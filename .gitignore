@@ -9,6 +9,9 @@ venv/
 .env
 deploy/.env.gov
 
+# Python 包构建产物(setuptools/uv 自动生成),勿入库
+/backend/*.egg-info/
+
 # IDE / OS
 .idea/
 .vscode/
