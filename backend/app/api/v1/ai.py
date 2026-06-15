@@ -16,7 +16,9 @@ from fastapi import APIRouter, Depends
 
 from app.core.config import settings
 from app.schemas.ai import (
+    GeneratedPipeline,
     GeneratedTaskConfig,
+    GeneratePipelineRequest,
     GenerateTaskRequest,
     InferredSchema,
     InferSchemaRequest,
@@ -24,6 +26,7 @@ from app.schemas.ai import (
     QaRequest,
 )
 from app.schemas.common import CamelModel
+from app.services import operator_catalog as oc
 from app.services.ai import AIProvider, get_ai_provider
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -61,6 +64,13 @@ class QaResponse(CamelModel):
     success: bool = True
 
 
+class GeneratePipelineResponse(CamelModel):
+    """流水线生成响应。"""
+
+    data: GeneratedPipeline
+    success: bool = True
+
+
 @router.post("/infer-schema", response_model=InferSchemaResponse)
 async def infer_schema(
     body: InferSchemaRequest,
@@ -89,3 +99,20 @@ async def qa(
     """回答平台使用相关问题。"""
     result = await provider.qa(body.question)
     return QaResponse(data=QaAnswer.model_validate(result))
+
+
+@router.post("/generate-pipeline", response_model=GeneratePipelineResponse)
+async def generate_pipeline(
+    body: GeneratePipelineRequest,
+    provider: ProviderDep,
+) -> GeneratePipelineResponse:
+    """据目标场景生成算子流水线(LLM 或启发式),经确定性校验后返回。"""
+    ready = oc.ready_operator_context()
+    raw = await provider.generate_pipeline(body.goal, ready)
+    steps = oc.sanitize_pipeline(raw.get("operators", []))
+    explanation = str(raw.get("explanation", ""))
+    return GeneratePipelineResponse(
+        data=GeneratedPipeline.model_validate(
+            {"operators": steps, "explanation": explanation}
+        )
+    )
