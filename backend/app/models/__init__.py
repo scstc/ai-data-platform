@@ -2,6 +2,7 @@
 
 from app.core.db import Base
 from app.models.audit_log import AuditLog
+from app.models.category import Category
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
@@ -15,6 +16,7 @@ from app.models.user import User
 __all__ = [
     "AuditLog",
     "Base",
+    "Category",
     "DataSource",
     "Dataset",
     "DatasetVersion",

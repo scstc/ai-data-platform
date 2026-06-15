@@ -310,7 +310,7 @@ const ContentSafety: React.FC = () => {
   };
 
   // 轮询单 job 状态(2s),终态停止并载报告;复用 getJob(同 ingest 推进式轮询思路)
-  const pollTimer = useRef<ReturnType<typeof setTimeout>>();
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pollJob = useCallback(
     (jobId: string) => {
       const tick = async () => {

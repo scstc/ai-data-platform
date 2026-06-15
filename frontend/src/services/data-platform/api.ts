@@ -2,6 +2,61 @@
 /* eslint-disable */
 import { request } from '@umijs/max';
 
+/** 分类列表（所有登录用户）GET /api/v1/categories（#15） */
+export async function listCategories(options?: { [key: string]: any }) {
+  return request<{ data: DataPlatform.Category[]; success: boolean }>(
+    '/api/v1/categories',
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 新建分类（仅 admin；重名 409）POST /api/v1/categories（#15） */
+export async function createCategory(
+  body: DataPlatform.CategoryCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Category; success: boolean }>(
+    '/api/v1/categories',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      // skipErrorHandler:交由调用方 catch 展示后端重名 message
+      skipErrorHandler: true,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 更新分类（仅 admin；改名撞名 409）PATCH /api/v1/categories/{id}（#15） */
+export async function updateCategory(
+  id: string,
+  body: DataPlatform.CategoryUpdate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Category; success: boolean }>(
+    `/api/v1/categories/${id}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      // skipErrorHandler:交由调用方 catch 展示后端重名 message
+      skipErrorHandler: true,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 删除分类（仅 admin；被引用返回 409 + message）DELETE /api/v1/categories/{id}（#15） */
+export async function deleteCategory(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/categories/${id}`, {
+    method: 'DELETE',
+    // skipErrorHandler:交由调用方 catch 展示后端「正被 N 处引用」message
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
 /** 获取数据源列表 GET /api/v1/datasources */
 export async function listDataSources(
   params?: DataPlatform.DataSourceListParams,

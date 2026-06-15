@@ -65,6 +65,19 @@ vi.mock('@/services/data-platform', () => ({
   deleteIngestTask: vi.fn(),
   createIngestTask: vi.fn(),
   listDataSources: vi.fn(),
+  listCategories: vi.fn(),
+}));
+
+// 分类管理抽屉占位，避免其内部组件树真实渲染干扰
+vi.mock('@/components', () => ({
+  CategoryManager: ({ open }: any) =>
+    open ? <div data-testid="category-manager" /> : null,
+}));
+
+// access 门控：以 admin 视角渲染（分类管理入口对 admin 可见）
+vi.mock('@umijs/max', () => ({
+  useAccess: () => ({ canAdmin: true }),
+  Access: ({ accessible, children }: any) => (accessible ? children : null),
 }));
 
 import IngestTasksPage from './index';
@@ -99,6 +112,10 @@ describe('IngestTasksPage', () => {
       total: 0,
       success: true,
     });
+    vi.mocked(dpApi.listCategories).mockResolvedValue({
+      data: [],
+      success: true,
+    });
   });
 
   it('应正常渲染 ProTable', () => {
@@ -131,5 +148,14 @@ describe('IngestTasksPage', () => {
   it('工具栏应渲染新建任务按钮', () => {
     render(<IngestTasksPage />);
     expect(screen.getByText('新建任务')).toBeInTheDocument();
+  });
+
+  it('应渲染分类列与分类管理入口并在挂载后拉取分类（#15）', async () => {
+    render(<IngestTasksPage />);
+    expect(screen.getByTestId('column-categoryId')).toBeInTheDocument();
+    expect(screen.getByText('分类管理')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(dpApi.listCategories).toHaveBeenCalled();
+    });
   });
 });

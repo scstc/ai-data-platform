@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.categories import build_category_name_map
 from app.core.db import get_session
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
@@ -75,12 +76,26 @@ def _not_found() -> JSONResponse:
     )
 
 
-def _item(task: IngestTask, output: list[dict] | None = None) -> dict:
+def _item(
+    task: IngestTask,
+    output: list[dict] | None = None,
+    category_name: str | None = None,
+) -> dict:
     """把 ORM 任务序列化为 camelCase 单对象响应体（output 仅详情接口填充）。"""
     read = IngestTaskRead.model_validate(task)
     if output:
         read.output = output
+    if category_name is not None:
+        read.category_name = category_name
     return IngestTaskItemResponse(data=read).model_dump(by_alias=True, mode="json")
+
+
+async def _category_name(session: AsyncSession, task: IngestTask) -> str | None:
+    """取任务分类名(分类可空时返回 None)。"""
+    if not task.category_id:
+        return None
+    names = await build_category_name_map(session, [task.category_id])
+    return names.get(task.category_id)
 
 
 async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
@@ -112,8 +127,9 @@ async def list_ingest_tasks(
     page_size: Annotated[int, Query(ge=1, alias="pageSize")] = 10,
     name: Annotated[str | None, Query()] = None,
     status_: Annotated[str | None, Query(alias="status")] = None,
+    category_id: Annotated[str | None, Query(alias="categoryId")] = None,
 ) -> PageResponse[IngestTaskRead]:
-    """分页列出采集任务，支持 name 模糊、status 精确筛选。"""
+    """分页列出采集任务，支持 name 模糊、status 精确、categoryId 精确筛选。"""
     stmt = select(IngestTask)
     count_stmt = select(func.count()).select_from(IngestTask)
     if name:
@@ -122,15 +138,25 @@ async def list_ingest_tasks(
     if status_:
         stmt = stmt.where(IngestTask.status == status_)
         count_stmt = count_stmt.where(IngestTask.status == status_)
+    if category_id:
+        stmt = stmt.where(IngestTask.category_id == category_id)
+        count_stmt = count_stmt.where(IngestTask.category_id == category_id)
 
     total = await session.scalar(count_stmt) or 0
     offset = (current - 1) * page_size
     stmt = stmt.order_by(IngestTask.created_at.desc()).offset(offset).limit(page_size)
     rows = (await session.scalars(stmt)).all()
-    return PageResponse[IngestTaskRead](
-        data=[IngestTaskRead.model_validate(r) for r in rows],
-        total=total,
+    # 批量取分类名(避免 N+1),回填 categoryName
+    cat_names = await build_category_name_map(
+        session, [r.category_id for r in rows]
     )
+    data = []
+    for r in rows:
+        item = IngestTaskRead.model_validate(r)
+        if r.category_id:
+            item.category_name = cat_names.get(r.category_id)
+        data.append(item)
+    return PageResponse[IngestTaskRead](data=data, total=total)
 
 
 @router.post("/ingest-tasks")
@@ -153,11 +179,14 @@ async def create_ingest_task(
         status="pending",
         progress=0,
         logs=["[INFO] 任务已创建"],
+        category_id=payload.category_id,
     )
     session.add(task)
     await session.commit()
     await session.refresh(task)
-    return JSONResponse(content=_item(task))
+    return JSONResponse(
+        content=_item(task, category_name=await _category_name(session, task))
+    )
 
 
 @router.put("/ingest-tasks/{task_id}")
@@ -186,10 +215,14 @@ async def update_ingest_task(
             )
         task.datasource_id = body.datasource_id
         task.datasource_name = datasource.name
+    if body.category_id is not None:
+        task.category_id = body.category_id
 
     await session.commit()
     await session.refresh(task)
-    return JSONResponse(content=_item(task))
+    return JSONResponse(
+        content=_item(task, category_name=await _category_name(session, task))
+    )
 
 
 @router.get("/ingest-tasks/{task_id}")
@@ -212,7 +245,11 @@ async def get_ingest_task(
         await session.commit()
         await session.refresh(task)
     output = await _build_output(session, task.id)
-    return JSONResponse(content=_item(task, output))
+    return JSONResponse(
+        content=_item(
+            task, output, category_name=await _category_name(session, task)
+        )
+    )
 
 
 @router.post("/ingest-tasks/{task_id}/rerun")
@@ -285,7 +322,9 @@ async def rerun_ingest_task(
 
     await session.commit()
     await session.refresh(task)
-    return JSONResponse(content=_item(task))
+    return JSONResponse(
+        content=_item(task, category_name=await _category_name(session, task))
+    )
 
 
 @router.get(
@@ -375,7 +414,9 @@ async def stop_ingest_task(
     task.logs = [*task.logs, "[WARN] 任务被手动停止"]
     await session.commit()
     await session.refresh(task)
-    return JSONResponse(content=_item(task))
+    return JSONResponse(
+        content=_item(task, category_name=await _category_name(session, task))
+    )
 
 
 @router.delete("/ingest-tasks/{task_id}")

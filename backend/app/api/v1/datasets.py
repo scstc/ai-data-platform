@@ -1,4 +1,4 @@
-"""数据集路由:上传落地 POST /datasets/upload、列表 GET /datasets、详情 GET /datasets/{id}。"""
+"""数据集路由:上传落地、列表 /datasets、详情、元数据编辑、S3 托管(#18)、删除。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
+from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
 from app.models.dataset import Dataset
@@ -50,6 +51,7 @@ UploadFileDep = Annotated[UploadFile, File(...)]
 NameForm = Annotated[str | None, Form()]
 DataTypeForm = Annotated[str | None, Form()]
 DescForm = Annotated[str | None, Form()]
+CategoryIdForm = Annotated[str | None, Form(alias="categoryId")]
 CreatedStartQuery = Annotated[datetime | None, Query(alias="createdStart")]
 CreatedEndQuery = Annotated[datetime | None, Query(alias="createdEnd")]
 
@@ -84,6 +86,7 @@ async def upload_as_dataset(
     name: NameForm = None,
     data_type: DataTypeForm = None,
     description: DescForm = None,
+    category_id: CategoryIdForm = None,
 ) -> JSONResponse:
     """本地上传连接器:文件 → 规范化 jsonl → 受管 Dataset(v1) + DatasetVersion。"""
     filename = file.filename or ""
@@ -114,7 +117,17 @@ async def upload_as_dataset(
             content={"success": False, "message": f"解析失败:{exc}"},
         )
 
-    payload = DatasetResult(data=_to_detail(dataset, [version]))
+    # 上传后挂分类(可空):land_upload 已 commit,这里补一次更新
+    if category_id:
+        dataset.category_id = category_id
+        await session.commit()
+        await session.refresh(dataset)
+
+    detail = _to_detail(dataset, [version])
+    if dataset.category_id:
+        names = await build_category_name_map(session, [dataset.category_id])
+        detail.category_name = names.get(dataset.category_id)
+    payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
@@ -125,6 +138,7 @@ async def list_datasets(
     page_size: int = Query(10, ge=1, alias="pageSize"),
     name: str | None = Query(None),
     data_type: str | None = Query(None, alias="dataType"),
+    category_id: str | None = Query(None, alias="categoryId"),
     creator: str | None = Query(None),
     created_start: CreatedStartQuery = None,
     created_end: CreatedEndQuery = None,
@@ -135,6 +149,8 @@ async def list_datasets(
         conds.append(Dataset.name.ilike(f"%{name}%"))
     if data_type:
         conds.append(Dataset.data_type == data_type)
+    if category_id:
+        conds.append(Dataset.category_id == category_id)
     if creator:
         conds.append(Dataset.creator.ilike(f"%{creator}%"))
     if created_start is not None:
@@ -168,10 +184,16 @@ async def list_datasets(
                 )
             ).all()
         )
+    # 批量取本页分类名(避免 N+1),回填 categoryName
+    cat_names = await build_category_name_map(
+        session, [r.category_id for r in rows]
+    )
     data = []
     for r in rows:
         item = DatasetRead.model_validate(r)
         item.hosted = r.id in hosted_ids
+        if r.category_id:
+            item.category_name = cat_names.get(r.category_id)
         data.append(item)
     return PageResponse[DatasetRead](data=data, total=total or 0)
 
@@ -192,7 +214,11 @@ async def get_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
             .order_by(DatasetVersion.version_no)
         )
     ).all()
-    payload = DatasetResult(data=_to_detail(dataset, list(versions)))
+    detail = _to_detail(dataset, list(versions))
+    if dataset.category_id:
+        names = await build_category_name_map(session, [dataset.category_id])
+        detail.category_name = names.get(dataset.category_id)
+    payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
@@ -219,7 +245,11 @@ async def update_dataset(
             .order_by(DatasetVersion.version_no)
         )
     ).all()
-    payload = DatasetResult(data=_to_detail(dataset, list(versions)))
+    detail = _to_detail(dataset, list(versions))
+    if dataset.category_id:
+        names = await build_category_name_map(session, [dataset.category_id])
+        detail.category_name = names.get(dataset.category_id)
+    payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
@@ -483,6 +513,7 @@ async def host_s3(body: HostS3Request, session: SessionDep) -> JSONResponse:
             id=_new_dataset_id(),
             name=ds_name,
             data_type=body.data_type,
+            category_id=body.category_id,
             owner="admin",
             creator="admin",
         )
@@ -504,11 +535,18 @@ async def host_s3(body: HostS3Request, session: SessionDep) -> JSONResponse:
 
     # 先提交 + refresh,再组装详情(server_default 的 created_at/updated_at 才有值)
     await session.commit()
+    cat_name = None
+    if body.category_id:
+        names = await build_category_name_map(session, [body.category_id])
+        cat_name = names.get(body.category_id)
     created: list[DatasetDetailRead] = []
     for dataset, version in pairs:
         await session.refresh(dataset)
         await session.refresh(version)
-        created.append(_to_detail(dataset, [version]))
+        detail = _to_detail(dataset, [version])
+        if dataset.category_id:
+            detail.category_name = cat_name
+        created.append(detail)
     return JSONResponse(
         content={
             "data": [d.model_dump(by_alias=True, mode="json") for d in created],

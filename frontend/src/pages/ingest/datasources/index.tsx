@@ -3,8 +3,9 @@ import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { Access, useAccess } from '@umijs/max';
 import { Badge, Button, message, Popconfirm, Tag } from 'antd';
-import { type FC, useRef, useState } from 'react';
-import { deleteDataSource, listDataSources } from '@/services/data-platform';
+import { type FC, useCallback, useEffect, useRef, useState } from 'react';
+import { CategoryManager } from '@/components';
+import { deleteDataSource, listCategories, listDataSources } from '@/services/data-platform';
 import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
 import DataSourceFormDrawer from './components/DataSourceFormDrawer';
 
@@ -13,6 +14,23 @@ const DataSourcesPage: FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<DataPlatform.DataSource>();
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [categoryOptions, setCategoryOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const res = await listCategories();
+      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+    } catch {
+      // 静默：分类筛选不可用不应阻断列表
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCategories();
+  }, [loadCategories]);
 
   const openCreate = () => {
     setEditingRecord(undefined);
@@ -73,6 +91,13 @@ const DataSourcesPage: FC = () => {
       },
     },
     {
+      title: '分类',
+      dataIndex: 'categoryId',
+      valueType: 'select',
+      fieldProps: { options: categoryOptions, allowClear: true },
+      render: (_, record) => record.categoryName || '-',
+    },
+    {
       title: '创建人',
       dataIndex: 'creator',
       search: false,
@@ -124,6 +149,9 @@ const DataSourcesPage: FC = () => {
         rowKey="id"
         search={{ labelWidth: 'auto' }}
         toolBarRender={() => [
+          <Access key="category" accessible={!!access.canAdmin}>
+            <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
+          </Access>,
           <Access key="create" accessible={!!access.canAdmin}>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
               新建数据源
@@ -131,8 +159,14 @@ const DataSourcesPage: FC = () => {
           </Access>,
         ]}
         request={async (params) => {
-          const { current, pageSize, name, type } = params;
-          const res = await listDataSources({ current, pageSize, name, type });
+          const { current, pageSize, name, type, categoryId } = params;
+          const res = await listDataSources({
+            current,
+            pageSize,
+            name,
+            type,
+            categoryId: categoryId || undefined,
+          });
           return {
             data: res.data,
             total: res.total,
@@ -144,8 +178,18 @@ const DataSourcesPage: FC = () => {
       <DataSourceFormDrawer
         open={drawerOpen}
         record={editingRecord}
+        categoryOptions={categoryOptions}
         onClose={() => setDrawerOpen(false)}
         onSuccess={() => actionRef.current?.reload()}
+      />
+      <CategoryManager
+        open={categoryOpen}
+        canAdmin={!!access.canAdmin}
+        onClose={() => setCategoryOpen(false)}
+        onChanged={() => {
+          loadCategories();
+          actionRef.current?.reload();
+        }}
       />
     </PageContainer>
   );

@@ -27,6 +27,8 @@ interface DataSourceFormDrawerProps {
   open: boolean;
   /** 有值即编辑模式，无值为新建 */
   record?: DataPlatform.DataSource;
+  /** 受控分类下拉选项（来自宿主页 listCategories） */
+  categoryOptions?: { label: string; value: string }[];
   onClose: () => void;
   /** 保存成功后回调（刷新列表） */
   onSuccess: () => void;
@@ -72,6 +74,7 @@ function pickConfig(
 const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
   open,
   record,
+  categoryOptions,
   onClose,
   onSuccess,
 }) => {
@@ -98,7 +101,7 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
 
   // 配置步骤初值（编辑回填）
   const configInitialValues: Record<string, any> = record
-    ? { ...record.config, dbKind: record.dbKind }
+    ? { ...record.config, dbKind: record.dbKind, categoryId: record.categoryId ?? undefined }
     : {};
 
   // 推送地址（api 类型）：编辑用已有 url，新建给占位只读地址
@@ -147,6 +150,7 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
           dbKind,
           config,
           description: allValues.description,
+          categoryId: allValues.categoryId,
         });
         message.success('数据源已更新');
       } else {
@@ -156,6 +160,7 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
           dbKind,
           config,
           description: allValues.description,
+          categoryId: allValues.categoryId,
         });
         message.success('数据源已创建');
       }
@@ -349,6 +354,14 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
             </Paragraph>
           </>
         )}
+
+        <ProFormSelect
+          name="categoryId"
+          label="分类（可选）"
+          placeholder="请选择分类"
+          options={categoryOptions}
+          fieldProps={{ allowClear: true, showSearch: true }}
+        />
 
         <ProFormTextArea
           name="description"

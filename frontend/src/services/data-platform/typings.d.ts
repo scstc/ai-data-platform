@@ -2,6 +2,29 @@
 /* eslint-disable */
 
 declare namespace DataPlatform {
+  /** 受控分类（扁平单层，跨实体共享，#15） */
+  type Category = {
+    id: string;
+    name: string;
+    note?: string | null;
+    creator: string;
+    createdAt: string;
+    /** 三实体引用该分类的总数（供删除守卫与管理页展示） */
+    usageCount: number;
+  };
+
+  /** 新建分类入参 */
+  type CategoryCreate = {
+    name: string;
+    note?: string;
+  };
+
+  /** 更新分类入参 */
+  type CategoryUpdate = {
+    name?: string;
+    note?: string;
+  };
+
   /** 数据源类型 */
   type DataSourceType = 's3' | 'hdfs' | 'database' | 'api';
 
@@ -26,6 +49,8 @@ declare namespace DataPlatform {
     status: 'connected' | 'failed' | 'pending';
     config: Record<string, any>;
     description?: string;
+    categoryId?: string | null;
+    categoryName?: string | null;
     creator: string;
     createdAt: string;
     updatedAt: string;
@@ -64,6 +89,8 @@ declare namespace DataPlatform {
     status: 'pending' | 'running' | 'success' | 'failed';
     progress: number;
     runCount?: number;
+    categoryId?: string | null;
+    categoryName?: string | null;
     createdAt: string;
     lastRunAt?: string;
     logs?: string[];
@@ -284,7 +311,8 @@ declare namespace DataPlatform {
     description?: string;
     dataType?: string;
     sensitivityLevel?: string;
-    businessCategory?: string;
+    categoryId?: string | null;
+    categoryName?: string | null;
     owner: string;
     creator: string;
     lastModifier?: string;
@@ -309,6 +337,7 @@ declare namespace DataPlatform {
     keys: string[];
     name?: string;
     dataType?: string;
+    categoryId?: string;
   };
 
   /** 数据集详情（含版本列表） */
@@ -321,7 +350,8 @@ declare namespace DataPlatform {
     description?: string | null;
     dataType?: string | null;
     sensitivityLevel?: string | null;
-    businessCategory?: string | null;
+    // 受控分类:显式传 null 才能清空(后端 exclude_unset)
+    categoryId?: string | null;
     validUntil?: string | null;
   };
 
@@ -332,6 +362,7 @@ declare namespace DataPlatform {
     name?: string;
     dataType?: string;
     creator?: string;
+    categoryId?: string;
     createdStart?: string;
     createdEnd?: string;
   };
@@ -394,6 +425,7 @@ declare namespace DataPlatform {
     pageSize?: number;
     name?: string;
     type?: DataSourceType;
+    categoryId?: string;
   };
 
   /** 采集任务列表查询参数 */
@@ -402,6 +434,7 @@ declare namespace DataPlatform {
     pageSize?: number;
     name?: string;
     status?: IngestTask['status'];
+    categoryId?: string;
   };
 
   /** 上传记录列表查询参数 */
@@ -417,6 +450,7 @@ declare namespace DataPlatform {
     dbKind?: DbKind;
     config: Record<string, any>;
     description?: string;
+    categoryId?: string;
   };
 
   /** 更新数据源入参 */
@@ -444,6 +478,7 @@ declare namespace DataPlatform {
     datasourceId: string;
     schedule: IngestSchedule;
     extract?: IngestExtract;
+    categoryId?: string;
   };
 
   /** 单个上传记录响应 */

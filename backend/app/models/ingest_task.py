@@ -33,6 +33,8 @@ class IngestTask(Base):
     run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 日志列表 list[str]
     logs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    # 分类(#15):受控分类库引用 categories.id(无 FK,可空,单选)
+    category_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

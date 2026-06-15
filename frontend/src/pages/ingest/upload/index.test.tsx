@@ -56,6 +56,11 @@ describe('UploadPage', () => {
       total: 0,
       success: true,
     });
+    // 上传页挂载即拉分类下拉选项（#15）——避免真实 request 未注入导致的 rejection
+    vi.spyOn(api, 'listCategories').mockResolvedValue({
+      data: [],
+      success: true,
+    });
   });
 
   it('should render without crashing', () => {

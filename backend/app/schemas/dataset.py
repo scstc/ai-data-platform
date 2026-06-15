@@ -34,7 +34,9 @@ class DatasetRead(CamelModel):
     description: str | None = None
     data_type: str | None = None
     sensitivity_level: str | None = None
-    business_category: str | None = None
+    # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
+    category_id: str | None = None
+    category_name: str | None = None
     owner: str
     creator: str
     last_modifier: str | None = None
@@ -54,6 +56,8 @@ class HostS3Request(CamelModel):
     keys: list[str]
     name: str | None = None
     data_type: str | None = None
+    # 分类(#15):受控分类库引用 id,可空,挂到创建的数据集上
+    category_id: str | None = None
 
 
 class DatasetDetailRead(DatasetRead):
@@ -69,5 +73,6 @@ class DatasetUpdate(CamelModel):
     description: str | None = None
     data_type: str | None = None
     sensitivity_level: str | None = None
-    business_category: str | None = None
+    # 分类(#15):受控分类库引用 id;显式传 null 清空分类
+    category_id: str | None = None
     valid_until: datetime | None = None

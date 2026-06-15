@@ -32,6 +32,9 @@ class DataSourceRead(CamelModel):
     status: DataSourceStatus
     config: dict[str, Any]
     description: str | None = None
+    # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
+    category_id: str | None = None
+    category_name: str | None = None
     creator: str
     created_at: datetime
     updated_at: datetime
@@ -45,6 +48,8 @@ class DataSourceCreate(CamelModel):
     db_kind: DbKind | None = None
     config: dict[str, Any]
     description: str | None = None
+    # 分类(#15):受控分类库引用 id,可空
+    category_id: str | None = None
 
 
 class DataSourceUpdate(CamelModel):
@@ -56,6 +61,8 @@ class DataSourceUpdate(CamelModel):
     config: dict[str, Any] | None = None
     description: str | None = None
     status: DataSourceStatus | None = None
+    # 分类(#15):受控分类库引用 id;显式传 null 清空分类
+    category_id: str | None = None
 
 
 class TestConnectionParams(CamelModel):

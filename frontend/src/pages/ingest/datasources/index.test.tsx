@@ -29,6 +29,12 @@ vi.mock('./components/DataSourceFormDrawer', () => ({
   default: ({ open }: any) => (open ? <div data-testid="form-drawer" /> : null),
 }));
 
+// 分类管理抽屉是独立组件，这里占位，避免其内部 ProTable/ModalForm 真实渲染干扰
+vi.mock('@/components', () => ({
+  CategoryManager: ({ open }: any) =>
+    open ? <div data-testid="category-manager" /> : null,
+}));
+
 // access 门控：测以 admin 视角渲染（写入口对 admin 可见，对 user 隐藏由 access.ts 保证）
 vi.mock('@umijs/max', () => ({
   useAccess: () => ({ canAdmin: true }),
@@ -49,6 +55,7 @@ vi.mock('antd', async () => {
 vi.mock('@/services/data-platform', () => ({
   listDataSources: vi.fn(),
   deleteDataSource: vi.fn(),
+  listCategories: vi.fn(),
 }));
 
 import DataSourcesPage from './index';
@@ -59,6 +66,10 @@ describe('DataSourcesPage', () => {
     vi.mocked(api.listDataSources).mockResolvedValue({
       data: [],
       total: 0,
+      success: true,
+    });
+    vi.mocked(api.listCategories).mockResolvedValue({
+      data: [],
       success: true,
     });
   });
@@ -81,6 +92,19 @@ describe('DataSourcesPage', () => {
   it('renders the 新建数据源 toolbar button', () => {
     render(<DataSourcesPage />);
     expect(screen.getByText('新建数据源')).toBeInTheDocument();
+  });
+
+  it('renders the 分类 column and 分类管理 toolbar entry (#15)', () => {
+    render(<DataSourcesPage />);
+    expect(screen.getByText('分类')).toBeInTheDocument();
+    expect(screen.getByText('分类管理')).toBeInTheDocument();
+  });
+
+  it('loads categories on mount for the 分类 filter (#15)', async () => {
+    render(<DataSourcesPage />);
+    await waitFor(() => {
+      expect(api.listCategories).toHaveBeenCalled();
+    });
   });
 
   it('calls listDataSources on mount via ProTable request', async () => {

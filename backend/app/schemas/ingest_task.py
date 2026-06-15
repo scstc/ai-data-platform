@@ -41,10 +41,13 @@ class IngestTaskRead(CamelModel):
     status: IngestTaskStatus
     progress: int
     run_count: int = 0
+    # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
+    category_id: str | None = None
+    category_name: str | None = None
     created_at: datetime
     last_run_at: datetime | None = None
     logs: list[str] | None = None
-    # 产物概要列表（仅详情接口填充）：每项 {datasetId, datasetName, versionId, versionNo, rows}
+    # 产物概要列表(仅详情填充):每项含 datasetId/datasetName/versionId/versionNo/rows
     output: list[dict[str, Any]] | None = None
 
 
@@ -70,6 +73,8 @@ class IngestTaskCreate(CamelModel):
     datasource_id: str
     schedule: IngestSchedule
     extract: IngestExtract | None = None
+    # 分类(#15):受控分类库引用 id,可空
+    category_id: str | None = None
 
 
 class IngestTaskUpdate(CamelModel):
@@ -79,3 +84,5 @@ class IngestTaskUpdate(CamelModel):
     datasource_id: str | None = None
     schedule: IngestSchedule | None = None
     extract: IngestExtract | None = None
+    # 分类(#15):受控分类库引用 id
+    category_id: str | None = None

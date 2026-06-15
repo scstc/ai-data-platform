@@ -10,6 +10,7 @@ import {
   ProFormTextArea,
   ProTable,
 } from '@ant-design/pro-components';
+import { Access, useAccess } from '@umijs/max';
 import {
   Button,
   Drawer,
@@ -22,11 +23,13 @@ import {
   Typography,
 } from 'antd';
 import dayjs from 'dayjs';
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CategoryManager } from '@/components';
 import {
   createIngestTask,
   deleteIngestTask,
   getIngestTask,
+  listCategories,
   listDataSources,
   listDatasourceTables,
   listIngestRuns,
@@ -56,6 +59,7 @@ const renderSchedule = (schedule: DataPlatform.IngestSchedule) =>
   );
 
 const IngestTasksPage: React.FC = () => {
+  const access = useAccess();
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentRow, setCurrentRow] = useState<DataPlatform.IngestTask>();
@@ -65,6 +69,23 @@ const IngestTasksPage: React.FC = () => {
   );
   const [runs, setRuns] = useState<DataPlatform.IngestRun[]>([]);
   const [editRow, setEditRow] = useState<DataPlatform.IngestTask>();
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [categoryOptions, setCategoryOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const res = await listCategories();
+      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+    } catch {
+      // 静默：分类筛选不可用不应阻断列表
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCategories();
+  }, [loadCategories]);
 
   /** 打开详情 Drawer：拉取最新单任务（running 会被推进）+ 运行记录 */
   const openDetail = async (id: string) => {
@@ -143,6 +164,13 @@ const IngestTasksPage: React.FC = () => {
             value: d.id,
           }));
         }}
+      />
+      <ProFormSelect
+        name="categoryId"
+        label="分类"
+        placeholder="请选择分类（可选）"
+        options={categoryOptions}
+        fieldProps={{ allowClear: true, showSearch: true }}
       />
       <ProFormRadio.Group
         name={['schedule', 'mode']}
@@ -245,6 +273,13 @@ const IngestTasksPage: React.FC = () => {
       search: false,
     },
     {
+      title: '分类',
+      dataIndex: 'categoryId',
+      valueType: 'select',
+      fieldProps: { options: categoryOptions, allowClear: true },
+      render: (_, record) => record.categoryName || '-',
+    },
+    {
       title: '调度',
       dataIndex: 'schedule',
       search: false,
@@ -345,12 +380,13 @@ const IngestTasksPage: React.FC = () => {
         search={{ labelWidth: 80 }}
         polling={5000}
         request={async (params) => {
-          const { current, pageSize, name, status } = params;
+          const { current, pageSize, name, status, categoryId } = params;
           const res = await listIngestTasks({
             current,
             pageSize,
             name,
             status,
+            categoryId: categoryId || undefined,
           });
           // 对运行中的任务调用单任务接口推进进度，使轮询时进度可见
           const running = res.data.filter((t) => t.status === 'running');
@@ -382,6 +418,9 @@ const IngestTasksPage: React.FC = () => {
         }}
         columns={columns}
         toolBarRender={() => [
+          <Access key="category" accessible={!!access.canAdmin}>
+            <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
+          </Access>,
           <ModalForm<DataPlatform.IngestTaskCreate>
             key="create"
             title="新建采集任务"
@@ -420,6 +459,7 @@ const IngestTasksPage: React.FC = () => {
                 datasourceId: editRow.datasourceId,
                 schedule: editRow.schedule,
                 extract: editRow.extract,
+                categoryId: editRow.categoryId ?? undefined,
               }
             : undefined
         }
@@ -593,6 +633,16 @@ const IngestTasksPage: React.FC = () => {
           </>
         )}
       </Drawer>
+
+      <CategoryManager
+        open={categoryOpen}
+        canAdmin={!!access.canAdmin}
+        onClose={() => setCategoryOpen(false)}
+        onChanged={() => {
+          loadCategories();
+          actionRef.current?.reload();
+        }}
+      />
     </PageContainer>
   );
 };

@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
+from app.api.v1.categories import build_category_name_map
 from app.core.db import get_session
 from app.models import DataSource
 from app.schemas import (
@@ -105,6 +106,17 @@ def _not_found(message: str = "数据源不存在") -> JSONResponse:
     return JSONResponse(status_code=404, content={"success": False, "message": message})
 
 
+async def _read_with_category(
+    session: AsyncSession, item: DataSource
+) -> DataSourceRead:
+    """组装单个数据源读模型并回填 categoryName(分类可空)。"""
+    read = DataSourceRead.model_validate(item)
+    if item.category_id:
+        names = await build_category_name_map(session, [item.category_id])
+        read.category_name = names.get(item.category_id)
+    return read
+
+
 @router.get("/datasources", response_model=PageResponse[DataSourceRead])
 async def list_datasources(
     session: SessionDep,
@@ -112,13 +124,16 @@ async def list_datasources(
     page_size: Annotated[int, Query(ge=1, alias="pageSize")] = 10,
     name: Annotated[str | None, Query()] = None,
     type: Annotated[DataSourceType | None, Query()] = None,
+    category_id: Annotated[str | None, Query(alias="categoryId")] = None,
 ) -> PageResponse[DataSourceRead]:
-    """分页查询数据源：name 模糊匹配、type 精确匹配。"""
+    """分页查询数据源：name 模糊匹配、type 精确匹配、categoryId 精确匹配。"""
     conditions = []
     if name:
         conditions.append(DataSource.name.ilike(f"%{name}%"))
     if type:
         conditions.append(DataSource.type == type)
+    if category_id:
+        conditions.append(DataSource.category_id == category_id)
 
     total_stmt = select(func.count()).select_from(DataSource)
     list_stmt = select(DataSource).order_by(DataSource.created_at.desc())
@@ -133,10 +148,17 @@ async def list_datasources(
         )
     ).all()
 
-    return PageResponse[DataSourceRead](
-        data=[DataSourceRead.model_validate(row) for row in rows],
-        total=total,
+    # 批量取分类名(避免 N+1),回填 categoryName
+    cat_names = await build_category_name_map(
+        session, [row.category_id for row in rows]
     )
+    data = []
+    for row in rows:
+        item = DataSourceRead.model_validate(row)
+        if row.category_id:
+            item.category_name = cat_names.get(row.category_id)
+        data.append(item)
+    return PageResponse[DataSourceRead](data=data, total=total)
 
 
 @router.post(
@@ -165,12 +187,13 @@ async def create_datasource(
         status=status,
         config=body.config,
         description=body.description,
+        category_id=body.category_id,
         creator="admin",
     )
     session.add(item)
     await session.commit()
     await session.refresh(item)
-    return _SingleDataSource(data=DataSourceRead.model_validate(item))
+    return _SingleDataSource(data=await _read_with_category(session, item))
 
 
 @router.put(
@@ -194,7 +217,7 @@ async def update_datasource(
 
     await session.commit()
     await session.refresh(item)
-    return _SingleDataSource(data=DataSourceRead.model_validate(item))
+    return _SingleDataSource(data=await _read_with_category(session, item))
 
 
 @router.delete(

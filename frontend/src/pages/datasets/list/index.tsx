@@ -24,13 +24,15 @@ import {
   Typography,
 } from 'antd';
 import dayjs from 'dayjs';
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CategoryManager } from '@/components';
 import {
   batchDeleteDatasets,
   deleteDataset,
   getDataset,
   hostS3,
   listBuckets,
+  listCategories,
   listDataSources,
   listDatasets,
   listObjects,
@@ -77,6 +79,23 @@ const DatasetsList: React.FC = () => {
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Dataset[]>([]);
   const [editOpen, setEditOpen] = useState(false);
   const [hostOpen, setHostOpen] = useState(false);
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [categoryOptions, setCategoryOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const res = await listCategories();
+      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+    } catch {
+      // 静默：分类筛选不可用不应阻断列表
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCategories();
+  }, [loadCategories]);
 
   const selectedRowKeys = selectedRows.map((r) => r.id);
   // 外部托管数据集不可删除(后端 403 兜底)——批量删除前先拦截给提示
@@ -176,6 +195,13 @@ const DatasetsList: React.FC = () => {
       valueType: 'select',
       valueEnum: DATA_TYPE_ENUM,
       render: (_, r) => (r.dataType ? <Tag>{r.dataType}</Tag> : '-'),
+    },
+    {
+      title: '分类',
+      dataIndex: 'categoryId',
+      valueType: 'select',
+      fieldProps: { options: categoryOptions, allowClear: true },
+      render: (_, r) => r.categoryName || '-',
     },
     { title: '描述', dataIndex: 'description', search: false, ellipsis: true },
     { title: '创建人', dataIndex: 'creator' },
@@ -311,6 +337,9 @@ const DatasetsList: React.FC = () => {
           </Access>
         )}
         toolBarRender={() => [
+          <Access key="category" accessible={!!access.canAdmin}>
+            <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
+          </Access>,
           <Button
             key="host-s3"
             type="primary"
@@ -327,6 +356,7 @@ const DatasetsList: React.FC = () => {
             name: params.name || undefined,
             dataType: params.dataType || undefined,
             creator: params.creator || undefined,
+            categoryId: (params.categoryId as string) || undefined,
             // dateRange 给的是纯日期:起取当日 0 点、止取当日 23:59:59,
             // 否则 created_at <= 当日0点 会漏掉当天创建的记录
             createdStart: range?.[0]
@@ -381,8 +411,8 @@ const DatasetsList: React.FC = () => {
                 },
                 {
                   title: '分类',
-                  dataIndex: 'businessCategory',
-                  render: (_, r) => r.businessCategory ?? '-',
+                  dataIndex: 'categoryName',
+                  render: (_, r) => r.categoryName ?? '-',
                 },
                 { title: '归属', dataIndex: 'owner' },
                 { title: '创建人', dataIndex: 'creator' },
@@ -466,7 +496,7 @@ const DatasetsList: React.FC = () => {
                 description: detail.description,
                 dataType: detail.dataType,
                 sensitivityLevel: detail.sensitivityLevel,
-                businessCategory: detail.businessCategory,
+                categoryId: detail.categoryId ?? undefined,
                 validUntil: detail.validUntil,
               }
             : undefined
@@ -481,7 +511,7 @@ const DatasetsList: React.FC = () => {
               description: values.description ?? null,
               dataType: values.dataType ?? null,
               sensitivityLevel: values.sensitivityLevel ?? null,
-              businessCategory: values.businessCategory ?? null,
+              categoryId: values.categoryId ?? null,
               validUntil: values.validUntil
                 ? dayjs(values.validUntil).format('YYYY-MM-DD')
                 : null,
@@ -523,7 +553,13 @@ const DatasetsList: React.FC = () => {
             confidential: { text: 'confidential' },
           }}
         />
-        <ProFormText name="businessCategory" label="分类" />
+        <ProFormSelect
+          name="categoryId"
+          label="分类"
+          placeholder="请选择分类（可选）"
+          options={categoryOptions}
+          fieldProps={{ allowClear: true, showSearch: true }}
+        />
         <ProFormDatePicker name="validUntil" label="有效期" />
       </ModalForm>
 
@@ -628,7 +664,24 @@ const DatasetsList: React.FC = () => {
           placeholder="可选"
           fieldProps={{ allowClear: true }}
         />
+        <ProFormSelect
+          name="categoryId"
+          label="分类"
+          placeholder="可选"
+          options={categoryOptions}
+          fieldProps={{ allowClear: true, showSearch: true }}
+        />
       </ModalForm>
+
+      <CategoryManager
+        open={categoryOpen}
+        canAdmin={!!access.canAdmin}
+        onClose={() => setCategoryOpen(false)}
+        onChanged={() => {
+          loadCategories();
+          actionRef.current?.reload();
+        }}
+      />
     </PageContainer>
   );
 };

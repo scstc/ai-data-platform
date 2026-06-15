@@ -9,6 +9,7 @@ from app.schemas.ai import (
     QaRequest,
     SchemaField,
 )
+from app.schemas.category import CategoryCreate, CategoryRead, CategoryUpdate
 from app.schemas.common import CamelModel, PageResponse
 from app.schemas.datasource import (
     DataSourceCreate,
@@ -32,6 +33,10 @@ __all__ = [
     # common
     "CamelModel",
     "PageResponse",
+    # category
+    "CategoryCreate",
+    "CategoryRead",
+    "CategoryUpdate",
     # datasource
     "DataSourceCreate",
     "DataSourceRead",

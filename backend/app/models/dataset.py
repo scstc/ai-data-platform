@@ -26,8 +26,9 @@ class Dataset(Base):
     data_type: Mapped[str | None] = mapped_column(String, nullable=True)
     # 分级(#15):敏感级别,如 public | internal | confidential
     sensitivity_level: Mapped[str | None] = mapped_column(String, nullable=True)
-    # 分类(#15):业务类型
-    business_category: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 分类(#15):受控分类库引用 categories.id(无 FK,可空,单选);
+    # 收口原自由填 business_category(已由迁移 0009 删列)。
+    category_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 归属(#19 共享/ACL);无 RBAC 前默认 admin
     owner: Mapped[str] = mapped_column(String, nullable=False, default="admin")
     # 创建人(#13,固化不变)

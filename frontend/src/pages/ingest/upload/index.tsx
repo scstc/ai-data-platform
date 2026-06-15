@@ -2,9 +2,13 @@ import { InboxOutlined } from '@ant-design/icons';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import type { UploadProps } from 'antd';
-import { Alert, message, Space, Tag, Typography, Upload } from 'antd';
-import { useRef } from 'react';
-import { listDatasets, uploadDataset } from '@/services/data-platform';
+import { Alert, message, Select, Space, Tag, Typography, Upload } from 'antd';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  listCategories,
+  listDatasets,
+  uploadDataset,
+} from '@/services/data-platform';
 import {
   ACCEPT,
   ALLOWED_EXTENSIONS,
@@ -18,6 +22,23 @@ const { Paragraph, Text } = Typography;
 const UploadPage: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [messageApi, contextHolder] = message.useMessage();
+  const [categoryId, setCategoryId] = useState<string>();
+  const [categoryOptions, setCategoryOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const res = await listCategories();
+      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+    } catch {
+      // 静默：分类不可用不应阻断上传
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCategories();
+  }, [loadCategories]);
 
   /** 上传前校验：扩展名白名单 + 单文件 ≤200MB；不合法则 message.error 并拒绝 */
   const beforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
@@ -41,6 +62,7 @@ const UploadPage: React.FC = () => {
     const { file, onSuccess, onError } = options;
     const formData = new FormData();
     formData.append('file', file as File);
+    if (categoryId) formData.append('categoryId', categoryId);
     try {
       const res = await uploadDataset(formData);
       onSuccess?.(res);
@@ -83,6 +105,19 @@ const UploadPage: React.FC = () => {
         style={{ marginBottom: 16 }}
         title="上传的文件会自动成为受管数据集（v1）并进入数据集仓库；随后可在「数据加工」中选择它新建加工任务。"
       />
+      <Space style={{ marginBottom: 16 }}>
+        <Text type="secondary">分类（可选）：</Text>
+        <Select
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          placeholder="为本次上传的数据集选择分类"
+          style={{ width: 280 }}
+          options={categoryOptions}
+          value={categoryId}
+          onChange={(v) => setCategoryId(v)}
+        />
+      </Space>
       <Dragger
         name="file"
         multiple
