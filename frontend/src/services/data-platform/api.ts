@@ -370,6 +370,18 @@ export async function createJob(
   });
 }
 
+/** 样例试跑:前 N 行跑算子预览加工前后 POST /api/v1/jobs/preview */
+export async function previewJob(body: {
+  datasetVersionId: string;
+  operators: DataPlatform.PipelineStep[];
+  sampleSize?: number;
+}) {
+  return request<{ data: DataPlatform.PreviewResult; success: boolean }>(
+    '/api/v1/jobs/preview',
+    { method: 'POST', data: body },
+  );
+}
+
 /** 加工任务详情 GET /api/v1/jobs/{id} */
 export async function getJob(id: string, options?: { [key: string]: any }) {
   return request<{ data: DataPlatform.Job; success: boolean }>(

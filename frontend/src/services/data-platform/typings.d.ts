@@ -151,6 +151,15 @@ declare namespace DataPlatform {
     explanation: string;
   };
 
+  /** 样例试跑结果 */
+  type PreviewResult = {
+    before: Record<string, any>[];
+    after: Record<string, any>[];
+    beforeCount: number;
+    afterCount: number;
+    columns: string[];
+  };
+
   /** 算子市场:目录查询参数 */
   type OperatorCatalogParams = {
     scenario?: string;
