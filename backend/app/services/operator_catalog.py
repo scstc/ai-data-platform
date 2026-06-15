@@ -253,11 +253,16 @@ def query_catalog(
 # ---------------------------------------------------------------------------
 # AI 流水线生成:ready 算子上下文 + 确定性校验(白名单 + 合法参数键)
 # ---------------------------------------------------------------------------
-def ready_operator_context() -> list[dict[str, Any]]:
-    """供 LLM 提示的 ready 算子清单:name + 中文标签 + 场景 + 合法参数名。"""
+def ready_operator_context(category: str | None = None) -> list[dict[str, Any]]:
+    """供 LLM 提示的 ready 算子清单:name + 中文标签 + 场景 + 合法参数名。
+
+    ``category`` 可选,传入时只保留该类算子(如 ``"filter"``)。
+    """
     ctx: list[dict[str, Any]] = []
     for op in all_operators():
         if op["runnable"] != "ready":
+            continue
+        if category and op["category"] != category:
             continue
         ctx.append(
             {
