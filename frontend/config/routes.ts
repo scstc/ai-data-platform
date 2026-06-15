@@ -106,6 +106,12 @@ export default [
     component: './quality',
   },
   {
+    path: '/quality/editor',
+    name: 'quality-editor',
+    component: './quality/editor',
+    hideInMenu: true,
+  },
+  {
     path: '/security',
     name: 'security',
     icon: 'safetyCertificate',

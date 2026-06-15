@@ -57,6 +57,7 @@ export default {
   'menu.ingest.assistant': '智能接入助手',
   'menu.security': '数据安全',
   'menu.quality': '质量评估',
+  'menu.quality-editor': '新建质量评估',
   'menu.processing': '数据加工',
   'menu.processing.jobs': '加工任务',
   'menu.processing.editor': '新建加工任务',

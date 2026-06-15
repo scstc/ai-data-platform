@@ -57,6 +57,7 @@ export default {
   'menu.ingest.assistant': 'Ingestion Assistant',
   'menu.security': 'Data Security',
   'menu.quality': 'Quality Assessment',
+  'menu.quality-editor': 'New Quality Assessment',
   'menu.processing': 'Data Processing',
   'menu.processing.jobs': 'Processing Jobs',
   'menu.processing.editor': 'New Processing Job',
