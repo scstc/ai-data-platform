@@ -45,3 +45,14 @@ class DatasetDetailRead(DatasetRead):
     """数据集详情:元信息 + 版本列表。"""
 
     versions: list[DatasetVersionRead] = []
+
+
+class DatasetUpdate(CamelModel):
+    """数据集元数据编辑入参:全部可选,只更新传入字段。"""
+
+    name: str | None = None
+    description: str | None = None
+    data_type: str | None = None
+    sensitivity_level: str | None = None
+    business_category: str | None = None
+    valid_until: datetime | None = None
