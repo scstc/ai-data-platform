@@ -8,7 +8,9 @@ data-juicer venv(py3.11)的 dj-process,进程隔离、规避版本冲突。
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +71,86 @@ async def _run_dj(yaml_path: Path) -> tuple[int, str]:
     )
     out, _ = await proc.communicate()
     return proc.returncode or 0, out.decode("utf-8", "replace")
+
+
+def _read_jsonl_head(path: Path, limit: int) -> list[dict[str, Any]]:
+    """读 jsonl 文件前 limit 个非空行,逐行 json.loads。limit<=0 时读全部。"""
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rows.append(json.loads(line))
+            if limit > 0 and len(rows) >= limit:
+                break
+    return rows
+
+
+def _column_union(*row_lists: list[dict[str, Any]]) -> list[str]:
+    """按出现顺序求多组样本的键并集(dict.fromkeys 保序去重)。"""
+    keys: dict[str, None] = {}
+    for rows in row_lists:
+        for row in rows:
+            keys.update(dict.fromkeys(row.keys()))
+    return list(keys)
+
+
+async def run_preview(
+    *,
+    input_version: DatasetVersion,
+    operators: list[dict[str, Any]],
+    sample_size: int = 20,
+) -> dict[str, Any]:
+    """在输入版本的前 sample_size 行上试跑算子流水线,返回加工前后样本。
+
+    全程在临时目录内完成,不建 DatasetVersion、不写 DB。失败抛 EngineError。
+    返回 {before, after, beforeCount, afterCount, columns}。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        sample_path = tmp_dir / "sample.jsonl"
+        out_path = tmp_dir / "data.jsonl"
+        yaml_path = tmp_dir / "job.yaml"
+
+        # 读输入版本前 sample_size 个非空行:既落盘成试跑输入,也作 before 展示
+        before = _read_jsonl_head(Path(input_version.storage_uri), sample_size)
+        sample_path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in before),
+            encoding="utf-8",
+        )
+
+        cfg = build_config(
+            project_name="preview",
+            input_path=str(sample_path),
+            output_path=str(out_path),
+            operators=operators,
+        )
+        yaml_path.write_text(
+            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        async with _semaphore:
+            code, log = await _run_dj(yaml_path)
+
+        if code != 0 or not out_path.exists():
+            tail = "\n".join(log.strip().splitlines()[-8:])
+            raise EngineError(f"dj-process 退出码 {code}\n{tail}")
+
+        # 产出总行数(全量统计),after 仅取前 sample_size 条用于展示
+        after_count = sum(
+            1 for line in out_path.open(encoding="utf-8") if line.strip()
+        )
+        after = _read_jsonl_head(out_path, sample_size)
+        columns = _column_union(before, after)
+
+    return {
+        "before": before,
+        "after": after,
+        "beforeCount": len(before),
+        "afterCount": after_count,
+        "columns": columns,
+    }
 
 
 async def run_process_job(
