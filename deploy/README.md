@@ -54,6 +54,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 | `ENGINE_NP` | 2 | 单 job 内 data-juicer 并行度 |
 | `ENGINE_CONCURRENCY` | 3 | 多 job 并发上限 |
 | `CORS_ORIGINS` | `["http://10.60.1.60"]` | 跨域来源(同源部署可不改) |
+| `AUTH_SECRET` | dev 默认 | 会话令牌签名密钥(#5);生产务必设强随机值,如 `openssl rand -hex 32` |
 | `OPENAI_*` | 空 | 可选 LLM;留空则 AI 接口走启发式 |
 
 ## 常用运维
@@ -73,3 +74,34 @@ $C down -v            # 停止并清空数据(危险)
 - `adp_data` — 上传文件(`/data/uploads`)+ 受管数据集产物(`/data/datasets`)
 
 二者均为命名卷,`down` 不删、`down -v` 才清。
+
+## 对象存储:MinIO(S3 兼容,独立栈)
+
+10.60.1.60 上另跑一套 **MinIO**(S3 兼容对象存储),**独立于** adp 应用栈,用作三方 S3 数据源 / 外部托管(#18,见 `docs/plan/08-外部S3托管设计.md`)的真实端点与测试源。
+
+| 项 | 值 |
+|------|------|
+| S3 API | `http://10.60.1.60:9000` |
+| Web 控制台 | `http://10.60.1.60:9001` |
+| Access Key | `adpadmin` |
+| Secret Key | `adpMinio#2026`(demo,**生产改强密码**) |
+| 桶 | `datasets`、`uploads` |
+| 编排 | `/opt/minio/docker-compose.yml`(项目名 `adp-minio`,卷 `adp_minio_data`,`restart unless-stopped`) |
+
+> ⚠️ 镜像 `minio/minio` / `minio/mc` 在 Docker Hub——该机封 Docker Hub,需本地 `docker pull --platform linux/amd64` → `docker save` → `scp` → `docker load`(同基础镜像做法);`latest` 内嵌控制台可能为精简版。
+
+```bash
+# 容器(在 60 上)
+ssh root@10.60.1.60 'cd /opt/minio && docker compose ps'
+ssh root@10.60.1.60 'cd /opt/minio && docker compose up -d'   # 起(卷保留)
+ssh root@10.60.1.60 'cd /opt/minio && docker compose down'    # 停
+
+# mc(一次性容器,host 网络)
+docker run --rm --network host --entrypoint sh minio/mc:latest -c \
+  'mc alias set local http://127.0.0.1:9000 adpadmin "adpMinio#2026" && mc ls --recursive local'
+
+# aws-cli(配 adpadmin / adpMinio#2026)
+aws --endpoint-url http://10.60.1.60:9000 s3 ls
+```
+
+平台对接:在「数据源管理」新建 s3 数据源,endpoint `http://10.60.1.60:9000`、accessKey `adpadmin`、secretKey `adpMinio#2026`、bucket `datasets`。
