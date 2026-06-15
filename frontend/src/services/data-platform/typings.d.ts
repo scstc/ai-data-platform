@@ -133,6 +133,24 @@ declare namespace DataPlatform {
     recommend: boolean;
   };
 
+  /** 流水线步骤:算子名 + 参数 */
+  type PipelineStep = {
+    name: string;
+    params: Record<string, unknown>;
+  };
+
+  /** AI 生成流水线入参 */
+  type GeneratePipelineParams = {
+    goal: string;
+    datasetVersionId?: string;
+  };
+
+  /** AI 生成流水线结果 */
+  type GeneratedPipeline = {
+    operators: PipelineStep[];
+    explanation: string;
+  };
+
   /** 算子市场:目录查询参数 */
   type OperatorCatalogParams = {
     scenario?: string;

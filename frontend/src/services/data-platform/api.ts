@@ -252,6 +252,16 @@ export async function aiQa(body: { question: string }, options?: { [key: string]
   });
 }
 
+/** AI:据目标生成算子流水线 POST /api/v1/ai/generate-pipeline */
+export async function generatePipeline(
+  body: DataPlatform.GeneratePipelineParams,
+) {
+  return request<{ data: DataPlatform.GeneratedPipeline; success: boolean }>(
+    '/api/v1/ai/generate-pipeline',
+    { method: 'POST', data: body },
+  );
+}
+
 /** 上传文件并落地为数据集 POST /api/v1/datasets/upload */
 export async function uploadDataset(
   formData: FormData,
