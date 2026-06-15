@@ -18,9 +18,9 @@ from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
 from app.schemas.common import CamelModel, PageResponse
-from app.schemas.job import JobCreate, JobRead
+from app.schemas.job import JobCreate, JobRead, OperatorSpec
 from app.services import operator_catalog as oc
-from app.services.engine import EngineError, run_process_job
+from app.services.engine import EngineError, run_preview, run_process_job
 
 router = APIRouter(tags=["jobs"])
 
@@ -32,6 +32,14 @@ class JobItemResponse(CamelModel):
 
     data: JobRead
     success: bool = True
+
+
+class PreviewRequest(CamelModel):
+    """样例试跑入参:在某数据集版本前 N 行上跑算子,不建版本、不写 DB。"""
+
+    dataset_version_id: str
+    operators: list[OperatorSpec]
+    sample_size: int = 20
 
 
 def _new_job_id() -> str:
@@ -191,6 +199,58 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
     return JSONResponse(content=_item(job, output, input_))
+
+
+@router.post("/jobs/preview")
+async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse:
+    """样例试跑:在数据集版本前 N 行上跑算子流水线,返回加工前后样本。
+
+    不建 DatasetVersion、不写 DB;校验与 create_job 一致。
+    """
+    if not body.operators:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "请至少选择一个算子"},
+        )
+    known = oc.operator_names()
+    unknown = [o.name for o in body.operators if o.name not in known]
+    if unknown:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
+        )
+    llm_configured = bool(settings.openai_api_key)
+    blocked = [
+        reason
+        for o in body.operators
+        if (reason := oc.runnable_reason(o.name, llm_configured=llm_configured))
+    ]
+    if blocked:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "；".join(blocked)},
+        )
+
+    size = max(1, min(body.sample_size, 200))
+    input_version = await session.get(DatasetVersion, body.dataset_version_id)
+    if input_version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+
+    try:
+        result = await run_preview(
+            input_version=input_version,
+            operators=[o.model_dump() for o in body.operators],
+            sample_size=size,
+        )
+    except EngineError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(exc)},
+        )
+    return JSONResponse({"data": result, "success": True})
 
 
 @router.get("/jobs/{job_id}")
