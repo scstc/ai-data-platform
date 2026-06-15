@@ -19,7 +19,12 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
 from app.schemas.common import CamelModel, PageResponse
-from app.schemas.dataset import DatasetDetailRead, DatasetRead, DatasetVersionRead
+from app.schemas.dataset import (
+    DatasetDetailRead,
+    DatasetRead,
+    DatasetUpdate,
+    DatasetVersionRead,
+)
 from app.services.landing import LandingError, UnsupportedFormatError, land_upload
 
 router = APIRouter(tags=["datasets"])
@@ -146,6 +151,33 @@ async def get_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
             status_code=404,
             content={"success": False, "message": "数据集不存在"},
         )
+    versions = (
+        await session.scalars(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == dataset_id)
+            .order_by(DatasetVersion.version_no)
+        )
+    ).all()
+    payload = DatasetResult(data=_to_detail(dataset, list(versions)))
+    return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
+
+
+@router.patch("/datasets/{dataset_id}")
+async def update_dataset(
+    dataset_id: str, body: DatasetUpdate, session: SessionDep
+) -> JSONResponse:
+    """编辑数据集可变元数据:只更新传入字段,记录变更人。"""
+    dataset = await session.get(Dataset, dataset_id)
+    if dataset is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集不存在"},
+        )
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(dataset, field, value)
+    dataset.last_modifier = "admin"
+    await session.commit()
+    await session.refresh(dataset)
     versions = (
         await session.scalars(
             select(DatasetVersion)
