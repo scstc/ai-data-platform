@@ -1,6 +1,5 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import {
-  ModalForm,
   PageContainer,
   ProDescriptions,
   ProForm,
@@ -10,6 +9,7 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components';
+import { history } from '@umijs/max';
 import {
   Button,
   Drawer,
@@ -27,11 +27,8 @@ import dayjs from 'dayjs';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createJob,
-  createQualityJob,
-  getDataset,
   getQualityReport,
   getVersionStats,
-  listDatasets,
   listJobs,
   listOperators,
 } from '@/services/data-platform';
@@ -386,110 +383,13 @@ const Quality: React.FC = () => {
         }}
         columns={columns}
         toolBarRender={() => [
-          <ModalForm<{
-            name: string;
-            datasetId: string;
-            versionId: string;
-            operators: string[];
-            params?: Record<string, Record<string, unknown>>;
-          }>
+          <Button
             key="create"
-            title="新建质量评估"
-            width={560}
-            trigger={<Button type="primary">新建质量评估</Button>}
-            modalProps={{ destroyOnHidden: true }}
-            onFinish={async (values) => {
-              const operators = (values.operators ?? []).map((name) => ({
-                name,
-                params: values.params?.[name],
-              }));
-              const hide = message.loading('质量评估执行中（dj-analyze）…', 0);
-              try {
-                const res = await createQualityJob({
-                  name: values.name,
-                  datasetVersionId: values.versionId,
-                  operators,
-                });
-                hide();
-                if (res?.data?.state === 'success') {
-                  message.success(
-                    `质量评估完成：${renderInput(res.data.input)}`,
-                  );
-                } else {
-                  message.error(
-                    `质量评估失败：${res?.data?.error ?? '未知错误'}`,
-                  );
-                }
-                actionRef.current?.reload();
-                return true;
-              } catch {
-                hide();
-                message.error('请求失败，请重试');
-                return false;
-              }
-            }}
+            type="primary"
+            onClick={() => history.push('/quality/editor')}
           >
-            <ProFormText
-              name="name"
-              label="任务名"
-              placeholder="请输入任务名称"
-              rules={[{ required: true, message: '请输入任务名称' }]}
-            />
-            <ProFormSelect
-              name="datasetId"
-              label="数据集"
-              placeholder="选择要评估的数据集"
-              rules={[{ required: true, message: '请选择数据集' }]}
-              request={async () => {
-                const res = await listDatasets({ pageSize: 100 });
-                return res.data.map((d) => ({ label: d.name, value: d.id }));
-              }}
-            />
-            <ProFormDependency name={['datasetId']}>
-              {({ datasetId }) => (
-                <ProFormSelect
-                  name="versionId"
-                  label="版本"
-                  placeholder="选择数据集版本"
-                  rules={[{ required: true, message: '请选择版本' }]}
-                  params={{ datasetId }}
-                  request={async () => {
-                    if (!datasetId) return [];
-                    const res = await getDataset(datasetId);
-                    return (res.data?.versions ?? []).map((v) => ({
-                      label: `v${v.versionNo}（${v.rows ?? '-'} 行）`,
-                      value: v.id,
-                    }));
-                  }}
-                />
-              )}
-            </ProFormDependency>
-            <ProFormSelect
-              name="operators"
-              label="质量算子"
-              mode="multiple"
-              placeholder="选择质量评估算子（filter 类）"
-              tooltip="对版本内每条数据计算质量指标（不删除数据），结果写入该版本的 stats"
-              rules={[{ required: true, message: '请至少选择一个算子' }]}
-              options={qualityOps.map((o) => ({
-                label: `${o.label}（${o.name}）`,
-                value: o.name,
-              }))}
-            />
-            <ProFormDependency name={['operators']}>
-              {({ operators }) => {
-                const selected = (operators ?? []) as string[];
-                const fields = selected
-                  .filter((n) => (opMap[n]?.params?.length ?? 0) > 0)
-                  .flatMap((n) =>
-                    opMap[n].params.map((p) =>
-                      renderParamField(n, opMap[n].label, p),
-                    ),
-                  );
-                return fields.length ? <>{fields}</> : null;
-              }}
-            </ProFormDependency>
-          </ModalForm>,
+            新建质量评估
+          </Button>,
         ]}
       />
 
