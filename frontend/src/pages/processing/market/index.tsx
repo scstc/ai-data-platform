@@ -62,7 +62,7 @@ const metaLine = (op: DataPlatform.CatalogOperator) =>
 const PAGE_SIZE = 24;
 
 const Market: React.FC = () => {
-  const { ops: cart, add, clear } = useModel('opCart');
+  const { steps, add, clear } = useModel('opCart');
 
   // 全量算子(一次性拉取)
   const [allOps, setAllOps] = useState<DataPlatform.CatalogOperator[]>([]);
@@ -192,14 +192,14 @@ const Market: React.FC = () => {
     <PageContainer
       content={headerStats ?? ' '}
       footer={
-        cart.length
+        steps.length
           ? [
               <Space key="cart">
-                <Text type="secondary">已选 {cart.length} 个算子</Text>
+                <Text type="secondary">已选 {steps.length} 个算子</Text>
                 <Button onClick={clear}>清空</Button>
                 <Button
                   type="primary"
-                  onClick={() => history.push('/processing/jobs')}
+                  onClick={() => history.push('/processing/editor')}
                 >
                   去新建加工任务
                 </Button>
@@ -304,7 +304,7 @@ const Market: React.FC = () => {
                 >
                   {pageData.map((op) => {
                     const badge = RUNNABLE_BADGE[op.runnable];
-                    const inCart = cart.includes(op.name);
+                    const inCart = steps.some((s) => s.name === op.name);
                     return (
                       <Card
                         key={op.name}
@@ -423,10 +423,12 @@ const Market: React.FC = () => {
           detail.runnable === 'ready' && (
             <Button
               type="primary"
-              disabled={cart.includes(detail.name)}
+              disabled={steps.some((s) => s.name === detail.name)}
               onClick={() => onAdd(detail)}
             >
-              {cart.includes(detail.name) ? '已加入' : '加入加工任务'}
+              {steps.some((s) => s.name === detail.name)
+                ? '已加入'
+                : '加入加工任务'}
             </Button>
           )
         }
