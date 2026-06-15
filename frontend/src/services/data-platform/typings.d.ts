@@ -271,6 +271,8 @@ declare namespace DataPlatform {
     size?: number;
     origin: string;
     producedByJobId?: string;
+    /** 外部 S3 托管(origin=hosted)版本据此找 S3 凭证；受管版本为空 */
+    sourceDatasourceId?: string;
     note?: string;
     createdAt: string;
   };
@@ -287,8 +289,26 @@ declare namespace DataPlatform {
     creator: string;
     lastModifier?: string;
     validUntil?: string;
+    /** 是否含外部 S3 托管版本(#18)：true 时隐藏删除、改显「取消托管」并打「S3 托管」徽标 */
+    hosted?: boolean;
     createdAt: string;
     updatedAt: string;
+  };
+
+  /** 外部 S3 桶内对象（列对象接口返回项，#18） */
+  type S3Object = {
+    key: string;
+    size: number;
+    lastModified: string | null;
+  };
+
+  /** 托管 S3 数据入参（#18） */
+  type HostS3Params = {
+    datasourceId: string;
+    bucket: string;
+    keys: string[];
+    name?: string;
+    dataType?: string;
   };
 
   /** 数据集详情（含版本列表） */

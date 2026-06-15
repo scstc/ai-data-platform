@@ -32,6 +32,8 @@ from app.schemas import (
     TestConnectionResult,
 )
 from app.schemas.common import CamelModel
+from app.services import external_store
+from app.services.external_store import ExternalStoreError
 from app.services.ingest_runner import IngestError, list_tables
 
 router = APIRouter(tags=["datasources"])
@@ -146,9 +148,12 @@ async def create_datasource(
     body: DataSourceCreate,
     session: SessionDep,
 ) -> _SingleDataSource:
-    """新建数据源：postgresql 真连定状态，其余按 config 必填齐全→connected/pending。"""
+    """新建数据源:postgresql / s3 真连定状态，其余按 config 齐全→connected/pending。"""
     if body.type == "database" and body.db_kind == "postgresql":
         ok, _, _ = await _probe_postgres(body.config)
+        status = "connected" if ok else "failed"
+    elif body.type == "s3":
+        ok, _, _ = await external_store.test_connection(body.config)
         status = "connected" if ok else "failed"
     else:
         status = "connected" if _config_is_valid(body.type, body.config) else "pending"
@@ -216,6 +221,8 @@ async def test_connection(body: TestConnectionParams) -> TestConnectionResult:
     """
     if body.type == "database" and body.db_kind == "postgresql":
         ok, latency_ms, message = await _probe_postgres(body.config)
+    elif body.type == "s3":
+        ok, latency_ms, message = await external_store.test_connection(body.config)
     else:
         ok = _config_is_valid(body.type, body.config)
         latency_ms = randint(20, 200)
@@ -246,3 +253,57 @@ async def list_datasource_tables(ds_id: str, session: SessionDep) -> JSONRespons
             content={"success": False, "message": f"获取表失败:{exc}"},
         )
     return JSONResponse(content={"data": tables, "success": True})
+
+
+async def _require_s3_datasource(
+    ds_id: str, session: AsyncSession
+) -> DataSource | JSONResponse:
+    """取数据源并校验为 s3 类型(供托管向导列桶/列对象)。失败直接给响应。"""
+    ds = await session.get(DataSource, ds_id)
+    if ds is None:
+        return _not_found()
+    if ds.type != "s3":
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "仅支持 s3 数据源"},
+        )
+    return ds
+
+
+@router.get("/datasources/{ds_id}/buckets")
+async def list_datasource_buckets(
+    ds_id: str, session: SessionDep
+) -> JSONResponse:
+    """列出 s3 数据源下的全部桶(真连,供托管向导,#18)。"""
+    ds = await _require_s3_datasource(ds_id, session)
+    if isinstance(ds, JSONResponse):
+        return ds
+    try:
+        buckets = await external_store.list_buckets(ds.config or {})
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"列桶失败:{exc}"},
+        )
+    return JSONResponse(content={"data": buckets, "success": True})
+
+
+@router.get("/datasources/{ds_id}/objects")
+async def list_datasource_objects(
+    ds_id: str,
+    session: SessionDep,
+    bucket: Annotated[str, Query()],
+    prefix: Annotated[str, Query()] = "",
+) -> JSONResponse:
+    """列出 s3 数据源指定桶/前缀下的对象 [{key,size,lastModified}](上限 1000,#18)。"""
+    ds = await _require_s3_datasource(ds_id, session)
+    if isinstance(ds, JSONResponse):
+        return ds
+    try:
+        objects = await external_store.list_objects(ds.config or {}, bucket, prefix)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"列对象失败:{exc}"},
+        )
+    return JSONResponse(content={"data": objects, "success": True})

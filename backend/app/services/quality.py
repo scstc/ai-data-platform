@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
 from app.services.engine import _semaphore, build_config
+from app.services.external_store import materialized_version
 
 
 class QualityError(RuntimeError):
@@ -71,21 +72,24 @@ async def run_quality_job(
     yaml_path = out_dir / "job.yaml"
     log_path = out_dir / "run.log"
 
-    cfg = build_config(
-        project_name=job_id,
-        input_path=input_version.storage_uri,
-        output_path=str(export_path),
-        operators=operators,
-    )
-    # 固定 work_dir 与 job_id:work_dir 以 job_id 结尾时 DJ 不再追加时间戳
-    # 目录,分析产物稳定落在 out_dir/analysis/
-    cfg["work_dir"] = out_dir.as_posix()
-    cfg["job_id"] = job_id
-    yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
-    yaml_path.write_text(yaml_text, encoding="utf-8")
+    # 输入经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
+    # stats 回写到 hosted 输入版本的 stats_uri,源不动。
+    async with materialized_version(input_version, session) as input_path:
+        cfg = build_config(
+            project_name=job_id,
+            input_path=str(input_path),
+            output_path=str(export_path),
+            operators=operators,
+        )
+        # 固定 work_dir 与 job_id:work_dir 以 job_id 结尾时 DJ 不再追加时间戳
+        # 目录,分析产物稳定落在 out_dir/analysis/
+        cfg["work_dir"] = out_dir.as_posix()
+        cfg["job_id"] = job_id
+        yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+        yaml_path.write_text(yaml_text, encoding="utf-8")
 
-    async with _semaphore:
-        code, log = await _run_dj_analyze(yaml_path)
+        async with _semaphore:
+            code, log = await _run_dj_analyze(yaml_path)
     log_path.write_text(log, encoding="utf-8")
 
     if code != 0 or not stats_path.exists():

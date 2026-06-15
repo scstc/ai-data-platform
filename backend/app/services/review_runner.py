@@ -27,6 +27,7 @@ from app.models.job_input import JobInput
 from app.models.review_finding import ReviewFinding
 from app.services.ai import get_ai_provider
 from app.services.engine import _semaphore
+from app.services.external_store import materialized_version
 from app.services.review import scan_version
 
 logger = logging.getLogger(__name__)
@@ -66,11 +67,12 @@ async def run_review(
     成功返回打标版本;数据文件缺失抛 ReviewError(上层置 job failed)。
     并发受 engine 信号量限流(scan 为 CPU/IO 轻量但 LLM 路可能慢)。
     """
-    src_path = Path(version.storage_uri)
-    if not src_path.exists():
-        raise ReviewError(f"被审版本数据文件不存在:{version.storage_uri}")
-
-    rows = _read_jsonl(src_path)
+    # 经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
+    # 打标产出仍写受管存储(origin=review),源不动;血缘指向 hosted 被审版本。
+    async with materialized_version(version, session) as src_path:
+        if not src_path.exists():
+            raise ReviewError(f"被审版本数据文件不存在:{version.storage_uri}")
+        rows = _read_jsonl(src_path)
     provider = get_ai_provider(settings)
 
     async with _semaphore:

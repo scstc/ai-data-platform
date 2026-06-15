@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
+from app.services.external_store import materialized_version
 
 # 多 job 并发上限
 _semaphore = asyncio.Semaphore(settings.engine_concurrency)
@@ -96,6 +97,7 @@ def _column_union(*row_lists: list[dict[str, Any]]) -> list[str]:
 
 
 async def run_preview(
+    session: AsyncSession,
     *,
     input_version: DatasetVersion,
     operators: list[dict[str, Any]],
@@ -105,49 +107,55 @@ async def run_preview(
 
     全程在临时目录内完成,不建 DatasetVersion、不写 DB。失败抛 EngineError。
     返回 {before, after, beforeCount, afterCount, columns}。
+
+    输入经 materialized_version 解析:受管版本直接用本地路径,hosted 版本按需
+    从 S3 拉取并规范化为临时 jsonl(用完即清理)。
     """
-    # 输入数据文件缺失 → 抛 EngineError(让上层转 400,而非 FileNotFoundError 冒成 500)
-    src_path = Path(input_version.storage_uri)
-    if not src_path.exists():
-        raise EngineError(f"输入版本数据文件不存在:{input_version.storage_uri}")
+    # 经解析器拿本地可读路径(hosted 在此下载;managed 透传本地路径)
+    async with materialized_version(input_version, session) as src_path:
+        # 输入数据文件缺失 → 抛 EngineError(让上层转 400,不让 FileNotFound 冒成 500)
+        if not src_path.exists():
+            raise EngineError(f"输入版本数据文件不存在:{input_version.storage_uri}")
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        sample_path = tmp_dir / "sample.jsonl"
-        out_path = tmp_dir / "data.jsonl"
-        yaml_path = tmp_dir / "job.yaml"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            sample_path = tmp_dir / "sample.jsonl"
+            out_path = tmp_dir / "data.jsonl"
+            yaml_path = tmp_dir / "job.yaml"
 
-        # 读输入版本前 sample_size 个非空行:既落盘成试跑输入,也作 before 展示
-        before = _read_jsonl_head(src_path, sample_size)
-        sample_path.write_text(
-            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in before),
-            encoding="utf-8",
-        )
+            # 读输入版本前 sample_size 个非空行:既落盘成试跑输入,也作 before 展示
+            before = _read_jsonl_head(src_path, sample_size)
+            sample_path.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False) + "\n" for row in before
+                ),
+                encoding="utf-8",
+            )
 
-        cfg = build_config(
-            project_name="preview",
-            input_path=str(sample_path),
-            output_path=str(out_path),
-            operators=operators,
-        )
-        yaml_path.write_text(
-            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+            cfg = build_config(
+                project_name="preview",
+                input_path=str(sample_path),
+                output_path=str(out_path),
+                operators=operators,
+            )
+            yaml_path.write_text(
+                yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
 
-        async with _semaphore:
-            code, log = await _run_dj(yaml_path)
+            async with _semaphore:
+                code, log = await _run_dj(yaml_path)
 
-        if code != 0 or not out_path.exists():
-            tail = "\n".join(log.strip().splitlines()[-8:])
-            raise EngineError(f"dj-process 退出码 {code}\n{tail}")
+            if code != 0 or not out_path.exists():
+                tail = "\n".join(log.strip().splitlines()[-8:])
+                raise EngineError(f"dj-process 退出码 {code}\n{tail}")
 
-        # 产出总行数(全量统计),after 仅取前 sample_size 条用于展示
-        after_count = sum(
-            1 for line in out_path.open(encoding="utf-8") if line.strip()
-        )
-        after = _read_jsonl_head(out_path, sample_size)
-        columns = _column_union(before, after)
+            # 产出总行数(全量统计),after 仅取前 sample_size 条用于展示
+            after_count = sum(
+                1 for line in out_path.open(encoding="utf-8") if line.strip()
+            )
+            after = _read_jsonl_head(out_path, sample_size)
+            columns = _column_union(before, after)
 
     return {
         "before": before,
@@ -182,17 +190,20 @@ async def run_process_job(
     yaml_path = out_dir / "job.yaml"
     log_path = out_dir / "run.log"
 
-    cfg = build_config(
-        project_name=job_id,
-        input_path=input_version.storage_uri,
-        output_path=str(out_path),
-        operators=operators,
-    )
-    yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
-    yaml_path.write_text(yaml_text, encoding="utf-8")
+    # 输入经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
+    # 产出仍写受管存储(origin=managed),源不动;血缘 JobInput 指向 hosted 输入版本。
+    async with materialized_version(input_version, session) as input_path:
+        cfg = build_config(
+            project_name=job_id,
+            input_path=str(input_path),
+            output_path=str(out_path),
+            operators=operators,
+        )
+        yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+        yaml_path.write_text(yaml_text, encoding="utf-8")
 
-    async with _semaphore:
-        code, log = await _run_dj(yaml_path)
+        async with _semaphore:
+            code, log = await _run_dj(yaml_path)
     log_path.write_text(log, encoding="utf-8")
 
     if code != 0 or not out_path.exists():

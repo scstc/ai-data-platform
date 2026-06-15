@@ -19,6 +19,8 @@ class DatasetVersionRead(CamelModel):
     rows: int | None = None
     size: int | None = None
     origin: str
+    # hosted 版本指向的数据源 id(S3 凭证来源);受管版本为空(#18)
+    source_datasource_id: str | None = None
     produced_by_job_id: str | None = None
     note: str | None = None
     created_at: datetime
@@ -39,6 +41,19 @@ class DatasetRead(CamelModel):
     valid_until: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # 数据集是否含 hosted 版本(供前端「S3 托管」徽标/删除门控,#18)。
+    # 由路由按版本聚合填充,非 ORM 字段,默认 False。
+    hosted: bool = False
+
+
+class HostS3Request(CamelModel):
+    """外部 S3 数据托管登记入参(#18):把若干 S3 对象登记为受管数据集版本(不下载)。"""
+
+    datasource_id: str
+    bucket: str
+    keys: list[str]
+    name: str | None = None
+    data_type: str | None = None
 
 
 class DatasetDetailRead(DatasetRead):

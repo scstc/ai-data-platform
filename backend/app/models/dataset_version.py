@@ -42,6 +42,8 @@ class DatasetVersion(Base):
     size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # 来源:managed(平台受管) | hosted(三方 S3 托管,#18,写/删受控)
     origin: Mapped[str] = mapped_column(String, nullable=False, default="managed")
+    # hosted 版本据此找回 S3 凭证(指向 datasources.id);受管版本为空(#18)
+    source_datasource_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 产出该版本的 job(血缘上游);首次落地无 job 时可空
     produced_by_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 版本说明 / changelog

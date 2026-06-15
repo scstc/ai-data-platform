@@ -4,6 +4,7 @@ import {
   PageContainer,
   ProDescriptions,
   ProFormDatePicker,
+  ProFormDependency,
   ProFormSelect,
   ProFormText,
   ProFormTextArea,
@@ -28,8 +29,13 @@ import {
   batchDeleteDatasets,
   deleteDataset,
   getDataset,
+  hostS3,
+  listBuckets,
+  listDataSources,
   listDatasets,
+  listObjects,
   previewDatasetVersion,
+  unhostDataset,
   updateDataset,
 } from '@/services/data-platform';
 
@@ -68,8 +74,13 @@ const DatasetsList: React.FC = () => {
   const [activeVersion, setActiveVersion] = useState<string>();
   const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [selectedRows, setSelectedRows] = useState<DataPlatform.Dataset[]>([]);
   const [editOpen, setEditOpen] = useState(false);
+  const [hostOpen, setHostOpen] = useState(false);
+
+  const selectedRowKeys = selectedRows.map((r) => r.id);
+  // 外部托管数据集不可删除(后端 403 兜底)——批量删除前先拦截给提示
+  const hasHostedSelected = selectedRows.some((r) => r.hosted);
 
   const handleBatchDelete = async () => {
     const hide = message.loading('正在批量删除…', 0);
@@ -79,11 +90,25 @@ const DatasetsList: React.FC = () => {
       message.success(
         `已删除 ${res?.data?.deleted ?? selectedRowKeys.length} 个数据集`,
       );
-      setSelectedRowKeys([]);
+      setSelectedRows([]);
       actionRef.current?.reload();
     } catch {
       hide();
       message.error('批量删除失败，请重试');
+    }
+  };
+
+  // 取消托管(仅 admin):只移除平台引用，绝不删 S3 源对象
+  const handleUnhost = async (id: string) => {
+    const hide = message.loading('正在取消托管…', 0);
+    try {
+      await unhostDataset(id);
+      hide();
+      message.success('已取消托管（仅移除平台引用，S3 源对象保留）');
+      actionRef.current?.reload();
+    } catch {
+      hide();
+      message.error('取消托管失败，请重试');
     }
   };
 
@@ -128,14 +153,21 @@ const DatasetsList: React.FC = () => {
       title: '名称',
       dataIndex: 'name',
       render: (dom, record) => (
-        <a
-          onClick={(e) => {
-            e.preventDefault();
-            openDetail(record.id);
-          }}
-        >
-          {dom}
-        </a>
+        <span>
+          <a
+            onClick={(e) => {
+              e.preventDefault();
+              openDetail(record.id);
+            }}
+          >
+            {dom}
+          </a>
+          {record.hosted && (
+            <Tag color="geekblue" style={{ marginLeft: 8 }}>
+              S3 托管
+            </Tag>
+          )}
+        </span>
       ),
     },
     {
@@ -168,19 +200,32 @@ const DatasetsList: React.FC = () => {
         <a key="detail" onClick={() => openDetail(record.id)}>
           详情
         </a>,
-        // 删除仅 admin 可见(后端 require_admin 双层防护)
-        access.canAdmin ? (
-          <Popconfirm
-            key="delete"
-            title="确认删除该数据集？"
-            description="将删除其全部版本与产物文件，不可恢复。"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => handleDelete(record.id)}
-          >
-            <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-          </Popconfirm>
-        ) : null,
+        // 外部托管数据集禁止删除(#18)——隐藏「删除」，改显 admin「取消托管」;
+        // 受管数据集照旧显示「删除」(仅 admin，后端 require_admin 双层防护)
+        record.hosted
+          ? access.canAdmin && (
+              <Popconfirm
+                key="unhost"
+                title="确认取消托管该数据集？"
+                description="仅移除平台引用，不删除 S3 源对象。"
+                okText="取消托管"
+                onConfirm={() => handleUnhost(record.id)}
+              >
+                <a>取消托管</a>
+              </Popconfirm>
+            )
+          : access.canAdmin && (
+              <Popconfirm
+                key="delete"
+                title="确认删除该数据集？"
+                description="将删除其全部版本与产物文件，不可恢复。"
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleDelete(record.id)}
+              >
+                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+              </Popconfirm>
+            ),
       ],
     },
   ];
@@ -233,23 +278,47 @@ const DatasetsList: React.FC = () => {
         options={{ reload: true }}
         rowSelection={{
           selectedRowKeys,
-          onChange: (keys) => setSelectedRowKeys(keys as string[]),
+          onChange: (_keys, rows) =>
+            setSelectedRows(rows as DataPlatform.Dataset[]),
         }}
         tableAlertOptionRender={() => (
           <Access accessible={!!access.canAdmin}>
-            <Popconfirm
-              title={`确认删除选中的 ${selectedRowKeys.length} 个数据集？`}
-              description="将删除其全部版本与产物文件，不可恢复。"
-              okText="删除"
-              okButtonProps={{ danger: true }}
-              onConfirm={handleBatchDelete}
-            >
-              <Button type="link" danger>
+            {hasHostedSelected ? (
+              <Button
+                type="link"
+                danger
+                onClick={() =>
+                  message.warning(
+                    '外部托管数据集不支持删除，请对其单独使用「取消托管」',
+                  )
+                }
+              >
                 批量删除
               </Button>
-            </Popconfirm>
+            ) : (
+              <Popconfirm
+                title={`确认删除选中的 ${selectedRowKeys.length} 个数据集？`}
+                description="将删除其全部版本与产物文件，不可恢复。"
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                onConfirm={handleBatchDelete}
+              >
+                <Button type="link" danger>
+                  批量删除
+                </Button>
+              </Popconfirm>
+            )}
           </Access>
         )}
+        toolBarRender={() => [
+          <Button
+            key="host-s3"
+            type="primary"
+            onClick={() => setHostOpen(true)}
+          >
+            托管 S3 数据
+          </Button>,
+        ]}
         request={async (params) => {
           const range = params.createdAt as [string, string] | undefined;
           const res = await listDatasets({
@@ -456,6 +525,109 @@ const DatasetsList: React.FC = () => {
         />
         <ProFormText name="businessCategory" label="分类" />
         <ProFormDatePicker name="validUntil" label="有效期" />
+      </ModalForm>
+
+      <ModalForm<DataPlatform.HostS3Params>
+        title="托管 S3 数据"
+        width={640}
+        open={hostOpen}
+        modalProps={{ destroyOnHidden: true }}
+        onOpenChange={setHostOpen}
+        onFinish={async (values) => {
+          try {
+            const res = await hostS3(values);
+            const n = res?.data?.length ?? values.keys.length;
+            message.success(`已托管 ${n} 个对象为受管数据集（未发生下载）`);
+            actionRef.current?.reload();
+            return true;
+          } catch {
+            message.error('托管失败，请检查数据源连接与对象选择');
+            return false;
+          }
+        }}
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+          将三方 S3 / MinIO 上的对象登记为受管数据集版本（仅存引用，不拷贝）。
+          可对其浏览 / 预览 / 加工 / 质量 / 审核；删除源对象不提供，仅管理员可取消托管。
+        </Typography.Paragraph>
+        <ProFormSelect
+          name="datasourceId"
+          label="S3 数据源"
+          placeholder="请选择 s3 类型数据源"
+          rules={[{ required: true, message: '请选择 S3 数据源' }]}
+          request={async () => {
+            const res = await listDataSources({ type: 's3', pageSize: 100 });
+            return res.data.map((d) => ({
+              label: `${d.name}（${d.status}）`,
+              value: d.id,
+            }));
+          }}
+          fieldProps={{ showSearch: true }}
+        />
+        <ProFormDependency name={['datasourceId']}>
+          {({ datasourceId }) =>
+            datasourceId ? (
+              <ProFormSelect
+                name="bucket"
+                label="桶"
+                placeholder="请选择桶"
+                rules={[{ required: true, message: '请选择桶' }]}
+                params={{ datasourceId }}
+                request={async () => {
+                  try {
+                    const res = await listBuckets(datasourceId);
+                    return (res.data ?? []).map((b) => ({
+                      label: b,
+                      value: b,
+                    }));
+                  } catch {
+                    return [];
+                  }
+                }}
+                fieldProps={{ showSearch: true }}
+              />
+            ) : null
+          }
+        </ProFormDependency>
+        <ProFormDependency name={['datasourceId', 'bucket']}>
+          {({ datasourceId, bucket }) =>
+            datasourceId && bucket ? (
+              <ProFormSelect
+                name="keys"
+                label="对象"
+                mode="multiple"
+                placeholder="勾选一个或多个对象（每个对象各产一个数据集）"
+                rules={[{ required: true, message: '请至少选择一个对象' }]}
+                params={{ datasourceId, bucket }}
+                request={async () => {
+                  try {
+                    const res = await listObjects(datasourceId, { bucket });
+                    return (res.data ?? []).map((o) => ({
+                      label: `${o.key}（${fmtSize(o.size)}）`,
+                      value: o.key,
+                    }));
+                  } catch {
+                    return [];
+                  }
+                }}
+                fieldProps={{ showSearch: true }}
+              />
+            ) : null
+          }
+        </ProFormDependency>
+        <ProFormText
+          name="name"
+          label="数据集名称"
+          tooltip="留空则按对象 key 自动命名；多选时作为名称前缀"
+          placeholder="可选"
+        />
+        <ProFormSelect
+          name="dataType"
+          label="数据类型"
+          valueEnum={DATA_TYPE_ENUM}
+          placeholder="可选"
+          fieldProps={{ allowClear: true }}
+        />
       </ModalForm>
     </PageContainer>
   );

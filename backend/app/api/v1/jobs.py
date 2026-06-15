@@ -21,6 +21,7 @@ from app.schemas.common import CamelModel, PageResponse
 from app.schemas.job import JobCreate, JobRead, OperatorSpec
 from app.services import operator_catalog as oc
 from app.services.engine import EngineError, run_preview, run_process_job
+from app.services.external_store import ExternalStoreError
 
 router = APIRouter(tags=["jobs"])
 
@@ -189,7 +190,7 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
         job.progress = 100
         job.config_yaml = yaml_text
         job.logs_uri = log_path
-    except EngineError as exc:
+    except (EngineError, ExternalStoreError) as exc:
         job.state = "failed"
         job.error = str(exc)
     job.finished_at = _now()
@@ -241,11 +242,12 @@ async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse
 
     try:
         result = await run_preview(
+            session,
             input_version=input_version,
             operators=[o.model_dump() for o in body.operators],
             sample_size=size,
         )
-    except EngineError as exc:
+    except (EngineError, ExternalStoreError) as exc:
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": str(exc)},

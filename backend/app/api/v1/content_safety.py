@@ -33,6 +33,7 @@ from app.models.review_finding import ReviewFinding
 from app.schemas.common import PageResponse
 from app.schemas.job import JobRead
 from app.schemas.review import ReviewFindingRead, ReviewJobCreate
+from app.services.external_store import ExternalStoreError
 from app.services.review_runner import ReviewError, run_review
 
 router = APIRouter(tags=["content-safety"])
@@ -76,6 +77,9 @@ async def create_review_job(
     except ReviewError as exc:
         job.state = "failed"
         job.error = str(exc)
+    except ExternalStoreError as exc:  # hosted 版本:S3 读取失败给明确文案
+        job.state = "failed"
+        job.error = f"读取 S3 对象失败:{exc}"
     except Exception as exc:  # 未预期异常也不能让 job 卡死在 running
         job.state = "failed"
         job.error = f"未预期错误:{exc}"

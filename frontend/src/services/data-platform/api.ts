@@ -87,6 +87,60 @@ export async function listDatasourceTables(
   );
 }
 
+/** 列出 S3 数据源的桶 GET /api/v1/datasources/{id}/buckets（仅 s3，#18） */
+export async function listBuckets(
+  datasourceId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: string[]; success: boolean }>(
+    `/api/v1/datasources/${datasourceId}/buckets`,
+    {
+      method: 'GET',
+      ...(options || {}),
+    },
+  );
+}
+
+/** 列出 S3 桶内对象 GET /api/v1/datasources/{id}/objects（仅 s3，#18） */
+export async function listObjects(
+  datasourceId: string,
+  params: { bucket: string; prefix?: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.S3Object[]; success: boolean }>(
+    `/api/v1/datasources/${datasourceId}/objects`,
+    {
+      method: 'GET',
+      params: { ...params },
+      ...(options || {}),
+    },
+  );
+}
+
+/** 托管 S3 数据为受管数据集（纯引用，不下载）POST /api/v1/datasets/host-s3（#18） */
+export async function hostS3(
+  body: DataPlatform.HostS3Params,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Dataset[]; success: boolean }>(
+    '/api/v1/datasets/host-s3',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 取消托管（仅 admin，仅移除平台引用，绝不删 S3 源对象）POST /api/v1/datasets/{id}/unhost（#18） */
+export async function unhostDataset(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/datasets/${id}/unhost`, {
+    method: 'POST',
+    ...(options || {}),
+  });
+}
+
 /** 获取采集任务列表 GET /api/v1/ingest-tasks */
 export async function listIngestTasks(
   params?: DataPlatform.IngestTaskListParams,

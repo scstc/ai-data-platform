@@ -23,9 +23,10 @@ async def _admin_session(client: AsyncClient, seed_users: None) -> None:
 
     client.cookies.set("adp_session", sign_token("admin"))
 
-# 一组齐全的 s3 config（用于 connected 分支与 test 成功分支）。
+# 一组字段齐全但不可路由的 s3 config(s3 改真探活后,默认走 failed 分支且快速失败)。
+# endpoint 指向本地不可路由端口,确保 create/list 等用例不依赖外网、不挂起。
 _VALID_S3_CONFIG = {
-    "endpoint": "s3.cn-north-1.amazonaws.com.cn",
+    "endpoint": "http://127.0.0.1:1",
     "bucket": "test-bucket",
     "accessKey": "AKIATEST",
     "secretKey": "secret",
@@ -48,11 +49,14 @@ async def _create(client: AsyncClient, **overrides: object) -> dict:
     return body["data"]
 
 
-async def test_create_connected_branch(client: AsyncClient) -> None:
-    """config 齐全 → 初始 status=connected，且输出为 camelCase。"""
+async def test_create_s3_real_probe_branch(client: AsyncClient) -> None:
+    """s3 改真探活后:不可达的假 endpoint → status=failed,但记录仍建成、camelCase。
+
+    (#18:s3 分支从配置校验升级为 external_store.test_connection 真连。)
+    """
     data = await _create(client)
     assert data["id"].startswith("ds-")
-    assert data["status"] == "connected"
+    assert data["status"] == "failed"
     assert data["type"] == "s3"
     assert data["creator"] == "admin"
     # camelCase 字段存在
@@ -61,11 +65,12 @@ async def test_create_connected_branch(client: AsyncClient) -> None:
 
 
 async def test_create_pending_branch(client: AsyncClient) -> None:
-    """config 缺必填字段 → 初始 status=pending。"""
+    """非真探活类型(hdfs)config 缺必填字段 → 初始 status=pending。"""
     data = await _create(
         client,
         name="缺字段的库",
-        config={"endpoint": "only-endpoint"},
+        type="hdfs",
+        config={"nameNode": "only-namenode"},
     )
     assert data["status"] == "pending"
 
@@ -171,30 +176,42 @@ async def test_update_not_found(client: AsyncClient) -> None:
 
 
 async def test_test_connection_success(client: AsyncClient) -> None:
-    """test 接口：config 齐全 → success=true，latencyMs 在 20-200。"""
+    """test 接口(api 类型):config 齐全 → 裸响应 success=true。"""
+    resp = await client.post(
+        "/api/v1/datasources/test",
+        json={"type": "api", "config": {"url": "https://example.com/api"}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # 端点返回裸 TestConnectionResult(无 data 信封)
+    assert body["success"] is True
+    assert 20 <= body["latencyMs"] <= 200
+    assert isinstance(body["message"], str)
+
+
+async def test_test_connection_s3_real_probe_unreachable(
+    client: AsyncClient,
+) -> None:
+    """s3 真探活:不可达 endpoint → 裸响应 success=false(#18,不 500)。"""
     resp = await client.post(
         "/api/v1/datasources/test",
         json={"type": "s3", "config": dict(_VALID_S3_CONFIG)},
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["success"] is True
-    data = body["data"]
-    assert data["success"] is True
-    assert 20 <= data["latencyMs"] <= 200
-    assert isinstance(data["message"], str)
+    assert body["success"] is False
+    assert isinstance(body["message"], str)
 
 
 async def test_test_connection_failure(client: AsyncClient) -> None:
-    """test 接口：config 缺字段 → data.success=false（外层仍 success=true）。"""
+    """test 接口:config 缺字段 → 裸响应 success=false。"""
     resp = await client.post(
         "/api/v1/datasources/test",
         json={"type": "database", "config": {"host": "h"}},
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["success"] is True
-    assert body["data"]["success"] is False
+    assert body["success"] is False
 
 
 async def test_delete_and_then_404(client: AsyncClient) -> None:
