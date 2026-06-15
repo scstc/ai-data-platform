@@ -297,11 +297,12 @@ declare namespace DataPlatform {
   /** 数据集元数据更新入参 */
   type DatasetUpdate = {
     name?: string;
-    description?: string;
-    dataType?: string;
-    sensitivityLevel?: string;
-    businessCategory?: string;
-    validUntil?: string;
+    // 可清空字段:显式传 null 才能把旧值置空(后端 exclude_unset 保留显式 null)
+    description?: string | null;
+    dataType?: string | null;
+    sensitivityLevel?: string | null;
+    businessCategory?: string | null;
+    validUntil?: string | null;
   };
 
   /** 数据集列表查询参数 */

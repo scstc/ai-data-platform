@@ -247,8 +247,14 @@ const DatasetsList: React.FC = () => {
             name: params.name || undefined,
             dataType: params.dataType || undefined,
             creator: params.creator || undefined,
-            createdStart: range?.[0] || undefined,
-            createdEnd: range?.[1] || undefined,
+            // dateRange 给的是纯日期:起取当日 0 点、止取当日 23:59:59,
+            // 否则 created_at <= 当日0点 会漏掉当天创建的记录
+            createdStart: range?.[0]
+              ? dayjs(range[0]).startOf('day').toISOString()
+              : undefined,
+            createdEnd: range?.[1]
+              ? dayjs(range[1]).endOf('day').toISOString()
+              : undefined,
           });
           return { data: res.data, total: res.total, success: res.success };
         }}
@@ -386,11 +392,17 @@ const DatasetsList: React.FC = () => {
         onFinish={async (values) => {
           if (!detail) return false;
           try {
+            // 清空字段显式传 null(后端 exclude_unset 才会把旧值置空);
+            // 有效期是纯日期,用 YYYY-MM-DD 避免 toISOString 的 UTC 偏移漂一天
             const res = await updateDataset(detail.id, {
-              ...values,
+              name: values.name,
+              description: values.description ?? null,
+              dataType: values.dataType ?? null,
+              sensitivityLevel: values.sensitivityLevel ?? null,
+              businessCategory: values.businessCategory ?? null,
               validUntil: values.validUntil
-                ? dayjs(values.validUntil).toISOString()
-                : undefined,
+                ? dayjs(values.validUntil).format('YYYY-MM-DD')
+                : null,
             });
             message.success('已保存');
             setDetail(res.data);
@@ -413,10 +425,16 @@ const DatasetsList: React.FC = () => {
           label="描述"
           fieldProps={{ rows: 3 }}
         />
-        <ProFormSelect name="dataType" label="类型" valueEnum={DATA_TYPE_ENUM} />
+        <ProFormSelect
+          name="dataType"
+          label="类型"
+          valueEnum={DATA_TYPE_ENUM}
+          fieldProps={{ allowClear: true }}
+        />
         <ProFormSelect
           name="sensitivityLevel"
           label="分级"
+          fieldProps={{ allowClear: true }}
           valueEnum={{
             public: { text: 'public' },
             internal: { text: 'internal' },
