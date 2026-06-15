@@ -106,6 +106,11 @@ async def run_preview(
     全程在临时目录内完成,不建 DatasetVersion、不写 DB。失败抛 EngineError。
     返回 {before, after, beforeCount, afterCount, columns}。
     """
+    # 输入数据文件缺失 → 抛 EngineError(让上层转 400,而非 FileNotFoundError 冒成 500)
+    src_path = Path(input_version.storage_uri)
+    if not src_path.exists():
+        raise EngineError(f"输入版本数据文件不存在:{input_version.storage_uri}")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         sample_path = tmp_dir / "sample.jsonl"
@@ -113,7 +118,7 @@ async def run_preview(
         yaml_path = tmp_dir / "job.yaml"
 
         # 读输入版本前 sample_size 个非空行:既落盘成试跑输入,也作 before 展示
-        before = _read_jsonl_head(Path(input_version.storage_uri), sample_size)
+        before = _read_jsonl_head(src_path, sample_size)
         sample_path.write_text(
             "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in before),
             encoding="utf-8",

@@ -267,6 +267,8 @@ const Editor: React.FC = () => {
             trend = '(行数不变·纯清洗)';
           } else if (delta > 0) {
             trend = `(删除 ${delta} 行)`;
+          } else {
+            trend = `(新增 ${-delta} 行)`;
           }
           return (
             <>
@@ -285,7 +287,7 @@ const Editor: React.FC = () => {
                       key: i,
                       idx: i + 1,
                       before: mainText(b),
-                      after: mainText(after[i]),
+                      after: mainText(after[i] ?? {}),
                     }))}
                     columns={[
                       { title: '序号', dataIndex: 'idx', width: 60 },
