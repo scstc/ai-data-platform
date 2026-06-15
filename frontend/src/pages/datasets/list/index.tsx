@@ -1,7 +1,12 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import {
+  ModalForm,
   PageContainer,
   ProDescriptions,
+  ProFormDatePicker,
+  ProFormSelect,
+  ProFormText,
+  ProFormTextArea,
   ProTable,
 } from '@ant-design/pro-components';
 import type { TableColumnsType } from 'antd';
@@ -24,7 +29,19 @@ import {
   getDataset,
   listDatasets,
   previewDatasetVersion,
+  updateDataset,
 } from '@/services/data-platform';
+
+/** 数据集类型枚举（列表搜索 + 编辑表单复用） */
+const DATA_TYPE_ENUM = {
+  text: { text: 'text' },
+  multimodal: { text: 'multimodal' },
+  qa: { text: 'qa' },
+  cot: { text: 'cot' },
+  preference: { text: 'preference' },
+  timeseries: { text: 'timeseries' },
+  gis: { text: 'gis' },
+};
 
 /** 字节数转人类可读 */
 const fmtSize = (n?: number) => {
@@ -50,6 +67,7 @@ const DatasetsList: React.FC = () => {
   const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [editOpen, setEditOpen] = useState(false);
 
   const handleBatchDelete = async () => {
     const hide = message.loading('正在批量删除…', 0);
@@ -121,16 +139,24 @@ const DatasetsList: React.FC = () => {
     {
       title: '类型',
       dataIndex: 'dataType',
-      search: false,
+      valueType: 'select',
+      valueEnum: DATA_TYPE_ENUM,
       render: (_, r) => (r.dataType ? <Tag>{r.dataType}</Tag> : '-'),
     },
     { title: '描述', dataIndex: 'description', search: false, ellipsis: true },
-    { title: '创建人', dataIndex: 'creator', search: false },
+    { title: '创建人', dataIndex: 'creator' },
     {
       title: '创建时间',
       dataIndex: 'createdAt',
       search: false,
       render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'createdAt',
+      key: 'createdAtRange',
+      valueType: 'dateRange',
+      hideInTable: true,
     },
     {
       title: '操作',
@@ -194,7 +220,7 @@ const DatasetsList: React.FC = () => {
         headerTitle="数据集仓库"
         actionRef={actionRef}
         rowKey="id"
-        search={false}
+        search={{ labelWidth: 'auto' }}
         options={{ reload: true }}
         rowSelection={{
           selectedRowKeys,
@@ -214,9 +240,15 @@ const DatasetsList: React.FC = () => {
           </Popconfirm>
         )}
         request={async (params) => {
+          const range = params.createdAt as [string, string] | undefined;
           const res = await listDatasets({
             current: params.current,
             pageSize: params.pageSize,
+            name: params.name || undefined,
+            dataType: params.dataType || undefined,
+            creator: params.creator || undefined,
+            createdStart: range?.[0] || undefined,
+            createdEnd: range?.[1] || undefined,
           });
           return { data: res.data, total: res.total, success: res.success };
         }}
@@ -227,6 +259,13 @@ const DatasetsList: React.FC = () => {
         width={900}
         open={detailOpen}
         title={detail?.name}
+        extra={
+          detail && (
+            <Button type="primary" onClick={() => setEditOpen(true)}>
+              编辑
+            </Button>
+          )
+        }
         onClose={() => {
           setDetailOpen(false);
           setDetail(undefined);
@@ -268,6 +307,19 @@ const DatasetsList: React.FC = () => {
                   title: '创建时间',
                   dataIndex: 'createdAt',
                   valueType: 'dateTime',
+                },
+                {
+                  title: '更新时间',
+                  dataIndex: 'updatedAt',
+                  valueType: 'dateTime',
+                },
+                {
+                  title: '有效期',
+                  dataIndex: 'validUntil',
+                  render: (_, r) =>
+                    r.validUntil
+                      ? dayjs(r.validUntil).format('YYYY-MM-DD')
+                      : '-',
                 },
                 {
                   title: '描述',
@@ -312,6 +364,68 @@ const DatasetsList: React.FC = () => {
           </>
         )}
       </Drawer>
+
+      <ModalForm<DataPlatform.DatasetUpdate>
+        title="编辑数据集元数据"
+        width={520}
+        open={editOpen}
+        modalProps={{ destroyOnHidden: true }}
+        onOpenChange={setEditOpen}
+        initialValues={
+          detail
+            ? {
+                name: detail.name,
+                description: detail.description,
+                dataType: detail.dataType,
+                sensitivityLevel: detail.sensitivityLevel,
+                businessCategory: detail.businessCategory,
+                validUntil: detail.validUntil,
+              }
+            : undefined
+        }
+        onFinish={async (values) => {
+          if (!detail) return false;
+          try {
+            const res = await updateDataset(detail.id, {
+              ...values,
+              validUntil: values.validUntil
+                ? dayjs(values.validUntil).toISOString()
+                : undefined,
+            });
+            message.success('已保存');
+            setDetail(res.data);
+            setEditOpen(false);
+            actionRef.current?.reload();
+            return true;
+          } catch {
+            message.error('保存失败，请重试');
+            return false;
+          }
+        }}
+      >
+        <ProFormText
+          name="name"
+          label="名称"
+          rules={[{ required: true, message: '请输入名称' }]}
+        />
+        <ProFormTextArea
+          name="description"
+          label="描述"
+          fieldProps={{ rows: 3 }}
+        />
+        <ProFormSelect name="dataType" label="类型" valueEnum={DATA_TYPE_ENUM} />
+        <ProFormSelect
+          name="sensitivityLevel"
+          label="分级"
+          valueEnum={{
+            public: { text: 'public' },
+            internal: { text: 'internal' },
+            confidential: { text: 'confidential' },
+          }}
+        />
+        <ProFormText name="businessCategory" label="分类" />
+        <ProFormDatePicker name="validUntil" label="有效期" />
+      </ModalForm>
     </PageContainer>
   );
 };

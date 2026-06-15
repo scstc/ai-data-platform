@@ -294,6 +294,27 @@ declare namespace DataPlatform {
   /** 数据集详情（含版本列表） */
   type DatasetDetail = Dataset & { versions: DatasetVersion[] };
 
+  /** 数据集元数据更新入参 */
+  type DatasetUpdate = {
+    name?: string;
+    description?: string;
+    dataType?: string;
+    sensitivityLevel?: string;
+    businessCategory?: string;
+    validUntil?: string;
+  };
+
+  /** 数据集列表查询参数 */
+  type DatasetListParams = {
+    current?: number;
+    pageSize?: number;
+    name?: string;
+    dataType?: string;
+    creator?: string;
+    createdStart?: string;
+    createdEnd?: string;
+  };
+
   /** 版本数据预览 */
   type DatasetPreview = {
     data: Record<string, any>[];

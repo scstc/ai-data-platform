@@ -283,7 +283,7 @@ export async function uploadDataset(
 
 /** 数据集列表 GET /api/v1/datasets */
 export async function listDatasets(
-  params?: { current?: number; pageSize?: number },
+  params?: DataPlatform.DatasetListParams,
   options?: { [key: string]: any },
 ) {
   return request<DataPlatform.PageResult<DataPlatform.Dataset>>('/api/v1/datasets', {
@@ -298,6 +298,14 @@ export async function getDataset(id: string, options?: { [key: string]: any }) {
   return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(
     `/api/v1/datasets/${id}`,
     { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 更新数据集元数据 PATCH /api/v1/datasets/{id} */
+export async function updateDataset(id: string, body: DataPlatform.DatasetUpdate) {
+  return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(
+    `/api/v1/datasets/${id}`,
+    { method: 'PATCH', data: body },
   );
 }
 
