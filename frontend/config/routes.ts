@@ -15,6 +15,11 @@ export default [
     redirect: '/ingest/datasources',
   },
   {
+    // 文件管理已移入「数据管理」(/ingest/files);旧路径兼容
+    path: '/files',
+    redirect: '/ingest/files',
+  },
+  {
     path: '/ingest',
     name: 'ingest',
     icon: 'api',
@@ -22,6 +27,11 @@ export default [
       {
         path: '/ingest',
         redirect: '/ingest/datasources',
+      },
+      {
+        path: '/ingest/files',
+        name: 'files',
+        component: './files',
       },
       {
         path: '/ingest/datasources',
@@ -65,12 +75,6 @@ export default [
         component: './datasets/presets',
       },
     ],
-  },
-  {
-    path: '/files',
-    name: 'files',
-    icon: 'folder',
-    component: './files',
   },
   {
     path: '/processing',
