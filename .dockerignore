@@ -1,0 +1,45 @@
+# docker 构建上下文瘦身(后端/前端镜像均以仓库根为上下文)。
+# 注意:保留 backend/ 与 data-juicer/ 源码,仅剔除无关或可重建的重物。
+
+# VCS / 编辑器
+**/.git
+**/.gitignore
+**/.vscode
+**/.idea
+**/.DS_Store
+
+# 可重建依赖与缓存
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+frontend/dist
+frontend/.umi
+frontend/.umi-production
+
+# 本仓库非镜像所需的大件
+dashboard
+docs
+.claude
+.omc
+**/.omc
+
+# data-juicer:剔除非运行所需的大目录(保留 data_juicer 包源码 + pyproject + README)
+data-juicer/.git
+data-juicer/.venv
+data-juicer/.understand-anything
+data-juicer/tests
+data-juicer/demos
+data-juicer/docs
+data-juicer/outputs
+data-juicer/.github
+data-juicer/dist
+
+# 机密 / 本地态
+backend/.env
+backend/var
+deploy/.env
+**/*.log

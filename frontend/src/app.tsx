@@ -198,7 +198,9 @@ export const layout: RunTimeLayoutConfig = ({
  * @doc https://umijs.org/docs/max/request#配置
  */
 export const request: RequestConfig = {
-  baseURL: isDev ? '' : 'https://pro-api.ant-design-demo.workers.dev',
+  // 同源部署:dev 走 config/proxy.ts,生产走 nginx 反代(均为相对 /api),
+  // 不再指向 Ant Design Pro 的 demo API(否则跨域被 CORS 拦截,登录失败)。
+  baseURL: '',
   ...errorConfig,
 };
 
