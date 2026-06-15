@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -29,6 +30,8 @@ UploadFileDep = Annotated[UploadFile, File(...)]
 NameForm = Annotated[str | None, Form()]
 DataTypeForm = Annotated[str | None, Form()]
 DescForm = Annotated[str | None, Form()]
+CreatedStartQuery = Annotated[datetime | None, Query(alias="createdStart")]
+CreatedEndQuery = Annotated[datetime | None, Query(alias="createdEnd")]
 
 
 class DatasetResult(CamelModel):
@@ -99,13 +102,32 @@ async def list_datasets(
     session: SessionDep,
     current: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, alias="pageSize"),
+    name: str | None = Query(None),
+    data_type: str | None = Query(None, alias="dataType"),
+    creator: str | None = Query(None),
+    created_start: CreatedStartQuery = None,
+    created_end: CreatedEndQuery = None,
 ) -> PageResponse[DatasetRead]:
-    """分页查询数据集,按创建时间倒序。"""
-    total = await session.scalar(select(func.count()).select_from(Dataset))
+    """分页查询数据集,按创建时间倒序;按元数据条件过滤(向后兼容)。"""
+    conds = []
+    if name:
+        conds.append(Dataset.name.ilike(f"%{name}%"))
+    if data_type:
+        conds.append(Dataset.data_type == data_type)
+    if creator:
+        conds.append(Dataset.creator.ilike(f"%{creator}%"))
+    if created_start is not None:
+        conds.append(Dataset.created_at >= created_start)
+    if created_end is not None:
+        conds.append(Dataset.created_at <= created_end)
+    total = await session.scalar(
+        select(func.count()).select_from(Dataset).where(*conds)
+    )
     offset = (current - 1) * page_size
     rows = (
         await session.scalars(
             select(Dataset)
+            .where(*conds)
             .order_by(Dataset.created_at.desc())
             .offset(offset)
             .limit(page_size)
