@@ -34,3 +34,12 @@ class AIProvider(ABC):
     async def qa(self, question: str) -> dict[str, str]:
         """回答平台使用相关问题，返回 {"answer": str}。"""
         raise NotImplementedError
+
+    @abstractmethod
+    async def generate_pipeline(
+        self, goal: str, ready_ops: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """据目标场景生成算子流水线,返回 GeneratedPipeline 形状 dict
+        ({"operators": [{"name","params"}], "explanation": str})。
+        ready_ops 为可选算子上下文(name/label/scenario/params)。"""
+        raise NotImplementedError
