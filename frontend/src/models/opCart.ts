@@ -7,13 +7,11 @@ import { useCallback, useState } from 'react';
 export default function useOpCart() {
   const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
 
+  // 允许同一算子重复加入:流水线是有序步骤列表(data-juicer 线性算子语义),
+  // 同一算子用不同参数先后跑两次是合法编排,不能按 name 去重降级成集合。
   const add = useCallback(
     (name: string) =>
-      setSteps((prev) =>
-        prev.some((s) => s.name === name)
-          ? prev
-          : [...prev, { name, params: {} }],
-      ),
+      setSteps((prev) => [...prev, { name, params: {} }]),
     [],
   );
   const remove = useCallback(

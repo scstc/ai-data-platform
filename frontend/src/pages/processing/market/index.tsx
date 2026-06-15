@@ -304,7 +304,6 @@ const Market: React.FC = () => {
                 >
                   {pageData.map((op) => {
                     const badge = RUNNABLE_BADGE[op.runnable];
-                    const inCart = steps.some((s) => s.name === op.name);
                     return (
                       <Card
                         key={op.name}
@@ -383,13 +382,13 @@ const Market: React.FC = () => {
                           <Button
                             size="small"
                             type="primary"
-                            disabled={op.runnable !== 'ready' || inCart}
+                            disabled={op.runnable !== 'ready'}
                             onClick={(e) => {
                               e.stopPropagation();
                               onAdd(op);
                             }}
                           >
-                            {inCart ? '已加入' : '加入'}
+                            加入
                           </Button>
                         </div>
                       </Card>
@@ -421,14 +420,8 @@ const Market: React.FC = () => {
         extra={
           detail &&
           detail.runnable === 'ready' && (
-            <Button
-              type="primary"
-              disabled={steps.some((s) => s.name === detail.name)}
-              onClick={() => onAdd(detail)}
-            >
-              {steps.some((s) => s.name === detail.name)
-                ? '已加入'
-                : '加入加工任务'}
+            <Button type="primary" onClick={() => onAdd(detail)}>
+              加入加工任务
             </Button>
           )
         }

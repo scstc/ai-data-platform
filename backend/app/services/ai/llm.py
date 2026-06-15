@@ -135,5 +135,6 @@ class OpenAICompatProvider(AIProvider):
             )
             user = f"加工目标:{goal}\n\n【可用算子清单】\n{catalog}"
             return await self._chat_json(_PIPELINE_SYSTEM_PROMPT, user)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LLM generate_pipeline 失败，回退启发式：%s", exc)
             return await self._heuristic.generate_pipeline(goal, ready_ops)

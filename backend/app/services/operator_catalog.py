@@ -280,7 +280,13 @@ def sanitize_pipeline(
         op = get_operator(name) if name else None
         if op is None or op["runnable"] != "ready":
             continue
-        allowed = {p["name"] for p in op.get("params", [])}
+        # 排除 args/kwargs 变长占位项(与 _ui_field 口径一致):它们不是可配置参数,
+        # 若放行经 build_config 进入 DJ YAML 会在运行期被 dj-process 当非法参数报错。
+        allowed = {
+            p["name"]
+            for p in op.get("params", [])
+            if p["name"] not in ("args", "kwargs")
+        }
         raw = step.get("params") or {}
         params = {k: v for k, v in raw.items() if k in allowed}
         result.append({"name": name, "params": params})

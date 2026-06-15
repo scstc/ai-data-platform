@@ -17,11 +17,19 @@ def test_sanitize_drops_unknown_and_non_ready() -> None:
 
 
 def test_sanitize_strips_invalid_param_keys() -> None:
-    # text_length_filter 有 min_len/max_len;塞一个不存在的键应被裁掉
-    steps = [{"name": "text_length_filter", "params": {"min_len": 10, "BOGUS": 1}}]
+    # 非法键 BOGUS 与 args/kwargs 变长占位项都应被裁掉,只留合法的 min_len
+    steps = [
+        {
+            "name": "text_length_filter",
+            "params": {"min_len": 10, "BOGUS": 1, "args": [], "kwargs": {}},
+        }
+    ]
     out = oc.sanitize_pipeline(steps)
     assert out and out[0]["name"] == "text_length_filter"
     assert "BOGUS" not in out[0]["params"]
+    # args/kwargs 不是可配置参数,放行会让 dj-process 运行期报错,必须裁掉
+    assert "args" not in out[0]["params"]
+    assert "kwargs" not in out[0]["params"]
     assert out[0]["params"].get("min_len") == 10
 
 

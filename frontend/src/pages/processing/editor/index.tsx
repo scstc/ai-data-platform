@@ -78,8 +78,18 @@ const Editor: React.FC = () => {
         />
       ),
       onOk: async () => {
+        if (!goal.trim()) {
+          message.warning('请填写加工目标');
+          return Promise.reject();
+        }
         const r = await generatePipeline({ goal, datasetVersionId: versionId });
-        replaceAll(r.data.operators);
+        const ops = r.data.operators;
+        if (!ops.length) {
+          // 后端 sanitize 可能裁掉全部算子(返回空):不要清空已编排步骤,提示而非伪装成功
+          message.warning(r.data.explanation || '未生成可用算子,请调整目标后重试');
+          return Promise.reject();
+        }
+        replaceAll(ops);
         setActiveIdx(0);
         message.success(r.data.explanation || '已生成流水线');
       },
