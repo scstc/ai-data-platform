@@ -11,13 +11,17 @@ const StepParamsForm: React.FC<{
   if (!op) {
     return <Empty description="从中间选择一个步骤以配置参数" />;
   }
-  if (!op.params?.length) {
+  // 过滤 args/kwargs 变长占位项(非可配置参数,后端 sanitize 也会裁掉)
+  const fields = (op.params ?? []).filter(
+    (p) => p.name !== 'args' && p.name !== 'kwargs',
+  );
+  if (!fields.length) {
     return <Text type="secondary">该算子无可配参数</Text>;
   }
   const set = (k: string, v: unknown) => onChange({ ...params, [k]: v });
   return (
     <Form layout="vertical">
-      {op.params.map((p) => {
+      {fields.map((p) => {
         const val = params[p.name];
         const t = p.type || '';
         return (
