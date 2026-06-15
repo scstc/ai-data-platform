@@ -53,7 +53,7 @@ export default {
   'menu.ingest': 'Data Management',
   'menu.ingest.datasources': 'Data Sources',
   'menu.ingest.tasks': 'Ingestion Tasks',
-  'menu.ingest.upload': 'Local Upload',
+  'menu.ingest.access': 'Data Access',
   'menu.ingest.assistant': 'Ingestion Assistant',
   'menu.security': 'Security Audit',
   'menu.quality': 'Quality Assessment',

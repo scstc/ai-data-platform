@@ -188,6 +188,22 @@ export async function hostS3(
   );
 }
 
+/** 文件管理零拷贝接入为受管数据集 POST /api/v1/datasets/host-platform */
+export async function hostPlatformFiles(
+  body: DataPlatform.PlatformHostParams,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Dataset[]; success: boolean }>(
+    '/api/v1/datasets/host-platform',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
 /** 取消托管（仅 admin，仅移除平台引用，绝不删 S3 源对象）POST /api/v1/datasets/{id}/unhost（#18） */
 export async function unhostDataset(id: string, options?: { [key: string]: any }) {
   return request<{ success: boolean }>(`/api/v1/datasets/${id}/unhost`, {

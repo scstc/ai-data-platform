@@ -340,6 +340,15 @@ declare namespace DataPlatform {
     categoryId?: string;
   };
 
+  /** 文件管理零拷贝接入入参（数据接入）：把平台 MinIO 对象登记为受管数据集，不下载 */
+  type PlatformHostParams = {
+    bucket: string;
+    keys: string[];
+    name?: string;
+    dataType?: string;
+    categoryId?: string;
+  };
+
   /** 数据集详情（含版本列表） */
   type DatasetDetail = Dataset & { versions: DatasetVersion[] };
 

@@ -20,6 +20,11 @@ export default [
     redirect: '/ingest/files',
   },
   {
+    // 本地上传已升级为「数据接入」(/ingest/access);旧路径兼容
+    path: '/ingest/upload',
+    redirect: '/ingest/access',
+  },
+  {
     path: '/ingest',
     name: 'ingest',
     icon: 'api',
@@ -44,9 +49,9 @@ export default [
         component: './ingest/tasks',
       },
       {
-        path: '/ingest/upload',
-        name: 'upload',
-        component: './ingest/upload',
+        path: '/ingest/access',
+        name: 'access',
+        component: './ingest/access',
       },
       {
         path: '/ingest/assistant',
