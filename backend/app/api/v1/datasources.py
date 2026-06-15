@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_admin
 from app.core.db import get_session
 from app.models import DataSource
 from app.schemas import (
@@ -136,7 +137,11 @@ async def list_datasources(
     )
 
 
-@router.post("/datasources", response_model=_SingleDataSource)
+@router.post(
+    "/datasources",
+    response_model=_SingleDataSource,
+    dependencies=[Depends(require_admin)],
+)
 async def create_datasource(
     body: DataSourceCreate,
     session: SessionDep,
@@ -163,7 +168,11 @@ async def create_datasource(
     return _SingleDataSource(data=DataSourceRead.model_validate(item))
 
 
-@router.put("/datasources/{ds_id}", response_model=_SingleDataSource)
+@router.put(
+    "/datasources/{ds_id}",
+    response_model=_SingleDataSource,
+    dependencies=[Depends(require_admin)],
+)
 async def update_datasource(
     ds_id: str,
     body: DataSourceUpdate,
@@ -183,7 +192,9 @@ async def update_datasource(
     return _SingleDataSource(data=DataSourceRead.model_validate(item))
 
 
-@router.delete("/datasources/{ds_id}")
+@router.delete(
+    "/datasources/{ds_id}", dependencies=[Depends(require_admin)]
+)
 async def delete_datasource(
     ds_id: str,
     session: SessionDep,

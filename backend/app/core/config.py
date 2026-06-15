@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # 数据库连接串（async 驱动）
     database_url: str = "postgresql+asyncpg://adp:adp_dev_pw@127.0.0.1:55433/adp"
 
+    # 令牌签名密钥（env AUTH_SECRET）；dev 默认值仅供开发，生产必须覆盖
+    auth_secret: str = "adp-dev-insecure-secret-change-me"
+
     # OpenAI 兼容 LLM 配置（均可空；配置齐全时上层可启用 LLM 模式）
     openai_base_url: str | None = None
     openai_api_key: str | None = None

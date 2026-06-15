@@ -7,9 +7,21 @@ test 接口成功/失败两分支→删→删后 404。
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _admin_session(client: AsyncClient, seed_users: None) -> None:
+    """数据源写端点已加 require_admin 门控:本模块用例统一以 admin 身份请求。
+
+    种子用户由 seed_users 注入,这里给共享 client 挂上 admin 签名令牌 cookie。
+    """
+    from app.services.auth import sign_token
+
+    client.cookies.set("adp_session", sign_token("admin"))
 
 # 一组齐全的 s3 config（用于 connected 分支与 test 成功分支）。
 _VALID_S3_CONFIG = {

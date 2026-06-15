@@ -1,6 +1,7 @@
 import { PlusOutlined } from '@ant-design/icons';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
+import { Access, useAccess } from '@umijs/max';
 import { Badge, Button, message, Popconfirm, Tag } from 'antd';
 import { type FC, useRef, useState } from 'react';
 import { deleteDataSource, listDataSources } from '@/services/data-platform';
@@ -8,6 +9,7 @@ import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
 import DataSourceFormDrawer from './components/DataSourceFormDrawer';
 
 const DataSourcesPage: FC = () => {
+  const access = useAccess();
   const actionRef = useRef<ActionType | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<DataPlatform.DataSource>();
@@ -87,26 +89,30 @@ const DataSourcesPage: FC = () => {
       title: '操作',
       valueType: 'option',
       width: 140,
-      render: (_, record) => [
-        <a
-          key="edit"
-          onClick={() => {
-            openEdit(record);
-          }}
-        >
-          编辑
-        </a>,
-        <Popconfirm
-          key="delete"
-          title="确认删除该数据源？"
-          okText="删除"
-          cancelText="取消"
-          okButtonProps={{ danger: true }}
-          onConfirm={() => handleDelete(record.id)}
-        >
-          <a style={{ color: '#ff4d4f' }}>删除</a>
-        </Popconfirm>,
-      ],
+      // 编辑/删除仅 admin 可见(后端 require_admin 双层防护);非 admin 此列为空
+      render: (_, record) =>
+        access.canAdmin
+          ? [
+              <a
+                key="edit"
+                onClick={() => {
+                  openEdit(record);
+                }}
+              >
+                编辑
+              </a>,
+              <Popconfirm
+                key="delete"
+                title="确认删除该数据源？"
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleDelete(record.id)}
+              >
+                <a style={{ color: '#ff4d4f' }}>删除</a>
+              </Popconfirm>,
+            ]
+          : [<span key="readonly">-</span>],
     },
   ];
 
@@ -118,14 +124,11 @@ const DataSourcesPage: FC = () => {
         rowKey="id"
         search={{ labelWidth: 'auto' }}
         toolBarRender={() => [
-          <Button
-            key="create"
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={openCreate}
-          >
-            新建数据源
-          </Button>,
+          <Access key="create" accessible={!!access.canAdmin}>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              新建数据源
+            </Button>
+          </Access>,
         ]}
         request={async (params) => {
           const { current, pageSize, name, type } = params;

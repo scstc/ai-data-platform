@@ -29,6 +29,12 @@ vi.mock('./components/DataSourceFormDrawer', () => ({
   default: ({ open }: any) => (open ? <div data-testid="form-drawer" /> : null),
 }));
 
+// access 门控：测以 admin 视角渲染（写入口对 admin 可见，对 user 隐藏由 access.ts 保证）
+vi.mock('@umijs/max', () => ({
+  useAccess: () => ({ canAdmin: true }),
+  Access: ({ accessible, children }: any) => (accessible ? children : null),
+}));
+
 vi.mock('antd', async () => {
   const actual = await vi.importActual<any>('antd');
   return {

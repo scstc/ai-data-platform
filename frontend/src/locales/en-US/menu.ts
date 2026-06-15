@@ -55,7 +55,7 @@ export default {
   'menu.ingest.tasks': 'Ingestion Tasks',
   'menu.ingest.upload': 'Local Upload',
   'menu.ingest.assistant': 'Ingestion Assistant',
-  'menu.security': 'Data Security',
+  'menu.security': 'Security Audit',
   'menu.quality': 'Quality Assessment',
   'menu.quality-editor': 'New Quality Assessment',
   'menu.processing': 'Data Processing',

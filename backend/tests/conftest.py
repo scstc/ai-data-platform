@@ -92,3 +92,37 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def seed_users(session_factory) -> None:
+    """种子用户:测试库用 create_all 初始化(非 alembic),迁移种子不存在,
+
+    故鉴权类用例需经此 fixture 用 hash_password 插入已知账号
+    (admin/ant.design→admin、user/ant.design→user),与迁移 0006 同口令。
+    """
+    from app.models.user import User
+    from app.services.auth import hash_password
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                User(
+                    id="usr-test01",
+                    username="admin",
+                    password_hash=hash_password("ant.design"),
+                    role="admin",
+                    display_name="管理员",
+                    disabled=False,
+                ),
+                User(
+                    id="usr-test02",
+                    username="user",
+                    password_hash=hash_password("ant.design"),
+                    role="user",
+                    display_name="普通用户",
+                    disabled=False,
+                ),
+            ]
+        )
+        await session.commit()

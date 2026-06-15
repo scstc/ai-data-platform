@@ -20,7 +20,9 @@ pytestmark = pytest.mark.asyncio
 _COOKIE_NAME = "adp_session"
 
 
-async def test_login_admin_success_sets_cookie(client: AsyncClient) -> None:
+async def test_login_admin_success_sets_cookie(
+    client: AsyncClient, seed_users: None
+) -> None:
     """admin/ant.design → status ok、type 回显、currentAuthority=admin、下发 cookie。"""
     resp = await client.post(
         "/api/login/account",
@@ -33,12 +35,14 @@ async def test_login_admin_success_sets_cookie(client: AsyncClient) -> None:
         "type": "account",
         "currentAuthority": "admin",
     }
-    # cookie 值即角色（admin）。
-    assert resp.cookies.get(_COOKIE_NAME) == "admin"
+    # 成功登录下发签名令牌 cookie（不再是明文角色值）。
+    assert resp.cookies.get(_COOKIE_NAME) is not None
 
 
-async def test_login_user_success_sets_cookie(client: AsyncClient) -> None:
-    """user/ant.design → currentAuthority=user、cookie 值为 user。"""
+async def test_login_user_success_sets_cookie(
+    client: AsyncClient, seed_users: None
+) -> None:
+    """user/ant.design → currentAuthority=user、下发签名令牌 cookie。"""
     resp = await client.post(
         "/api/login/account",
         json={"username": "user", "password": "ant.design", "type": "account"},
@@ -50,10 +54,12 @@ async def test_login_user_success_sets_cookie(client: AsyncClient) -> None:
         "type": "account",
         "currentAuthority": "user",
     }
-    assert resp.cookies.get(_COOKIE_NAME) == "user"
+    assert resp.cookies.get(_COOKIE_NAME) is not None
 
 
-async def test_login_failure_guest_no_cookie(client: AsyncClient) -> None:
+async def test_login_failure_guest_no_cookie(
+    client: AsyncClient, seed_users: None
+) -> None:
     """错误凭据 → status error、currentAuthority=guest、不设 cookie。"""
     resp = await client.post(
         "/api/login/account",
@@ -82,7 +88,9 @@ async def test_current_user_without_cookie_401(client: AsyncClient) -> None:
     }
 
 
-async def test_current_user_with_admin_cookie(client: AsyncClient) -> None:
+async def test_current_user_with_admin_cookie(
+    client: AsyncClient, seed_users: None
+) -> None:
     """登录 admin 后查 currentUser → 200，本地化字段 + access=admin。"""
     await client.post(
         "/api/login/account",
@@ -95,7 +103,8 @@ async def test_current_user_with_admin_cookie(client: AsyncClient) -> None:
     data = body["data"]
     assert data["access"] == "admin"
     assert data["name"] == "管理员"
-    assert data["userid"] == "00000001"
+    # userid 取真实 User 主键(种子 fixture 的 id)。
+    assert data["userid"] == "usr-test01"
     assert data["email"] == "admin@adp.local"
     assert data["signature"] == "面向大模型的数据工程与数据集管理平台"
     assert data["title"] == "平台管理员"
@@ -115,7 +124,9 @@ async def test_current_user_with_admin_cookie(client: AsyncClient) -> None:
     assert data["avatar"].startswith("https://gw.alipayobjects.com/")
 
 
-async def test_current_user_with_user_cookie_name(client: AsyncClient) -> None:
+async def test_current_user_with_user_cookie_name(
+    client: AsyncClient, seed_users: None
+) -> None:
     """user 角色 → name 本地化为“普通用户”、access=user。"""
     await client.post(
         "/api/login/account",
@@ -128,7 +139,9 @@ async def test_current_user_with_user_cookie_name(client: AsyncClient) -> None:
     assert data["access"] == "user"
 
 
-async def test_out_login_then_current_user_401(client: AsyncClient) -> None:
+async def test_out_login_then_current_user_401(
+    client: AsyncClient, seed_users: None
+) -> None:
     """登录后登出，cookie 被清，再查 currentUser → 401。"""
     await client.post(
         "/api/login/account",

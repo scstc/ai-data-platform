@@ -37,6 +37,9 @@ services:
       ENGINE_CONCURRENCY: ${ENGINE_CONCURRENCY:-3}
       # 同源部署本不需要 CORS,仍按主机来源放行以防直连
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://10.60.1.60"]}
+      # 会话令牌签名密钥(#5 访问安全):务必在 deploy/.env 配真实值,
+      # 否则回退源码内的 dev 默认(公开,可被伪造令牌)。非空 fallback 避免空值覆盖。
+      AUTH_SECRET: ${AUTH_SECRET:-adp-dev-insecure-secret-change-me}
       # 可选 LLM(留空则后端走启发式)
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

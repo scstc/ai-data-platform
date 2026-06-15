@@ -9,6 +9,7 @@ import {
   ProFormTextArea,
   ProTable,
 } from '@ant-design/pro-components';
+import { Access, useAccess } from '@umijs/max';
 import type { TableColumnsType } from 'antd';
 import {
   Button,
@@ -60,6 +61,7 @@ const cellText = (v: unknown) =>
       : String(v);
 
 const DatasetsList: React.FC = () => {
+  const access = useAccess();
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
@@ -166,22 +168,29 @@ const DatasetsList: React.FC = () => {
         <a key="detail" onClick={() => openDetail(record.id)}>
           详情
         </a>,
-        <Popconfirm
-          key="delete"
-          title="确认删除该数据集？"
-          description="将删除其全部版本与产物文件，不可恢复。"
-          okText="删除"
-          okButtonProps={{ danger: true }}
-          onConfirm={() => handleDelete(record.id)}
-        >
-          <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-        </Popconfirm>,
+        // 删除仅 admin 可见(后端 require_admin 双层防护)
+        access.canAdmin ? (
+          <Popconfirm
+            key="delete"
+            title="确认删除该数据集？"
+            description="将删除其全部版本与产物文件，不可恢复。"
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(record.id)}
+          >
+            <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+          </Popconfirm>
+        ) : null,
       ],
     },
   ];
 
   const versionColumns: TableColumnsType<DataPlatform.DatasetVersion> = [
-    { title: '版本', dataIndex: 'versionNo', render: (_, v) => `v${v.versionNo}` },
+    {
+      title: '版本',
+      dataIndex: 'versionNo',
+      render: (_, v) => `v${v.versionNo}`,
+    },
     { title: '行数', dataIndex: 'rows', render: (_, v) => v.rows ?? '-' },
     { title: '大小', dataIndex: 'size', render: (_, v) => fmtSize(v.size) },
     {
@@ -227,17 +236,19 @@ const DatasetsList: React.FC = () => {
           onChange: (keys) => setSelectedRowKeys(keys as string[]),
         }}
         tableAlertOptionRender={() => (
-          <Popconfirm
-            title={`确认删除选中的 ${selectedRowKeys.length} 个数据集？`}
-            description="将删除其全部版本与产物文件，不可恢复。"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={handleBatchDelete}
-          >
-            <Button type="link" danger>
-              批量删除
-            </Button>
-          </Popconfirm>
+          <Access accessible={!!access.canAdmin}>
+            <Popconfirm
+              title={`确认删除选中的 ${selectedRowKeys.length} 个数据集？`}
+              description="将删除其全部版本与产物文件，不可恢复。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleBatchDelete}
+            >
+              <Button type="link" danger>
+                批量删除
+              </Button>
+            </Popconfirm>
+          </Access>
         )}
         request={async (params) => {
           const range = params.createdAt as [string, string] | undefined;
@@ -267,9 +278,11 @@ const DatasetsList: React.FC = () => {
         title={detail?.name}
         extra={
           detail && (
-            <Button type="primary" onClick={() => setEditOpen(true)}>
-              编辑
-            </Button>
+            <Access accessible={!!access.canAdmin}>
+              <Button type="primary" onClick={() => setEditOpen(true)}>
+                编辑
+              </Button>
+            </Access>
           )
         }
         onClose={() => {

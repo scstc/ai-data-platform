@@ -115,6 +115,7 @@ export default [
     path: '/security',
     name: 'security',
     icon: 'safetyCertificate',
+    access: 'canAdmin',
     component: './security',
   },
   {

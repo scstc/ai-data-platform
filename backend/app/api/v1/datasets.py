@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_admin
 from app.core.config import settings
 from app.core.db import get_session
 from app.models.dataset import Dataset
@@ -162,7 +163,7 @@ async def get_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
-@router.patch("/datasets/{dataset_id}")
+@router.patch("/datasets/{dataset_id}", dependencies=[Depends(require_admin)])
 async def update_dataset(
     dataset_id: str, body: DatasetUpdate, session: SessionDep
 ) -> JSONResponse:
@@ -223,7 +224,7 @@ class BatchDeleteRequest(CamelModel):
     ids: list[str]
 
 
-@router.delete("/datasets/{dataset_id}")
+@router.delete("/datasets/{dataset_id}", dependencies=[Depends(require_admin)])
 async def delete_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
     """删除数据集:级联删版本 + 清血缘边(job_inputs)+ 删磁盘产物。"""
     if not await _purge_dataset(session, dataset_id):
@@ -236,7 +237,9 @@ async def delete_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
     return JSONResponse(content={"success": True})
 
 
-@router.post("/datasets/batch-delete")
+@router.post(
+    "/datasets/batch-delete", dependencies=[Depends(require_admin)]
+)
 async def batch_delete_datasets(
     body: BatchDeleteRequest, session: SessionDep
 ) -> JSONResponse:

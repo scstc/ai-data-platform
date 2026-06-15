@@ -55,7 +55,7 @@ export default {
   'menu.ingest.tasks': '采集任务',
   'menu.ingest.upload': '本地上传',
   'menu.ingest.assistant': '智能接入助手',
-  'menu.security': '数据安全',
+  'menu.security': '安全审计',
   'menu.quality': '质量评估',
   'menu.quality-editor': '新建质量评估',
   'menu.processing': '数据加工',

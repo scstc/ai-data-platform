@@ -449,4 +449,27 @@ declare namespace DataPlatform {
     data: { answer: string };
     success: boolean;
   };
+
+  /** 审计日志（写操作记录，camelCase） */
+  type AuditLog = {
+    id: string;
+    username: string;
+    action: string;
+    method: string;
+    path: string;
+    target?: string;
+    statusCode: number;
+    createdAt: string;
+  };
+
+  /** 审计日志列表查询参数 */
+  type AuditLogListParams = {
+    current?: number;
+    pageSize?: number;
+    username?: string;
+    action?: string;
+    method?: string;
+    createdStart?: string;
+    createdEnd?: string;
+  };
 }

@@ -466,3 +466,15 @@ export async function getOperatorDetail(
     { method: 'GET', ...(options || {}) },
   );
 }
+
+/** 操作审计日志列表（仅管理员）GET /api/v1/audit */
+export async function listAuditLogs(
+  params?: DataPlatform.AuditLogListParams,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.PageResult<DataPlatform.AuditLog>>('/api/v1/audit', {
+    method: 'GET',
+    params: { ...params },
+    ...(options || {}),
+  });
+}
