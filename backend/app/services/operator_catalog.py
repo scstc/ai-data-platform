@@ -248,3 +248,40 @@ def query_catalog(
     total = len(filtered)
     start = (current - 1) * page_size
     return {"data": filtered[start : start + page_size], "total": total}
+
+
+# ---------------------------------------------------------------------------
+# AI 流水线生成:ready 算子上下文 + 确定性校验(白名单 + 合法参数键)
+# ---------------------------------------------------------------------------
+def ready_operator_context() -> list[dict[str, Any]]:
+    """供 LLM 提示的 ready 算子清单:name + 中文标签 + 场景 + 合法参数名。"""
+    ctx: list[dict[str, Any]] = []
+    for op in all_operators():
+        if op["runnable"] != "ready":
+            continue
+        ctx.append(
+            {
+                "name": op["name"],
+                "label": op.get("zh_label") or op["name"],
+                "scenario": op.get("scenario_group") or "",
+                "params": [p["name"] for p in op.get("params", [])],
+            }
+        )
+    return ctx
+
+
+def sanitize_pipeline(
+    steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """裁剪到可执行流水线:丢弃未知/非 ready 算子,删除不在该算子参数表里的键。"""
+    result: list[dict[str, Any]] = []
+    for step in steps:
+        name = step.get("name")
+        op = get_operator(name) if name else None
+        if op is None or op["runnable"] != "ready":
+            continue
+        allowed = {p["name"] for p in op.get("params", [])}
+        raw = step.get("params") or {}
+        params = {k: v for k, v in raw.items() if k in allowed}
+        result.append({"name": name, "params": params})
+    return result
