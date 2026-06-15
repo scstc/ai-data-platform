@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -13,7 +15,7 @@ from app.core.db import Base
 class Job(Base):
     """通用任务:读入版本、跑 data-juicer、产出新版本。
 
-    `type` + `config_yaml` 做特化;ingest/clean/quality/synth/process/safety/annotate
+    `type` + `config_yaml` 做特化;ingest/clean/quality/synth/process/review/annotate
     共用此表与状态机。承载 #6–#10;采集任务每次运行也产一条 type=ingest 记录
     (ingest_task 收编,原 ingest_runs 表已退役,见迁移 0005)。
     """
@@ -23,7 +25,7 @@ class Job(Base):
     # 主键形如 "job-" + 6 位 hex
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    # 类型:ingest | clean | quality | synth | process | safety | annotate
+    # 类型:ingest | clean | quality | synth | process | review | annotate
     type: Mapped[str] = mapped_column(String, nullable=False)
     # type=ingest 时回指所属采集任务配置(ingest_tasks.id);其余类型为空
     ingest_task_id: Mapped[str | None] = mapped_column(
@@ -39,6 +41,12 @@ class Job(Base):
     logs_uri: Mapped[str | None] = mapped_column(String, nullable=True)
     # 失败原因
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # type=review 时存审核汇总报告(#4):
+    # {totalRows, scannedRows, flaggedRows, sampleLimitApplied,
+    #  byCategory, bySeverity, bySource};其余类型为空
+    review_report: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     created_by: Mapped[str] = mapped_column(String, nullable=False, default="admin")
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False

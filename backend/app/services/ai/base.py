@@ -43,3 +43,15 @@ class AIProvider(ABC):
         ({"operators": [{"name","params"}], "explanation": str})。
         ready_ops 为可选算子上下文(name/label/scenario/params)。"""
         raise NotImplementedError
+
+    @abstractmethod
+    async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
+        """内容安全审核(#4):对一批文本逐条分类。
+
+        返回与 texts 等长、按下标对齐的列表,每元素
+        {"flagged":bool, "category":str, "severity":str, "reason":str}。
+        category 用英文枚举:porn|gambling|drugs|politics|terrorism|other。
+        正常文本 flagged=False、category="other"。
+        失败(超时/解析失败)由实现抛异常或返回空,交 review.py 降级处理。
+        """
+        raise NotImplementedError

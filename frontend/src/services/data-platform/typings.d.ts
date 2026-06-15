@@ -472,4 +472,85 @@ declare namespace DataPlatform {
     createdStart?: string;
     createdEnd?: string;
   };
+
+  /** 内容安全:审核类别 */
+  type ReviewCategory =
+    | 'porn'
+    | 'gambling'
+    | 'drugs'
+    | 'politics'
+    | 'terrorism'
+    | 'pii'
+    | 'other';
+
+  /** 内容安全:命中严重度 */
+  type ReviewSeverity = 'high' | 'medium' | 'low';
+
+  /** 内容安全:命中来源 */
+  type ReviewSource = 'keyword' | 'regex' | 'flagged_words' | 'llm' | 'pii';
+
+  /** 内容安全:自定义正则项 */
+  type ReviewCustomRegex = {
+    name: string;
+    pattern: string;
+  };
+
+  /** 内容安全:审核任务配置 */
+  type ReviewJobConfig = {
+    categories: ReviewCategory[];
+    customWords: string[];
+    customRegex: ReviewCustomRegex[];
+    useLlm: boolean;
+    usePii: boolean;
+    useFlaggedWords: boolean;
+    sampleLimit?: number;
+  };
+
+  /** 内容安全:新建审核任务入参 */
+  type ReviewJobCreate = {
+    datasetVersionId: string;
+    name?: string;
+    config: ReviewJobConfig;
+  };
+
+  /** 内容安全:审核报告统计体 */
+  type ReviewReportBody = {
+    totalRows: number;
+    scannedRows: number;
+    flaggedRows: number;
+    sampleLimitApplied: boolean;
+    byCategory: Record<string, number>;
+    bySeverity: Record<string, number>;
+    bySource: Record<string, number>;
+    warnings?: string[];
+  };
+
+  /** 内容安全:审核报告响应内层(后端 {data,success} 信封的 data 体) */
+  type ReviewReport = {
+    jobId?: string;
+    name?: string;
+    state: DataPlatform.Job['state'];
+    error?: string;
+    reviewReport?: ReviewReportBody;
+    taggedVersionId?: string;
+  };
+
+  /** 内容安全:逐条命中记录 */
+  type ReviewFinding = {
+    rowIndex: number;
+    category: ReviewCategory;
+    severity: ReviewSeverity;
+    source: ReviewSource;
+    detail?: string;
+    snippet?: string;
+  };
+
+  /** 内容安全:命中明细列表查询参数 */
+  type ReviewFindingListParams = {
+    current?: number;
+    pageSize?: number;
+    category?: ReviewCategory;
+    source?: ReviewSource;
+    severity?: ReviewSeverity;
+  };
 }

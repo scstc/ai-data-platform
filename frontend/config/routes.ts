@@ -112,6 +112,12 @@ export default [
     hideInMenu: true,
   },
   {
+    path: '/content-safety',
+    name: 'contentSafety',
+    icon: 'safety',
+    component: './content-safety',
+  },
+  {
     path: '/security',
     name: 'security',
     icon: 'safetyCertificate',

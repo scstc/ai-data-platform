@@ -8,6 +8,7 @@ from app.models.datasource import DataSource
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.review_finding import ReviewFinding
 from app.models.upload import UploadRecord
 from app.models.user import User
 
@@ -20,6 +21,7 @@ __all__ = [
     "IngestTask",
     "Job",
     "JobInput",
+    "ReviewFinding",
     "UploadRecord",
     "User",
 ]

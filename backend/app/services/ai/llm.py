@@ -47,6 +47,32 @@ _PIPELINE_SYSTEM_PROMPT = (
     "\"explanation\":\"<一句中文说明>\"}。"
     "name 必须是清单中的算子名;不确定参数就给 {};不要编造清单外的算子。"
 )
+# 内容安全审核(#4):分批把若干文本分类为 黄/赌/毒/政/恐 或 正常。
+_MODERATE_SYSTEM_PROMPT = (
+    "你是内容安全审核助手。给定带编号的若干文本,逐条判断是否含违规内容,"
+    "并分类为:porn(黄/色情)、gambling(赌/博彩)、drugs(毒/毒品)、"
+    "politics(政/违规政治)、terrorism(恐/暴恐),正常文本归为 other。"
+    "严格只输出一个 JSON 对象:"
+    '{"results":[{"index":<编号>,"flagged":<bool>,'
+    '"category":"porn|gambling|drugs|politics|terrorism|other",'
+    '"severity":"high|medium|low","reason":"<简短中文理由>"}]}。'
+    "results 必须覆盖每个输入编号;正常文本 flagged=false、category=other。"
+    "不要任何额外解释或 markdown 代码块。"
+)
+# 单批文本条数(控制单次提示长度与时延)
+_MODERATE_BATCH = 20
+# 审核单批超时(秒):比通用 timeout 略宽,但仍有界,失败即降级
+_MODERATE_TIMEOUT = 60.0
+# 合法 category 枚举(LLM 越界回退 other)
+_MODERATE_CATEGORIES = {
+    "porn",
+    "gambling",
+    "drugs",
+    "politics",
+    "terrorism",
+    "other",
+}
+_MODERATE_SEVERITIES = {"high", "medium", "low"}
 
 
 class OpenAICompatProvider(AIProvider):
@@ -138,3 +164,86 @@ class OpenAICompatProvider(AIProvider):
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM generate_pipeline 失败，回退启发式：%s", exc)
             return await self._heuristic.generate_pipeline(goal, ready_ops)
+
+    async def _moderate_batch(self, batch: list[str]) -> list[dict[str, Any]]:
+        """审核一批文本(<=_MODERATE_BATCH 条),返回与 batch 等长、按下标对齐的结果。
+
+        任一环节失败(请求异常/超时/解析失败/缺编号)直接抛,交 moderate_texts 处理。
+        """
+        numbered = "\n".join(f"[{i}] {t}" for i, t in enumerate(batch))
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": _MODERATE_SYSTEM_PROMPT},
+                {"role": "user", "content": numbered},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=_MODERATE_TIMEOUT) as client:
+            resp = await client.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        results = parsed.get("results") if isinstance(parsed, dict) else parsed
+        if not isinstance(results, list):
+            raise ValueError("LLM moderate 返回缺少 results 数组")
+
+        # 按 index 归位;缺失的编号在 moderate_texts 兜底为正常,确保等长对齐
+        by_index: dict[int, dict[str, Any]] = {}
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            if not isinstance(idx, int) or not 0 <= idx < len(batch):
+                continue
+            by_index[idx] = item
+        return [self._normalize_verdict(by_index.get(i)) for i in range(len(batch))]
+
+    @staticmethod
+    def _normalize_verdict(item: dict[str, Any] | None) -> dict[str, Any]:
+        """规整单条裁决:越界 category/severity 收敛,缺失项当正常。"""
+        if not item:
+            return {
+                "flagged": False,
+                "category": "other",
+                "severity": "low",
+                "reason": "",
+            }
+        flagged = bool(item.get("flagged"))
+        category = item.get("category")
+        if category not in _MODERATE_CATEGORIES:
+            category = "other"
+        severity = item.get("severity")
+        if severity not in _MODERATE_SEVERITIES:
+            severity = "medium" if flagged else "low"
+        reason = item.get("reason")
+        return {
+            "flagged": flagged,
+            "category": category if flagged else "other",
+            "severity": severity,
+            "reason": str(reason) if reason is not None else "",
+        }
+
+    async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
+        """分批审核全部文本(每批 ~_MODERATE_BATCH 条),返回等长对齐结果。
+
+        任一批失败即整体抛异常 —— 由 review.py 捕获后【整体跳过 llm source】(降级),
+        其余 source 仍出结果,绝不让审核任务 500。
+        """
+        if not texts:
+            return []
+        out: list[dict[str, Any]] = []
+        for start in range(0, len(texts), _MODERATE_BATCH):
+            batch = texts[start : start + _MODERATE_BATCH]
+            out.extend(await self._moderate_batch(batch))
+        return out

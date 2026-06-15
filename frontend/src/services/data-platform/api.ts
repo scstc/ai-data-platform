@@ -467,6 +467,53 @@ export async function getOperatorDetail(
   );
 }
 
+/** 内容安全:新建并执行审核任务 POST /api/v1/content-safety/jobs */
+export async function createReviewJob(
+  body: DataPlatform.ReviewJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/content-safety/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 内容安全:审核任务列表（type=review）GET /api/v1/content-safety/jobs */
+export async function listReviewJobs(
+  params?: { current?: number; pageSize?: number },
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.PageResult<DataPlatform.Job>>(
+    '/api/v1/content-safety/jobs',
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
+/** 内容安全:审核报告 GET /api/v1/content-safety/jobs/{id}/report */
+export async function getReviewReport(id: string, options?: { [key: string]: any }) {
+  return request<{ data: DataPlatform.ReviewReport; success: boolean }>(
+    `/api/v1/content-safety/jobs/${id}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 内容安全:命中明细（分页 + 按类别/来源/严重度筛）GET /api/v1/content-safety/jobs/{id}/findings */
+export async function listReviewFindings(
+  id: string,
+  params?: DataPlatform.ReviewFindingListParams,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.PageResult<DataPlatform.ReviewFinding>>(
+    `/api/v1/content-safety/jobs/${id}/findings`,
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
 /** 操作审计日志列表（仅管理员）GET /api/v1/audit */
 export async function listAuditLogs(
   params?: DataPlatform.AuditLogListParams,

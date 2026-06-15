@@ -9,6 +9,7 @@ from app.api import compat
 from app.api.v1 import (
     ai,
     audit,
+    content_safety,
     datasets,
     datasources,
     ingest_tasks,
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(operators.router, prefix="/api/v1")
     app.include_router(quality.router, prefix="/api/v1")
+    app.include_router(content_safety.router, prefix="/api/v1")
     app.include_router(ingest_tasks.router, prefix="/api/v1")
     app.include_router(uploads.router, prefix="/api/v1")
     app.include_router(ai.router, prefix="/api/v1")

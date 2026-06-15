@@ -454,3 +454,20 @@ class HeuristicProvider(AIProvider):
         self, goal: str, ready_ops: list[dict[str, Any]]
     ) -> dict[str, Any]:
         return generate_pipeline_from_goal(goal, ready_ops)
+
+    async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
+        """无 LLM 时的保守兜底:全部判为正常。
+
+        语义判定能力依赖 LLM;启发式不做关键词二次判断——违规词命中已由
+        review.py 的内置词表(source=flagged_words)与规则覆盖,这里再判会重复计数。
+        故返回全 正常,LLM source 对结果无贡献(降级到规则+PII)。
+        """
+        return [
+            {
+                "flagged": False,
+                "category": "other",
+                "severity": "low",
+                "reason": "",
+            }
+            for _ in texts
+        ]
