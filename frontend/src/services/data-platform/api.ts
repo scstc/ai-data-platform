@@ -634,3 +634,104 @@ export async function listAuditLogs(
     ...(options || {}),
   });
 }
+
+/** 文件管理:列出平台 MinIO 的桶（所有登录用户）GET /api/v1/files/buckets（#10） */
+export async function listPlatformBuckets(options?: { [key: string]: any }) {
+  return request<{ data: string[]; success: boolean }>('/api/v1/files/buckets', {
+    method: 'GET',
+    ...(options || {}),
+  });
+}
+
+/** 文件管理:列目录（文件夹 + 对象）GET /api/v1/files（#10） */
+export async function listFiles(
+  params: { bucket: string; prefix?: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.FileListResult; success: boolean }>(
+    '/api/v1/files',
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
+/** 文件管理:获取对象下载 presigned URL GET /api/v1/files/download-url（#10） */
+export async function getFileDownloadUrl(
+  params: { bucket: string; key: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { url: string }; success: boolean }>(
+    '/api/v1/files/download-url',
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
+/** 文件管理:预览对象（可解析格式）GET /api/v1/files/preview（#10） */
+export async function previewFile(
+  params: { bucket: string; key: string; limit?: number },
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { columns: string[]; data: Record<string, any>[]; message?: string };
+    success: boolean;
+  }>('/api/v1/files/preview', {
+    method: 'GET',
+    params: { ...params },
+    ...(options || {}),
+  });
+}
+
+/** 文件管理:上传对象（仅 admin，multipart）POST /api/v1/files/upload（#10） */
+export async function uploadPlatformFile(
+  formData: FormData,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { key: string }; success: boolean }>(
+    '/api/v1/files/upload',
+    { method: 'POST', data: formData, requestType: 'form', ...(options || {}) },
+  );
+}
+
+/** 文件管理:新建文件夹（仅 admin）POST /api/v1/files/folder（#10） */
+export async function createFolder(
+  body: { bucket: string; prefix?: string; name: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>('/api/v1/files/folder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    ...(options || {}),
+  });
+}
+
+/** 文件管理:删除对象（仅 admin；被托管引用返回 409 + message）DELETE /api/v1/files/object（#10） */
+export async function deleteFileObject(
+  params: { bucket: string; key: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>('/api/v1/files/object', {
+    method: 'DELETE',
+    params: { ...params },
+    // skipErrorHandler:交由调用方 catch 展示后端「被 N 个托管数据集引用」message
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
+/** 文件管理:递归删除文件夹（仅 admin；被托管引用返回 409 + message）POST /api/v1/files/delete-folder（#10） */
+export async function deleteFolder(
+  body: { bucket: string; prefix: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/files/delete-folder',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      // skipErrorHandler:交由调用方 catch 展示后端 409 message
+      skipErrorHandler: true,
+      ...(options || {}),
+    },
+  );
+}

@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
 
+    # 平台 MinIO 对象存储(文件管理 #19);env STORAGE_MINIO_*。未配置→文件管理 503。
+    storage_minio_endpoint: str | None = None
+    storage_minio_access_key: str | None = None
+    storage_minio_secret_key: str | None = None
+
     # 上传文件落盘目录
     upload_dir: str = (
         "/Users/enjoy/ai-project/ai-data-platform/backend/var/uploads"

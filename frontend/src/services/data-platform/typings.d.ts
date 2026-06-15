@@ -608,4 +608,18 @@ declare namespace DataPlatform {
     source?: ReviewSource;
     severity?: ReviewSeverity;
   };
+
+  /** 文件管理:对象条目（#10） */
+  type FileEntry = {
+    key: string;
+    name: string;
+    size: number;
+    lastModified: string | null;
+  };
+
+  /** 文件管理:列目录结果（folders 在前，files 在后）（#10） */
+  type FileListResult = {
+    folders: string[];
+    files: FileEntry[];
+  };
 }

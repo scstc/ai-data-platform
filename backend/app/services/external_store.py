@@ -16,10 +16,12 @@ remove_bucket)——托管不破坏源数据,"取消托管"只删平台引用。
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -30,6 +32,7 @@ from minio import Minio
 from minio.error import S3Error
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.services.landing import normalize_to_records
@@ -297,3 +300,162 @@ async def materialized_version(
         raw_path.unlink(missing_ok=True)
         if jsonl_path is not None:
             jsonl_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 平台 MinIO 文件管理(#19):管理平台自有对象存储,允许写/删(软保护在路由层)
+# ---------------------------------------------------------------------------
+def platform_config() -> dict[str, Any]:
+    """从 settings 拼平台 MinIO 的 {endpoint, accessKey, secretKey}。
+
+    缺 endpoint / 任一凭证 → 抛 ExternalStoreError("平台存储(MinIO)未配置"),
+    由路由层兜底为 503,不报 500。
+    """
+    endpoint = (settings.storage_minio_endpoint or "").strip()
+    access_key = (settings.storage_minio_access_key or "").strip()
+    secret_key = (settings.storage_minio_secret_key or "").strip()
+    if not (endpoint and access_key and secret_key):
+        raise ExternalStoreError("平台存储(MinIO)未配置")
+    return {"endpoint": endpoint, "accessKey": access_key, "secretKey": secret_key}
+
+
+def _list_dir_sync(
+    client: Minio, bucket: str, prefix: str
+) -> dict[str, list[Any]]:
+    """同步分组列举(供 to_thread):folders + files 两类,上限 _LIST_LIMIT。"""
+    folders: list[str] = []
+    files: list[dict[str, Any]] = []
+    count = 0
+    for obj in client.list_objects(bucket, prefix=prefix or None, recursive=False):
+        name = obj.object_name
+        if obj.is_dir:
+            # 跳过当前目录自身的零字节标记对象(minio-py 对 key 以 '/' 结尾的对象
+            # 置 is_dir=True,列举自身目录时会把标记当成同名幻影子目录)
+            if name == prefix:
+                continue
+            # 文件夹:取末段(去尾部 '/')
+            folders.append(name.rstrip("/").rsplit("/", 1)[-1])
+        else:
+            # 跳过等于 prefix 自身的零字节文件夹标记
+            if name == prefix:
+                continue
+            last_modified = obj.last_modified
+            files.append(
+                {
+                    "key": name,
+                    "name": name[len(prefix):] if prefix else name,
+                    "size": obj.size,
+                    "lastModified": (
+                        last_modified.isoformat() if last_modified else None
+                    ),
+                }
+            )
+        count += 1
+        if count >= _LIST_LIMIT:
+            break
+    return {"folders": folders, "files": files}
+
+
+async def list_dir(
+    config: dict[str, Any] | None, bucket: str, prefix: str = ""
+) -> dict[str, list[Any]]:
+    """列单层目录:{folders:[name], files:[{key,name,size,lastModified}]}(上限 1000)。"""
+    client = client_for(config)
+    try:
+        return await asyncio.to_thread(_list_dir_sync, client, bucket, prefix)
+    except S3Error as exc:
+        raise ExternalStoreError(f"列目录失败:{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(f"列目录失败:{exc}") from exc
+
+
+async def upload_object(
+    config: dict[str, Any] | None,
+    bucket: str,
+    key: str,
+    data: Any,
+    length: int,
+    content_type: str = "application/octet-stream",
+) -> None:
+    """上传对象(put_object)。S3 错误抛 ExternalStoreError。"""
+    client = client_for(config)
+    try:
+        await asyncio.to_thread(
+            client.put_object, bucket, key, data, length, content_type=content_type
+        )
+    except S3Error as exc:
+        raise ExternalStoreError(f"上传失败 {bucket}/{key}:{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(f"上传失败 {bucket}/{key}:{exc}") from exc
+
+
+async def create_folder(
+    config: dict[str, Any] | None, bucket: str, prefix: str
+) -> None:
+    """新建"文件夹":put 一个零字节对象,key = prefix.rstrip('/') + '/'。"""
+    key = prefix.rstrip("/") + "/"
+    client = client_for(config)
+    try:
+        await asyncio.to_thread(
+            client.put_object, bucket, key, io.BytesIO(b""), 0
+        )
+    except S3Error as exc:
+        raise ExternalStoreError(f"新建文件夹失败 {bucket}/{key}:{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(f"新建文件夹失败 {bucket}/{key}:{exc}") from exc
+
+
+async def remove_object(
+    config: dict[str, Any] | None, bucket: str, key: str
+) -> None:
+    """删单个对象(remove_object)。S3 错误抛 ExternalStoreError。"""
+    client = client_for(config)
+    try:
+        await asyncio.to_thread(client.remove_object, bucket, key)
+    except S3Error as exc:
+        raise ExternalStoreError(f"删除失败 {bucket}/{key}:{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(f"删除失败 {bucket}/{key}:{exc}") from exc
+
+
+def _remove_prefix_sync(client: Minio, bucket: str, prefix: str) -> int:
+    """同步递归删前缀下所有对象(供 to_thread),返回删除条数。"""
+    count = 0
+    for obj in client.list_objects(bucket, prefix=prefix or None, recursive=True):
+        client.remove_object(bucket, obj.object_name)
+        count += 1
+    return count
+
+
+async def remove_prefix(
+    config: dict[str, Any] | None, bucket: str, prefix: str
+) -> int:
+    """递归删前缀(文件夹)下所有对象,返回删除条数。S3 错误抛 ExternalStoreError。"""
+    client = client_for(config)
+    try:
+        return await asyncio.to_thread(_remove_prefix_sync, client, bucket, prefix)
+    except S3Error as exc:
+        raise ExternalStoreError(f"删除目录失败 {bucket}/{prefix}:{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(f"删除目录失败 {bucket}/{prefix}:{exc}") from exc
+
+
+async def presigned_get_url(
+    config: dict[str, Any] | None,
+    bucket: str,
+    key: str,
+    expires_seconds: int = 600,
+) -> str:
+    """生成预签名下载 URL(浏览器可直连 MinIO endpoint 下载)。"""
+    client = client_for(config)
+    try:
+        return await asyncio.to_thread(
+            client.presigned_get_object,
+            bucket,
+            key,
+            expires=timedelta(seconds=expires_seconds),
+        )
+    except S3Error as exc:
+        raise ExternalStoreError(f"生成下载链接失败 {bucket}/{key}:{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(f"生成下载链接失败 {bucket}/{key}:{exc}") from exc

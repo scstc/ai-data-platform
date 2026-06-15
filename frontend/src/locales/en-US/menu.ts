@@ -63,6 +63,7 @@ export default {
   'menu.processing.editor': 'New Processing Job',
   'menu.operators': 'Operator Market',
   'menu.contentSafety': 'Content Safety',
+  'menu.files': 'File Management',
   'menu.dataTasks': 'Data Tasks',
   'menu.lineage': 'Data Lineage',
   'menu.annotation': 'Data Annotation',

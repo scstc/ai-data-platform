@@ -42,6 +42,15 @@ async def current_user(
     return user
 
 
+async def require_user(
+    user: Annotated[User | None, Depends(current_user)],
+) -> User:
+    """登录门控:任何登录用户放行;未登录→401(供仅需登录、不限角色的读端点)。"""
+    if user is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return user
+
+
 async def require_admin(
     user: Annotated[User | None, Depends(current_user)],
 ) -> User:

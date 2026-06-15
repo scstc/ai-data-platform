@@ -63,6 +63,7 @@ export default {
   'menu.processing.editor': '新建加工任务',
   'menu.operators': '算子市场',
   'menu.contentSafety': '内容安全',
+  'menu.files': '文件管理',
   'menu.dataTasks': '数据任务',
   'menu.lineage': '数据血缘',
   'menu.annotation': '数据标注',

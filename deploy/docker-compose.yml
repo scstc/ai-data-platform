@@ -40,6 +40,10 @@ services:
       # 会话令牌签名密钥(#5 访问安全):务必在 deploy/.env 配真实值,
       # 否则回退源码内的 dev 默认(公开,可被伪造令牌)。非空 fallback 避免空值覆盖。
       AUTH_SECRET: ${AUTH_SECRET:-adp-dev-insecure-secret-change-me}
+      # 文件管理(平台 MinIO 对象存储):留空则文件管理接口返回 503「未配置」
+      STORAGE_MINIO_ENDPOINT: ${STORAGE_MINIO_ENDPOINT:-}
+      STORAGE_MINIO_ACCESS_KEY: ${STORAGE_MINIO_ACCESS_KEY:-}
+      STORAGE_MINIO_SECRET_KEY: ${STORAGE_MINIO_SECRET_KEY:-}
       # 可选 LLM(留空则后端走启发式)
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

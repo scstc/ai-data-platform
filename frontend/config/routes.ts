@@ -67,6 +67,12 @@ export default [
     ],
   },
   {
+    path: '/files',
+    name: 'files',
+    icon: 'folder',
+    component: './files',
+  },
+  {
     path: '/processing',
     name: 'processing',
     icon: 'deploymentUnit',

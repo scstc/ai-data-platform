@@ -55,6 +55,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 | `ENGINE_CONCURRENCY` | 3 | 多 job 并发上限 |
 | `CORS_ORIGINS` | `["http://10.60.1.60"]` | 跨域来源(同源部署可不改) |
 | `AUTH_SECRET` | dev 默认 | 会话令牌签名密钥(#5);生产务必设强随机值,如 `openssl rand -hex 32` |
+| `STORAGE_MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY` | 空 | 文件管理(平台 MinIO,见 `docs/plan/10-文件管理设计.md`)指向的 MinIO;留空则文件管理接口返回 503。本机默认指向同机 MinIO 栈(见下) |
 | `OPENAI_*` | 空 | 可选 LLM;留空则 AI 接口走启发式 |
 
 ## 常用运维
