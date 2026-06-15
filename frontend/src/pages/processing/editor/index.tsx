@@ -39,9 +39,9 @@ const Editor: React.FC = () => {
   const [activeIdx, setActiveIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
-  // 算子元信息(供 label/params 渲染):一次取全量 ready+非 ready 名称映射
+  // 算子元信息(供 label/params 渲染):一次取全量(212 ≤ 后端 pageSize 上限 500)
   useEffect(() => {
-    listOperatorCatalog({ current: 1, pageSize: 1000 }).then((r) => {
+    listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
     });
   }, []);
