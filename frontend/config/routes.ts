@@ -81,6 +81,12 @@ export default [
         component: './processing',
       },
       {
+        path: '/processing/editor',
+        name: 'editor',
+        component: './processing/editor',
+        hideInMenu: true,
+      },
+      {
         // 旧路径兼容:算子市场已提升为一级菜单 /operators
         path: '/processing/market',
         redirect: '/operators',

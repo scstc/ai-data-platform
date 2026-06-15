@@ -59,6 +59,7 @@ export default {
   'menu.quality': '质量评估',
   'menu.processing': '数据加工',
   'menu.processing.jobs': '加工任务',
+  'menu.processing.editor': '新建加工任务',
   'menu.operators': '算子市场',
   'menu.dataTasks': '数据任务',
   'menu.lineage': '数据血缘',
