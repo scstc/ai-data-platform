@@ -6,7 +6,10 @@ import { listOperatorCatalog, getOperatorCatalogMeta } from '@/services/data-pla
 const { Text } = Typography;
 
 /** 左栏:检索/场景/只看可运行,点 + 添加算子到流水线。 */
-const OperatorLibrary: React.FC<{ onAdd: (name: string) => void }> = ({ onAdd }) => {
+const OperatorLibrary: React.FC<{
+  onAdd: (name: string) => void;
+  category?: string;
+}> = ({ onAdd, category }) => {
   const [scenarios, setScenarios] = useState<Record<string, number>>({});
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
@@ -21,6 +24,7 @@ const OperatorLibrary: React.FC<{ onAdd: (name: string) => void }> = ({ onAdd })
   useEffect(() => {
     setLoading(true);
     listOperatorCatalog({
+      category,
       scenario,
       keyword,
       runnable: onlyReady ? 'ready' : undefined,
@@ -29,7 +33,7 @@ const OperatorLibrary: React.FC<{ onAdd: (name: string) => void }> = ({ onAdd })
     })
       .then((r) => setData(r.data))
       .finally(() => setLoading(false));
-  }, [scenario, keyword, onlyReady]);
+  }, [category, scenario, keyword, onlyReady]);
 
   const scenarioOptions = useMemo(
     () =>

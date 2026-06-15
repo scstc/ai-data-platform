@@ -262,6 +262,14 @@ export async function generatePipeline(
   );
 }
 
+/** AI:据目标推荐质量评估算子 POST /api/v1/ai/generate-quality */
+export async function generateQuality(body: DataPlatform.GeneratePipelineParams) {
+  return request<{ data: DataPlatform.GeneratedPipeline; success: boolean }>(
+    '/api/v1/ai/generate-quality',
+    { method: 'POST', data: body },
+  );
+}
+
 /** 上传文件并落地为数据集 POST /api/v1/datasets/upload */
 export async function uploadDataset(
   formData: FormData,
