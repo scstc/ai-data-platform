@@ -60,6 +60,16 @@ class HostS3Request(CamelModel):
     category_id: str | None = None
 
 
+class PlatformHostRequest(CamelModel):
+    """文件管理零拷贝接入入参:把平台 MinIO 对象登记为受管数据集版本(不下载)。"""
+
+    bucket: str
+    keys: list[str]
+    name: str | None = None
+    data_type: str | None = None
+    category_id: str | None = None
+
+
 class DatasetDetailRead(DatasetRead):
     """数据集详情:元信息 + 版本列表。"""
 

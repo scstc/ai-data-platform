@@ -29,10 +29,21 @@ LANDABLE_FORMATS = {
     "csv",
     "tsv",
     "txt",
+    "log",
     "xlsx",
     "xls",
     *DOC_FORMATS,
 }
+
+# 二进制类:原样存储,不规范化(图像 / 音频 / 视频)
+BINARY_FORMATS = {
+    "png", "jpg", "jpeg", "gif", "bmp", "webp",
+    "mp3", "wav", "flac", "m4a", "aac", "ogg",
+    "mp4", "avi", "mov", "mkv", "webm",
+}
+
+# 数据接入可受理的全部格式(可规范化 + 二进制零拷贝)
+INGESTABLE_FORMATS = LANDABLE_FORMATS | BINARY_FORMATS
 
 # markitdown 实例(懒加载,首次处理文档时才初始化,避免拖慢后端启动)
 _markitdown = None
@@ -249,3 +260,56 @@ async def land_upload(
         note=f"本地上传落地:{filename}",
         creator=creator,
     )
+
+
+async def land_upload_raw(
+    session: AsyncSession,
+    *,
+    content: bytes,
+    filename: str,
+    source_format: str,
+    dataset_name: str | None = None,
+    data_type: str | None = None,
+    description: str | None = None,
+    creator: str = "admin",
+) -> tuple[Dataset, DatasetVersion]:
+    """二进制本地上传:原样存储,不解析。版本 rows=None,format=源扩展名。"""
+    dataset = Dataset(
+        id=_new_dataset_id(),
+        name=dataset_name or Path(filename).stem or "未命名数据集",
+        description=description,
+        data_type=data_type,
+        owner=creator,
+        creator=creator,
+    )
+    session.add(dataset)
+
+    out_dir = Path(settings.datasets_dir) / dataset.id / "v1"
+    out_path = out_dir / (Path(filename).name or f"data.{source_format}")
+    # 磁盘写失败(空间/权限)→ 清理半成品 + 回滚 pending dataset,抛 LandingError,
+    # 绝不留下没有对应文件的孤立 Dataset 行
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(content)
+    except OSError as exc:
+        out_path.unlink(missing_ok=True)
+        await session.rollback()
+        raise LandingError(f"原样存储失败:{exc}") from exc
+
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset.id,
+        version_no=1,
+        storage_uri=str(out_path),
+        format=source_format.lower(),
+        rows=None,
+        size=len(content),
+        origin="managed",
+        produced_by_job_id=None,
+        note=f"本地上传(原样存):{filename}",
+    )
+    session.add(version)
+    await session.commit()
+    await session.refresh(dataset)
+    await session.refresh(version)
+    return dataset, version

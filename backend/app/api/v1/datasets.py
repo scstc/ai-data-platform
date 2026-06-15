@@ -29,18 +29,23 @@ from app.schemas.dataset import (
     DatasetUpdate,
     DatasetVersionRead,
     HostS3Request,
+    PlatformHostRequest,
 )
 from app.services.external_store import (
     ExternalStoreError,
     head_records,
     parse_s3_uri,
+    platform_config,
     stat_object,
 )
 from app.services.landing import (
+    BINARY_FORMATS,
+    INGESTABLE_FORMATS,
     LANDABLE_FORMATS,
     LandingError,
     UnsupportedFormatError,
     land_upload,
+    land_upload_raw,
 )
 
 router = APIRouter(tags=["datasets"])
@@ -92,29 +97,43 @@ async def upload_as_dataset(
     filename = file.filename or ""
     fmt = _file_ext(filename)
     content = await file.read()
+    # 二进制类原样存(land_upload_raw),其余规范化落地(land_upload);
+    # 两条路径的落地失败都收敛为 LandingError → 400(磁盘写失败/解析失败均不冒 500)
     try:
-        dataset, version = await land_upload(
-            session,
-            content=content,
-            filename=filename,
-            source_format=fmt,
-            dataset_name=name,
-            data_type=data_type,
-            description=description,
-        )
+        if fmt in BINARY_FORMATS:
+            dataset, version = await land_upload_raw(
+                session,
+                content=content,
+                filename=filename,
+                source_format=fmt,
+                dataset_name=name,
+                data_type=data_type,
+                description=description,
+            )
+        else:
+            dataset, version = await land_upload(
+                session,
+                content=content,
+                filename=filename,
+                source_format=fmt,
+                dataset_name=name,
+                data_type=data_type,
+                description=description,
+            )
     except UnsupportedFormatError:
         return JSONResponse(
             status_code=400,
             content={
                 "success": False,
                 "message": f"格式 .{fmt} 暂不支持落地;当前支持 "
-                "jsonl/json/csv/tsv/txt/xlsx/xls/html/pdf/doc/docx/ppt/pptx",
+                "jsonl/json/csv/tsv/txt/log/xlsx/xls/html/pdf/doc/docx/ppt/pptx "
+                "及常见图像/音频/视频",
             },
         )
     except LandingError as exc:
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": f"解析失败:{exc}"},
+            content={"success": False, "message": f"落地失败:{exc}"},
         )
 
     # 上传后挂分类(可空):land_upload 已 commit,这里补一次更新
@@ -383,23 +402,44 @@ async def preview_version(
             content={"success": False, "message": "版本不存在"},
         )
 
+    # 二进制类(图像/音视频)原样存储,不解析:预览置灰,仅下载
+    if version.format in BINARY_FORMATS:
+        return JSONResponse(
+            content={
+                "data": [],
+                "columns": [],
+                "total": version.rows or 0,
+                "success": True,
+                "message": "二进制文件不支持预览,请下载查看",
+            }
+        )
+
     # hosted:按需从 S3 取前 offset+limit 条再切片(预览成本由取前 N 缓解)
     if version.origin == "hosted":
-        if not version.source_datasource_id:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "托管版本缺少数据源引用"},
-            )
-        ds = await session.get(DataSource, version.source_datasource_id)
-        if ds is None:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "托管版本对应的数据源已不存在"},
-            )
+        if version.source_datasource_id:
+            ds = await session.get(DataSource, version.source_datasource_id)
+            if ds is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": "托管版本对应的数据源已不存在",
+                    },
+                )
+            cfg = ds.config
+        else:
+            # 平台对象零拷贝接入:用平台 MinIO 凭证回退
+            try:
+                cfg = platform_config()
+            except ExternalStoreError as exc:
+                return JSONResponse(
+                    status_code=503,
+                    content={"success": False, "message": str(exc)},
+                )
         try:
             bucket, key = parse_s3_uri(version.storage_uri)
             head = await head_records(
-                ds.config, bucket, key, version.format, offset + limit
+                cfg, bucket, key, version.format, offset + limit
             )
         except ExternalStoreError as exc:
             return JSONResponse(
@@ -534,6 +574,104 @@ async def host_s3(body: HostS3Request, session: SessionDep) -> JSONResponse:
         pairs.append((dataset, version))
 
     # 先提交 + refresh,再组装详情(server_default 的 created_at/updated_at 才有值)
+    await session.commit()
+    cat_name = None
+    if body.category_id:
+        names = await build_category_name_map(session, [body.category_id])
+        cat_name = names.get(body.category_id)
+    created: list[DatasetDetailRead] = []
+    for dataset, version in pairs:
+        await session.refresh(dataset)
+        await session.refresh(version)
+        detail = _to_detail(dataset, [version])
+        if dataset.category_id:
+            detail.category_name = cat_name
+        created.append(detail)
+    return JSONResponse(
+        content={
+            "data": [d.model_dump(by_alias=True, mode="json") for d in created],
+            "success": True,
+        }
+    )
+
+
+@router.post("/datasets/host-platform")
+async def host_platform(
+    body: PlatformHostRequest, session: SessionDep
+) -> JSONResponse:
+    """文件管理零拷贝接入:把平台 MinIO 若干对象登记为受管数据集版本,**不下载**。
+
+    用 platform_config() 取平台存储凭证(而非数据源);source_datasource_id 留空,
+    预览/物化时由 platform_config 回退定位(见 preview / materialized_version)。
+    """
+    if not body.keys:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "请至少选择一个对象"},
+        )
+    if not body.bucket:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "缺少存储桶"},
+        )
+    # 先整批校验所有 key 的格式;任一非法即整批 400(此时尚未 stat、未 add session,无脏状态)
+    for key in body.keys:
+        fmt = _file_ext(key)
+        if fmt not in INGESTABLE_FORMATS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"对象 {key} 的格式 .{fmt} 暂不支持接入",
+                },
+            )
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+
+    pairs: list[tuple[Dataset, DatasetVersion]] = []
+    multiple = len(body.keys) > 1
+    for key in body.keys:
+        fmt = _file_ext(key)
+        try:
+            meta = await stat_object(cfg, body.bucket, key)
+        except ExternalStoreError as exc:
+            # 中途某对象 stat 失败:回滚本批已 add 的 pending 对象,整批 400(绝不部分登记)
+            await session.rollback()
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"读取平台对象失败:{exc}"},
+            )
+
+        base_name = body.name or Path(key).stem or "未命名接入数据集"
+        ds_name = f"{base_name}/{Path(key).name}" if multiple else base_name
+        dataset = Dataset(
+            id=_new_dataset_id(),
+            name=ds_name,
+            data_type=body.data_type,
+            category_id=body.category_id,
+            owner="admin",
+            creator="admin",
+        )
+        session.add(dataset)
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset.id,
+            version_no=1,
+            storage_uri=f"s3://{body.bucket}/{key}",
+            format=fmt,
+            rows=None,
+            size=meta.get("size"),
+            origin="hosted",
+            source_datasource_id=None,
+            note=f"文件管理接入(零拷贝):s3://{body.bucket}/{key}",
+        )
+        session.add(version)
+        pairs.append((dataset, version))
+
     await session.commit()
     cat_name = None
     if body.category_id:

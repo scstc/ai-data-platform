@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
-from app.services.landing import normalize_to_records
+from app.services.landing import BINARY_FORMATS, normalize_to_records
 
 # 列对象/列桶的硬上限,避免大桶把内存/响应打爆(spec §2.1)
 _LIST_LIMIT = 1000
@@ -282,14 +282,24 @@ async def materialized_version(
         yield Path(version.storage_uri)
         return
 
-    if not version.source_datasource_id:
-        raise ExternalStoreError("托管版本缺少 source_datasource_id,无法定位 S3 凭证")
-    ds = await session.get(DataSource, version.source_datasource_id)
-    if ds is None:
-        raise ExternalStoreError("托管版本对应的数据源已不存在,无法访问 S3")
+    # 二进制 hosted 版本无法规范化为 jsonl(加工/物化不适用)→ 明确报错,
+    # 避免 normalize_to_records 对二进制字节抛未捕获的 UnsupportedFormatError(冒 500)
+    if version.format in BINARY_FORMATS:
+        raise ExternalStoreError(
+            f"二进制格式 .{version.format} 不支持物化/加工,请下载查看或选择文本类数据集"
+        )
+
+    if version.source_datasource_id:
+        ds = await session.get(DataSource, version.source_datasource_id)
+        if ds is None:
+            raise ExternalStoreError("托管版本对应的数据源已不存在,无法访问 S3")
+        cfg = ds.config
+    else:
+        # 平台对象零拷贝接入:用平台 MinIO 凭证(未配置 → ExternalStoreError)
+        cfg = platform_config()
 
     bucket, key = parse_s3_uri(version.storage_uri)
-    raw_path = await download_to_temp(ds.config, bucket, key)
+    raw_path = await download_to_temp(cfg, bucket, key)
     jsonl_path: Path | None = None
     try:
         content = await asyncio.to_thread(raw_path.read_bytes)
