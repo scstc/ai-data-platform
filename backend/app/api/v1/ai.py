@@ -116,3 +116,26 @@ async def generate_pipeline(
             {"operators": steps, "explanation": explanation}
         )
     )
+
+
+@router.post("/generate-quality", response_model=GeneratePipelineResponse)
+async def generate_quality(
+    body: GeneratePipelineRequest,
+    provider: ProviderDep,
+) -> GeneratePipelineResponse:
+    """据目标生成质量评估流水线:只推 filter 类、可运行的算子。"""
+    ready = oc.ready_operator_context(category="filter")
+    raw = await provider.generate_pipeline(body.goal, ready)
+    steps = oc.sanitize_pipeline(raw.get("operators", []))
+    # 再加一道:只保留 filter 类(防 provider 越出限定上下文)
+    steps = [
+        s
+        for s in steps
+        if (op := oc.get_operator(s["name"])) and op["category"] == "filter"
+    ]
+    explanation = str(raw.get("explanation", ""))
+    return GeneratePipelineResponse(
+        data=GeneratedPipeline.model_validate(
+            {"operators": steps, "explanation": explanation}
+        )
+    )
