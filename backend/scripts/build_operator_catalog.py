@@ -277,6 +277,9 @@ def runnable(op: dict) -> str:
         return "needs_api"
     if res in ("hf_model", "gpu", "vllm"):
         return "needs_compute"
+    # Ray 分布式算子需 Ray executor;本平台用 standalone dj-process,直接跑会失败
+    if op["name"].startswith("ray_"):
+        return "needs_compute"
     # cpu
     if mod & {"image", "video", "audio", "multimodal"}:
         return "needs_media"

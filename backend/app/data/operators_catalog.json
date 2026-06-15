@@ -50,9 +50,9 @@
     },
     "by_runnable": {
       "needs_api": 28,
-      "needs_compute": 62,
-      "needs_media": 33,
-      "ready": 89
+      "needs_compute": 66,
+      "needs_media": 31,
+      "ready": 87
     }
   },
   "operators": [
@@ -945,7 +945,7 @@
         }
       ],
       "example": "RayBTSMinhashDeduplicator(ignore_pattern='\\\\p{P}', work_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'english_dedup'))",
-      "runnable": "ready",
+      "runnable": "needs_compute",
       "scenario_group": "去重",
       "zh_label": "Ray分布式MinHash去重",
       "zh_usage_tip": "在Ray集群上运行的高性能MinHash去重，适合TB级超大规模预训练语料的分布式去重。",
@@ -1012,7 +1012,7 @@
         }
       ],
       "example": "RayDocumentDeduplicator(lowercase=False, ignore_non_character=False)",
-      "runnable": "ready",
+      "runnable": "needs_compute",
       "scenario_group": "去重",
       "zh_label": "Ray分布式文档去重",
       "zh_usage_tip": "在Ray集群上做精确文档去重，适合需要水平扩展的大规模文本数据集批处理场景。",
@@ -1067,7 +1067,7 @@
         }
       ],
       "example": "RayImageDeduplicator()",
-      "runnable": "needs_media",
+      "runnable": "needs_compute",
       "scenario_group": "去重",
       "zh_label": "Ray分布式图像去重",
       "zh_usage_tip": "在Ray集群上对图像做精确去重，适合大规模多模态数据集的分布式图像清洗流水线。",
@@ -1116,7 +1116,7 @@
         }
       ],
       "example": "RayVideoDeduplicator()",
-      "runnable": "needs_media",
+      "runnable": "needs_compute",
       "scenario_group": "去重",
       "zh_label": "Ray分布式视频去重",
       "zh_usage_tip": "在Ray集群上对视频做精确去重，适合大规模视频语料分布式处理时的重复视频剔除。",
