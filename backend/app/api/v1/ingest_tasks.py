@@ -1,10 +1,11 @@
 """采集任务路由：/ingest-tasks 系列端点与进度状态机。
 
-状态机要点：
+状态机要点（rerun 同步执行，返回即终态；不再凭 GET 轮询伪造进度/成功）：
 - create        → status=pending、progress=0、logs=["[INFO] 任务已创建"]，
                   datasource_name 从数据源表冗余（数据源不存在 → 404）。
-- GET detail    → 若 running：progress += 20；满 100 转 success 并补"任务完成"日志。
-- rerun         → 重置为 running、progress=0、last_run_at=now、追加日志。
+- GET detail    → 只读：如实返回当前状态/进度，附产物列表（不修改任何字段）。
+- rerun         → PG+采集对象：真实拉取，success/failed；
+                  PG 未配采集对象 / 非 PG 源：如实 failed（不产出数据集）。
 - stop          → 转 failed、追加"[WARN] 任务被手动停止"。
 - delete        → 删除记录。
 
@@ -42,7 +43,6 @@ router = APIRouter(tags=["ingest-tasks"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
-PROGRESS_STEP = 20
 PROGRESS_DONE = 100
 
 
@@ -230,20 +230,12 @@ async def get_ingest_task(
     task_id: str,
     session: SessionDep,
 ) -> Response:
-    """获取任务详情；running 状态每次访问推进进度 +20，满 100 转 success。"""
+    """获取任务详情。状态如实反映运行结果(rerun 为同步执行,返回即终态),
+    不再凭轮询伪造进度/成功——避免「任务成功却没有产出数据集」的假象。"""
     task = await session.get(IngestTask, task_id)
     if task is None:
         return _not_found()
 
-    if task.status == "running":
-        task.progress = min(PROGRESS_DONE, task.progress + PROGRESS_STEP)
-        task.logs = [*task.logs, f"[INFO] 进度推进至 {task.progress}%"]
-        if task.progress >= PROGRESS_DONE:
-            task.progress = PROGRESS_DONE
-            task.status = "success"
-            task.logs = [*task.logs, "[INFO] 任务完成"]
-        await session.commit()
-        await session.refresh(task)
     output = await _build_output(session, task.id)
     return JSONResponse(
         content=_item(
@@ -316,9 +308,22 @@ async def rerun_ingest_task(
             job.error = str(exc)
         job.finished_at = _now()
         task.run_count += 1
+    elif is_pg and not task.extract:
+        # 诚实失败:PG 源但没配采集对象 → 不可能产出数据集,不再假装 running/success
+        task.status = "failed"
+        task.logs = [
+            *task.logs,
+            "[ERROR] 未配置采集对象,请先在任务中选择表或填写 SQL 后再运行",
+        ]
     else:
-        task.status = "running"
-        task.logs = [*task.logs, "[INFO] 任务重跑，进度重置为 0"]
+        # 非 PostgreSQL 源:真实连接器尚未接入 → 明确标记不支持,而非伪造成功
+        src = datasource.name if datasource is not None else "?"
+        task.status = "failed"
+        task.logs = [
+            *task.logs,
+            f"[ERROR] 数据源「{src}」类型暂不支持自动采集(当前仅支持 PostgreSQL),"
+            "未产出任何数据集",
+        ]
 
     await session.commit()
     await session.refresh(task)

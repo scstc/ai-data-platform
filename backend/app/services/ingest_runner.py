@@ -106,6 +106,8 @@ async def run_pg_ingest(
                     session,
                     records,
                     dataset_name=name,
+                    # 采集落地统一归到 SQL 接入栏(否则 data_type=NULL,数据接入页任何分栏都看不到)
+                    data_type="sql",
                     note=f"采集落地:{task.name}(来源 {datasource.name})",
                     produced_by_job_id=job_id,
                 )

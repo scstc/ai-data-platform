@@ -1,8 +1,9 @@
-"""采集任务路由测试：完整状态机走查 + 列表筛选。
+"""采集任务路由测试：诚实状态机 + 列表筛选。
 
-状态机走查链路：
-create(pending) → rerun(running) → 连续 GET 推进至 success → stop(failed) → delete。
-另覆盖：数据源不存在 → 404、单条 404、列表 name/status 筛选。
+状态机：create(pending) → rerun。rerun 为同步执行,返回即终态——
+PG+采集对象 → success(见 PG 用例);非 PG 源 / PG 未配采集对象 → 如实 failed
+(不再凭轮询 GET 伪造进度/成功)。另覆盖:数据源不存在 → 404、单条 404、
+列表 name/status 筛选、stop(failed)、delete。
 
 数据源通过 session_factory 直接落库，避免依赖 datasources 路由。
 """
@@ -92,11 +93,11 @@ async def test_create_sets_pending_and_redundant_name(
 
 
 @pytest.mark.asyncio
-async def test_full_state_machine(
+async def test_lifecycle_unsupported_source_fails_honestly(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
-    """走查：create→rerun→连续 GET 推进到 success→stop→delete。"""
-    ds = await _seed_datasource(session_factory)
+    """走查：create→rerun(非 PG 源如实失败,不伪造 running/success)→GET 稳定→stop→delete。"""
+    ds = await _seed_datasource(session_factory)  # type=s3,非 PG
     task = await _create_task(client, ds.id)
     task_id = task["id"]
 
@@ -106,40 +107,29 @@ async def test_full_state_machine(
     assert resp.json()["data"]["progress"] == 0
     assert resp.json()["data"]["status"] == "pending"
 
-    # 2) rerun → running、progress 重置 0、last_run_at 落值
+    # 2) rerun → 非 PG 源如实失败(不再伪造 running)、last_run_at 落值、日志说明原因
     resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
     assert resp.status_code == 200
     rerun = resp.json()["data"]
-    assert rerun["status"] == "running"
-    assert rerun["progress"] == 0
+    assert rerun["status"] == "failed"
     assert rerun["lastRunAt"] is not None
+    assert any("暂不支持自动采集" in line for line in rerun["logs"])
 
-    # 3) 连续 GET：每次 +20，第 5 次到 100 转 success
-    expected = [20, 40, 60, 80, 100]
-    for step in expected:
+    # 3) 反复 GET 既不推进进度也不伪造成功:仍为 failed/0
+    for _ in range(3):
         resp = await client.get(f"/api/v1/ingest-tasks/{task_id}")
         data = resp.json()["data"]
-        assert data["progress"] == step
-        if step < 100:
-            assert data["status"] == "running"
-        else:
-            assert data["status"] == "success"
-            assert "[INFO] 任务完成" in data["logs"]
+        assert data["status"] == "failed"
+        assert data["progress"] == 0
 
-    # 4) success 后再 GET 不再推进
-    resp = await client.get(f"/api/v1/ingest-tasks/{task_id}")
-    data = resp.json()["data"]
-    assert data["progress"] == 100
-    assert data["status"] == "success"
-
-    # 5) stop → failed、追加手动停止日志
+    # 4) stop → failed、追加手动停止日志
     resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/stop")
     assert resp.status_code == 200
     stopped = resp.json()["data"]
     assert stopped["status"] == "failed"
     assert "[WARN] 任务被手动停止" in stopped["logs"]
 
-    # 6) delete → success:true，再 GET 404
+    # 5) delete → success:true，再 GET 404
     resp = await client.delete(f"/api/v1/ingest-tasks/{task_id}")
     assert resp.status_code == 200
     assert resp.json()["success"] is True
@@ -150,27 +140,40 @@ async def test_full_state_machine(
 
 
 @pytest.mark.asyncio
-async def test_rerun_from_success_resets_to_running(
+async def test_pg_rerun_without_extract_fails_honestly(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
-    """已完成任务 rerun 后应回到 running/0，可再次被 GET 推进。"""
-    ds = await _seed_datasource(session_factory)
-    task = await _create_task(client, ds.id)
-    task_id = task["id"]
+    """PG 源但未配置采集对象:rerun 如实失败并提示去配置,不伪造成功、不产出数据集。"""
+    async with session_factory() as session:
+        session.add(
+            DataSource(
+                id="ds-pg-noextract",
+                name="PG无采集对象",
+                type="database",
+                db_kind="postgresql",
+                status="connected",
+                config={
+                    "host": "127.0.0.1",
+                    "port": 5432,
+                    "database": "d",
+                    "username": "u",
+                    "password": "p",
+                },
+                creator="admin",
+            )
+        )
+        await session.commit()
+    task = await _create_task(client, "ds-pg-noextract", name="未配置采集对象")
 
-    await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
-    for _ in range(5):
-        await client.get(f"/api/v1/ingest-tasks/{task_id}")
-    resp = await client.get(f"/api/v1/ingest-tasks/{task_id}")
-    assert resp.json()["data"]["status"] == "success"
+    resp = await client.post(f"/api/v1/ingest-tasks/{task['id']}/rerun")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["status"] == "failed"
+    assert any("未配置采集对象" in line for line in data["logs"])
 
-    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
-    again = resp.json()["data"]
-    assert again["status"] == "running"
-    assert again["progress"] == 0
-
-    resp = await client.get(f"/api/v1/ingest-tasks/{task_id}")
-    assert resp.json()["data"]["progress"] == 20
+    # 未配置即失败发生在连库之前:不产生任何运行记录/数据集
+    resp = await client.get(f"/api/v1/ingest-tasks/{task['id']}/runs")
+    assert resp.json()["total"] == 0
 
 
 @pytest.mark.asyncio
@@ -211,13 +214,13 @@ async def test_list_pagination_and_filters(
     assert body["total"] == 2
     assert all("同步" in item["name"] for item in body["data"])
 
-    # status 精确筛选：把其中一个推进到 running，再按 status=running 过滤
+    # status 精确筛选：rerun 其中一个(s3 源→如实 failed),再按 status=failed 过滤
     await client.post(f"/api/v1/ingest-tasks/{t_sync_a['id']}/rerun")
-    resp = await client.get("/api/v1/ingest-tasks", params={"status": "running"})
+    resp = await client.get("/api/v1/ingest-tasks", params={"status": "failed"})
     body = resp.json()
     assert body["total"] == 1
     assert body["data"][0]["id"] == t_sync_a["id"]
-    assert body["data"][0]["status"] == "running"
+    assert body["data"][0]["status"] == "failed"
 
     # 分页：pageSize=2 → 第一页 2 条，total 仍为 3
     resp = await client.get("/api/v1/ingest-tasks?current=1&pageSize=2")
@@ -302,6 +305,13 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
         version = (await session.scalars(select(DV))).one()
         assert version.produced_by_job_id == job_id
         assert version.rows == 1
+
+        # 采集落地的数据集归到 SQL 接入栏(data_type='sql'),否则在数据接入页任何分栏都不可见
+        from app.models.dataset import Dataset as DSModel
+
+        ds_row = await session.get(DSModel, version.dataset_id)
+        assert ds_row is not None
+        assert ds_row.data_type == "sql"
 
     # runs 端点 wire 形态与收编前一致
     resp = await client.get(f"/api/v1/ingest-tasks/{task_id}/runs")

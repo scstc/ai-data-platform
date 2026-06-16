@@ -87,7 +87,7 @@ const IngestTasksPage: React.FC = () => {
     loadCategories();
   }, [loadCategories]);
 
-  /** 打开详情 Drawer：拉取最新单任务（running 会被推进）+ 运行记录 */
+  /** 打开详情 Drawer：拉取最新单任务（GET 只读，如实返回状态/产物）+ 运行记录 */
   const openDetail = async (id: string) => {
     const res = await getIngestTask(id);
     if (res?.success) {
