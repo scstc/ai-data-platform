@@ -223,7 +223,10 @@ export default defineConfig({
     },
   },
   requestRecord: {},
-  exportStatic: {},
+  // 关闭 exportStatic:菜单按数据工程流程分组用到「纯菜单分组(无 path 父路由)」,
+  // exportStatic 遍历路由时要求每个路由都有 path,否则构建崩溃;前端由 nginx
+  // SPA 兜底(try_files → /index.html)托管,无需逐路由预渲染 HTML。
+  // exportStatic: {},
   define: {
     'process.env.CI': process.env.CI,
     'process.env.COMMIT_HASH': commitHash,

@@ -14,61 +14,40 @@ export default [
     path: '/',
     redirect: '/ingest/datasources',
   },
-  {
-    // 文件管理已移入「数据管理」(/ingest/files);旧路径兼容
-    path: '/files',
-    redirect: '/ingest/files',
-  },
-  {
-    // 本地上传已升级为「数据接入」(/ingest/access);旧路径兼容
-    path: '/ingest/upload',
-    redirect: '/ingest/access',
-  },
+  // 旧路径兼容(菜单已按数据工程流程重组,页面路径不变)
+  { path: '/files', redirect: '/ingest/files' },
+  { path: '/ingest/upload', redirect: '/ingest/access' },
+  { path: '/processing/market', redirect: '/operators' },
+  // ① 数据接入
   {
     path: '/ingest',
     name: 'ingest',
     icon: 'api',
     routes: [
-      {
-        path: '/ingest',
-        redirect: '/ingest/datasources',
-      },
-      {
-        path: '/ingest/files',
-        name: 'files',
-        component: './files',
-      },
+      { path: '/ingest', redirect: '/ingest/datasources' },
       {
         path: '/ingest/datasources',
         name: 'datasources',
         component: './ingest/datasources',
       },
+      { path: '/ingest/tasks', name: 'tasks', component: './ingest/tasks' },
+      { path: '/ingest/access', name: 'access', component: './ingest/access' },
+      { path: '/ingest/files', name: 'files', component: './files' },
       {
-        path: '/ingest/tasks',
-        name: 'tasks',
-        component: './ingest/tasks',
-      },
-      {
-        path: '/ingest/access',
-        name: 'access',
-        component: './ingest/access',
+        path: '/ingest/assistant',
+        name: 'assistant',
+        component: './ingest/assistant',
       },
     ],
   },
+  // ② 数据集仓库(原始数据湖 · 草稿版本 + 发布门 + 算法工程师消费)
   {
     path: '/datasets',
     name: 'datasets',
     icon: 'database',
     routes: [
-      {
-        path: '/datasets',
-        redirect: '/datasets/list',
-      },
-      {
-        path: '/datasets/list',
-        name: 'list',
-        component: './datasets/list',
-      },
+      { path: '/datasets', redirect: '/datasets/list' },
+      { path: '/datasets/list', name: 'list', component: './datasets/list' },
       {
         path: '/datasets/presets',
         name: 'presets',
@@ -76,87 +55,50 @@ export default [
       },
     ],
   },
+  // ③ 数据治理(安全扫描 / 质量评估 / 数据加工 / 数据标注)
+  // 纯菜单分组(无 path):页面路径不变,避免 RR「绝对子路径须含父前缀」约束
   {
-    path: '/processing',
-    name: 'processing',
-    icon: 'deploymentUnit',
+    name: 'governance',
+    icon: 'safety',
     routes: [
       {
-        path: '/processing',
-        redirect: '/processing/jobs',
+        path: '/content-safety',
+        name: 'contentSafety',
+        component: './content-safety',
       },
+      { path: '/quality', name: 'quality', component: './quality' },
       {
-        path: '/processing/jobs',
-        name: 'jobs',
-        component: './processing',
+        path: '/quality/editor',
+        name: 'quality-editor',
+        component: './quality/editor',
+        hideInMenu: true,
       },
+      { path: '/processing', redirect: '/processing/jobs' },
+      { path: '/processing/jobs', name: 'processing', component: './processing' },
       {
         path: '/processing/editor',
-        name: 'editor',
+        name: 'processing-editor',
         component: './processing/editor',
         hideInMenu: true,
       },
-      {
-        // 旧路径兼容:算子市场已提升为一级菜单 /operators
-        path: '/processing/market',
-        redirect: '/operators',
-      },
+      { path: '/operators', name: 'operators', component: './processing/market' },
+      { path: '/annotation', name: 'annotation', component: './annotation' },
     ],
   },
+  // ④ 运维监控(跨切面:任务 / 血缘 / 审计)— 纯菜单分组(无 path)
   {
-    path: '/operators',
-    name: 'operators',
-    icon: 'appstore',
-    component: './processing/market',
-  },
-  {
-    path: '/quality',
-    name: 'quality',
-    icon: 'fundProjectionScreen',
-    component: './quality',
-  },
-  {
-    path: '/quality/editor',
-    name: 'quality-editor',
-    component: './quality/editor',
-    hideInMenu: true,
-  },
-  {
-    path: '/content-safety',
-    name: 'contentSafety',
-    icon: 'safety',
-    component: './content-safety',
-  },
-  {
-    path: '/security',
-    name: 'security',
-    icon: 'safetyCertificate',
-    access: 'canAdmin',
-    component: './security',
-  },
-  {
-    path: '/data-tasks',
-    name: 'dataTasks',
-    icon: 'schedule',
-    component: './data-tasks',
-  },
-  {
-    path: '/lineage',
-    name: 'lineage',
-    icon: 'nodeIndex',
-    component: './lineage',
-  },
-  {
-    path: '/annotation',
-    name: 'annotation',
-    icon: 'tags',
-    component: './annotation',
-  },
-  {
-    path: '/assistant',
-    name: 'assistant',
-    icon: 'robot',
-    component: './ingest/assistant',
+    name: 'ops',
+    icon: 'dashboard',
+    routes: [
+      { path: '/data-tasks', name: 'dataTasks', component: './data-tasks' },
+      { path: '/lineage', name: 'lineage', component: './lineage' },
+      {
+        path: '/security',
+        name: 'security',
+        access: 'canAdmin',
+        component: './security',
+      },
+    ],
   },
   {
     component: './exception/404',
