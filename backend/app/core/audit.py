@@ -42,6 +42,7 @@ _RESOURCE_ALIAS = {
     "jobs": "job",
     "operators": "operator",
     "uploads": "upload",
+    "content-safety": "reviewJob",
 }
 
 

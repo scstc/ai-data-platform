@@ -686,8 +686,12 @@ async def list_datasets(
     creator: str | None = Query(None),
     created_start: CreatedStartQuery = None,
     created_end: CreatedEndQuery = None,
+    publish_status: str | None = Query(None, alias="publishStatus"),
 ) -> PageResponse[DatasetRead]:
-    """分页查询数据集,按创建时间倒序;按元数据条件过滤(向后兼容)。"""
+    """分页查询数据集,按创建时间倒序;按元数据条件过滤(向后兼容)。
+
+    publishStatus=published 时只返回含已发布版本的数据集(算法工程师消费视图)。
+    """
     conds = []
     if name:
         conds.append(Dataset.name.ilike(f"%{name}%"))
@@ -701,6 +705,16 @@ async def list_datasets(
         conds.append(Dataset.created_at >= created_start)
     if created_end is not None:
         conds.append(Dataset.created_at <= created_end)
+    # 算法工程师消费视图:publishStatus=published → 只返回含已发布版本的数据集
+    if publish_status == "published":
+        published_ds_ids = (
+            await session.scalars(
+                select(DatasetVersion.dataset_id)
+                .where(DatasetVersion.publish_status == "published")
+                .distinct()
+            )
+        ).all()
+        conds.append(Dataset.id.in_(published_ds_ids))
     total = await session.scalar(
         select(func.count()).select_from(Dataset).where(*conds)
     )

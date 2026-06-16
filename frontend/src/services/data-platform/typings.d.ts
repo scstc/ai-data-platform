@@ -402,6 +402,8 @@ declare namespace DataPlatform {
     categoryId?: string;
     createdStart?: string;
     createdEnd?: string;
+    /** 发布状态过滤：publishStatus=published 只返回含已发布版本的数据集（算法工程师消费视图） */
+    publishStatus?: 'draft' | 'published' | 'unpublished';
   };
 
   /** 版本数据预览 */

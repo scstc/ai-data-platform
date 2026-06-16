@@ -394,7 +394,28 @@ const DatasetsList: React.FC = () => {
                 <a>下架</a>
               </Popconfirm>
             ) : (
-              <a onClick={() => handlePublish(v.id)}>发布</a>
+              <Tooltip
+                title={
+                  v.scanVerdict === 'unscanned'
+                    ? '需先完成内容安全全量扫描（或管理员人工接受风险）才能发布'
+                    : v.scanVerdict === 'failed'
+                      ? '安全扫描未通过，请在加工中挂隐私脱敏算子产出新版本重扫，或人工接受风险'
+                      : undefined
+                }
+              >
+                <a
+                  onClick={() =>
+                    v.scanVerdict === 'passed' ? handlePublish(v.id) : undefined
+                  }
+                  style={
+                    v.scanVerdict !== 'passed'
+                      ? { color: 'var(--ant-color-text-disabled, rgba(0,0,0,.25))', cursor: 'not-allowed' }
+                      : undefined
+                  }
+                >
+                  发布
+                </a>
+              </Tooltip>
             ))}
           {access.canAdmin && v.scanVerdict !== 'passed' && (
             <a

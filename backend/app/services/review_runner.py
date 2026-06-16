@@ -142,7 +142,12 @@ async def run_review(
         verdict_source="auto",
     )
     session.add(tagged_version)
-    # 3) 血缘边:被审版本 → review job
+    # 3) 回写被审版本的 scan_verdict:使被审版本本身也持有扫描结论,
+    #    从而让用户可直接对它执行 publish(发布门校验 scan_verdict==passed)。
+    #    打标版本 already 持有相同 verdict 供下游血缘追溯。
+    version.scan_verdict = verdict
+    version.verdict_source = "auto"
+    # 4) 血缘边:被审版本 → review job
     session.add(JobInput(job_id=job.id, dataset_version_id=version.id))
 
     # 4) 报告回写 job
