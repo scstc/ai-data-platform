@@ -54,7 +54,7 @@ export default {
   'menu.ingest.datasources': 'Data Sources',
   'menu.ingest.tasks': 'Ingestion Tasks',
   'menu.ingest.access': 'Data Access',
-  'menu.ingest.assistant': 'Ingestion Assistant',
+  'menu.assistant': 'Ingestion Assistant',
   'menu.security': 'Security Audit',
   'menu.quality': 'Quality Assessment',
   'menu.quality-editor': 'New Quality Assessment',

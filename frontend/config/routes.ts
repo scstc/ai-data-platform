@@ -53,11 +53,6 @@ export default [
         name: 'access',
         component: './ingest/access',
       },
-      {
-        path: '/ingest/assistant',
-        name: 'assistant',
-        component: './ingest/assistant',
-      },
     ],
   },
   {
@@ -156,6 +151,12 @@ export default [
     name: 'annotation',
     icon: 'tags',
     component: './annotation',
+  },
+  {
+    path: '/assistant',
+    name: 'assistant',
+    icon: 'robot',
+    component: './ingest/assistant',
   },
   {
     component: './exception/404',

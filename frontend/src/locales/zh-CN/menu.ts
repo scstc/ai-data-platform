@@ -54,7 +54,7 @@ export default {
   'menu.ingest.datasources': '数据源管理',
   'menu.ingest.tasks': '采集任务',
   'menu.ingest.access': '数据接入',
-  'menu.ingest.assistant': '智能接入助手',
+  'menu.assistant': '智能接入助手',
   'menu.security': '安全审计',
   'menu.quality': '质量评估',
   'menu.quality-editor': '新建质量评估',
