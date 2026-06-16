@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -119,6 +120,7 @@ def _item(
     job: Job, output: dict | None = None, input_: dict | None = None
 ) -> dict:
     read = JobRead.model_validate(job)
+    read.can_rerun = bool(job.spec)
     if output is not None:
         read.output = output
     if input_ is not None:
@@ -150,14 +152,18 @@ async def list_jobs(
     data: list[JobRead] = []
     for r in rows:
         read = JobRead.model_validate(r)
+        read.can_rerun = bool(r.spec)
         read.input = await _build_input(session, r.id)
         data.append(read)
     return PageResponse[JobRead](data=data, total=total)
 
 
-@router.post("/jobs")
-async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
-    """新建并执行加工任务:对一个数据集版本跑算子流水线 → 产出新版本。"""
+async def _create_and_run(session: AsyncSession, body: JobCreate) -> JSONResponse:
+    """校验 → 建任务(存 spec 以备重跑)→ 同步跑算子流水线 → 落终态并返回。
+
+    create_job 与 rerun_job 共用:rerun 用原任务存下的 spec 重建 body,故对
+    原输入版本再跑一次,产出新版本(新建一条任务记录,保留每次运行的血缘)。
+    """
     if not body.operators:
         return JSONResponse(
             status_code=400,
@@ -221,6 +227,8 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
         progress=0,
         created_by="admin",
         started_at=_now(),
+        # 存原始执行规格(算子 + 输出去向 + 输入版本),供 rerun 原样重跑
+        spec=body.model_dump(mode="json"),
     )
     session.add(job)
     await session.commit()
@@ -247,6 +255,43 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
     return JSONResponse(content=_item(job, output, input_))
+
+
+@router.post("/jobs")
+async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
+    """新建并执行加工任务:对一个数据集版本跑算子流水线 → 产出新版本。"""
+    return await _create_and_run(session, body)
+
+
+@router.post("/jobs/{job_id}/rerun")
+async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
+    """用原任务存下的配置(算子 + 输出去向)对原输入版本重跑一次 → 产出新版本。
+
+    新建一条任务记录(不改动原记录),保留每次运行的血缘;早于本特性、无 spec
+    的旧任务返回 400。输入版本若已删除,沿用 create 校验返回 404。
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "任务不存在"},
+        )
+    if not job.spec:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "该任务无可重跑的配置(早于重跑特性创建),请新建任务",
+            },
+        )
+    try:
+        spec = JobCreate.model_validate(job.spec)
+    except ValidationError:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "任务配置已损坏,无法重跑"},
+        )
+    return await _create_and_run(session, spec)
 
 
 @router.post("/jobs/preview")

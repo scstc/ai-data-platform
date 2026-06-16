@@ -229,6 +229,8 @@ declare namespace DataPlatform {
     output?: IngestOutput;
     /** 输入数据集版本（通过 job_input 血缘反查；quality 任务 output 为空） */
     input?: IngestOutput;
+    /** 是否可重跑（存有原始执行规格；早于重跑特性的任务为 false） */
+    canRerun?: boolean;
   };
 
   /** 新建加工任务入参 */

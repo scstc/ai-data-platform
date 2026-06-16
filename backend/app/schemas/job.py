@@ -53,3 +53,5 @@ class JobRead(CamelModel):
     output: dict[str, Any] | None = None
     # 输入版本概要(经 job_inputs 反查)：{datasetId, datasetName, versionId, versionNo}
     input: dict[str, Any] | None = None
+    # 是否可重跑(存有原始执行规格 spec;早于重跑特性的任务为 False)
+    can_rerun: bool = False

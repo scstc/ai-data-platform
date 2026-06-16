@@ -608,6 +608,14 @@ export async function createJob(
   });
 }
 
+/** 重跑加工任务 POST /api/v1/jobs/:id/rerun（用原配置对原输入版本再跑一次，产新版本） */
+export async function rerunJob(id: string, options?: { [key: string]: any }) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/jobs/${id}/rerun`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
 /** 样例试跑:前 N 行跑算子预览加工前后 POST /api/v1/jobs/preview */
 export async function previewJob(body: {
   datasetVersionId: string;

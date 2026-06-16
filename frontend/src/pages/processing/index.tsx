@@ -5,9 +5,9 @@ import {
   ProTable,
 } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
-import { Button, Drawer, Tag, Typography } from 'antd';
+import { Button, Drawer, message, Popconfirm, Tag, Typography } from 'antd';
 import { useRef, useState } from 'react';
-import { listJobs } from '@/services/data-platform';
+import { listJobs, rerunJob } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 
 const STATE_META: Record<
@@ -29,6 +29,20 @@ const Processing: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
+
+  /** 重跑:用原配置对原输入版本再跑一次,产出新版本(同步执行,完成后刷新列表) */
+  const handleRerun = async (id: string) => {
+    const hide = message.loading('正在重新运行…', 0);
+    try {
+      await rerunJob(id);
+      hide();
+      message.success('已重新运行，产出新版本');
+      actionRef.current?.reload();
+    } catch {
+      hide();
+      message.error('重新运行失败，请重试');
+    }
+  };
 
   const columns: ProColumns<DataPlatform.Job>[] = [
     {
@@ -68,6 +82,23 @@ const Processing: React.FC = () => {
       title: '创建时间',
       dataIndex: 'createdAt',
       render: (_, r) => formatDateTime(r.createdAt),
+    },
+    {
+      title: '操作',
+      valueType: 'option',
+      key: 'option',
+      render: (_, r) =>
+        r.canRerun
+          ? [
+              <Popconfirm
+                key="rerun"
+                title="用原配置对原输入版本重新运行，产出新版本？"
+                onConfirm={() => handleRerun(r.id)}
+              >
+                <a>重新运行</a>
+              </Popconfirm>,
+            ]
+          : [],
     },
   ];
 
