@@ -11,6 +11,7 @@ import {
 } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import {
+  Alert,
   Button,
   Drawer,
   Empty,
@@ -26,6 +27,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createJob,
+  getJob,
   getQualityReport,
   getVersionStats,
   listJobs,
@@ -57,7 +59,6 @@ const renderParamField = (
   opLabel: string,
   p: DataPlatform.OperatorParam,
 ) => {
-  // key 必须直接写在 JSX 上,经 spread 传入会被 React 忽略
   const key = `${opName}.${p.name}`;
   const common = {
     name: ['params', opName, p.name],
@@ -214,7 +215,6 @@ const StatsTab: React.FC<{ versionId: string }> = ({ versionId }) => {
             pageSize: params.pageSize,
           });
           const next = res.metrics ?? [];
-          // 指标集未变化时保持原引用,避免 columns 重建引发的级联更新
           setMetrics((prev) =>
             prev.length === next.length && prev.every((v, i) => v === next[i])
               ? prev
@@ -229,19 +229,87 @@ const StatsTab: React.FC<{ versionId: string }> = ({ versionId }) => {
   );
 };
 
-/** Tab 3:低质过滤（filter 算子带阈值跑 clean job 产新版本） */
+/** Tab 3:低质过滤 — 提交后轮询 job 状态，完成后刷新任务列表并跳转数据集页 */
 const FilterTab: React.FC<{
   job: DataPlatform.Job;
   input: DataPlatform.IngestOutput;
   qualityOps: DataPlatform.Operator[];
   opMap: Record<string, DataPlatform.Operator>;
-}> = ({ job, input, qualityOps, opMap }) => {
+  /** 成功后父组件回调：刷新任务列表 + 跳转到产出版本所在数据集 */
+  onSuccess: (output: DataPlatform.IngestOutput) => void;
+}> = ({ job, input, qualityOps, opMap, onSuccess }) => {
+  // running=true 时禁止重复提交，并展示轮询进度 Alert
+  const [running, setRunning] = useState(false);
+  const [statusText, setStatusText] = useState('');
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // 组件卸载时清理轮询定时器，避免在抽屉关闭后仍写 state
+  useEffect(
+    () => () => {
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    },
+    [],
+  );
+
+  const pollUntilDone = (jobId: string, outputSnapshot: DataPlatform.IngestOutput | undefined) => {
+    const tick = async () => {
+      try {
+        const res = await getJob(jobId);
+        const j = res?.data;
+        if (!j) {
+          // 网络抖动，继续轮询
+          pollTimer.current = setTimeout(tick, 2000);
+          return;
+        }
+        if (j.state === 'success') {
+          setRunning(false);
+          setStatusText('');
+          // 优先用 job 最新 output，其次用提交时快照
+          const out = (j.output as DataPlatform.IngestOutput | undefined) ?? outputSnapshot;
+          if (out) {
+            message.success(
+              `低质过滤完成，产出 ${out.datasetName} ${out.versionLabel ?? `v${out.versionNo}`}（${out.rows ?? '-'} 行）`,
+            );
+            onSuccess(out);
+          } else {
+            message.success('低质过滤完成');
+            onSuccess({} as DataPlatform.IngestOutput);
+          }
+        } else if (j.state === 'failed' || j.state === 'cancelled') {
+          setRunning(false);
+          setStatusText('');
+          message.error(`执行失败：${j.error ?? '未知错误'}`);
+        } else {
+          // pending / running — 继续轮询，更新提示文字
+          const pct = j.progress > 0 ? `（${j.progress}%）` : '';
+          setStatusText(`低质过滤执行中${pct}，请稍候…`);
+          pollTimer.current = setTimeout(tick, 2000);
+        }
+      } catch {
+        // 请求出错时继续轮询，不中断
+        pollTimer.current = setTimeout(tick, 2000);
+      }
+    };
+    tick();
+  };
+
   return (
     <>
       <Typography.Paragraph type="secondary">
         选择质量算子并配置阈值，对输入版本 {renderInput(input)}{' '}
         执行过滤加工：得分不达标的数据将被删除，结果存储为该数据集的新版本（原版本不变）。
       </Typography.Paragraph>
+
+      {running && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={statusText || '低质过滤执行中，请稍候…'}
+          description="任务完成后将自动刷新任务列表并跳转到产出数据集。"
+        />
+      )}
+
       <ProForm<{
         operators: string[];
         params?: Record<string, Record<string, unknown>>;
@@ -249,13 +317,15 @@ const FilterTab: React.FC<{
         submitter={{
           searchConfig: { submitText: '删除低质数据（产出新版本）' },
           resetButtonProps: { style: { display: 'none' } },
+          submitButtonProps: { loading: running, disabled: running },
         }}
         onFinish={async (values) => {
           const operators = (values.operators ?? []).map((name) => ({
             name,
             params: values.params?.[name],
           }));
-          const hide = message.loading('低质过滤执行中（dj-process）…', 0);
+          setRunning(true);
+          setStatusText('正在提交加工任务…');
           try {
             const res = await createJob({
               name: `${job.name} - 低质过滤`,
@@ -263,21 +333,51 @@ const FilterTab: React.FC<{
               datasetVersionId: input.versionId,
               operators,
             });
-            hide();
-            if (res?.data?.state === 'success') {
-              const o = res.data.output;
-              message.success(
-                `已删除低质数据，产出 ${o?.datasetName} ${o?.versionLabel ?? `v${o?.versionNo}`}（${o?.rows} 行）`,
-              );
-              return true;
+            const created = res?.data;
+            if (!created) {
+              setRunning(false);
+              setStatusText('');
+              message.error('任务创建失败，请重试');
+              return false;
             }
-            message.error(`执行失败：${res?.data?.error ?? '未知错误'}`);
-            return false;
+            // createJob 是同步执行（后端 await run_process_job），
+            // 返回时任务已到终态；但为保持 UX 一致性仍走轮询分支。
+            if (
+              created.state === 'success' ||
+              created.state === 'failed' ||
+              created.state === 'cancelled'
+            ) {
+              // 任务已完成，直接处理结果
+              setRunning(false);
+              setStatusText('');
+              if (created.state === 'success') {
+                const out = created.output as DataPlatform.IngestOutput | undefined;
+                if (out) {
+                  message.success(
+                    `低质过滤完成，产出 ${out.datasetName} ${out.versionLabel ?? `v${out.versionNo}`}（${out.rows ?? '-'} 行）`,
+                  );
+                  onSuccess(out);
+                } else {
+                  message.success('低质过滤完成');
+                  onSuccess({} as DataPlatform.IngestOutput);
+                }
+              } else {
+                message.error(`执行失败：${created.error ?? '未知错误'}`);
+              }
+            } else {
+              // pending/running — 开始轮询
+              setStatusText('低质过滤执行中，请稍候…');
+              pollUntilDone(
+                created.id,
+                created.output as DataPlatform.IngestOutput | undefined,
+              );
+            }
           } catch {
-            hide();
+            setRunning(false);
+            setStatusText('');
             message.error('请求失败，请重试');
-            return false;
           }
+          return false; // 阻止 ProForm 自动 reset（我们手动控制）
         }}
       >
         <ProFormSelect
@@ -313,7 +413,6 @@ const Quality: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
-  // 质量算子目录(name 以 _filter 结尾)
   const [qualityOps, setQualityOps] = useState<DataPlatform.Operator[]>([]);
   const opMap = useMemo(
     () => Object.fromEntries(qualityOps.map((o) => [o.name, o])),
@@ -331,6 +430,18 @@ const Quality: React.FC = () => {
         message.error('算子目录加载失败，请刷新页面重试');
       });
   }, []);
+
+  /** FilterTab 成功回调：刷新任务列表 + 跳转到产出版本所在数据集页 */
+  const handleFilterSuccess = (output: DataPlatform.IngestOutput) => {
+    // 刷新质量任务列表
+    actionRef.current?.reload();
+    // 跳转到数据集仓库并带上 datasetId，让用户直接看到新版本
+    if (output.datasetId) {
+      history.push(`/datasets/list?highlight=${output.datasetId}`);
+    } else {
+      history.push('/datasets/list');
+    }
+  };
 
   const columns: ProColumns<DataPlatform.Job>[] = [
     {
@@ -469,6 +580,7 @@ const Quality: React.FC = () => {
                         input={currentJob.input}
                         qualityOps={qualityOps}
                         opMap={opMap}
+                        onSuccess={handleFilterSuccess}
                       />
                     ),
                   },

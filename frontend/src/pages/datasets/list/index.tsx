@@ -10,7 +10,7 @@ import {
   ProFormTextArea,
   ProTable,
 } from '@ant-design/pro-components';
-import { Access, useAccess } from '@umijs/max';
+import { Access, useAccess, useLocation, history } from '@umijs/max';
 import type { TableColumnsType } from 'antd';
 import {
   Button,
@@ -124,6 +124,19 @@ const DatasetsList: React.FC = () => {
   useEffect(() => {
     loadCategories();
   }, [loadCategories]);
+
+  // 从 URL ?highlight=<datasetId> 自动打开对应数据集详情抽屉（来自低质过滤跳转）
+  const location = useLocation();
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const highlightId = params.get('highlight');
+    if (!highlightId) return;
+    // 清除 URL 中的 highlight 参数，避免刷新后重复触发
+    history.replace('/datasets/list');
+    openDetail(highlightId);
+    // openDetail 在 mount 后稳定，不需要列为依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const selectedRowKeys = selectedRows.map((r) => r.id);
   // 外部托管数据集不可删除(后端 403 兜底)——批量删除前先拦截给提示
