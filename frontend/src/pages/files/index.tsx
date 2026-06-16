@@ -14,9 +14,10 @@ import {
   Empty,
   Form,
   Input,
-  message,
   Modal,
+  message,
   Popconfirm,
+  Progress,
   Select,
   Space,
   Spin,
@@ -25,11 +26,13 @@ import {
 } from 'antd';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ACCESS_TYPES, getExtension } from '@/pages/ingest/access/constants';
 import {
   createFolder,
   deleteFileObject,
   deleteFolder,
   getFileDownloadUrl,
+  hostPlatformFiles,
   listFiles,
   listPlatformBuckets,
   previewFile,
@@ -82,6 +85,8 @@ const FilesPage: React.FC = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [preview, setPreview] = useState<PreviewState>();
   const [previewName, setPreviewName] = useState<string>();
+  // 上传进度（null = 空闲；0~100 = 上传中），用于大文件可见反馈
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
 
   const loadBuckets = useCallback(async () => {
     try {
@@ -125,7 +130,11 @@ const FilesPage: React.FC = () => {
       });
       setPreview(res.data);
     } catch {
-      setPreview({ columns: [], data: [], message: '预览失败，文件可能无法解析' });
+      setPreview({
+        columns: [],
+        data: [],
+        message: '预览失败，文件可能无法解析',
+      });
     } finally {
       setPreviewLoading(false);
     }
@@ -157,7 +166,11 @@ const FilesPage: React.FC = () => {
   const handleCreateFolder = async () => {
     const values = await folderForm.validateFields();
     try {
-      await createFolder({ bucket: bucket as string, prefix, name: values.name });
+      await createFolder({
+        bucket: bucket as string,
+        prefix,
+        name: values.name,
+      });
       messageApi.success('已创建文件夹');
       setFolderOpen(false);
       folderForm.resetFields();
@@ -167,23 +180,55 @@ const FilesPage: React.FC = () => {
     }
   };
 
+  // 零拷贝接入:把平台 MinIO 对象登记为受管数据集(不复制文件），打通文件管理→数据集→数据加工。
+  // dataType 仅对命中数据接入分栏的扩展名赋值;其余可接入格式(如 xlsx/doc/html)交后端
+  // INGESTABLE_FORMATS 把关——真不支持时透出后端文案,不在前端按栏目白名单误拒。
+  const handleHost = async (entry: DataPlatform.FileEntry) => {
+    const ext = getExtension(entry.name);
+    const t = ACCESS_TYPES.find((a) => a.extensions.includes(ext));
+    try {
+      await hostPlatformFiles({
+        bucket: bucket as string,
+        keys: [entry.key],
+        dataType: t?.key,
+      });
+      messageApi.success(
+        t
+          ? `已接入为数据集（零拷贝），可在「数据接入 · ${t.label}」查看`
+          : '已接入为数据集（零拷贝），可在数据集列表 / 数据加工中使用',
+      );
+    } catch (err) {
+      messageApi.error(pickErrMsg(err, '接入为数据集失败，请重试'));
+    }
+  };
+
   // 上传到当前 bucket/prefix（仅 admin）
   const customRequest: NonNullable<UploadProps['customRequest']> = async (
     options,
   ) => {
-    const { file, onSuccess, onError } = options;
+    const { file, onSuccess, onError, onProgress } = options;
     const formData = new FormData();
     formData.append('bucket', bucket as string);
     formData.append('prefix', prefix);
     formData.append('file', file as File);
+    setUploadPercent(0);
     try {
-      const res = await uploadPlatformFile(formData);
+      const res = await uploadPlatformFile(formData, {
+        onUploadProgress: (e: ProgressEvent) => {
+          if (!e.total) return;
+          const percent = Math.round((e.loaded / e.total) * 100);
+          setUploadPercent(percent);
+          onProgress?.({ percent });
+        },
+      });
       onSuccess?.(res);
       messageApi.success(`${(file as File).name} 上传成功`);
       actionRef.current?.reload();
     } catch (err) {
       onError?.(err as Error);
       messageApi.error(`${(file as File).name} 上传失败`);
+    } finally {
+      setUploadPercent(null);
     }
   };
 
@@ -221,7 +266,8 @@ const FilesPage: React.FC = () => {
     {
       title: '大小',
       width: 120,
-      render: (_, row) => (row.kind === 'folder' ? '-' : fmtSize(row.entry.size)),
+      render: (_, row) =>
+        row.kind === 'folder' ? '-' : fmtSize(row.entry.size),
     },
     {
       title: '修改时间',
@@ -239,10 +285,7 @@ const FilesPage: React.FC = () => {
       render: (_, row) =>
         row.kind === 'folder'
           ? [
-              <a
-                key="enter"
-                onClick={() => goPrefix(`${prefix}${row.name}/`)}
-              >
+              <a key="enter" onClick={() => goPrefix(`${prefix}${row.name}/`)}>
                 进入
               </a>,
               access.canAdmin ? (
@@ -269,6 +312,17 @@ const FilesPage: React.FC = () => {
               </a>,
               access.canAdmin ? (
                 <Popconfirm
+                  key="host"
+                  title="接入为数据集？"
+                  description="零拷贝登记为受管数据集（不复制文件），随后可在数据接入页查看并用于数据加工。"
+                  okText="接入"
+                  onConfirm={() => handleHost(row.entry)}
+                >
+                  <a>接入数据集</a>
+                </Popconfirm>
+              ) : null,
+              access.canAdmin ? (
+                <Popconfirm
                   key="delete"
                   title="确认删除该文件？"
                   description="被托管数据集引用的对象将被拦截。"
@@ -276,7 +330,9 @@ const FilesPage: React.FC = () => {
                   okButtonProps={{ danger: true }}
                   onConfirm={() => handleDeleteObject(row.entry.key)}
                 >
-                  <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+                  <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>
+                    删除
+                  </a>
                 </Popconfirm>
               ) : null,
             ],
@@ -312,22 +368,38 @@ const FilesPage: React.FC = () => {
       <ProTable<Row>
         headerTitle="文件列表"
         actionRef={actionRef}
-        rowKey={(row) => (row.kind === 'folder' ? `d:${row.name}` : `f:${row.entry.key}`)}
+        rowKey={(row) =>
+          row.kind === 'folder' ? `d:${row.name}` : `f:${row.entry.key}`
+        }
         search={false}
         pagination={false}
         options={{ reload: true, setting: false, density: false }}
         params={{ bucket, prefix }}
         toolBarRender={() => [
           <Access key="upload" accessible={!!access.canAdmin}>
-            <Upload
-              showUploadList={false}
-              customRequest={customRequest}
-              disabled={!bucket}
-            >
-              <Button icon={<UploadOutlined />} disabled={!bucket}>
-                上传
-              </Button>
-            </Upload>
+            <Space>
+              <Upload
+                showUploadList={false}
+                customRequest={customRequest}
+                disabled={!bucket || uploadPercent !== null}
+              >
+                <Button
+                  icon={<UploadOutlined />}
+                  disabled={!bucket || uploadPercent !== null}
+                  loading={uploadPercent !== null}
+                >
+                  上传
+                </Button>
+              </Upload>
+              {uploadPercent !== null && (
+                <Progress
+                  percent={uploadPercent}
+                  size="small"
+                  style={{ width: 140 }}
+                  status={uploadPercent < 100 ? 'active' : 'success'}
+                />
+              )}
+            </Space>
           </Access>,
           <Access key="new-folder" accessible={!!access.canAdmin}>
             <Button
