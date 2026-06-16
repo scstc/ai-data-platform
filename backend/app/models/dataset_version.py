@@ -48,6 +48,22 @@ class DatasetVersion(Base):
     produced_by_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 版本说明 / changelog
     note: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 安全扫描结论(#4 发布门,见 docs/plan/11):unscanned | passed | failed。
+    # 内容审核任务完成后自动回写;auto 结论可被有权限者人工覆盖。
+    scan_verdict: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unscanned"
+    )
+    # 结论来源:auto(按命中自动判) | manual(人工接受风险/驳回);未扫描为空
+    verdict_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 人工覆盖理由(接受风险 / 驳回时填)
+    verdict_note: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 发布状态(湖→仓边界,#13/#15/#19 之前的门):draft | published | unpublished。
+    # draft→published 需 scan_verdict=passed;算法侧只消费 published 版本。
+    publish_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="draft"
+    )
+    # 发布时间(可追溯);未发布为空
+    published_at: Mapped[datetime | None] = mapped_column(nullable=True)
     # 版本不可变,仅记录创建时间(无 updated_at)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False

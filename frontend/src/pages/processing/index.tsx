@@ -6,9 +6,9 @@ import {
 } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Button, Drawer, Tag, Typography } from 'antd';
-import dayjs from 'dayjs';
 import { useRef, useState } from 'react';
 import { listJobs } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 
 const STATE_META: Record<
   DataPlatform.Job['state'],
@@ -22,7 +22,7 @@ const STATE_META: Record<
 
 const renderOutput = (o?: DataPlatform.IngestOutput) =>
   o
-    ? `${o.datasetName}（${o.rows ?? '-'} 行 · ${o.datasetId} v${o.versionNo}）`
+    ? `${o.datasetName}（${o.rows ?? '-'} 行 · ${o.datasetId} ${o.versionLabel ?? `v${o.versionNo}`}）`
     : '-';
 
 const Processing: React.FC = () => {
@@ -67,7 +67,7 @@ const Processing: React.FC = () => {
     {
       title: '创建时间',
       dataIndex: 'createdAt',
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      render: (_, r) => formatDateTime(r.createdAt),
     },
   ];
 
@@ -131,7 +131,7 @@ const Processing: React.FC = () => {
                 {
                   title: '创建时间',
                   dataIndex: 'createdAt',
-                  valueType: 'dateTime',
+                  render: (_, r) => formatDateTime(r.createdAt),
                 },
                 {
                   title: '错误',

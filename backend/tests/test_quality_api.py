@@ -301,12 +301,20 @@ async def test_create_quality_job_success_and_type_filter(
     assert data["state"] == "success"
     assert data["progress"] == 100
     assert data["output"] is None  # 质量任务不产新版本
-    assert data["input"] == {
+    assert {
+        "datasetId": data["input"]["datasetId"],
+        "datasetName": data["input"]["datasetName"],
+        "versionId": data["input"]["versionId"],
+        "versionNo": data["input"]["versionNo"],
+    } == {
         "datasetId": DATASET_ID,
         "datasetName": "质量测试集",
         "versionId": VERSION_ID,
         "versionNo": 1,
     }
+    # 输入概要带版本展示标签(v{日期} (#n));日期随运行日变化,只校验形态
+    assert data["input"]["versionLabel"].startswith("v")
+    assert data["input"]["versionLabel"].endswith("(#1)")
     job_id = data["id"]
 
     # 版本 stats_uri 已回写 → stats 端点可用

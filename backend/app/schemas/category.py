@@ -5,9 +5,7 @@ createdAt / usageCount 走 alias 驼峰,与全仓 by_alias 约定一致。
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, UtcDateTime
 
 
 class CategoryCreate(CamelModel):
@@ -35,5 +33,5 @@ class CategoryRead(CamelModel):
     name: str
     note: str | None = None
     creator: str
-    created_at: datetime
+    created_at: UtcDateTime
     usage_count: int = 0

@@ -40,6 +40,8 @@ const Editor: React.FC = () => {
   const [name, setName] = useState('');
   const [datasetId, setDatasetId] = useState<string>();
   const [versionId, setVersionId] = useState<string>();
+  const [outputMode, setOutputMode] = useState<'version' | 'new_dataset'>('version');
+  const [outputName, setOutputName] = useState('');
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
   const [opMap, setOpMap] = useState<Record<string, DataPlatform.CatalogOperator>>({});
@@ -74,6 +76,15 @@ const Editor: React.FC = () => {
   const activeOp = activeStep ? opMap[activeStep.name] : undefined;
 
   const yamlText = useMemo(() => stepsToYaml(steps), [steps]);
+
+  const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
+  // 写回模式产物落到原数据集的下一个版本号(供提示用,真实序号以后端为准)
+  const nextVersionNo = versions.length
+    ? Math.max(...versions.map((v) => v.versionNo)) + 1
+    : 1;
+  // 产物版本展示标签的日期前缀(与后端 format_version_label 同款:不补零)
+  const now = new Date();
+  const todayLabel = `v${now.getFullYear()}.${now.getMonth() + 1}.${now.getDate()}`;
 
   const onGenerate = () => {
     let goal = '';
@@ -150,12 +161,18 @@ const Editor: React.FC = () => {
       message.warning('至少添加一个算子');
       return;
     }
+    if (outputMode === 'new_dataset' && !outputName.trim()) {
+      message.warning('请填写新数据集名称');
+      return;
+    }
     setSubmitting(true);
     try {
       await createJob({
         name,
         datasetVersionId: versionId,
         operators: steps,
+        outputMode,
+        outputDatasetName: outputMode === 'new_dataset' ? outputName.trim() : undefined,
       });
       message.success('加工任务已创建');
       clear();
@@ -180,37 +197,74 @@ const Editor: React.FC = () => {
         </Button>,
       ]}
     >
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Input
-          placeholder="任务名"
-          style={{ width: 220 }}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <Select
-          placeholder="选择数据集"
-          style={{ width: 220 }}
-          value={datasetId}
-          onChange={(v) => setDatasetId(v)}
-          options={datasets.map((d) => ({ label: d.name, value: d.id }))}
-        />
-        <Select
-          placeholder="选择版本"
-          style={{ width: 220 }}
-          value={versionId}
-          onChange={setVersionId}
-          options={versions.map((v) => {
-            const isBinary = isBinaryFormat(v.format);
-            return {
-              label: isBinary
-                ? `v${v.versionNo}（${v.format}·二进制不可加工）`
-                : `v${v.versionNo}（${v.format}）`,
-              value: v.id,
-              disabled: isBinary,
-            };
-          })}
-        />
-      </Space>
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Space orientation="vertical" size={12} style={{ width: '100%' }}>
+          <Input
+            placeholder="任务名"
+            style={{ width: 280 }}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <Space wrap align="center" size={8}>
+            <Text strong style={{ color: '#1677ff' }}>
+              源数据
+            </Text>
+            <Select
+              placeholder="选择数据集"
+              style={{ width: 200 }}
+              value={datasetId}
+              onChange={(v) => setDatasetId(v)}
+              options={datasets.map((d) => ({ label: d.name, value: d.id }))}
+            />
+            <Select
+              placeholder="选择版本"
+              style={{ width: 240 }}
+              value={versionId}
+              onChange={setVersionId}
+              options={versions.map((v) => {
+                const isBinary = isBinaryFormat(v.format);
+                return {
+                  label: isBinary
+                    ? `${v.versionLabel}（${v.format}·二进制不可加工）`
+                    : `${v.versionLabel}（${v.format}）`,
+                  value: v.id,
+                  disabled: isBinary,
+                };
+              })}
+            />
+            <Text type="secondary" style={{ fontSize: 18, padding: '0 4px' }}>
+              →
+            </Text>
+            <Text strong style={{ color: '#52c41a' }}>
+              产物
+            </Text>
+            <Select
+              style={{ width: 200 }}
+              value={outputMode}
+              onChange={setOutputMode}
+              options={[
+                { label: '写回原数据集(新版本)', value: 'version' },
+                { label: '另存为新数据集', value: 'new_dataset' },
+              ]}
+            />
+            {outputMode === 'new_dataset' && (
+              <Input
+                placeholder="新数据集名称"
+                style={{ width: 200 }}
+                value={outputName}
+                onChange={(e) => setOutputName(e.target.value)}
+              />
+            )}
+          </Space>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {outputMode === 'new_dataset'
+              ? `加工产物将另存为新数据集「${outputName.trim() || '（未命名）'}」,版本 ${todayLabel} (#1)`
+              : selectedDatasetName
+                ? `加工产物将写回「${selectedDatasetName}」,生成新版本 ${todayLabel} (#${nextVersionNo})`
+                : '加工产物将作为所选数据集的新版本'}
+          </Text>
+        </Space>
+      </Card>
 
       <Row gutter={16}>
         <Col span={7}>

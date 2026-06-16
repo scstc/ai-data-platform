@@ -22,7 +22,6 @@ import {
   Timeline,
   Typography,
 } from 'antd';
-import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
 import {
@@ -38,6 +37,7 @@ import {
   stopIngestTask,
   updateIngestTask,
 } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 
 /** 状态 → 中文标签与 Tag 颜色 */
 const STATUS_META: Record<
@@ -224,9 +224,7 @@ const IngestTasksPage: React.FC = () => {
                       label="选择表"
                       mode="multiple"
                       placeholder="选择一张或多张表（每张表各产一个数据集）"
-                      rules={[
-                        { required: true, message: '请至少选择一张表' },
-                      ]}
+                      rules={[{ required: true, message: '请至少选择一张表' }]}
                       params={{ datasourceId }}
                       request={async () => {
                         if (!datasourceId) return [];
@@ -314,10 +312,7 @@ const IngestTasksPage: React.FC = () => {
       title: '最近运行',
       dataIndex: 'lastRunAt',
       search: false,
-      render: (_, record) =>
-        record.lastRunAt
-          ? dayjs(record.lastRunAt).format('YYYY-MM-DD HH:mm:ss')
-          : '-',
+      render: (_, record) => formatDateTime(record.lastRunAt),
     },
     {
       title: '运行次数',
@@ -541,15 +536,12 @@ const IngestTasksPage: React.FC = () => {
                 {
                   title: '创建时间',
                   dataIndex: 'createdAt',
-                  valueType: 'dateTime',
+                  render: (_, record) => formatDateTime(record.createdAt),
                 },
                 {
                   title: '最近运行',
                   dataIndex: 'lastRunAt',
-                  render: (_, record) =>
-                    record.lastRunAt
-                      ? dayjs(record.lastRunAt).format('YYYY-MM-DD HH:mm:ss')
-                      : '-',
+                  render: (_, record) => formatDateTime(record.lastRunAt),
                 },
                 {
                   title: '产物数据集',
@@ -560,7 +552,7 @@ const IngestTasksPage: React.FC = () => {
                         items={record.output.map((o) => ({
                           key: o.versionId,
                           color: 'green',
-                          children: `${o.datasetName}（${o.rows ?? '-'} 行 · ${o.datasetId} v${o.versionNo}）`,
+                          children: `${o.datasetName}（${o.rows ?? '-'} 行 · ${o.datasetId} ${o.versionLabel ?? `v${o.versionNo}`}）`,
                         }))}
                       />
                     ) : (
@@ -582,7 +574,7 @@ const IngestTasksPage: React.FC = () => {
                   {
                     title: '开始时间',
                     dataIndex: 'startedAt',
-                    render: (v) => dayjs(v).format('YYYY-MM-DD HH:mm:ss'),
+                    render: (v) => formatDateTime(v),
                   },
                   {
                     title: '状态',

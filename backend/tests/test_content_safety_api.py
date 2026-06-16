@@ -170,6 +170,10 @@ async def test_review_job_full_flow(
         assert v.origin == "review"
         assert v.produced_by_job_id == job_id
         assert v.version_no == 2
+        # 自动安全判据:3 处命中 + 全量扫描 → failed(auto)
+        assert v.scan_verdict == "failed"
+        assert v.verdict_source == "auto"
+        assert v.publish_status == "draft"
         tagged_lines = [
             json.loads(ln)
             for ln in Path(v.storage_uri).read_text(encoding="utf-8").splitlines()
@@ -223,3 +227,49 @@ async def test_review_job_sample_limit(
     assert rr["scannedRows"] == 2
     assert rr["sampleLimitApplied"] is True
     assert rr["flaggedRows"] == 2
+
+
+@pytest.mark.asyncio
+async def test_review_verdict_passed_on_clean_full_scan(
+    client: AsyncClient, session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """全量扫描 + 零命中 → 打标版本自动判 passed(可发布)。"""
+    rows = [{"text": "今天天气真好,适合散步"} for _ in range(3)]
+    await _seed_version(session_factory, tmp_path, rows)
+
+    resp = await client.post(
+        "/api/v1/content-safety/jobs",
+        json={
+            "datasetVersionId": VERSION_ID,
+            "config": {"useLlm": False, "usePii": True, "useFlaggedWords": True},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    tagged_id = resp.json()["data"]["output"]["versionId"]
+    async with session_factory() as session:
+        v = await session.get(DatasetVersion, tagged_id)
+        assert v.scan_verdict == "passed"
+        assert v.verdict_source == "auto"
+
+
+@pytest.mark.asyncio
+async def test_review_verdict_unscanned_on_clean_partial_scan(
+    client: AsyncClient, session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """零命中但只扫了样本前缀 → 自动判 unscanned,不允许据此发布(发布门防漏)。"""
+    rows = [{"text": "今天天气真好,适合散步"} for _ in range(5)]
+    await _seed_version(session_factory, tmp_path, rows)
+
+    resp = await client.post(
+        "/api/v1/content-safety/jobs",
+        json={
+            "datasetVersionId": VERSION_ID,
+            "config": {"useLlm": False, "useFlaggedWords": True, "sampleLimit": 2},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    tagged_id = resp.json()["data"]["output"]["versionId"]
+    async with session_factory() as session:
+        v = await session.get(DatasetVersion, tagged_id)
+        # 部分扫描即便零命中也不能 certify 整版安全
+        assert v.scan_verdict == "unscanned"

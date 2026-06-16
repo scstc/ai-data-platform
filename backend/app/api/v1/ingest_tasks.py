@@ -30,7 +30,7 @@ from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
-from app.schemas.common import CamelModel, PageResponse
+from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.ingest_task import (
     IngestRunRead,
     IngestTaskCreate,
@@ -114,6 +114,7 @@ async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
             "datasetName": dataset.name,
             "versionId": version.id,
             "versionNo": version.version_no,
+            "versionLabel": format_version_label(version.version_no, version.created_at),
             "rows": version.rows,
         }
         for version, dataset in rows
@@ -381,6 +382,9 @@ async def list_ingest_runs(
                     "datasetName": dataset.name,
                     "versionId": version.id,
                     "versionNo": version.version_no,
+                    "versionLabel": format_version_label(
+                        version.version_no, version.created_at
+                    ),
                     "rows": version.rows,
                 }
             )

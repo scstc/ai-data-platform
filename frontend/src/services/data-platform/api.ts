@@ -212,6 +212,53 @@ export async function unhostDataset(id: string, options?: { [key: string]: any }
   });
 }
 
+/** 发布版本为可训练（仅 admin；未过安全扫描返回 409 + message）（#4 发布门） */
+export async function publishVersion(
+  versionId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetVersion; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/publish`,
+    {
+      method: 'POST',
+      // skipErrorHandler:交由调用方 catch 展示后端「未过安全扫描」message
+      skipErrorHandler: true,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 下架已发布版本（仅 admin）（#4 发布门） */
+export async function unpublishVersion(
+  versionId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetVersion; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/unpublish`,
+    {
+      method: 'POST',
+      ...(options || {}),
+    },
+  );
+}
+
+/** 人工覆盖安全扫描结论（仅 admin；接受风险=passed / 驳回=failed）（#4 发布门） */
+export async function setVersionVerdict(
+  versionId: string,
+  body: { verdict: 'passed' | 'failed'; note?: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetVersion; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/verdict`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
 /** 获取采集任务列表 GET /api/v1/ingest-tasks */
 export async function listIngestTasks(
   params?: DataPlatform.IngestTaskListParams,

@@ -75,6 +75,8 @@ declare namespace DataPlatform {
     datasetName: string;
     versionId: string;
     versionNo: number;
+    /** 版本展示标签:v2026.6.16 (#5)（后端按创建日期+内部版本号生成） */
+    versionLabel?: string;
     rows?: number;
   };
 
@@ -235,6 +237,10 @@ declare namespace DataPlatform {
     type?: string;
     datasetVersionId: string;
     operators: { name: string; params?: Record<string, any> }[];
+    /** 产物去向:version=写回原数据集新版本(默认);new_dataset=另存为新数据集 */
+    outputMode?: 'version' | 'new_dataset';
+    /** outputMode=new_dataset 时的新数据集名称 */
+    outputDatasetName?: string;
   };
 
   /** 新建质量评估任务入参 */
@@ -291,6 +297,8 @@ declare namespace DataPlatform {
     id: string;
     datasetId: string;
     versionNo: number;
+    /** 版本展示标签:v2026.6.16 (#5)（后端计算字段） */
+    versionLabel: string;
     storageUri: string;
     statsUri?: string;
     format: string;
@@ -301,6 +309,15 @@ declare namespace DataPlatform {
     /** 外部 S3 托管(origin=hosted)版本据此找 S3 凭证；受管版本为空 */
     sourceDatasourceId?: string;
     note?: string;
+    /** 安全扫描结论(#4 发布门):unscanned=未扫描 / passed=通过 / failed=未通过 */
+    scanVerdict?: 'unscanned' | 'passed' | 'failed';
+    /** 结论来源:auto=自动判定 / manual=人工覆盖 */
+    verdictSource?: 'auto' | 'manual';
+    /** 人工覆盖理由 */
+    verdictNote?: string;
+    /** 发布状态:draft=草稿 / published=已发布 / unpublished=已下架 */
+    publishStatus?: 'draft' | 'published' | 'unpublished';
+    publishedAt?: string;
     createdAt: string;
   };
 

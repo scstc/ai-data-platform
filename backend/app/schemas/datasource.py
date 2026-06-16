@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, UtcDateTime
 
 DataSourceType = Literal["s3", "hdfs", "database", "api"]
 DbKind = Literal[
@@ -36,8 +35,8 @@ class DataSourceRead(CamelModel):
     category_id: str | None = None
     category_name: str | None = None
     creator: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
 
 class DataSourceCreate(CamelModel):

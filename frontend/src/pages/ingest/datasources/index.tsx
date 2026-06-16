@@ -5,7 +5,12 @@ import { Access, useAccess } from '@umijs/max';
 import { Badge, Button, message, Popconfirm, Tag } from 'antd';
 import { type FC, useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
-import { deleteDataSource, listCategories, listDataSources } from '@/services/data-platform';
+import {
+  deleteDataSource,
+  listCategories,
+  listDataSources,
+} from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
 import DataSourceFormDrawer from './components/DataSourceFormDrawer';
 
@@ -106,7 +111,7 @@ const DataSourcesPage: FC = () => {
     {
       title: '创建时间',
       dataIndex: 'createdAt',
-      valueType: 'dateTime',
+      render: (_, r) => formatDateTime(r.createdAt),
       search: false,
       width: 180,
     },

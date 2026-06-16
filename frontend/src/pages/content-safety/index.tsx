@@ -20,8 +20,8 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createReviewJob,
   getDataset,
@@ -31,7 +31,7 @@ import {
   listReviewFindings,
   listReviewJobs,
 } from '@/services/data-platform';
-import { isBinaryFormat } from '@/pages/ingest/access/constants';
+import { formatDateTime } from '@/utils/format';
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -311,7 +311,9 @@ const ContentSafety: React.FC = () => {
   };
 
   // 轮询单 job 状态(2s),终态停止并载报告;复用 getJob(同 ingest 推进式轮询思路)
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const pollJob = useCallback(
     (jobId: string) => {
       const tick = async () => {
@@ -371,7 +373,7 @@ const ContentSafety: React.FC = () => {
       dataIndex: 'input',
       render: (_, r) =>
         r.input
-          ? `${r.input.datasetName}（${r.input.datasetId} v${r.input.versionNo}）`
+          ? `${r.input.datasetName}（${r.input.datasetId} ${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
           : '-',
     },
     {
@@ -393,7 +395,7 @@ const ContentSafety: React.FC = () => {
       title: '创建时间',
       dataIndex: 'createdAt',
       width: 170,
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      render: (_, r) => formatDateTime(r.createdAt),
     },
   ];
 
@@ -428,8 +430,8 @@ const ContentSafety: React.FC = () => {
               const isBinary = isBinaryFormat(v.format);
               return {
                 label: isBinary
-                  ? `v${v.versionNo}（${v.format}·二进制不可审核）`
-                  : `v${v.versionNo}（${v.format}）`,
+                  ? `${v.versionLabel}（${v.format}·二进制不可审核）`
+                  : `${v.versionLabel}（${v.format}）`,
                 value: v.id,
                 disabled: isBinary,
               };

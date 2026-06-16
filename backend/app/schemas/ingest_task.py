@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, UtcDateTime
 
 IngestTaskStatus = Literal["pending", "running", "success", "failed"]
 
@@ -44,8 +43,8 @@ class IngestTaskRead(CamelModel):
     # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
     category_id: str | None = None
     category_name: str | None = None
-    created_at: datetime
-    last_run_at: datetime | None = None
+    created_at: UtcDateTime
+    last_run_at: UtcDateTime | None = None
     logs: list[str] | None = None
     # 产物概要列表(仅详情填充):每项含 datasetId/datasetName/versionId/versionNo/rows
     output: list[dict[str, Any]] | None = None
@@ -62,8 +61,8 @@ class IngestRunRead(CamelModel):
     dataset_count: int
     outputs: list[dict[str, Any]] | None = None
     error: str | None = None
-    started_at: datetime
-    finished_at: datetime | None = None
+    started_at: UtcDateTime
+    finished_at: UtcDateTime | None = None
 
 
 class IngestTaskCreate(CamelModel):

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Literal
 
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, UtcDateTime
 
 
 class UploadRecordRead(CamelModel):
@@ -16,4 +15,4 @@ class UploadRecordRead(CamelModel):
     size: int
     format: str
     status: Literal["done", "error"]
-    uploaded_at: datetime
+    uploaded_at: UtcDateTime

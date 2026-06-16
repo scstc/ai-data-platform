@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, UtcDateTime
 
 
 class CustomRegexSpec(CamelModel):
@@ -63,4 +61,4 @@ class ReviewFindingRead(CamelModel):
     source: str
     detail: str | None = None
     snippet: str | None = None
-    created_at: datetime
+    created_at: UtcDateTime

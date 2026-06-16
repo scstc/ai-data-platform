@@ -27,6 +27,7 @@ import {
   listDatasets,
   previewDatasetVersion,
 } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 import { ACCESS_TYPES, acceptOf } from './constants';
 import MediaMembersDrawer from './MediaMembersDrawer';
 import UploadModal from './UploadModal';
@@ -169,7 +170,7 @@ const AccessPage: React.FC = () => {
       title: '创建时间',
       dataIndex: 'createdAt',
       width: 180,
-      valueType: 'dateTime',
+      render: (_, r) => formatDateTime(r.createdAt),
     },
     {
       title: '操作',

@@ -24,7 +24,6 @@ import {
   Table,
   Upload,
 } from 'antd';
-import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ACCESS_TYPES, getExtension } from '@/pages/ingest/access/constants';
 import {
@@ -38,6 +37,7 @@ import {
   previewFile,
   uploadPlatformFile,
 } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 
 /** 字节数转人类可读（与数据集列表保持一致） */
 const fmtSize = (n?: number) => {
@@ -273,9 +273,7 @@ const FilesPage: React.FC = () => {
       title: '修改时间',
       width: 200,
       render: (_, row) =>
-        row.kind === 'folder' || !row.entry.lastModified
-          ? '-'
-          : dayjs(row.entry.lastModified).format('YYYY-MM-DD HH:mm:ss'),
+        row.kind === 'folder' ? '-' : formatDateTime(row.entry.lastModified),
     },
     {
       title: '操作',

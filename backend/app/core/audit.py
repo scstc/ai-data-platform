@@ -48,16 +48,21 @@ _RESOURCE_ALIAS = {
 def _resource_and_target(path: str) -> tuple[str, str | None]:
     """从 /api/v1 之后的路径段推导资源名与目标末段。
 
-    取 /api/v1/ 之后的第一段作资源、最后一段作 target;末段与资源段相同
-    (即无具体 id,如 POST /api/v1/datasets)时 target 记 None。
-    形如 /api/v1/datasets/xx/batch-delete 这类动作后缀也作为 target 末段。
+    取 /api/v1/ 之后的第一段作资源。target 取「被操作对象的 id」:
+    - /resource(无 id,如 POST /api/v1/datasets)→ None
+    - /resource/{id}(如 DELETE /api/v1/datasets/xx)→ id
+    - /resource/{id}/{action}(如 POST /api/v1/dataset-versions/xx/verdict)→ {id}
+      (动作语义已落在 action 字段;target 记 id 才能审计"操作了哪个对象")
     """
     rest = path[len(_API_PREFIX):].strip("/")
     segments = [s for s in rest.split("/") if s]
     if not segments:
         return "api", None
     resource = segments[0]
-    target = segments[-1] if len(segments) > 1 else None
+    if len(segments) >= 3:
+        target = segments[1]
+    else:
+        target = segments[-1] if len(segments) > 1 else None
     return resource, target
 
 

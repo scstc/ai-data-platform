@@ -16,11 +16,15 @@ import {
   Button,
   Drawer,
   Empty,
+  Input,
+  Modal,
   message,
   Popconfirm,
+  Space,
   Spin,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import dayjs from 'dayjs';
@@ -37,9 +41,13 @@ import {
   listDatasets,
   listObjects,
   previewDatasetVersion,
+  publishVersion,
+  setVersionVerdict,
   unhostDataset,
+  unpublishVersion,
   updateDataset,
 } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 
 /** 数据集类型枚举（列表搜索 + 编辑表单复用） */
 const DATA_TYPE_ENUM = {
@@ -68,6 +76,20 @@ const cellText = (v: unknown) =>
       ? JSON.stringify(v)
       : String(v);
 
+/** 安全扫描结论徽章（#4 发布门） */
+const SCAN_VERDICT_TAG: Record<string, { color: string; text: string }> = {
+  unscanned: { color: 'default', text: '未扫描' },
+  passed: { color: 'green', text: '通过' },
+  failed: { color: 'red', text: '未通过' },
+};
+
+/** 发布状态徽章（#4 发布门） */
+const PUBLISH_STATUS_TAG: Record<string, { color: string; text: string }> = {
+  draft: { color: 'default', text: '草稿' },
+  published: { color: 'green', text: '已发布' },
+  unpublished: { color: 'default', text: '已下架' },
+};
+
 const DatasetsList: React.FC = () => {
   const access = useAccess();
   const actionRef = useRef<ActionType | null>(null);
@@ -80,6 +102,12 @@ const DatasetsList: React.FC = () => {
   const [editOpen, setEditOpen] = useState(false);
   const [hostOpen, setHostOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
+  // 人工覆盖安全扫描结论的弹窗（#4 发布门）
+  const [verdictModal, setVerdictModal] = useState<{
+    versionId: string;
+    verdict: 'passed' | 'failed';
+  }>();
+  const [verdictNote, setVerdictNote] = useState('');
   const [categoryOptions, setCategoryOptions] = useState<
     { label: string; value: string }[]
   >([]);
@@ -154,6 +182,54 @@ const DatasetsList: React.FC = () => {
     }
   };
 
+  // 发布门动作后刷新抽屉里的版本列表（#4）
+  const reloadDetail = async () => {
+    if (!detail) return;
+    const res = await getDataset(detail.id);
+    if (res?.success) setDetail(res.data);
+  };
+
+  const handlePublish = async (versionId: string) => {
+    try {
+      await publishVersion(versionId);
+      message.success('已发布为可训练版本');
+      await reloadDetail();
+    } catch (e: any) {
+      // 未过安全扫描 → 后端 409，skipErrorHandler 透出 message
+      const msg =
+        e?.info?.errorMessage || e?.response?.data?.message || e?.data?.message;
+      message.error(msg || '发布失败');
+    }
+  };
+
+  const handleUnpublish = async (versionId: string) => {
+    try {
+      await unpublishVersion(versionId);
+      message.success('已下架');
+      await reloadDetail();
+    } catch {
+      message.error('下架失败，请重试');
+    }
+  };
+
+  const submitVerdict = async () => {
+    if (!verdictModal) return;
+    try {
+      await setVersionVerdict(verdictModal.versionId, {
+        verdict: verdictModal.verdict,
+        note: verdictNote.trim() || undefined,
+      });
+      message.success(
+        verdictModal.verdict === 'passed' ? '已人工标为通过' : '已驳回',
+      );
+      setVerdictModal(undefined);
+      setVerdictNote('');
+      await reloadDetail();
+    } catch {
+      message.error('操作失败，请重试');
+    }
+  };
+
   const handleDelete = async (id: string) => {
     const hide = message.loading('正在删除…', 0);
     try {
@@ -209,7 +285,7 @@ const DatasetsList: React.FC = () => {
       title: '创建时间',
       dataIndex: 'createdAt',
       search: false,
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      render: (_, r) => formatDateTime(r.createdAt),
     },
     {
       title: '创建时间',
@@ -260,7 +336,7 @@ const DatasetsList: React.FC = () => {
     {
       title: '版本',
       dataIndex: 'versionNo',
-      render: (_, v) => `v${v.versionNo}`,
+      render: (_, v) => v.versionLabel ?? `v${v.versionNo}`,
     },
     { title: '行数', dataIndex: 'rows', render: (_, v) => v.rows ?? '-' },
     { title: '大小', dataIndex: 'size', render: (_, v) => fmtSize(v.size) },
@@ -272,16 +348,76 @@ const DatasetsList: React.FC = () => {
       ),
     },
     {
+      title: '扫描结论',
+      dataIndex: 'scanVerdict',
+      render: (_, v) => {
+        const t =
+          SCAN_VERDICT_TAG[v.scanVerdict ?? 'unscanned'] ??
+          SCAN_VERDICT_TAG.unscanned;
+        return (
+          <Tooltip title={v.verdictNote}>
+            <Tag color={t.color}>
+              {t.text}
+              {v.verdictSource === 'manual' ? '·人工' : ''}
+            </Tag>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      title: '发布状态',
+      dataIndex: 'publishStatus',
+      render: (_, v) => {
+        const t =
+          PUBLISH_STATUS_TAG[v.publishStatus ?? 'draft'] ??
+          PUBLISH_STATUS_TAG.draft;
+        return <Tag color={t.color}>{t.text}</Tag>;
+      },
+    },
+    {
       title: '操作',
       render: (_, v) => (
-        <a
-          onClick={() => loadPreview(v.id)}
-          style={{
-            fontWeight: activeVersion === v.id ? 600 : undefined,
-          }}
-        >
-          预览
-        </a>
+        <Space size="small" wrap>
+          <a
+            onClick={() => loadPreview(v.id)}
+            style={{ fontWeight: activeVersion === v.id ? 600 : undefined }}
+          >
+            预览
+          </a>
+          {access.canAdmin &&
+            (v.publishStatus === 'published' ? (
+              <Popconfirm
+                title="确认下架该版本？"
+                description="算法工程师将不再能选用它。"
+                onConfirm={() => handleUnpublish(v.id)}
+              >
+                <a>下架</a>
+              </Popconfirm>
+            ) : (
+              <a onClick={() => handlePublish(v.id)}>发布</a>
+            ))}
+          {access.canAdmin && v.scanVerdict !== 'passed' && (
+            <a
+              onClick={() => {
+                setVerdictModal({ versionId: v.id, verdict: 'passed' });
+                setVerdictNote('');
+              }}
+            >
+              接受风险
+            </a>
+          )}
+          {access.canAdmin && v.scanVerdict !== 'failed' && (
+            <a
+              style={{ color: 'var(--ant-color-error, #ff4d4f)' }}
+              onClick={() => {
+                setVerdictModal({ versionId: v.id, verdict: 'failed' });
+                setVerdictNote('');
+              }}
+            >
+              驳回
+            </a>
+          )}
+        </Space>
       ),
     },
   ];
@@ -424,12 +560,12 @@ const DatasetsList: React.FC = () => {
                 {
                   title: '创建时间',
                   dataIndex: 'createdAt',
-                  valueType: 'dateTime',
+                  render: (_, r) => formatDateTime(r.createdAt),
                 },
                 {
                   title: '更新时间',
                   dataIndex: 'updatedAt',
-                  valueType: 'dateTime',
+                  render: (_, r) => formatDateTime(r.updatedAt),
                 },
                 {
                   title: '有效期',
@@ -584,7 +720,8 @@ const DatasetsList: React.FC = () => {
       >
         <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
           将三方 S3 / MinIO 上的对象登记为受管数据集版本（仅存引用，不拷贝）。
-          可对其浏览 / 预览 / 加工 / 质量 / 审核；删除源对象不提供，仅管理员可取消托管。
+          可对其浏览 / 预览 / 加工 / 质量 /
+          审核；删除源对象不提供，仅管理员可取消托管。
         </Typography.Paragraph>
         <ProFormSelect
           name="datasourceId"
@@ -682,6 +819,29 @@ const DatasetsList: React.FC = () => {
           actionRef.current?.reload();
         }}
       />
+
+      <Modal
+        title={
+          verdictModal?.verdict === 'passed' ? '人工接受风险' : '驳回该版本'
+        }
+        open={!!verdictModal}
+        onOk={submitVerdict}
+        onCancel={() => setVerdictModal(undefined)}
+        okText="确认"
+        okButtonProps={{ danger: verdictModal?.verdict === 'failed' }}
+      >
+        <Typography.Paragraph type="secondary">
+          {verdictModal?.verdict === 'passed'
+            ? '将该版本的安全扫描结论人工标为「通过」，即可发布。请填写接受风险的理由（留痕审计）。'
+            : '将该版本的安全扫描结论人工标为「未通过」，已发布的将无法继续被选用。请填写驳回理由。'}
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={3}
+          placeholder="理由（可选，建议填写以便审计追溯）"
+          value={verdictNote}
+          onChange={(e) => setVerdictNote(e.target.value)}
+        />
+      </Modal>
     </PageContainer>
   );
 };

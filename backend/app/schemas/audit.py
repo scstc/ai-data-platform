@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, UtcDateTime
 
 
 class AuditLogRead(CamelModel):
@@ -17,4 +15,4 @@ class AuditLogRead(CamelModel):
     path: str
     target: str | None = None
     status_code: int
-    created_at: datetime
+    created_at: UtcDateTime

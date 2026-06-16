@@ -17,7 +17,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
-from app.schemas.common import CamelModel, PageResponse
+from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.job import JobCreate, JobRead, OperatorSpec
 from app.services import operator_catalog as oc
 from app.services.engine import EngineError, run_preview, run_process_job
@@ -63,6 +63,11 @@ def _new_job_id() -> str:
     return f"job-{secrets.token_hex(3)}"
 
 
+def _new_dataset_id() -> str:
+    """形如 ``dset-`` + 6 位 hex(与 landing/datasets 同款)。"""
+    return f"dset-{secrets.token_hex(3)}"
+
+
 def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
@@ -84,6 +89,7 @@ async def _build_output(session: AsyncSession, job_id: str) -> dict | None:
         "datasetName": dataset.name,
         "versionId": version.id,
         "versionNo": version.version_no,
+        "versionLabel": format_version_label(version.version_no, version.created_at),
         "rows": version.rows,
     }
 
@@ -105,6 +111,7 @@ async def _build_input(session: AsyncSession, job_id: str) -> dict | None:
         "datasetName": dataset.name,
         "versionId": version.id,
         "versionNo": version.version_no,
+        "versionLabel": format_version_label(version.version_no, version.created_at),
     }
 
 
@@ -185,6 +192,27 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
 
+    # 产物去向:默认写回输入数据集(新版本);new_dataset 则另存为新数据集。
+    # 新数据集对象在此构建但不入库,由 run_process_job 在加工成功后落库,
+    # 避免任务失败时残留空数据集。
+    output_dataset = None
+    if body.output_mode == "new_dataset":
+        new_name = (body.output_dataset_name or "").strip()
+        if not new_name:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "另存为新数据集时请填写新数据集名称"},
+            )
+        src_dataset = await session.get(Dataset, input_version.dataset_id)
+        output_dataset = Dataset(
+            id=_new_dataset_id(),
+            name=new_name,
+            data_type=src_dataset.data_type if src_dataset else None,
+            category_id=src_dataset.category_id if src_dataset else None,
+            owner="admin",
+            creator="admin",
+        )
+
     job = Job(
         id=_new_job_id(),
         name=body.name,
@@ -203,6 +231,7 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
             job_id=job.id,
             input_version=input_version,
             operators=[o.model_dump() for o in body.operators],
+            output_dataset=output_dataset,
         )
         job.state = "success"
         job.progress = 100

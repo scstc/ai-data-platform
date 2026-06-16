@@ -23,7 +23,6 @@ import {
   Typography,
   theme,
 } from 'antd';
-import dayjs from 'dayjs';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createJob,
@@ -32,6 +31,7 @@ import {
   listJobs,
   listOperators,
 } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 
 const STATE_META: Record<
   DataPlatform.Job['state'],
@@ -44,7 +44,9 @@ const STATE_META: Record<
 };
 
 const renderInput = (i?: DataPlatform.IngestOutput) =>
-  i ? `${i.datasetName}（${i.datasetId} v${i.versionNo}）` : '-';
+  i
+    ? `${i.datasetName}（${i.datasetId} ${i.versionLabel ?? `v${i.versionNo}`}）`
+    : '-';
 
 const fmtNum = (v: number) =>
   Number.isInteger(v) ? String(v) : Number(v.toFixed(4)).toString();
@@ -264,7 +266,7 @@ const FilterTab: React.FC<{
             if (res?.data?.state === 'success') {
               const o = res.data.output;
               message.success(
-                `已删除低质数据，产出 ${o?.datasetName} v${o?.versionNo}（${o?.rows} 行）`,
+                `已删除低质数据，产出 ${o?.datasetName} ${o?.versionLabel ?? `v${o?.versionNo}`}（${o?.rows} 行）`,
               );
               return true;
             }
@@ -361,7 +363,7 @@ const Quality: React.FC = () => {
     {
       title: '创建时间',
       dataIndex: 'createdAt',
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      render: (_, r) => formatDateTime(r.createdAt),
     },
   ];
 
@@ -424,7 +426,7 @@ const Quality: React.FC = () => {
                 {
                   title: '创建时间',
                   dataIndex: 'createdAt',
-                  valueType: 'dateTime',
+                  render: (_, r) => formatDateTime(r.createdAt),
                 },
                 {
                   title: '错误',

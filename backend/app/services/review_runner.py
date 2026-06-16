@@ -114,6 +114,19 @@ async def run_review(
         encoding="utf-8",
     )
 
+    # 自动安全判据(#4 发布门,设计见 docs/plan/11),通过性口径三态:
+    #   有命中               → failed(任何敏感词/PII/LLM 命中都需处置或脱敏)
+    #   零命中但仅扫了样本前缀 → unscanned(未完整覆盖,不能据此certify整版安全;
+    #                            需调大 sampleLimit 全量重扫,或人工接受风险)
+    #   零命中且全量扫描       → passed
+    # "passed" 必须意味着"整版都扫过且干净",否则尾部 PII 会从发布门漏过。
+    if report.get("flaggedRows", 0) > 0:
+        verdict = "failed"
+    elif report.get("sampleLimitApplied"):
+        verdict = "unscanned"
+    else:
+        verdict = "passed"
+
     tagged_version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
@@ -125,6 +138,8 @@ async def run_review(
         origin="review",
         produced_by_job_id=job.id,
         note=f"内容审核打标(来自 v{version.version_no})",
+        scan_verdict=verdict,
+        verdict_source="auto",
     )
     session.add(tagged_version)
     # 3) 血缘边:被审版本 → review job

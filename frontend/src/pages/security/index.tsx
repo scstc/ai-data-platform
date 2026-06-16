@@ -4,6 +4,7 @@ import { Alert, Tag } from 'antd';
 import dayjs from 'dayjs';
 import type React from 'react';
 import { listAuditLogs } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
 
 /** 写操作方法枚举（搜索下拉；读请求不记审计，故不含 GET） */
 const METHOD_ENUM = {
@@ -28,7 +29,7 @@ const Security: React.FC = () => {
       dataIndex: 'createdAt',
       search: false,
       width: 180,
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      render: (_, r) => formatDateTime(r.createdAt),
     },
     {
       // 仅作搜索条件用的时间区间（不在表格中展示列）

@@ -6,7 +6,7 @@ import io
 import json
 import secrets
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -1315,3 +1315,119 @@ async def unhost_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
     await session.commit()
     _rmdir(dataset_id)
     return JSONResponse(content={"success": True})
+
+
+# ===== 版本级发布门(#4,设计见 docs/plan/11-数据安全扫描发布门设计.md)=====
+# 只卡发布:质量/加工/标注在草稿版本上不受限;draft→published 需 scan_verdict=passed。
+# 三个写端点均 require_admin,经 #5 审计中间件留痕(资源段 dataset-versions)。
+
+_VERDICTS = {"passed", "failed"}
+
+
+class VerdictUpdate(CamelModel):
+    """人工覆盖安全扫描结论入参:verdict ∈ {passed, failed},note 为理由。"""
+
+    verdict: str
+    note: str | None = None
+
+
+def _now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _version_item(version: DatasetVersion) -> dict:
+    return {
+        "data": DatasetVersionRead.model_validate(version).model_dump(
+            by_alias=True, mode="json"
+        ),
+        "success": True,
+    }
+
+
+@router.post(
+    "/dataset-versions/{version_id}/publish",
+    dependencies=[Depends(require_admin)],
+)
+async def publish_version(version_id: str, session: SessionDep) -> JSONResponse:
+    """发布一个版本为"已发布·可训练"(admin)。门:scan_verdict 必须为 passed。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+    if version.scan_verdict != "passed":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": (
+                    "该版本未通过安全扫描,不能发布。请先对其全量跑内容安全扫描;"
+                    "若命中敏感内容,可在数据加工中挂隐私脱敏算子产出新版本后重扫,"
+                    "或由管理员知情后人工接受风险。"
+                ),
+            },
+        )
+    # 幂等:已发布则不改写 published_at(保留首次发布时间,见模型注释"可追溯")
+    if version.publish_status != "published":
+        version.publish_status = "published"
+        version.published_at = _now()
+        await session.commit()
+        await session.refresh(version)
+    return JSONResponse(content=_version_item(version))
+
+
+@router.post(
+    "/dataset-versions/{version_id}/unpublish",
+    dependencies=[Depends(require_admin)],
+)
+async def unpublish_version(version_id: str, session: SessionDep) -> JSONResponse:
+    """下架一个已发布版本(admin):published → unpublished,不删数据。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+    if version.publish_status != "published":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "只能下架已发布的版本"},
+        )
+    version.publish_status = "unpublished"
+    version.published_at = None
+    await session.commit()
+    await session.refresh(version)
+    return JSONResponse(content=_version_item(version))
+
+
+@router.post(
+    "/dataset-versions/{version_id}/verdict",
+    dependencies=[Depends(require_admin)],
+)
+async def override_verdict(
+    version_id: str, body: VerdictUpdate, session: SessionDep
+) -> JSONResponse:
+    """人工覆盖安全扫描结论(admin):接受风险=passed / 驳回=failed,附理由留审计。"""
+    if body.verdict not in _VERDICTS:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "verdict 只能是 passed 或 failed"},
+        )
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+    version.scan_verdict = body.verdict
+    version.verdict_source = "manual"
+    version.verdict_note = body.note
+    # 维持不变量"已发布 ⟹ 通过":驳回一个已发布版本时同时下架它,
+    # 避免出现 published + failed 这种被算法侧消费的脏状态。
+    if body.verdict == "failed" and version.publish_status == "published":
+        version.publish_status = "unpublished"
+        version.published_at = None
+    await session.commit()
+    await session.refresh(version)
+    return JSONResponse(content=_version_item(version))

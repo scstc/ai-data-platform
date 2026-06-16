@@ -186,8 +186,8 @@ const QualityEditor: React.FC = () => {
             const isBinary = isBinaryFormat(v.format);
             return {
               label: isBinary
-                ? `v${v.versionNo}（${v.format}·二进制不可评估）`
-                : `v${v.versionNo}（${v.format}）`,
+                ? `${v.versionLabel}（${v.format}·二进制不可评估）`
+                : `${v.versionLabel}（${v.format}）`,
               value: v.id,
               disabled: isBinary,
             };

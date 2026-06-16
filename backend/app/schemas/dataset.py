@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.schemas.common import CamelModel
+from pydantic import computed_field
+
+from app.schemas.common import CamelModel, UtcDateTime, format_version_label
 
 
 class DatasetVersionRead(CamelModel):
@@ -23,7 +25,18 @@ class DatasetVersionRead(CamelModel):
     source_datasource_id: str | None = None
     produced_by_job_id: str | None = None
     note: str | None = None
-    created_at: datetime
+    # 安全扫描结论 + 发布状态(#4 发布门,docs/plan/11)
+    scan_verdict: str = "unscanned"
+    verdict_source: str | None = None
+    verdict_note: str | None = None
+    publish_status: str = "draft"
+    published_at: UtcDateTime | None = None
+    created_at: UtcDateTime
+
+    @computed_field  # 展示标签 versionLabel:v2026.6.16 (#5)
+    @property
+    def version_label(self) -> str:
+        return format_version_label(self.version_no, self.created_at)
 
 
 class DatasetRead(CamelModel):
@@ -41,8 +54,8 @@ class DatasetRead(CamelModel):
     creator: str
     last_modifier: str | None = None
     valid_until: datetime | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
     # 数据集是否含 hosted 版本(供前端「S3 托管」徽标/删除门控,#18)。
     # 由路由按版本聚合填充,非 ORM 字段,默认 False。
     hosted: bool = False
