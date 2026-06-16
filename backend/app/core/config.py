@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     storage_minio_endpoint: str | None = None
     storage_minio_access_key: str | None = None
     storage_minio_secret_key: str | None = None
+    # 媒体批量接入(manifest 数据集)上传成员/清单的目标桶(平台自有,可删可回收)
+    storage_minio_upload_bucket: str = "uploads"
 
     # 上传文件落盘目录
     upload_dir: str = (

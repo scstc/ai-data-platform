@@ -26,6 +26,7 @@ import {
   listOperatorCatalog,
   previewJob,
 } from '@/services/data-platform';
+import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import OperatorLibrary from './OperatorLibrary';
 import PipelineSteps from './PipelineSteps';
 import StepParamsForm from './StepParamsForm';
@@ -195,10 +196,19 @@ const Editor: React.FC = () => {
         />
         <Select
           placeholder="选择版本"
-          style={{ width: 200 }}
+          style={{ width: 220 }}
           value={versionId}
           onChange={setVersionId}
-          options={versions.map((v) => ({ label: `v${v.versionNo}`, value: v.id }))}
+          options={versions.map((v) => {
+            const isBinary = isBinaryFormat(v.format);
+            return {
+              label: isBinary
+                ? `v${v.versionNo}（${v.format}·二进制不可加工）`
+                : `v${v.versionNo}（${v.format}）`,
+              value: v.id,
+              disabled: isBinary,
+            };
+          })}
         />
       </Space>
 

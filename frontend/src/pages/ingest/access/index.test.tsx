@@ -75,8 +75,19 @@ describe('数据接入页', () => {
     expect(screen.getByText('日志接入')).toBeInTheDocument();
   });
 
-  it('默认栏(CSV/TSV)以 dataType=csv-tsv 拉列表', async () => {
+  it('默认栏(SQL)显示引导提示并以 dataType=sql 拉列表', async () => {
     render(<AccessPage />);
+    expect(await screen.findByText('去数据源管理')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.listDatasets).toHaveBeenCalledWith(
+        expect.objectContaining({ dataType: 'sql' }),
+      ),
+    );
+  });
+
+  it('切到「CSV/TSV接入」栏以 dataType=csv-tsv 拉列表', async () => {
+    render(<AccessPage />);
+    fireEvent.click(screen.getByText('CSV/TSV接入'));
     await waitFor(() =>
       expect(api.listDatasets).toHaveBeenCalledWith(
         expect.objectContaining({ dataType: 'csv-tsv' }),
@@ -94,10 +105,10 @@ describe('数据接入页', () => {
     );
   });
 
-  it('切到「SQL接入」栏显示引导页且不渲染表格', async () => {
+  it('SQL接入栏既显示引导提示也渲染数据集表格(采集落地的 SQL 数据集可见)', async () => {
     render(<AccessPage />);
     fireEvent.click(screen.getByText('SQL接入'));
     expect(await screen.findByText('去数据源管理')).toBeInTheDocument();
-    expect(screen.queryByTestId('pro-table')).not.toBeInTheDocument();
+    expect(screen.getByTestId('pro-table')).toBeInTheDocument();
   });
 });

@@ -22,10 +22,26 @@ from app.schemas.job import JobCreate, JobRead, OperatorSpec
 from app.services import operator_catalog as oc
 from app.services.engine import EngineError, run_preview, run_process_job
 from app.services.external_store import ExternalStoreError
+from app.services.landing import BINARY_FORMATS
 
 router = APIRouter(tags=["jobs"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+def _binary_block(version: DatasetVersion) -> JSONResponse | None:
+    """二进制数据集(图像/音频/视频)无法规范化为 jsonl → 提前 400,不让任务跑起来才失败。"""
+    if version.format in BINARY_FORMATS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": (
+                    f"二进制数据集(.{version.format})不支持加工,请选择文本类数据集"
+                ),
+            },
+        )
+    return None
 
 
 class JobItemResponse(CamelModel):
@@ -166,6 +182,8 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
         )
+    if (blocked_resp := _binary_block(input_version)) is not None:
+        return blocked_resp
 
     job = Job(
         id=_new_job_id(),
@@ -239,6 +257,8 @@ async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
         )
+    if (blocked_resp := _binary_block(input_version)) is not None:
+        return blocked_resp
 
     try:
         result = await run_preview(

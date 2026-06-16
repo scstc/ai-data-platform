@@ -70,6 +70,16 @@ class PlatformHostRequest(CamelModel):
     category_id: str | None = None
 
 
+class DatasetMemberRead(CamelModel):
+    """数据集成员文件(manifest 数据集的一个媒体对象)读模型。"""
+
+    name: str
+    key: str
+    bucket: str
+    format: str
+    size: int | None = None
+
+
 class DatasetDetailRead(DatasetRead):
     """数据集详情:元信息 + 版本列表。"""
 

@@ -78,6 +78,43 @@ async def test_upload_binary_lands_raw(client, monkeypatch, tmp_path):
     assert body["data"]["versions"][0]["format"] == "mp4"
 
 
+@pytest.mark.asyncio
+async def test_binary_dataset_blocked_from_processing(client, monkeypatch, tmp_path):
+    """二进制数据集版本提交加工/试跑 → 提前 400(而非跑起来才失败)。"""
+    from app.services import landing as landing_mod
+
+    monkeypatch.setattr(landing_mod.settings, "datasets_dir", str(tmp_path))
+    files = {"file": ("clip.mp4", b"\x00\x00\x00\x18ftypmp42rawbytes", "video/mp4")}
+    resp = await client.post(
+        "/api/v1/datasets/upload", files=files, data={"data_type": "video"}
+    )
+    version_id = resp.json()["data"]["versions"][0]["id"]
+
+    # 建加工任务:二进制版本 → 提前 400(含「二进制」),不真正起任务
+    resp = await client.post(
+        "/api/v1/jobs",
+        json={
+            "name": "二进制加工",
+            "datasetVersionId": version_id,
+            "operators": [{"name": "text_length_filter"}],
+        },
+    )
+    assert resp.status_code == 400
+    assert "二进制" in resp.json()["message"]
+
+    # 样例试跑同样提前 400
+    resp = await client.post(
+        "/api/v1/jobs/preview",
+        json={
+            "datasetVersionId": version_id,
+            "operators": [{"name": "text_length_filter"}],
+            "sampleSize": 5,
+        },
+    )
+    assert resp.status_code == 400
+    assert "二进制" in resp.json()["message"]
+
+
 # ---------------------------------------------------------------------------
 # Task 3: POST /datasets/host-platform(文件管理零拷贝)
 # ---------------------------------------------------------------------------
@@ -229,3 +266,315 @@ async def test_materialized_version_platform_fallback(db_session, monkeypatch):
     async with es.materialized_version(v, db_session) as path:
         assert path.exists()
     assert seen["cfg"]["endpoint"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# 媒体批量接入:一批文件 → 平台 MinIO → 一个 manifest 数据集
+# ---------------------------------------------------------------------------
+def _mem_store_patch(monkeypatch, module) -> dict:
+    """给某 module(datasets / external_store)打补丁:用内存字典模拟平台 MinIO。"""
+    import tempfile
+    from pathlib import Path as _P
+
+    store: dict[tuple[str, str], bytes] = {}
+    monkeypatch.setattr(
+        module,
+        "platform_config",
+        lambda: {"endpoint": "x", "accessKey": "a", "secretKey": "b"},
+    )
+
+    async def fake_upload(cfg, bucket, key, data, length, content_type="x"):
+        store[(bucket, key)] = data.read()
+
+    async def fake_download(cfg, bucket, key):
+        fd, name = tempfile.mkstemp()
+        import os as _os
+
+        _os.close(fd)
+        p = _P(name)
+        p.write_bytes(store[(bucket, key)])
+        return p
+
+    async def fake_presign(cfg, bucket, key, expires_seconds=600):
+        return f"http://minio/{bucket}/{key}?sig=test"
+
+    async def fake_remove(cfg, bucket, key):
+        store.pop((bucket, key), None)
+
+    if hasattr(module, "upload_object"):
+        monkeypatch.setattr(module, "upload_object", fake_upload)
+    monkeypatch.setattr(module, "download_to_temp", fake_download)
+    if hasattr(module, "presigned_get_url"):
+        monkeypatch.setattr(module, "presigned_get_url", fake_presign)
+    if hasattr(module, "remove_object"):
+        monkeypatch.setattr(module, "remove_object", fake_remove)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
+    """一批图 → 一个 manifest 数据集(format=manifest/origin=managed/rows=N);
+    成员列表 / 预览 / 预签名 URL 均可用;manifest 内容符合 data-juicer 契约。"""
+    import json
+
+    from app.api.v1 import datasets as dmod
+
+    store = _mem_store_patch(monkeypatch, dmod)
+
+    files = [
+        ("files", ("a.png", b"PNGDATA1", "image/png")),
+        ("files", ("b.jpg", b"JPGDATA22", "image/jpeg")),
+    ]
+    resp = await client.post(
+        "/api/v1/datasets/upload-media",
+        files=files,
+        data={"data_type": "image", "name": "我的图集"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["name"] == "我的图集"
+    assert data["dataType"] == "image"
+    assert len(data["versions"]) == 1
+    v = data["versions"][0]
+    assert v["format"] == "manifest"
+    assert v["origin"] == "managed"
+    assert v["rows"] == 2
+    version_id = v["id"]
+
+    # manifest 内容符合 DJ 契约:images 数组 + <__dj__image> token + 平台旁路 __member
+    dataset_id = data["id"]
+    manifest = store[("uploads", f"{dataset_id}/manifest.jsonl")].decode()
+    rows = [json.loads(ln) for ln in manifest.splitlines() if ln.strip()]
+    assert len(rows) == 2
+    assert all(r["text"] == "<__dj__image>" for r in rows)
+    assert all(len(r["images"]) == 1 for r in rows)
+    assert all(r["__member"]["format"] in ("png", "jpg") for r in rows)
+
+    # 成员列表
+    resp = await client.get(f"/api/v1/dataset-versions/{version_id}/members")
+    members = resp.json()["data"]
+    assert {m["name"] for m in members} == {"a.png", "b.jpg"}
+
+    # 预览返回成员表
+    resp = await client.get(f"/api/v1/dataset-versions/{version_id}/preview")
+    body = resp.json()
+    assert body["total"] == 2
+    assert body["columns"] == ["name", "format", "size"]
+
+    # 预签名 URL:合法成员 key → 200;越权 key → 400
+    good_key = members[0]["key"]
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{version_id}/member-url",
+        params={"key": good_key},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["url"].startswith("http")
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{version_id}/member-url",
+        params={"key": "other-ds/evil.png"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch):
+    """manifest 物化:images 路径改写为本地相对名、成员文件就近落盘、__member 剥除;
+    且 manifest 版本不被加工的二进制门控拦截。"""
+    import json
+    from pathlib import Path as _P
+
+    from app.api.v1.jobs import _binary_block
+    from app.models.dataset_version import DatasetVersion
+    from app.services import external_store as es
+
+    store = _mem_store_patch(monkeypatch, es)
+    store[("uploads", "ds-x/manifest.jsonl")] = (
+        json.dumps(
+            {
+                "images": ["ds-x/000000-a.png"],
+                "text": "<__dj__image>",
+                "__member": {
+                    "bucket": "uploads",
+                    "key": "ds-x/000000-a.png",
+                    "name": "a.png",
+                    "size": 3,
+                    "format": "png",
+                },
+            }
+        )
+        + "\n"
+    ).encode()
+    store[("uploads", "ds-x/000000-a.png")] = b"PNG"
+
+    v = DatasetVersion(
+        id="dsv-x",
+        dataset_id="ds-x",
+        version_no=1,
+        storage_uri="s3://uploads/ds-x/manifest.jsonl",
+        format="manifest",
+        origin="managed",
+        rows=1,
+    )
+    # manifest 不属二进制门控(format=manifest),可进加工
+    assert _binary_block(v) is None
+
+    async with es.materialized_version(v, db_session) as path:
+        row = json.loads(path.read_text(encoding="utf-8").strip())
+        local = row["images"][0]
+        assert "/" not in local  # 已改写为本地相对文件名
+        assert "__member" not in row  # 平台旁路字段已剥除
+        assert (_P(path).parent / local).read_bytes() == b"PNG"  # 成员就近落盘
+
+
+@pytest.mark.asyncio
+async def test_upload_media_rejects_over_member_cap(client, monkeypatch):
+    """超过成员数上限的批量 → 400(不会创建永远无法物化的数据集)。"""
+    from app.api.v1 import datasets as dmod
+
+    _mem_store_patch(monkeypatch, dmod)
+    monkeypatch.setattr(dmod, "MAX_MANIFEST_MEMBERS", 2)
+    files = [
+        ("files", (f"x{i}.png", b"PNG", "image/png")) for i in range(3)
+    ]
+    resp = await client.post(
+        "/api/v1/datasets/upload-media", files=files, data={"data_type": "image"}
+    )
+    assert resp.status_code == 400
+    assert "最多" in resp.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_upload_media_gc_on_storage_failure(client, monkeypatch):
+    """中途上传失败 → 503 且回收已写对象(remove_prefix 命中本数据集前缀),不留孤儿。"""
+    from app.api.v1 import datasets as dmod
+    from app.services.external_store import ExternalStoreError
+
+    calls = {"n": 0, "gc": []}
+    monkeypatch.setattr(
+        dmod,
+        "platform_config",
+        lambda: {"endpoint": "x", "accessKey": "a", "secretKey": "b"},
+    )
+
+    async def fail_upload(cfg, bucket, key, data, length, content_type="x"):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ExternalStoreError("boom")
+
+    async def rec_remove_prefix(cfg, bucket, prefix):
+        calls["gc"].append((bucket, prefix))
+        return 1
+
+    monkeypatch.setattr(dmod, "upload_object", fail_upload)
+    monkeypatch.setattr(dmod, "remove_prefix", rec_remove_prefix)
+
+    files = [
+        ("files", ("a.png", b"PNG", "image/png")),
+        ("files", ("b.png", b"PNG", "image/png")),
+    ]
+    resp = await client.post(
+        "/api/v1/datasets/upload-media", files=files, data={"data_type": "image"}
+    )
+    assert resp.status_code == 503
+    assert calls["gc"], "失败时应回收已写对象"
+    assert calls["gc"][0][1].endswith("/")  # 以数据集前缀回收
+
+
+@pytest.mark.asyncio
+async def test_members_corrupt_manifest_returns_4xx(
+    client, session_factory, monkeypatch
+):
+    """清单损坏 → 成员接口 4xx(不冒 500)。"""
+    from app.api.v1 import datasets as dmod
+    from app.models.dataset import Dataset
+    from app.models.dataset_version import DatasetVersion
+
+    store = _mem_store_patch(monkeypatch, dmod)
+    store[("uploads", "ds-bad/manifest.jsonl")] = b"{not json]\n"
+    async with session_factory() as session:
+        session.add(Dataset(id="ds-bad", name="坏清单"))
+        session.add(
+            DatasetVersion(
+                id="dsv-bad",
+                dataset_id="ds-bad",
+                version_no=1,
+                storage_uri="s3://uploads/ds-bad/manifest.jsonl",
+                format="manifest",
+                origin="managed",
+                rows=1,
+            )
+        )
+        await session.commit()
+
+    resp = await client.get("/api/v1/dataset-versions/dsv-bad/members")
+    assert resp.status_code == 400
+    assert resp.json()["success"] is False
+
+
+async def _upload_two_images(client, store_owner_module, monkeypatch):
+    """建一个含 2 张图的 manifest 数据集,返回 (datasetId, versionId, store)。"""
+    store = _mem_store_patch(monkeypatch, store_owner_module)
+    files = [
+        ("files", ("a.png", b"PNGDATA1", "image/png")),
+        ("files", ("b.jpg", b"JPGDATA22", "image/jpeg")),
+    ]
+    resp = await client.post(
+        "/api/v1/datasets/upload-media", files=files, data={"data_type": "image"}
+    )
+    d = resp.json()["data"]
+    return d["id"], d["versions"][0]["id"], store
+
+
+@pytest.mark.asyncio
+async def test_add_members_appends_to_manifest(client, monkeypatch):
+    """追加成员:对象写入 + 清单增行 + 版本 rows 更新;成员接口可见。"""
+    from app.api.v1 import datasets as dmod
+
+    did, vid, store = await _upload_two_images(client, dmod, monkeypatch)
+
+    resp = await client.post(
+        f"/api/v1/datasets/{did}/members",
+        files=[("files", ("c.png", b"PNGC", "image/png"))],
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["rows"] == 3
+
+    members = (
+        await client.get(f"/api/v1/dataset-versions/{vid}/members")
+    ).json()["data"]
+    assert {m["name"] for m in members} == {"a.png", "b.jpg", "c.png"}
+    # 清单对象确实增到 3 行
+    manifest = store[("uploads", f"{did}/manifest.jsonl")].decode()
+    assert len([ln for ln in manifest.splitlines() if ln.strip()]) == 3
+
+
+@pytest.mark.asyncio
+async def test_delete_member_removes_from_manifest(client, monkeypatch):
+    """删除成员:清单去行 + 对象移除 + 版本 rows 更新;越权 key → 400。"""
+    from app.api.v1 import datasets as dmod
+
+    did, vid, store = await _upload_two_images(client, dmod, monkeypatch)
+    members = (
+        await client.get(f"/api/v1/dataset-versions/{vid}/members")
+    ).json()["data"]
+    victim = next(m for m in members if m["name"] == "a.png")["key"]
+
+    # 越权 key(不在本数据集前缀)→ 400
+    bad = await client.request(
+        "DELETE",
+        f"/api/v1/datasets/{did}/members",
+        params={"key": "other-ds/x.png"},
+    )
+    assert bad.status_code == 400
+
+    resp = await client.request(
+        "DELETE", f"/api/v1/datasets/{did}/members", params={"key": victim}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["rows"] == 1
+    # 成员对象已从存储移除
+    assert ("uploads", victim) not in store
+    members = (
+        await client.get(f"/api/v1/dataset-versions/{vid}/members")
+    ).json()["data"]
+    assert {m["name"] for m in members} == {"b.jpg"}

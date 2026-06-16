@@ -12,13 +12,13 @@ export interface AccessType {
 
 /** 左侧 8 个类型栏(顺序即展示顺序,贴合 BCC 截图) */
 export const ACCESS_TYPES: AccessType[] = [
+  { key: 'sql', label: 'SQL接入', binary: false, extensions: [] },
   {
     key: 'csv-tsv',
     label: 'CSV/TSV接入',
     binary: false,
     extensions: ['csv', 'tsv'],
   },
-  { key: 'sql', label: 'SQL接入', binary: false, extensions: [] },
   {
     key: 'image',
     label: '图像接入',
@@ -46,6 +46,15 @@ export const ACCESS_TYPES: AccessType[] = [
   },
   { key: 'log', label: '日志接入', binary: false, extensions: ['log', 'txt'] },
 ];
+
+/** 二进制扩展名集合(由 binary 栏聚合;与后端 landing.BINARY_FORMATS 对齐) */
+export const BINARY_FORMATS = new Set(
+  ACCESS_TYPES.filter((t) => t.binary).flatMap((t) => t.extensions),
+);
+
+/** 版本/文件 format 是否为二进制(图像/音频/视频)——不可规范化、不可加工 */
+export const isBinaryFormat = (format?: string): boolean =>
+  !!format && BINARY_FORMATS.has(format.toLowerCase());
 
 /** Upload accept 属性值(带点号,逗号分隔) */
 export const acceptOf = (t: AccessType): string =>

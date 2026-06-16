@@ -1,8 +1,9 @@
 import { UploadOutlined } from '@ant-design/icons';
-import type { UploadProps } from 'antd';
+import type { UploadFile, UploadProps } from 'antd';
 import {
   Alert,
   Button,
+  Input,
   Modal,
   message,
   Radio,
@@ -15,6 +16,7 @@ import {
   hostPlatformFiles,
   listCategories,
   uploadDataset,
+  uploadMediaDataset,
 } from '@/services/data-platform';
 import type { AccessType } from './constants';
 import { acceptOf, isExtAllowed } from './constants';
@@ -51,12 +53,18 @@ const UploadModal: React.FC<Props> = ({
   const [mode, setMode] = useState<'local' | 'platform'>('local');
   const [sel, setSel] = useState<PlatformSelection>({ bucket: '', keys: [] });
   const [submitting, setSubmitting] = useState(false);
+  // 媒体批量接入(图/音/视频):暂存文件 + 接入名称 → 一次建一个 manifest 数据集
+  const isMediaBatch = accessType.binary;
+  const [mediaName, setMediaName] = useState('');
+  const [fileList, setFileList] = useState<UploadFile[]>([]);
 
   useEffect(() => {
     if (!open) return;
     setMode('local');
     setSel({ bucket: '', keys: [] });
     setCategoryId(undefined);
+    setMediaName('');
+    setFileList([]);
     listCategories()
       .then((res) =>
         setCategoryOptions(
@@ -129,6 +137,50 @@ const UploadModal: React.FC<Props> = ({
     }
   };
 
+  // 媒体批量接入:一次提交所有暂存文件,后端建一个 manifest 数据集(一文件一行)
+  const handleMediaBatchOk = async () => {
+    const files = fileList
+      .map((f) => f.originFileObj)
+      .filter((f): f is NonNullable<typeof f> => !!f);
+    if (files.length === 0) {
+      messageApi.error('请先选择至少一个文件');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const formData = new FormData();
+      for (const f of files) formData.append('files', f);
+      formData.append('data_type', accessType.key);
+      if (mediaName.trim()) formData.append('name', mediaName.trim());
+      if (categoryId) formData.append('categoryId', categoryId);
+      const res = await uploadMediaDataset(formData);
+      messageApi.success(
+        `已接入 ${files.length} 个文件为数据集「${res.data.name}」`,
+      );
+      onDone();
+      onClose();
+    } catch (err) {
+      messageApi.error(pickErrMsg(err, '媒体批量接入失败,请重试'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // 暂存校验:扩展名/大小不符直接忽略;合法则 return false(只暂存不自动上传)
+  const stageBeforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
+    if (!isExtAllowed(file.name, accessType)) {
+      messageApi.error(
+        `不支持的文件格式:${file.name},「${accessType.label}」仅支持 ${accessType.extensions.join('、')}`,
+      );
+      return Upload.LIST_IGNORE;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      messageApi.error(`文件 ${file.name} 超过 200MB 大小限制`);
+      return Upload.LIST_IGNORE;
+    }
+    return false;
+  };
+
   return (
     <Modal
       title={`上传文件 · ${accessType.label}`}
@@ -151,11 +203,26 @@ const UploadModal: React.FC<Props> = ({
                 接入
               </Button>,
             ]
-          : [
-              <Button key="close" onClick={onClose}>
-                关闭
-              </Button>,
-            ]
+          : isMediaBatch
+            ? [
+                <Button key="cancel" onClick={onClose}>
+                  取消
+                </Button>,
+                <Button
+                  key="ok"
+                  type="primary"
+                  loading={submitting}
+                  disabled={fileList.length === 0}
+                  onClick={handleMediaBatchOk}
+                >
+                  接入为一个数据集
+                </Button>,
+              ]
+            : [
+                <Button key="close" onClick={onClose}>
+                  关闭
+                </Button>,
+              ]
       }
     >
       {contextHolder}
@@ -185,7 +252,34 @@ const UploadModal: React.FC<Props> = ({
           />
         </Space>
 
-        {mode === 'local' ? (
+        {mode === 'local' && isMediaBatch ? (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              title={`一批${accessType.label.replace('接入', '')}将合并为一个数据集(清单形式),可直接用于数据加工。`}
+            />
+            <Space>
+              <span>接入名称:</span>
+              <Input
+                placeholder="给这个数据集起个名(默认取首个文件名)"
+                style={{ width: 360 }}
+                value={mediaName}
+                onChange={(e) => setMediaName(e.target.value)}
+              />
+            </Space>
+            <Upload
+              multiple
+              accept={acceptOf(accessType)}
+              beforeUpload={stageBeforeUpload}
+              fileList={fileList}
+              onChange={({ fileList: fl }) => setFileList(fl)}
+              listType="picture"
+            >
+              <Button icon={<UploadOutlined />}>选择文件(可多选)</Button>
+            </Upload>
+          </>
+        ) : mode === 'local' ? (
           <Upload
             multiple
             accept={acceptOf(accessType)}

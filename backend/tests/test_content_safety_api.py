@@ -60,6 +60,34 @@ async def _seed_version(
 
 
 @pytest.mark.asyncio
+async def test_review_job_rejects_binary_version(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """二进制版本提交审核 → 提前 400(与加工一致,不建 job、不跑引擎)。"""
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-bin-cs", name="二进制集"))
+        session.add(
+            DatasetVersion(
+                id="dsv-bin-cs",
+                dataset_id="dset-bin-cs",
+                version_no=1,
+                storage_uri="s3://x/clip.mp4",
+                format="mp4",
+                rows=None,
+                origin="hosted",
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/content-safety/jobs",
+        json={"datasetVersionId": "dsv-bin-cs", "config": {"useLlm": False}},
+    )
+    assert resp.status_code == 400
+    assert "二进制" in resp.json()["message"]
+
+
+@pytest.mark.asyncio
 async def test_review_job_full_flow(
     client: AsyncClient, session_factory: async_sessionmaker, tmp_path: Path
 ) -> None:

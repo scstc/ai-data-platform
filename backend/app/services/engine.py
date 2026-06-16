@@ -119,9 +119,13 @@ async def run_preview(
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            sample_path = tmp_dir / "sample.jsonl"
             out_path = tmp_dir / "data.jsonl"
             yaml_path = tmp_dir / "job.yaml"
+            # 试跑样例必须与 src 同目录:多模态 manifest 的相对媒体路径由 DJ rel2abs
+            # 按 jsonl 所在目录解析,媒体文件就在 src 旁(物化时下载),另起目录会找不到。
+            sample_path = (
+                src_path.parent / f"preview-sample-{secrets.token_hex(4)}.jsonl"
+            )
 
             # 读输入版本前 sample_size 个非空行:既落盘成试跑输入,也作 before 展示
             before = _read_jsonl_head(src_path, sample_size)
@@ -132,30 +136,33 @@ async def run_preview(
                 encoding="utf-8",
             )
 
-            cfg = build_config(
-                project_name="preview",
-                input_path=str(sample_path),
-                output_path=str(out_path),
-                operators=operators,
-            )
-            yaml_path.write_text(
-                yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
-                encoding="utf-8",
-            )
+            try:
+                cfg = build_config(
+                    project_name="preview",
+                    input_path=str(sample_path),
+                    output_path=str(out_path),
+                    operators=operators,
+                )
+                yaml_path.write_text(
+                    yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
 
-            async with _semaphore:
-                code, log = await _run_dj(yaml_path)
+                async with _semaphore:
+                    code, log = await _run_dj(yaml_path)
 
-            if code != 0 or not out_path.exists():
-                tail = "\n".join(log.strip().splitlines()[-8:])
-                raise EngineError(f"dj-process 退出码 {code}\n{tail}")
+                if code != 0 or not out_path.exists():
+                    tail = "\n".join(log.strip().splitlines()[-8:])
+                    raise EngineError(f"dj-process 退出码 {code}\n{tail}")
 
-            # 产出总行数(全量统计),after 仅取前 sample_size 条用于展示
-            after_count = sum(
-                1 for line in out_path.open(encoding="utf-8") if line.strip()
-            )
-            after = _read_jsonl_head(out_path, sample_size)
-            columns = _column_union(before, after)
+                # 产出总行数(全量统计),after 仅取前 sample_size 条用于展示
+                after_count = sum(
+                    1 for line in out_path.open(encoding="utf-8") if line.strip()
+                )
+                after = _read_jsonl_head(out_path, sample_size)
+                columns = _column_union(before, after)
+            finally:
+                sample_path.unlink(missing_ok=True)
 
     return {
         "before": before,

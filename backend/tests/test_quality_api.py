@@ -222,6 +222,38 @@ async def test_create_quality_job_validations(
 
 
 @pytest.mark.asyncio
+async def test_create_quality_job_rejects_binary_version(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """二进制版本提交质量评估 → 提前 400(与加工一致,不建 job、不跑引擎)。"""
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-bin-q", name="二进制集"))
+        session.add(
+            DatasetVersion(
+                id="dsv-bin-q",
+                dataset_id="dset-bin-q",
+                version_no=1,
+                storage_uri="s3://x/clip.mp4",
+                format="mp4",
+                rows=None,
+                origin="hosted",
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/quality/jobs",
+        json={
+            "name": "质量评估",
+            "datasetVersionId": "dsv-bin-q",
+            "operators": [{"name": "text_length_filter"}],
+        },
+    )
+    assert resp.status_code == 400
+    assert "二进制" in resp.json()["message"]
+
+
+@pytest.mark.asyncio
 async def test_create_quality_job_success_and_type_filter(
     client: AsyncClient,
     session_factory: async_sessionmaker,

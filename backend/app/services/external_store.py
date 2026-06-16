@@ -35,10 +35,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
-from app.services.landing import BINARY_FORMATS, normalize_to_records
+from app.services.landing import (
+    BINARY_FORMATS,
+    MANIFEST_FORMAT,
+    normalize_to_records,
+)
 
 # 列对象/列桶的硬上限,避免大桶把内存/响应打爆(spec §2.1)
 _LIST_LIMIT = 1000
+
+# manifest 物化下载的扇出上限(防止大媒体集打爆临时盘/拖垮 dj-process)
+MAX_MANIFEST_MEMBERS = 1000
+MAX_MATERIALIZE_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
 
 
 class ExternalStoreError(RuntimeError):
@@ -264,6 +272,73 @@ def _write_jsonl_sync(records: list[dict[str, Any]]) -> Path:
     return tmp_path
 
 
+async def _version_cfg(
+    version: DatasetVersion, session: AsyncSession
+) -> dict[str, Any]:
+    """解析版本访问对象存储的凭证:有 source_datasource_id 用其数据源,否则平台 MinIO 回退。"""
+    if version.source_datasource_id:
+        ds = await session.get(DataSource, version.source_datasource_id)
+        if ds is None:
+            raise ExternalStoreError("托管版本对应的数据源已不存在,无法访问 S3")
+        return ds.config
+    return platform_config()
+
+
+@asynccontextmanager
+async def _materialized_manifest(
+    version: DatasetVersion, session: AsyncSession
+) -> AsyncIterator[Path]:
+    """物化 manifest 版本:清单 + 各媒体成员下到同一临时目录,images/audios/videos
+    路径改写为本地相对文件名(dj rel2abs 以 jsonl 目录为锚),剥掉平台旁路 __member。
+    带成员数/总字节上限,退出时整目录清理。"""
+    cfg = await _version_cfg(version, session)
+    bucket, manifest_key = parse_s3_uri(version.storage_uri)
+    manifest_raw = await download_to_temp(cfg, bucket, manifest_key)
+    try:
+        lines = [
+            ln
+            for ln in manifest_raw.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    finally:
+        manifest_raw.unlink(missing_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="adp-manifest-") as td:
+        tmpdir = Path(td)
+        out_path = tmpdir / "data.jsonl"
+        total_bytes = 0
+        count = 0
+        with out_path.open("w", encoding="utf-8") as out:
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ExternalStoreError(f"清单格式损坏:{exc}") from exc
+                for field in ("images", "audios", "videos"):
+                    paths = row.get(field)
+                    if not isinstance(paths, list):
+                        continue
+                    local_names: list[str] = []
+                    for member_key in paths:
+                        if count >= MAX_MANIFEST_MEMBERS:
+                            raise ExternalStoreError(
+                                f"清单成员超过上限 {MAX_MANIFEST_MEMBERS},无法物化加工"
+                            )
+                        member_tmp = await download_to_temp(cfg, bucket, member_key)
+                        total_bytes += member_tmp.stat().st_size
+                        if total_bytes > MAX_MATERIALIZE_BYTES:
+                            member_tmp.unlink(missing_ok=True)
+                            raise ExternalStoreError("清单物化体积超过上限,无法加工")
+                        local_name = f"{count:06d}-{Path(member_key).name}"
+                        member_tmp.replace(tmpdir / local_name)
+                        local_names.append(local_name)
+                        count += 1
+                    row[field] = local_names
+                row.pop("__member", None)
+                out.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        yield out_path
+
+
 @asynccontextmanager
 async def materialized_version(
     version: DatasetVersion, session: AsyncSession
@@ -278,6 +353,13 @@ async def materialized_version(
 
     S3/对象错误抛 ExternalStoreError(由调用方转 4xx,不 500、不动源)。
     """
+    # 媒体批量接入(manifest):下载清单 + 各成员到同一临时目录,把 images/audios/videos
+    # 路径改写为本地相对文件名(dj 的 rel2abs 以 jsonl 所在目录为锚),剥掉平台旁路 __member。
+    if version.format == MANIFEST_FORMAT:
+        async with _materialized_manifest(version, session) as mpath:
+            yield mpath
+        return
+
     if version.origin != "hosted":
         yield Path(version.storage_uri)
         return

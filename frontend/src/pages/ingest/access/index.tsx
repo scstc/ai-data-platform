@@ -3,6 +3,7 @@ import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
 import {
+  Alert,
   Button,
   Drawer,
   Empty,
@@ -11,7 +12,6 @@ import {
   Menu,
   message,
   Popconfirm,
-  Result,
   Select,
   Space,
   Spin,
@@ -27,7 +27,8 @@ import {
   listDatasets,
   previewDatasetVersion,
 } from '@/services/data-platform';
-import { ACCESS_TYPES } from './constants';
+import { ACCESS_TYPES, acceptOf } from './constants';
+import MediaMembersDrawer from './MediaMembersDrawer';
 import UploadModal from './UploadModal';
 
 const { Sider, Content } = Layout;
@@ -56,6 +57,12 @@ const AccessPage: React.FC = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
   const [previewName, setPreviewName] = useState<string>();
+  // 媒体集成员文件抽屉
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [membersVersionId, setMembersVersionId] = useState<string>();
+  const [membersDatasetId, setMembersDatasetId] = useState<string>();
+  const [membersName, setMembersName] = useState<string>();
+  const [membersEditable, setMembersEditable] = useState(false);
 
   // typeKey 恒为有效栏 key,这里仍做兜底避免任何来源扩展导致的运行时崩溃
   const accessType =
@@ -118,8 +125,26 @@ const AccessPage: React.FC = () => {
     }
   };
 
+  // 打开成员文件抽屉:取数据集首版本 id → 列成员并预览
+  const openMembers = async (r: DataPlatform.Dataset) => {
+    setMembersName(r.name);
+    setMembersDatasetId(r.id);
+    setMembersVersionId(undefined);
+    setMembersEditable(false);
+    setMembersOpen(true);
+    try {
+      const detail = await getDataset(r.id);
+      const v = detail.data.versions?.[0];
+      setMembersVersionId(v?.id);
+      // 仅 manifest 媒体集可增删成员(平台自有);其它(单文件托管等)只读
+      setMembersEditable(v?.format === 'manifest');
+    } catch {
+      // 抽屉内自行兜底为空
+    }
+  };
+
   const columns: ProColumns<DataPlatform.Dataset>[] = [
-    { title: '文件名', dataIndex: 'name', ellipsis: true },
+    { title: '数据集名称', dataIndex: 'name', ellipsis: true },
     {
       title: '分类',
       dataIndex: 'categoryName',
@@ -152,14 +177,11 @@ const AccessPage: React.FC = () => {
       width: 140,
       render: (_, r) => {
         const ops = [
-          // 二进制类无表格预览(后端 raw 存,不规范化)→ 置灰
+          // 媒体集(manifest)看成员文件并预览;文本集走表格预览
           accessType.binary ? (
-            <span
-              key="preview"
-              style={{ color: 'var(--ant-color-text-disabled)' }}
-            >
-              预览
-            </span>
+            <a key="members" onClick={() => openMembers(r)}>
+              查看文件
+            </a>
           ) : (
             <a key="preview" onClick={() => handlePreview(r)}>
               预览
@@ -209,102 +231,109 @@ const AccessPage: React.FC = () => {
           />
         </Sider>
         <Content style={{ paddingInlineStart: 16 }}>
-          {accessType.key === 'sql' ? (
-            <Result
-              status="info"
-              title="SQL 接入走「数据源管理」"
-              subTitle="数据库接入请在数据源管理中创建 SQL 连接,再用采集任务拉取入库。"
-              extra={[
-                <Button
-                  key="ds"
-                  type="primary"
-                  onClick={() => history.push('/ingest/datasources')}
-                >
-                  去数据源管理
-                </Button>,
-                <Button
-                  key="task"
-                  onClick={() => history.push('/ingest/tasks')}
-                >
-                  去采集任务
-                </Button>,
-              ]}
-            />
-          ) : (
-            <ProTable<DataPlatform.Dataset>
-              headerTitle={accessType.label}
-              actionRef={actionRef}
-              rowKey="id"
-              search={false}
-              columns={columns}
-              // 过滤项经 params 驱动:变化时 ProTable 自动重拉(避免手动 reload 的陈旧闭包)
-              params={{
-                dataType: accessType.key,
-                name: keyword,
-                categoryId,
-              }}
-              toolBarRender={() => [
-                <Space key="filters">
-                  <Select
-                    allowClear
-                    placeholder="选择分类"
-                    style={{ width: 180 }}
-                    options={categoryOptions}
-                    value={categoryId}
-                    onChange={setCategoryId}
-                  />
-                  <Input.Search
-                    allowClear
-                    placeholder="文件名搜索"
-                    style={{ width: 200 }}
-                    onSearch={(v) => setKeyword(v || undefined)}
-                  />
-                </Space>,
-                <Button
-                  key="upload"
-                  type="primary"
-                  icon={<UploadOutlined />}
-                  onClick={() => setUploadOpen(true)}
-                >
-                  上传
-                </Button>,
-                <Button
-                  key="cat"
-                  icon={<AppstoreAddOutlined />}
-                  onClick={() => setCatOpen(true)}
-                >
-                  分类管理
-                </Button>,
-              ]}
-              request={async (params) => {
-                const {
-                  current,
-                  pageSize,
-                  dataType,
-                  name,
-                  categoryId: cid,
-                } = params as {
-                  current?: number;
-                  pageSize?: number;
-                  dataType?: string;
-                  name?: string;
-                  categoryId?: string;
-                };
-                const res = await listDatasets({
-                  current,
-                  pageSize,
-                  dataType,
-                  name,
-                  categoryId: cid,
-                });
-                return {
-                  data: res.data,
-                  total: res.total,
-                  success: res.success,
-                };
-              }}
+          {accessType.key === 'sql' && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              title="SQL/数据库接入走「数据源管理 + 采集任务」"
+              description="在数据源管理创建数据库连接,在采集任务中选择表或填写 SQL 并运行;采集成功后数据会落为下方数据集,可直接用于数据加工。"
+              action={
+                <Space vertical>
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={() => history.push('/ingest/datasources')}
+                  >
+                    去数据源管理
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => history.push('/ingest/tasks')}
+                  >
+                    去采集任务
+                  </Button>
+                </Space>
+              }
             />
           )}
+          <ProTable<DataPlatform.Dataset>
+            headerTitle={accessType.label}
+            actionRef={actionRef}
+            rowKey="id"
+            search={false}
+            columns={columns}
+            // 过滤项经 params 驱动:变化时 ProTable 自动重拉(避免手动 reload 的陈旧闭包)
+            params={{
+              dataType: accessType.key,
+              name: keyword,
+              categoryId,
+            }}
+            toolBarRender={() => [
+              <Space key="filters">
+                <Select
+                  allowClear
+                  placeholder="选择分类"
+                  style={{ width: 180 }}
+                  options={categoryOptions}
+                  value={categoryId}
+                  onChange={setCategoryId}
+                />
+                <Input.Search
+                  allowClear
+                  placeholder="名称搜索"
+                  style={{ width: 200 }}
+                  onSearch={(v) => setKeyword(v || undefined)}
+                />
+              </Space>,
+              ...(accessType.extensions.length > 0
+                ? [
+                    <Button
+                      key="upload"
+                      type="primary"
+                      icon={<UploadOutlined />}
+                      onClick={() => setUploadOpen(true)}
+                    >
+                      上传
+                    </Button>,
+                  ]
+                : []),
+              <Button
+                key="cat"
+                icon={<AppstoreAddOutlined />}
+                onClick={() => setCatOpen(true)}
+              >
+                分类管理
+              </Button>,
+            ]}
+            request={async (params) => {
+              const {
+                current,
+                pageSize,
+                dataType,
+                name,
+                categoryId: cid,
+              } = params as {
+                current?: number;
+                pageSize?: number;
+                dataType?: string;
+                name?: string;
+                categoryId?: string;
+              };
+              const res = await listDatasets({
+                current,
+                pageSize,
+                dataType,
+                name,
+                categoryId: cid,
+              });
+              return {
+                data: res.data,
+                total: res.total,
+                success: res.success,
+              };
+            }}
+          />
         </Content>
       </Layout>
 
@@ -313,6 +342,15 @@ const AccessPage: React.FC = () => {
         accessType={accessType}
         onClose={() => setUploadOpen(false)}
         onDone={() => actionRef.current?.reload()}
+      />
+      <MediaMembersDrawer
+        open={membersOpen}
+        versionId={membersVersionId}
+        datasetId={membersDatasetId}
+        editable={membersEditable}
+        accept={acceptOf(accessType)}
+        title={membersName}
+        onClose={() => setMembersOpen(false)}
       />
       <CategoryManager
         open={catOpen}

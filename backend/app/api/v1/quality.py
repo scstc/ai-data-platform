@@ -18,7 +18,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
-from app.api.v1.jobs import SessionDep, _build_input, _item, _new_job_id, _now
+from app.api.v1.jobs import (
+    SessionDep,
+    _binary_block,
+    _build_input,
+    _item,
+    _new_job_id,
+    _now,
+)
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
@@ -83,6 +90,8 @@ async def create_quality_job(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
         )
+    if (blocked_resp := _binary_block(input_version)) is not None:
+        return blocked_resp
 
     job = Job(
         id=_new_job_id(),

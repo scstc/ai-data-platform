@@ -352,6 +352,15 @@ declare namespace DataPlatform {
   /** 数据集详情（含版本列表） */
   type DatasetDetail = Dataset & { versions: DatasetVersion[] };
 
+  /** manifest 数据集的成员文件(一个媒体对象) */
+  type DatasetMember = {
+    name: string;
+    key: string;
+    bucket: string;
+    format: string;
+    size?: number;
+  };
+
   /** 数据集元数据更新入参 */
   type DatasetUpdate = {
     name?: string;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import secrets
 import shutil
@@ -25,6 +26,7 @@ from app.models.job_input import JobInput
 from app.schemas.common import CamelModel, PageResponse
 from app.schemas.dataset import (
     DatasetDetailRead,
+    DatasetMemberRead,
     DatasetRead,
     DatasetUpdate,
     DatasetVersionRead,
@@ -32,16 +34,24 @@ from app.schemas.dataset import (
     PlatformHostRequest,
 )
 from app.services.external_store import (
+    MAX_MANIFEST_MEMBERS,
+    MAX_MATERIALIZE_BYTES,
     ExternalStoreError,
+    download_to_temp,
     head_records,
     parse_s3_uri,
     platform_config,
+    presigned_get_url,
+    remove_object,
+    remove_prefix,
     stat_object,
+    upload_object,
 )
 from app.services.landing import (
     BINARY_FORMATS,
     INGESTABLE_FORMATS,
     LANDABLE_FORMATS,
+    MANIFEST_FORMAT,
     LandingError,
     UnsupportedFormatError,
     land_upload,
@@ -148,6 +158,521 @@ async def upload_as_dataset(
         detail.category_name = names.get(dataset.category_id)
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
+
+
+# 媒体批量接入:单文件体积上限(与 uploads.py / 前端 200MB 对齐)
+_MAX_MEDIA_FILE_BYTES = 200 * 1024 * 1024
+
+# 媒体批量接入:data_type → manifest 媒体字段 + dj 特殊 token(一个数据集一种模态)
+_MEDIA_FIELD = {"image": "images", "audio": "audios", "video": "videos"}
+_MEDIA_TOKEN = {
+    "image": "<__dj__image>",
+    "audio": "<__dj__audio>",
+    "video": "<__dj__video>",
+}
+
+MediaFilesDep = Annotated[list[UploadFile], File()]
+
+
+async def _version_storage_cfg(
+    version: DatasetVersion, session: SessionDep
+) -> dict | None:
+    """解析版本访问对象存储凭证;平台未配置返回 None(调用方转 503)。"""
+    if version.source_datasource_id:
+        ds = await session.get(DataSource, version.source_datasource_id)
+        return ds.config if ds is not None else None
+    try:
+        return platform_config()
+    except ExternalStoreError:
+        return None
+
+
+async def _read_manifest_rows(cfg: dict, storage_uri: str) -> list[dict]:
+    """下载 manifest 对象并解析为行列表(供成员列表/预览)。"""
+    bucket, key = parse_s3_uri(storage_uri)
+    raw = await download_to_temp(cfg, bucket, key)
+    try:
+        rows: list[dict] = []
+        for ln in raw.read_text(encoding="utf-8").splitlines():
+            if not ln.strip():
+                continue
+            try:
+                rows.append(json.loads(ln))
+            except json.JSONDecodeError as exc:
+                # 清单损坏 → 转 ExternalStoreError(调用方 4xx),不冒 500
+                raise ExternalStoreError(f"清单格式损坏:{exc}") from exc
+        return rows
+    finally:
+        raw.unlink(missing_ok=True)
+
+
+def _manifest_bytes(rows: list[dict]) -> bytes:
+    """把 manifest 行序列化为 jsonl 字节(写回平台对象)。"""
+    return (
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n"
+    ).encode("utf-8")
+
+
+async def _manifest_version_of(
+    session: SessionDep, dataset_id: str
+) -> DatasetVersion | None:
+    """取数据集的可编辑 manifest 版本(媒体集只有一个 format=manifest 的源版本)。"""
+    return (
+        await session.scalars(
+            select(DatasetVersion)
+            .where(
+                DatasetVersion.dataset_id == dataset_id,
+                DatasetVersion.format == MANIFEST_FORMAT,
+            )
+            .order_by(DatasetVersion.version_no.desc())
+        )
+    ).first()
+
+
+@router.post("/datasets/upload-media")
+async def upload_media_as_dataset(
+    files: MediaFilesDep,
+    session: SessionDep,
+    name: NameForm = None,
+    data_type: DataTypeForm = None,
+    category_id: CategoryIdForm = None,
+) -> JSONResponse:
+    """媒体批量接入:一批文件 → 传平台 MinIO → 生成**一个** manifest 数据集(一文件一行)。
+
+    与 /datasets/upload(一文件一集)不同:整批只建一个数据集,版本是 manifest jsonl,
+    可进 dj-process(物化时下载成员)。仅图/音/视频(同模态)。
+    """
+    field = _MEDIA_FIELD.get(data_type or "")
+    token = _MEDIA_TOKEN.get(data_type or "")
+    if field is None or token is None:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "媒体批量接入仅支持 image / audio / video 类型",
+            },
+        )
+    if not files:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "请至少选择一个文件"},
+        )
+    for f in files:
+        if _file_ext(f.filename or "") not in BINARY_FORMATS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"文件 {f.filename} 不是支持的媒体格式",
+                },
+            )
+    # 接入上限与物化上限对齐:超限的数据集永远无法加工,故在接入处就拦截
+    if len(files) > MAX_MANIFEST_MEMBERS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": f"一次最多接入 {MAX_MANIFEST_MEMBERS} 个文件",
+            },
+        )
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+
+    bucket = settings.storage_minio_upload_bucket
+    dataset_id = _new_dataset_id()
+    # 任一步失败(对象写入/落库)都回收本数据集前缀,绝不留孤儿对象
+    try:
+        manifest_rows: list[dict] = []
+        total_size = 0
+        for idx, f in enumerate(files):
+            content = await f.read()
+            if len(content) > _MAX_MEDIA_FILE_BYTES:
+                raise ValueError(f"文件 {f.filename} 超过单文件 200MB 上限")
+            total_size += len(content)
+            if total_size > MAX_MATERIALIZE_BYTES:
+                raise ValueError("本批文件总体积超过上限,无法加工")
+            fmt = _file_ext(f.filename or "")
+            base = Path(f.filename or f"file{idx}").name  # 去路径,防 key 注入
+            member_key = f"{dataset_id}/{idx:06d}-{base}"
+            await upload_object(
+                cfg,
+                bucket,
+                member_key,
+                io.BytesIO(content),
+                len(content),
+                content_type=f.content_type or "application/octet-stream",
+            )
+            manifest_rows.append(
+                {
+                    field: [member_key],
+                    "text": token,
+                    "__member": {
+                        "bucket": bucket,
+                        "key": member_key,
+                        "name": base,
+                        "size": len(content),
+                        "format": fmt,
+                    },
+                }
+            )
+        manifest_bytes = _manifest_bytes(manifest_rows)
+        manifest_key = f"{dataset_id}/manifest.jsonl"
+        await upload_object(
+            cfg,
+            bucket,
+            manifest_key,
+            io.BytesIO(manifest_bytes),
+            len(manifest_bytes),
+            content_type="application/x-ndjson",
+        )
+
+        dataset = Dataset(
+            id=dataset_id,
+            name=name or (Path(files[0].filename or "媒体数据集").name),
+            data_type=data_type,
+            category_id=category_id,
+            owner="admin",
+            creator="admin",
+        )
+        session.add(dataset)
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=1,
+            storage_uri=f"s3://{bucket}/{manifest_key}",
+            format=MANIFEST_FORMAT,
+            rows=len(files),
+            size=total_size,
+            origin="managed",
+            source_datasource_id=None,
+            note=f"媒体批量接入:{len(files)} 个文件",
+        )
+        session.add(version)
+        await session.commit()
+        await session.refresh(dataset)
+        await session.refresh(version)
+    except ValueError as exc:
+        await _gc_manifest_objects((bucket, f"{dataset_id}/"))
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": str(exc)}
+        )
+    except ExternalStoreError as exc:
+        await _gc_manifest_objects((bucket, f"{dataset_id}/"))
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": f"对象写入失败:{exc}"},
+        )
+    except Exception:
+        await session.rollback()
+        await _gc_manifest_objects((bucket, f"{dataset_id}/"))
+        raise
+
+    detail = _to_detail(dataset, [version])
+    if dataset.category_id:
+        names = await build_category_name_map(session, [dataset.category_id])
+        detail.category_name = names.get(dataset.category_id)
+    payload = DatasetResult(data=detail)
+    return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
+
+
+@router.get("/dataset-versions/{version_id}/members")
+async def list_version_members(
+    version_id: str, session: SessionDep
+) -> JSONResponse:
+    """列出版本的成员文件:manifest 版本从 __member 取;其余版本回退为单一成员。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+
+    if version.format != MANIFEST_FORMAT:
+        bucket = ""
+        key = version.storage_uri
+        if version.origin == "hosted":
+            try:
+                bucket, key = parse_s3_uri(version.storage_uri)
+            except ExternalStoreError:
+                bucket, key = "", version.storage_uri
+        member = DatasetMemberRead(
+            name=Path(key).name,
+            key=key,
+            bucket=bucket,
+            format=version.format,
+            size=version.size,
+        )
+        return JSONResponse(
+            content={
+                "data": [member.model_dump(by_alias=True)],
+                "success": True,
+            }
+        )
+
+    cfg = await _version_storage_cfg(version, session)
+    if cfg is None:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "平台存储(MinIO)未配置"},
+        )
+    try:
+        rows = await _read_manifest_rows(cfg, version.storage_uri)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"读取清单失败:{exc}"},
+        )
+    members = [
+        DatasetMemberRead(**m).model_dump(by_alias=True)
+        for r in rows
+        if isinstance((m := r.get("__member")), dict)
+    ]
+    return JSONResponse(content={"data": members, "success": True})
+
+
+@router.get("/dataset-versions/{version_id}/member-url")
+async def get_member_url(
+    version_id: str,
+    session: SessionDep,
+    key: Annotated[str, Query()],
+) -> JSONResponse:
+    """生成成员对象的预签名 URL(供浏览器直连预览 图/音/视频/文本)。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    # 解析该版本自身对象的桶/键(manifest→uploads桶;单文件 hosted→其源桶;
+    # managed 本地版本无 s3 位置)。
+    own_bucket = ""
+    own_key = ""
+    try:
+        own_bucket, own_key = parse_s3_uri(version.storage_uri)
+    except ExternalStoreError:
+        own_bucket, own_key = "", ""
+    # 安全:只签名属于本数据集前缀的对象(manifest 成员)或该版本自身托管对象,
+    # 避免签出任意桶内对象。
+    allowed = key.startswith(f"{version.dataset_id}/") or (
+        own_key != "" and key == own_key
+    )
+    if not allowed:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "非法的成员 key"},
+        )
+    if not own_bucket:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "该版本无对象存储位置,无法预览"},
+        )
+    cfg = await _version_storage_cfg(version, session)
+    if cfg is None:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "平台存储(MinIO)未配置"},
+        )
+    try:
+        url = await presigned_get_url(cfg, own_bucket, key)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"生成链接失败:{exc}"},
+        )
+    return JSONResponse(content={"data": {"url": url}, "success": True})
+
+
+@router.post("/datasets/{dataset_id}/members")
+async def add_dataset_members(
+    dataset_id: str,
+    files: MediaFilesDep,
+    session: SessionDep,
+) -> JSONResponse:
+    """向 manifest 媒体集追加成员(原地编辑:写对象 + 追加清单行 + 更新版本计数)。"""
+    dataset = await session.get(Dataset, dataset_id)
+    version = await _manifest_version_of(session, dataset_id)
+    if dataset is None or version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集不存在或不是可编辑的媒体集"},
+        )
+    field = _MEDIA_FIELD.get(dataset.data_type or "")
+    token = _MEDIA_TOKEN.get(dataset.data_type or "")
+    if field is None or token is None:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "该数据集不支持追加媒体文件"},
+        )
+    if not files:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "请至少选择一个文件"},
+        )
+    for f in files:
+        if _file_ext(f.filename or "") not in BINARY_FORMATS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"文件 {f.filename} 不是支持的媒体格式",
+                },
+            )
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+    bucket, manifest_key = parse_s3_uri(version.storage_uri)
+    try:
+        rows = await _read_manifest_rows(cfg, version.storage_uri)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"读取清单失败:{exc}"},
+        )
+    if len(rows) + len(files) > MAX_MANIFEST_MEMBERS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": f"成员数将超过上限 {MAX_MANIFEST_MEMBERS}",
+            },
+        )
+
+    added_keys: list[str] = []
+    added_size = 0
+    try:
+        for f in files:
+            content = await f.read()
+            if len(content) > _MAX_MEDIA_FILE_BYTES:
+                raise ValueError(f"文件 {f.filename} 超过单文件 200MB 上限")
+            if (version.size or 0) + added_size + len(content) > MAX_MATERIALIZE_BYTES:
+                raise ValueError("数据集总体积将超过上限")
+            fmt = _file_ext(f.filename or "")
+            base = Path(f.filename or "file").name
+            # 追加成员用随机前缀,避免与现有(可能已删出空档的)序号键冲突
+            member_key = f"{dataset_id}/{secrets.token_hex(4)}-{base}"
+            await upload_object(
+                cfg,
+                bucket,
+                member_key,
+                io.BytesIO(content),
+                len(content),
+                content_type=f.content_type or "application/octet-stream",
+            )
+            added_keys.append(member_key)
+            added_size += len(content)
+            rows.append(
+                {
+                    field: [member_key],
+                    "text": token,
+                    "__member": {
+                        "bucket": bucket,
+                        "key": member_key,
+                        "name": base,
+                        "size": len(content),
+                        "format": fmt,
+                    },
+                }
+            )
+        body = _manifest_bytes(rows)
+        await upload_object(
+            cfg,
+            bucket,
+            manifest_key,
+            io.BytesIO(body),
+            len(body),
+            content_type="application/x-ndjson",
+        )
+    except (ValueError, ExternalStoreError) as exc:
+        for k in added_keys:  # 回收本次新写对象,清单未改、保持一致
+            try:
+                await remove_object(cfg, bucket, k)
+            except ExternalStoreError:
+                pass
+        code = 400 if isinstance(exc, ValueError) else 503
+        return JSONResponse(
+            status_code=code, content={"success": False, "message": str(exc)}
+        )
+
+    version.rows = len(rows)
+    version.size = (version.size or 0) + added_size
+    await session.commit()
+    return JSONResponse(content={"data": {"rows": len(rows)}, "success": True})
+
+
+@router.delete("/datasets/{dataset_id}/members")
+async def delete_dataset_member(
+    dataset_id: str,
+    session: SessionDep,
+    key: Annotated[str, Query()],
+) -> JSONResponse:
+    """从 manifest 媒体集移除一个成员(删对象 + 去清单行 + 更新版本计数)。"""
+    version = await _manifest_version_of(session, dataset_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集不存在或不是可编辑的媒体集"},
+        )
+    if not key.startswith(f"{dataset_id}/"):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "非法的成员 key"},
+        )
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+    bucket, manifest_key = parse_s3_uri(version.storage_uri)
+    try:
+        rows = await _read_manifest_rows(cfg, version.storage_uri)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"读取清单失败:{exc}"},
+        )
+    kept = [r for r in rows if (r.get("__member") or {}).get("key") != key]
+    if len(kept) == len(rows):
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "成员不存在"},
+        )
+    removed_size = sum(
+        (m.get("size") or 0)
+        for r in rows
+        if (m := r.get("__member")) and m.get("key") == key
+    )
+    # 先删对象(失败也继续从清单移除,避免清单与对象长期不一致)
+    try:
+        await remove_object(cfg, bucket, key)
+    except ExternalStoreError:
+        pass
+    try:
+        body = _manifest_bytes(kept)
+        await upload_object(
+            cfg,
+            bucket,
+            manifest_key,
+            io.BytesIO(body),
+            len(body),
+            content_type="application/x-ndjson",
+        )
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": f"更新清单失败:{exc}"},
+        )
+    version.rows = len(kept)
+    version.size = max(0, (version.size or 0) - removed_size)
+    await session.commit()
+    return JSONResponse(content={"data": {"rows": len(kept)}, "success": True})
 
 
 @router.get("/datasets", response_model=PageResponse[DatasetRead])
@@ -315,6 +840,37 @@ def _rmdir(dataset_id: str) -> None:
     shutil.rmtree(Path(settings.datasets_dir) / dataset_id, ignore_errors=True)
 
 
+async def _manifest_gc_target(
+    session: SessionDep, dataset_id: str
+) -> tuple[str, str] | None:
+    """数据集含 manifest 版本(平台自有媒体)→ 返回 (bucket, prefix) 供删除时回收对象。"""
+    v = (
+        await session.scalars(
+            select(DatasetVersion).where(
+                DatasetVersion.dataset_id == dataset_id,
+                DatasetVersion.format == MANIFEST_FORMAT,
+            )
+        )
+    ).first()
+    if v is None:
+        return None
+    try:
+        bucket, _ = parse_s3_uri(v.storage_uri)
+    except ExternalStoreError:
+        return None
+    return bucket, f"{dataset_id}/"
+
+
+async def _gc_manifest_objects(target: tuple[str, str] | None) -> None:
+    """尽力回收 manifest 数据集在平台 MinIO 的对象;平台未配/不可达时不阻断删除。"""
+    if target is None:
+        return
+    try:
+        await remove_prefix(platform_config(), target[0], target[1])
+    except ExternalStoreError:
+        pass  # DB 行已删;残留对象由后续清理,不让 GC 失败阻断删除
+
+
 class BatchDeleteRequest(CamelModel):
     """批量删除入参。"""
 
@@ -336,6 +892,7 @@ async def delete_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
             status_code=403,
             content={"success": False, "message": _HOSTED_DELETE_MSG},
         )
+    gc = await _manifest_gc_target(session, dataset_id)
     if not await _purge_dataset(session, dataset_id):
         return JSONResponse(
             status_code=404,
@@ -343,6 +900,7 @@ async def delete_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
         )
     await session.commit()
     _rmdir(dataset_id)
+    await _gc_manifest_objects(gc)
     return JSONResponse(content={"success": True})
 
 
@@ -362,12 +920,19 @@ async def batch_delete_datasets(
                 status_code=403,
                 content={"success": False, "message": _HOSTED_DELETE_MSG},
             )
-    deleted = [
-        ds_id for ds_id in body.ids if await _purge_dataset(session, ds_id)
-    ]
+    deleted: list[str] = []
+    gc_targets: list[tuple[str, str]] = []
+    for ds_id in body.ids:
+        gc = await _manifest_gc_target(session, ds_id)
+        if await _purge_dataset(session, ds_id):
+            deleted.append(ds_id)
+            if gc is not None:
+                gc_targets.append(gc)
     await session.commit()
     for ds_id in deleted:
         _rmdir(ds_id)
+    for target in gc_targets:
+        await _gc_manifest_objects(target)
     return JSONResponse(
         content={"data": {"deleted": len(deleted)}, "success": True}
     )
@@ -400,6 +965,35 @@ async def preview_version(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
+        )
+
+    # manifest(媒体集):返回成员清单表(name/format/size),不走 normalize_to_records
+    if version.format == MANIFEST_FORMAT:
+        cfg = await _version_storage_cfg(version, session)
+        if cfg is None:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "平台存储(MinIO)未配置"},
+            )
+        try:
+            rows = await _read_manifest_rows(cfg, version.storage_uri)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"读取清单失败:{exc}"},
+            )
+        members = [
+            {"name": m.get("name"), "format": m.get("format"), "size": m.get("size")}
+            for r in rows
+            if isinstance((m := r.get("__member")), dict)
+        ]
+        return JSONResponse(
+            content={
+                "data": members[offset : offset + limit],
+                "columns": ["name", "format", "size"],
+                "total": version.rows or len(members),
+                "success": True,
+            }
         )
 
     # 二进制类(图像/音视频)原样存储,不解析:预览置灰,仅下载

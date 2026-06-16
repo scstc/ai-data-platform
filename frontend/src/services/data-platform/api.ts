@@ -406,6 +406,64 @@ export async function uploadDataset(
   );
 }
 
+/** 媒体批量接入:一批文件 → 一个 manifest 数据集 POST /api/v1/datasets/upload-media */
+export async function uploadMediaDataset(
+  formData: FormData,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(
+    '/api/v1/datasets/upload-media',
+    { method: 'POST', data: formData, ...(options || {}) },
+  );
+}
+
+/** 列出版本的成员文件 GET /api/v1/dataset-versions/{id}/members */
+export async function listDatasetMembers(
+  versionId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetMember[]; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/members`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 取成员对象的预签名预览/下载 URL GET /api/v1/dataset-versions/{id}/member-url */
+export async function getDatasetMemberUrl(
+  versionId: string,
+  key: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { url: string }; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/member-url`,
+    { method: 'GET', params: { key }, ...(options || {}) },
+  );
+}
+
+/** 向媒体集追加成员文件 POST /api/v1/datasets/{id}/members */
+export async function addDatasetMembers(
+  datasetId: string,
+  formData: FormData,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { rows: number }; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/members`,
+    { method: 'POST', data: formData, ...(options || {}) },
+  );
+}
+
+/** 从媒体集移除一个成员文件 DELETE /api/v1/datasets/{id}/members?key= */
+export async function deleteDatasetMember(
+  datasetId: string,
+  key: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { rows: number }; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/members`,
+    { method: 'DELETE', params: { key }, ...(options || {}) },
+  );
+}
+
 /** 数据集列表 GET /api/v1/datasets */
 export async function listDatasets(
   params?: DataPlatform.DatasetListParams,

@@ -45,6 +45,10 @@ BINARY_FORMATS = {
 # 数据接入可受理的全部格式(可规范化 + 二进制零拷贝)
 INGESTABLE_FORMATS = LANDABLE_FORMATS | BINARY_FORMATS
 
+# 媒体批量接入产物的版本 format:一份 manifest jsonl(每行引用对象存储里的媒体),
+# 物化时下载成员并改写为本地路径喂给 dj-process(见 external_store.materialized_version)。
+MANIFEST_FORMAT = "manifest"
+
 # markitdown 实例(懒加载,首次处理文档时才初始化,避免拖慢后端启动)
 _markitdown = None
 
