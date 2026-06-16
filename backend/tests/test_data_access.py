@@ -427,6 +427,43 @@ async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_persist_manifest_output_uploads_and_rewrites(monkeypatch, tmp_path):
+    """加工产物持久化(materialize 的逆):本地媒体回传 MinIO、images 改写为对象 key、
+    补回 __member、清单写到版本前缀;产物自包含(不回指输入对象)。"""
+    import json
+
+    from app.services import external_store as es
+
+    store = _mem_store_patch(monkeypatch, es)
+
+    # 模拟 dj 产物:images 指向物化临时目录里的本地媒体(绝对路径)
+    img = tmp_path / "000000-000000-pic.png"
+    img.write_bytes(b"\x89PNG-fake")
+    jsonl = tmp_path / "data.jsonl"
+    jsonl.write_text(
+        json.dumps({"images": [str(img)], "text": "<__dj__image>"}) + "\n",
+        encoding="utf-8",
+    )
+
+    uri, rows, size = await es.persist_manifest_output(
+        jsonl_path=jsonl, dataset_id="dset-x", version_no=2
+    )
+
+    assert uri == "s3://uploads/dset-x/v2/manifest.jsonl"
+    assert rows == 1
+    assert size == len(b"\x89PNG-fake")
+    # 媒体已回传到版本前缀(自包含)
+    assert ("uploads", "dset-x/v2/000000-000000-pic.png") in store
+    # 清单:images 改写为对象 key + __member 指回该对象
+    manifest_row = json.loads(
+        store[("uploads", "dset-x/v2/manifest.jsonl")].decode().strip()
+    )
+    assert manifest_row["images"] == ["dset-x/v2/000000-000000-pic.png"]
+    assert manifest_row["__member"]["key"] == "dset-x/v2/000000-000000-pic.png"
+    assert manifest_row["__member"]["bucket"] == "uploads"
+
+
+@pytest.mark.asyncio
 async def test_upload_media_rejects_over_member_cap(client, monkeypatch):
     """超过成员数上限的批量 → 400(不会创建永远无法物化的数据集)。"""
     from app.api.v1 import datasets as dmod

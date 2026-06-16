@@ -174,7 +174,7 @@ const Editor: React.FC = () => {
         outputMode,
         outputDatasetName: outputMode === 'new_dataset' ? outputName.trim() : undefined,
       });
-      message.success('加工任务已创建');
+      message.success('加工任务已创建，正在后台运行');
       clear();
       history.push('/processing/jobs');
     } finally {

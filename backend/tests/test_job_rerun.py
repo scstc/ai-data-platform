@@ -5,7 +5,9 @@
 版本**再跑一次、产出新版本,并**新建一条任务记录**(保留每次运行的血缘)。早于本
 特性、无 spec 的旧任务不可重跑 → 400(而非 500)。
 
-子进程层(run_process_job)打桩,只验证编排与状态流转,不跑真实 data-juicer。
+执行已改为**后台异步**(见 job_runner):POST 立即返回 pending,跑完才转 success。
+子进程层(run_process_job)打桩,只验证编排与状态流转;测试用 job_runner.drain()
+等后台任务落定后再断言。
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.services import job_runner
 
 DATASET_ID = "dset-r1"
 VERSION_ID = "dsv-r1"
@@ -58,9 +61,9 @@ async def test_rerun_reexecutes_with_saved_spec(
         await session.commit()
         return None, "process: []", "/tmp/run.log"
 
-    monkeypatch.setattr("app.api.v1.jobs.run_process_job", fake_run)
+    monkeypatch.setattr("app.services.job_runner.run_process_job", fake_run)
 
-    # 建任务(产出 spec)
+    # 建任务(后台执行)→ 立即返回 pending
     resp = await client.post(
         "/api/v1/jobs",
         json={
@@ -72,17 +75,25 @@ async def test_rerun_reexecutes_with_saved_spec(
     )
     assert resp.status_code == 200, resp.text
     job1 = resp.json()["data"]
-    assert job1["state"] == "success"
+    assert job1["state"] == "pending"
     assert job1["canRerun"] is True
     job1_id = job1["id"]
 
-    # 重跑
+    await job_runner.drain()  # 等后台跑完
+    detail = (await client.get(f"/api/v1/jobs/{job1_id}")).json()["data"]
+    assert detail["state"] == "success"
+
+    # 重跑 → 又是 pending,新建一条记录
     resp = await client.post(f"/api/v1/jobs/{job1_id}/rerun")
     assert resp.status_code == 200, resp.text
     job2 = resp.json()["data"]
-    assert job2["state"] == "success"
+    assert job2["state"] == "pending"
     assert job2["canRerun"] is True
-    assert job2["id"] != job1_id  # 新建一条记录,不改动原记录
+    assert job2["id"] != job1_id  # 新建记录,不改动原记录
+
+    await job_runner.drain()
+    detail2 = (await client.get(f"/api/v1/jobs/{job2['id']}")).json()["data"]
+    assert detail2["state"] == "success"
 
     # 引擎被调用两次;第二次仍针对「原」输入版本、用原算子(可复现)
     assert len(calls) == 2

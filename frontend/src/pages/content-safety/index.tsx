@@ -43,6 +43,7 @@ const STATE_META: Record<
   running: { text: '运行中', color: 'processing' },
   success: { text: '成功', color: 'success' },
   failed: { text: '失败', color: 'error' },
+  cancelled: { text: '已取消', color: 'warning' },
 };
 
 const CATEGORY_META: Record<

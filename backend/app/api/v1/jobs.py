@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -20,10 +20,16 @@ from app.models.job import Job
 from app.models.job_input import JobInput
 from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.job import JobCreate, JobRead, OperatorSpec
+from app.services import job_runner
 from app.services import operator_catalog as oc
-from app.services.engine import EngineError, run_preview, run_process_job
+from app.services.engine import (
+    EngineError,
+    multimodal_ready,
+    run_preview,
+    terminate_job,
+)
 from app.services.external_store import ExternalStoreError
-from app.services.landing import BINARY_FORMATS
+from app.services.landing import BINARY_FORMATS, MANIFEST_FORMAT
 
 router = APIRouter(tags=["jobs"])
 
@@ -39,6 +45,26 @@ def _binary_block(version: DatasetVersion) -> JSONResponse | None:
                 "success": False,
                 "message": (
                     f"二进制数据集(.{version.format})不支持加工,请选择文本类数据集"
+                ),
+            },
+        )
+    return None
+
+
+async def _multimodal_block(version: DatasetVersion) -> JSONResponse | None:
+    """媒体(manifest)数据集需 DJ 多模态引擎(torch);本部署没装则提前 400。
+
+    避免在无 torch 的环境里运行时 ``uv pip install torch`` 卡几十分钟(且装进重启即丢
+    的可写层)。媒体加工请在已装多模态引擎的环境(如 GPU 机)运行。
+    """
+    if version.format == MANIFEST_FORMAT and not await multimodal_ready():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": (
+                    "当前部署未安装多模态引擎(torch),媒体数据集加工请在已装多模态"
+                    "引擎的环境(如 GPU 机)运行"
                 ),
             },
         )
@@ -62,11 +88,6 @@ class PreviewRequest(CamelModel):
 
 def _new_job_id() -> str:
     return f"job-{secrets.token_hex(3)}"
-
-
-def _new_dataset_id() -> str:
-    """形如 ``dset-`` + 6 位 hex(与 landing/datasets 同款)。"""
-    return f"dset-{secrets.token_hex(3)}"
 
 
 def _now() -> datetime:
@@ -158,11 +179,12 @@ async def list_jobs(
     return PageResponse[JobRead](data=data, total=total)
 
 
-async def _create_and_run(session: AsyncSession, body: JobCreate) -> JSONResponse:
-    """校验 → 建任务(存 spec 以备重跑)→ 同步跑算子流水线 → 落终态并返回。
+async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
+    """校验 → 建任务(pending,存 spec 以备重跑)→ 起后台任务执行 → 立即返回(不等跑完)。
 
-    create_job 与 rerun_job 共用:rerun 用原任务存下的 spec 重建 body,故对
-    原输入版本再跑一次,产出新版本(新建一条任务记录,保留每次运行的血缘)。
+    实际执行在 job_runner 后台进行(状态机 pending→running→success/failed/cancelled),
+    任务可经 POST /jobs/{id}/stop 停止;create_job 与 rerun_job 共用此入口
+    (rerun 用原任务存下的 spec 重建 body)。
     """
     if not body.operators:
         return JSONResponse(
@@ -197,70 +219,42 @@ async def _create_and_run(session: AsyncSession, body: JobCreate) -> JSONRespons
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
-
-    # 产物去向:默认写回输入数据集(新版本);new_dataset 则另存为新数据集。
-    # 新数据集对象在此构建但不入库,由 run_process_job 在加工成功后落库,
-    # 避免任务失败时残留空数据集。
-    output_dataset = None
-    if body.output_mode == "new_dataset":
-        new_name = (body.output_dataset_name or "").strip()
-        if not new_name:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "另存为新数据集时请填写新数据集名称"},
-            )
-        src_dataset = await session.get(Dataset, input_version.dataset_id)
-        output_dataset = Dataset(
-            id=_new_dataset_id(),
-            name=new_name,
-            data_type=src_dataset.data_type if src_dataset else None,
-            category_id=src_dataset.category_id if src_dataset else None,
-            owner="admin",
-            creator="admin",
+    if (blocked_resp := await _multimodal_block(input_version)) is not None:
+        return blocked_resp
+    if (
+        body.output_mode == "new_dataset"
+        and not (body.output_dataset_name or "").strip()
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "另存为新数据集时请填写新数据集名称"},
         )
 
     job = Job(
         id=_new_job_id(),
         name=body.name,
         type=body.type,
-        state="running",
+        state="pending",
         progress=0,
         created_by="admin",
-        started_at=_now(),
         # 存原始执行规格(算子 + 输出去向 + 输入版本),供 rerun 原样重跑
         spec=body.model_dump(mode="json"),
     )
     session.add(job)
     await session.commit()
-
-    try:
-        _version, yaml_text, log_path = await run_process_job(
-            session,
-            job_id=job.id,
-            input_version=input_version,
-            operators=[o.model_dump() for o in body.operators],
-            output_dataset=output_dataset,
-        )
-        job.state = "success"
-        job.progress = 100
-        job.config_yaml = yaml_text
-        job.logs_uri = log_path
-    except (EngineError, ExternalStoreError) as exc:
-        job.state = "failed"
-        job.error = str(exc)
-    job.finished_at = _now()
-    await session.commit()
     await session.refresh(job)
-
-    output = await _build_output(session, job.id)
-    input_ = await _build_input(session, job.id)
-    return JSONResponse(content=_item(job, output, input_))
+    # 交后台执行:产物去向(含另存新数据集的构建)由 job_runner 在加工时处理
+    job_runner.spawn(job.id, body)
+    return JSONResponse(content=_item(job))
 
 
 @router.post("/jobs")
 async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
-    """新建并执行加工任务:对一个数据集版本跑算子流水线 → 产出新版本。"""
-    return await _create_and_run(session, body)
+    """新建加工任务并后台执行:对一个数据集版本跑算子流水线 → 产出新版本。
+
+    立即返回 pending 任务(不阻塞到跑完);进度经轮询 GET 反映,可经 stop 端点停止。
+    """
+    return await _start_job(session, body)
 
 
 @router.post("/jobs/{job_id}/rerun")
@@ -291,7 +285,35 @@ async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
             status_code=400,
             content={"success": False, "message": "任务配置已损坏,无法重跑"},
         )
-    return await _create_and_run(session, spec)
+    return await _start_job(session, spec)
+
+
+@router.post("/jobs/{job_id}/stop")
+async def stop_job(job_id: str, session: SessionDep) -> JSONResponse:
+    """停止运行中 / 排队中的加工任务:杀子进程并把任务标记为 cancelled。
+
+    仅 pending/running 可停;终态任务 → 409;未知 → 404。
+    停止不删产物,要重来用「重新运行」。
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "任务不存在"},
+        )
+    if job.state not in ("pending", "running"):
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务不在运行中,无法停止"},
+        )
+    # 先登记停止意图(让排队中的后台任务起跑前放弃、被杀任务记 cancelled 而非 failed),
+    # 再杀子进程;DB 立刻置 cancelled 给前端即时反馈。
+    job_runner.request_cancel(job_id)
+    terminate_job(job_id)
+    job.state = "cancelled"
+    job.finished_at = _now()
+    await session.commit()
+    return JSONResponse(content={"success": True})
 
 
 @router.post("/jobs/preview")
@@ -333,6 +355,8 @@ async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
+    if (blocked_resp := await _multimodal_block(input_version)) is not None:
+        return blocked_resp
 
     try:
         result = await run_preview(
@@ -361,3 +385,66 @@ async def get_job(job_id: str, session: SessionDep) -> JSONResponse:
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
     return JSONResponse(content=_item(job, output, input_))
+
+
+async def _delete_job_cascade(session: AsyncSession, job: Job) -> None:
+    """清该任务血缘边(job_inputs)+ 置空其产物版本上游(保留版本)+ 删任务本身,不 commit。
+
+    调用方需先确保 job 可删(存在且非 running)。单删与批量删共用此清理逻辑。
+    """
+    await session.execute(delete(JobInput).where(JobInput.job_id == job.id))
+    await session.execute(
+        update(DatasetVersion)
+        .where(DatasetVersion.produced_by_job_id == job.id)
+        .values(produced_by_job_id=None)
+    )
+    await session.delete(job)
+
+
+@router.delete("/jobs/{job_id}")
+async def delete_job(job_id: str, session: SessionDep) -> JSONResponse:
+    """删除加工任务记录(只删任务,不删产物)。
+
+    清掉该任务的血缘边(job_inputs),并把它产出版本的 produced_by_job_id 置空——
+    产出的数据集版本作为独立资产保留(可能已发布 / 被下游引用,有独立删除入口)。
+    运行中的任务不可删 → 409;未知任务 → 404。
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "任务不存在"},
+        )
+    if job.state == "running":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务运行中,无法删除"},
+        )
+    await _delete_job_cascade(session, job)
+    await session.commit()
+    return JSONResponse(content={"success": True})
+
+
+class BatchDeleteRequest(CamelModel):
+    """批量删除入参。"""
+
+    ids: list[str]
+
+
+@router.post("/jobs/batch-delete")
+async def batch_delete_jobs(
+    body: BatchDeleteRequest, session: SessionDep
+) -> JSONResponse:
+    """批量删除加工任务记录,返回实际删除数量(只删任务,产物版本保留)。
+
+    删除语义同单条 delete;运行中或不存在的任务自动跳过(不阻断整批)。
+    """
+    deleted = 0
+    for job_id in body.ids:
+        job = await session.get(Job, job_id)
+        if job is None or job.state == "running":
+            continue
+        await _delete_job_cascade(session, job)
+        deleted += 1
+    await session.commit()
+    return JSONResponse(content={"data": {"deleted": deleted}, "success": True})

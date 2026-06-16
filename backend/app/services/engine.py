@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
+import signal
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -22,14 +24,78 @@ from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
-from app.services.external_store import materialized_version
+from app.services.external_store import (
+    materialized_version,
+    persist_manifest_output,
+)
+from app.services.landing import MANIFEST_FORMAT
 
 # 多 job 并发上限
 _semaphore = asyncio.Semaphore(settings.engine_concurrency)
 
+# 运行中子进程注册表(单 worker 进程内有效):job_id -> dj-process 子进程。
+# 由 _run_dj 在进程起止时维护,供 terminate_job 停止任务。
+_running_procs: dict[str, asyncio.subprocess.Process] = {}
+
+
+def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
+    """整组杀:连同 dj-process fork 出的子孙(如 uv/pip 装依赖)一起 SIGKILL。
+
+    子进程以 start_new_session=True 自成进程组(pgid==pid),故对进程组发信号即可。
+    只杀 dj 自己会留孤儿继续跑、还堵住 stdout 管道让 communicate() 卡死(漏临时目录 +
+    占住并发槽)。进程已退出 / 取不到组 → 退回单进程杀,异常吞掉(已死即达成目的)。
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
+def terminate_job(job_id: str) -> bool:
+    """杀掉某 job 正在跑的 dj-process 子进程(连同其子孙);返回是否确有进程被杀。"""
+    proc = _running_procs.get(job_id)
+    if proc is None:
+        return False
+    _kill_proc_tree(proc)
+    return True
+
+
+# 多模态引擎(torch)就绪缓存:媒体/manifest 加工需 torch,无则提前拦截而非运行时拉装
+_multimodal_ready: bool | None = None
+
+
+async def multimodal_ready() -> bool:
+    """DJ venv 是否装了 torch(媒体/manifest 加工所需)。结果缓存,避免每次起子进程探测。
+
+    纯文本加工不需 torch、永不调用本检查;只有 manifest 输入才据此门控,
+    没装 torch 的部署直接 400,绝不让 DJ 运行时 ``uv pip install torch`` 卡死。
+    """
+    global _multimodal_ready
+    if _multimodal_ready is not None:
+        return _multimodal_ready
+    dj_python = str(Path(settings.dj_process_bin).with_name("python"))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            dj_python,
+            "-c",
+            "import torch",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+    except OSError:
+        return False  # 探测本身失败(如 python 不存在)不缓存,下次再试
+    _multimodal_ready = proc.returncode == 0
+    return _multimodal_ready
+
 
 class EngineError(RuntimeError):
-    """加工执行失败(dj-process 非零退出 / 无产物)。"""
+    """加工执行失败(dj-process 非零退出 / 无产物 / 超时)。"""
 
 
 def _new_version_id() -> str:
@@ -62,16 +128,35 @@ def build_config(
     }
 
 
-async def _run_dj(yaml_path: Path) -> tuple[int, str]:
-    """异步起 dj-process 子进程,返回 (退出码, 合并日志)。"""
+async def _run_dj(yaml_path: Path, *, job_id: str | None = None) -> tuple[int, str]:
+    """异步起 dj-process 子进程,返回 (退出码, 合并日志)。
+
+    传 job_id 时把子进程登记进 _running_procs(供 terminate_job 停止);进程结束即注销。
+    超过 settings.engine_job_timeout 秒(>0 时)则杀进程并抛 EngineError。
+    """
     proc = await asyncio.create_subprocess_exec(
         settings.dj_process_bin,
         "--config",
         str(yaml_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        # 自成进程组:停止/超时时可整组杀,连带 dj fork 出的子孙(uv/pip 等)
+        start_new_session=True,
     )
-    out, _ = await proc.communicate()
+    if job_id is not None:
+        _running_procs[job_id] = proc
+    timeout = settings.engine_job_timeout if settings.engine_job_timeout > 0 else None
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        _kill_proc_tree(proc)
+        await proc.wait()
+        raise EngineError(
+            f"加工超时(超过 {settings.engine_job_timeout}s),已终止"
+        ) from None
+    finally:
+        if job_id is not None:
+            _running_procs.pop(job_id, None)
     return proc.returncode or 0, out.decode("utf-8", "replace")
 
 
@@ -215,29 +300,53 @@ async def run_process_job(
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
 
-        async with _semaphore:
-            code, log = await _run_dj(yaml_path)
+        # 并发信号量由调用方(job_runner)持有;此处只负责跑子进程(可被 terminate_job 停止)
+        code, log = await _run_dj(yaml_path, job_id=job_id)
+
+        # manifest 输入:产物里的媒体引用指向物化临时目录(用完即清),趁临时文件还在,
+        # 把媒体回传平台 MinIO、清单改写为对象引用 → 产物仍是自包含的 manifest 版本。
+        manifest_out: tuple[str, int, int] | None = None
+        if code == 0 and out_path.exists() and input_version.format == MANIFEST_FORMAT:
+            manifest_out = await persist_manifest_output(
+                jsonl_path=out_path, dataset_id=dataset_id, version_no=new_vno
+            )
     log_path.write_text(log, encoding="utf-8")
 
     if code != 0 or not out_path.exists():
         tail = "\n".join(log.strip().splitlines()[-8:])
         raise EngineError(f"dj-process 退出码 {code}\n{tail}")
 
-    rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
-    stats_path = out_dir / "data_stats.jsonl"
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=str(out_path),
-        stats_uri=str(stats_path) if stats_path.exists() else None,
-        format="jsonl",
-        rows=rows,
-        size=out_path.stat().st_size,
-        origin="managed",
-        produced_by_job_id=job_id,
-        note=f"加工产出(来自 v{input_version.version_no})",
-    )
+    if manifest_out is not None:
+        # 媒体加工产出:storage_uri 指向平台 MinIO 上的清单,与媒体批量接入版本同形
+        storage_uri, rows, size = manifest_out
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=new_vno,
+            storage_uri=storage_uri,
+            format=MANIFEST_FORMAT,
+            rows=rows,
+            size=size,
+            origin="managed",
+            produced_by_job_id=job_id,
+            note=f"加工产出(来自 v{input_version.version_no})",
+        )
+    else:
+        rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
+        stats_path = out_dir / "data_stats.jsonl"
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=new_vno,
+            storage_uri=str(out_path),
+            stats_uri=str(stats_path) if stats_path.exists() else None,
+            format="jsonl",
+            rows=rows,
+            size=out_path.stat().st_size,
+            origin="managed",
+            produced_by_job_id=job_id,
+            note=f"加工产出(来自 v{input_version.version_no})",
+        )
     if output_dataset is not None:
         session.add(output_dataset)
     session.add(version)

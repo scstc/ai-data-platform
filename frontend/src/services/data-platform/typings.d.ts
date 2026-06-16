@@ -219,7 +219,7 @@ declare namespace DataPlatform {
     id: string;
     name: string;
     type: string;
-    state: 'pending' | 'running' | 'success' | 'failed';
+    state: 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
     progress: number;
     error?: string;
     configYaml?: string;

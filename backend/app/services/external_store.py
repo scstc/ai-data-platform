@@ -394,6 +394,84 @@ async def materialized_version(
             jsonl_path.unlink(missing_ok=True)
 
 
+async def persist_manifest_output(
+    *, jsonl_path: Path, dataset_id: str, version_no: int
+) -> tuple[str, int, int]:
+    """把加工产出的 jsonl 持久化为平台 manifest 版本(``_materialized_manifest`` 的逆)。
+
+    加工 manifest 数据集时,dj 产物里的 images/audios/videos 引用指向物化临时目录
+    (用完即清)。本函数趁临时文件还在,把各媒体回传平台 MinIO
+    (uploads/<dataset_id>/v<n>/...),路径改写为对象 key 并补回 __member,再把清单写到
+    uploads/<dataset_id>/v<n>/manifest.jsonl。返回 (storage_uri, 行数, 媒体总字节)。
+
+    图像算子改图后产出的是**新文件**,照样按其产物路径原样上传,故对未来的多模态加工
+    (GPU 上跑图像算子)同样自洽——产物始终自包含,不回指输入对象。
+    """
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    prefix = f"{dataset_id}/v{version_no}"
+    lines = [
+        ln
+        for ln in jsonl_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    total_size = 0
+    out_rows: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ExternalStoreError(f"加工产物格式损坏:{exc}") from exc
+        member: dict[str, Any] | None = None
+        for field in ("images", "audios", "videos"):
+            paths = row.get(field)
+            if not isinstance(paths, list):
+                continue
+            keys: list[str] = []
+            for local in paths:
+                p = Path(str(local))
+                if not p.is_absolute() or not p.exists():
+                    raise ExternalStoreError(
+                        f"加工产物媒体缺失,无法持久化:{local}"
+                    )
+                content = await asyncio.to_thread(p.read_bytes)
+                key = f"{prefix}/{p.name}"
+                await upload_object(
+                    cfg, bucket, key, io.BytesIO(content), len(content)
+                )
+                total_size += len(content)
+                keys.append(key)
+                if member is None:
+                    member = {
+                        "bucket": bucket,
+                        "key": key,
+                        "name": p.name,
+                        "size": len(content),
+                        "format": p.suffix.lstrip("."),
+                    }
+            row[field] = keys
+        if member is not None:
+            row["__member"] = member
+        out_rows.append(row)
+
+    manifest_bytes = (
+        "\n".join(
+            json.dumps(r, ensure_ascii=False, default=str) for r in out_rows
+        )
+        + "\n"
+    ).encode("utf-8")
+    manifest_key = f"{prefix}/manifest.jsonl"
+    await upload_object(
+        cfg,
+        bucket,
+        manifest_key,
+        io.BytesIO(manifest_bytes),
+        len(manifest_bytes),
+        content_type="application/x-ndjson",
+    )
+    return f"s3://{bucket}/{manifest_key}", len(out_rows), total_size
+
+
 # ---------------------------------------------------------------------------
 # 平台 MinIO 文件管理(#19):管理平台自有对象存储,允许写/删(软保护在路由层)
 # ---------------------------------------------------------------------------

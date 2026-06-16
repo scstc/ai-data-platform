@@ -13,6 +13,7 @@ import os
 from collections.abc import AsyncGenerator
 
 import asyncpg
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
@@ -92,6 +93,27 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _job_runner_test_db(session_factory, monkeypatch) -> None:
+    """加工任务后台执行用独立会话(默认连业务库);测试里改指测试库,保证隔离。
+
+    job_runner._run_job 用 async_session_factory() 自建会话(请求会话已关闭),不走
+    get_session 覆盖,故须单独把该工厂指向测试库;并按每用例的新事件循环重建并发
+    信号量,避免 asyncio 原语「bound to a different event loop」。
+    """
+    import asyncio
+
+    from app.core.config import settings
+    from app.services import engine, job_runner
+
+    monkeypatch.setattr(job_runner, "async_session_factory", session_factory)
+    monkeypatch.setattr(
+        engine, "_semaphore", asyncio.Semaphore(settings.engine_concurrency)
+    )
+    # 多模态就绪是进程级缓存,逐用例清掉,避免跨用例串味
+    monkeypatch.setattr(engine, "_multimodal_ready", None)
 
 
 @pytest_asyncio.fixture

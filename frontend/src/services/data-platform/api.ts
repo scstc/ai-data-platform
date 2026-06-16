@@ -616,6 +616,16 @@ export async function rerunJob(id: string, options?: { [key: string]: any }) {
   );
 }
 
+/** 停止运行中/排队中的加工任务（杀子进程并标记 cancelled）POST /api/v1/jobs/:id/stop */
+export async function stopJob(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/jobs/${id}/stop`, {
+    method: 'POST',
+    // skipErrorHandler:交由调用方 catch 展示后端「不在运行中」等 message
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
 /** 样例试跑:前 N 行跑算子预览加工前后 POST /api/v1/jobs/preview */
 export async function previewJob(body: {
   datasetVersionId: string;
@@ -634,6 +644,30 @@ export async function getJob(id: string, options?: { [key: string]: any }) {
   return request<{ data: DataPlatform.Job; success: boolean }>(
     `/api/v1/jobs/${id}`,
     { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 删除加工任务（只删任务记录，产出的数据集版本保留）DELETE /api/v1/jobs/:id */
+export async function deleteJob(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/jobs/${id}`, {
+    method: 'DELETE',
+    ...(options || {}),
+  });
+}
+
+/** 批量删除加工任务（只删任务记录，产出版本保留；运行中/不存在自动跳过）POST /api/v1/jobs/batch-delete */
+export async function batchDeleteJobs(
+  ids: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/jobs/batch-delete',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: { ids },
+      ...(options || {}),
+    },
   );
 }
 

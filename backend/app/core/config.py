@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     engine_np: int = 2
     # 多 job 并发上限(信号量,避免单机被打爆)
     engine_concurrency: int = 3
+    # 单个加工任务超时(秒);超时杀子进程并标记失败。0/负 = 不限时
+    engine_job_timeout: int = 3600
 
     # 允许的跨域来源（前端 dev server）
     cors_origins: list[str] = [
