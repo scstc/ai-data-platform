@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -25,6 +26,14 @@ from app.services import job_runner
 DATASET_ID = "dset-r1"
 VERSION_ID = "dsv-r1"
 OPERATORS = [{"name": "text_length_filter", "params": {"min_len": 5}}]
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _admin_session(client: AsyncClient, seed_users: None) -> None:
+    """加工任务写端点 require_admin:这些用例默认以 admin 身份请求。"""
+    from app.services.auth import sign_token
+
+    client.cookies.set("adp_session", sign_token("admin"))
 
 
 async def _seed_version(session_factory: async_sessionmaker) -> None:

@@ -14,6 +14,7 @@ import signal
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -27,6 +28,14 @@ from app.services.engine import EngineError
 DATASET_ID = "dset-c1"
 VERSION_ID = "dsv-c1"
 OPERATORS = [{"name": "text_length_filter", "params": {"min_len": 5}}]
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _admin_session(client: AsyncClient, seed_users: None) -> None:
+    """加工任务写端点 require_admin:这些用例默认以 admin 身份请求。"""
+    from app.services.auth import sign_token
+
+    client.cookies.set("adp_session", sign_token("admin"))
 
 
 async def _seed(session_factory: async_sessionmaker) -> None:
@@ -335,3 +344,23 @@ async def test_manifest_job_allowed_with_multimodal(
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["state"] == "pending"
     await job_runner.drain()
+
+
+@pytest.mark.asyncio
+async def test_job_write_requires_admin(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """加工写端点真后端门控:非 admin → 403、匿名 → 401(门控早于业务,无需种子数据)。"""
+    from app.services.auth import sign_token
+
+    body = {
+        "name": "x",
+        "type": "clean",
+        "datasetVersionId": VERSION_ID,
+        "operators": OPERATORS,
+    }
+    client.cookies.set("adp_session", sign_token("user"))
+    assert (await client.post("/api/v1/jobs", json=body)).status_code == 403
+
+    client.cookies.delete("adp_session")
+    assert (await client.post("/api/v1/jobs", json=body)).status_code == 401

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1445,3 +1445,70 @@ async def override_verdict(
     await session.commit()
     await session.refresh(version)
     return JSONResponse(content=_version_item(version))
+
+
+# ===== 消费导出:算法工程师取「已发布」训练集(端到端闭环终点)=====
+# 发布门的消费侧对偶:只有 publish_status=published 的版本可被导出/下载,
+# 维持「published ⟹ 可被消费、draft/unpublished 不可流出」。读端点与平台其余
+# 读路径一致不强制登录,门控落在发布状态上(草稿区数据取不出去)。
+
+
+@router.get("/dataset-versions/{version_id}/download")
+async def download_version(version_id: str, session: SessionDep) -> JSONResponse:
+    """导出/下载一个已发布版本的数据(闭环终点:算法工程师选已发布版本取走训练集)。
+
+    门:``publish_status`` 必须为 ``published``,否则 409(草稿/已下架不可消费)。
+    - managed 本地版本(storage_uri 为本地路径)→ 直接流式下发文件(FileResponse)。
+    - s3 背书版本(hosted 单对象 / manifest 媒体集,storage_uri=s3://…)→ 302 跳转
+      预签名 GET URL(浏览器直连对象存储下载)。manifest 下发的是自包含清单 jsonl,
+      其媒体成员经 members / member-url 取(完整打包为后续增强)。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+    if version.publish_status != "published":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": (
+                    "仅已发布版本可导出/下载。请先对该版本通过安全扫描并发布"
+                    "(草稿区数据不对算法侧开放)。"
+                ),
+            },
+        )
+
+    uri = version.storage_uri
+    # s3 背书(hosted 单对象 / manifest 媒体集):签发预签名 URL 并 302 跳转
+    if uri.startswith("s3://"):
+        cfg = await _version_storage_cfg(version, session)
+        if cfg is None:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "平台存储(MinIO)未配置"},
+            )
+        try:
+            bucket, key = parse_s3_uri(uri)
+            url = await presigned_get_url(cfg, bucket, key)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"生成下载链接失败:{exc}"},
+            )
+        return RedirectResponse(url)
+
+    # managed 本地版本:流式下发产物文件(强制下载,文件名带数据集与版本号)
+    path = Path(uri)
+    if not path.exists():
+        return JSONResponse(
+            status_code=410,
+            content={"success": False, "message": "产物文件缺失,无法下载"},
+        )
+    ext = version.format or "jsonl"
+    filename = f"{version.dataset_id}_v{version.version_no}.{ext}"
+    return FileResponse(
+        path, media_type="application/octet-stream", filename=filename
+    )

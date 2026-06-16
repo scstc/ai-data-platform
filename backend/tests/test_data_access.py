@@ -79,11 +79,16 @@ async def test_upload_binary_lands_raw(client, monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_binary_dataset_blocked_from_processing(client, monkeypatch, tmp_path):
+async def test_binary_dataset_blocked_from_processing(
+    client, seed_users, monkeypatch, tmp_path
+):
     """二进制数据集版本提交加工/试跑 → 提前 400(而非跑起来才失败)。"""
     from app.services import landing as landing_mod
+    from app.services.auth import sign_token
 
     monkeypatch.setattr(landing_mod.settings, "datasets_dir", str(tmp_path))
+    # 加工创建端点 require_admin(jobs.py),以 admin 身份请求才能走到二进制门控
+    client.cookies.set("adp_session", sign_token("admin"))
     files = {"file": ("clip.mp4", b"\x00\x00\x00\x18ftypmp42rawbytes", "video/mp4")}
     resp = await client.post(
         "/api/v1/datasets/upload", files=files, data={"data_type": "video"}

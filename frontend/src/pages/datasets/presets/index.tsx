@@ -78,6 +78,20 @@ const DatasetsPresets: React.FC = () => {
       render: (_, v) => formatDateTime(v.publishedAt),
     },
     { title: '说明', dataIndex: 'note', render: (_, v) => v.note ?? '-' },
+    {
+      title: '操作',
+      key: 'option',
+      // 闭环终点:算法工程师取走已发布版本(后端仅 published 放行,见 /download)
+      render: (_, v) => (
+        <a
+          onClick={() =>
+            window.open(`/api/v1/dataset-versions/${v.id}/download`, '_blank')
+          }
+        >
+          下载
+        </a>
+      ),
+    },
   ];
 
   const columns: ProColumns<DataPlatform.Dataset>[] = [

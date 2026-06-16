@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_admin
 from app.core.config import settings
 from app.core.db import get_session
 from app.models.dataset import Dataset
@@ -248,7 +249,7 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
     return JSONResponse(content=_item(job))
 
 
-@router.post("/jobs")
+@router.post("/jobs", dependencies=[Depends(require_admin)])
 async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
     """新建加工任务并后台执行:对一个数据集版本跑算子流水线 → 产出新版本。
 
@@ -257,7 +258,7 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
     return await _start_job(session, body)
 
 
-@router.post("/jobs/{job_id}/rerun")
+@router.post("/jobs/{job_id}/rerun", dependencies=[Depends(require_admin)])
 async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
     """用原任务存下的配置(算子 + 输出去向)对原输入版本重跑一次 → 产出新版本。
 
@@ -288,7 +289,7 @@ async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
     return await _start_job(session, spec)
 
 
-@router.post("/jobs/{job_id}/stop")
+@router.post("/jobs/{job_id}/stop", dependencies=[Depends(require_admin)])
 async def stop_job(job_id: str, session: SessionDep) -> JSONResponse:
     """停止运行中 / 排队中的加工任务:杀子进程并把任务标记为 cancelled。
 
@@ -401,7 +402,7 @@ async def _delete_job_cascade(session: AsyncSession, job: Job) -> None:
     await session.delete(job)
 
 
-@router.delete("/jobs/{job_id}")
+@router.delete("/jobs/{job_id}", dependencies=[Depends(require_admin)])
 async def delete_job(job_id: str, session: SessionDep) -> JSONResponse:
     """删除加工任务记录(只删任务,不删产物)。
 
@@ -431,7 +432,7 @@ class BatchDeleteRequest(CamelModel):
     ids: list[str]
 
 
-@router.post("/jobs/batch-delete")
+@router.post("/jobs/batch-delete", dependencies=[Depends(require_admin)])
 async def batch_delete_jobs(
     body: BatchDeleteRequest, session: SessionDep
 ) -> JSONResponse:

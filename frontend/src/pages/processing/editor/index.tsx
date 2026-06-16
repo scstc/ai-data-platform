@@ -1,5 +1,5 @@
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useModel } from '@umijs/max';
+import { history, useLocation, useModel } from '@umijs/max';
 import {
   Button,
   Card,
@@ -70,6 +70,17 @@ const Editor: React.FC = () => {
     }
     getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
   }, [datasetId]);
+
+  // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本;不带参则维持原交互
+  const location = useLocation();
+  useEffect(() => {
+    const dsId = new URLSearchParams(location.search).get('datasetId');
+    if (dsId) setDatasetId(dsId);
+  }, []);
+  useEffect(() => {
+    const vId = new URLSearchParams(location.search).get('versionId');
+    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+  }, [versions]);
 
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
   const activeStep = steps[activeIdx];

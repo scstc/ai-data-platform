@@ -1,6 +1,6 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useLocation } from '@umijs/max';
 import {
   Alert,
   Button,
@@ -233,6 +233,18 @@ const ContentSafety: React.FC = () => {
       setVersionId(vs.length ? vs[vs.length - 1].id : undefined);
     });
   }, [datasetId]);
+
+  // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本(覆盖默认选最新版),
+  // 让“扫描某版本”一键直达;不带参则维持原交互
+  const location = useLocation();
+  useEffect(() => {
+    const dsId = new URLSearchParams(location.search).get('datasetId');
+    if (dsId) setDatasetId(dsId);
+  }, []);
+  useEffect(() => {
+    const vId = new URLSearchParams(location.search).get('versionId');
+    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+  }, [versions]);
 
   // 载入某 job 的报告(被选中时 / 轮询时)
   const loadReport = useCallback(async (jobId: string) => {

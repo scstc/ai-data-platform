@@ -388,6 +388,44 @@ const DatasetsList: React.FC = () => {
       },
     },
     {
+      // 跨阶段导航:从某版本一键进入下一流程步骤(携 dataset/version 预选,消除“各页面孤立”)
+      title: '流程',
+      key: 'pipeline',
+      render: (_, v) => (
+        <Space size="small" wrap>
+          <a
+            onClick={() =>
+              history.push(
+                `/content-safety?datasetId=${v.datasetId}&versionId=${v.id}`,
+              )
+            }
+          >
+            安全扫描
+          </a>
+          <a
+            onClick={() =>
+              history.push(
+                `/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+              )
+            }
+          >
+            质量评估
+          </a>
+          {access.canAdmin && (
+            <a
+              onClick={() =>
+                history.push(
+                  `/processing/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+                )
+              }
+            >
+              数据加工
+            </a>
+          )}
+        </Space>
+      ),
+    },
+    {
       title: '操作',
       render: (_, v) => (
         <Space size="small" wrap>
