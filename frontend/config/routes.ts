@@ -30,6 +30,7 @@ export default [
   { path: '/data-tasks', redirect: '/ops/data-tasks' },
   { path: '/lineage', redirect: '/ops/lineage' },
   { path: '/security', redirect: '/ops/security' },
+  { path: '/ingest/assistant', redirect: '/assistant' },
   // ① 数据接入
   {
     path: '/ingest',
@@ -45,11 +46,6 @@ export default [
       { path: '/ingest/tasks', name: 'tasks', component: './ingest/tasks' },
       { path: '/ingest/access', name: 'access', component: './ingest/access' },
       { path: '/ingest/files', name: 'files', component: './files' },
-      {
-        path: '/ingest/assistant',
-        name: 'assistant',
-        component: './ingest/assistant',
-      },
     ],
   },
   // ② 数据集仓库(原始数据湖 · 草稿版本 + 发布门 + 算法工程师消费)
@@ -125,6 +121,13 @@ export default [
         component: './security',
       },
     ],
+  },
+  // 智能助手(独立顶级入口,放在菜单最后)
+  {
+    path: '/assistant',
+    name: 'assistant',
+    icon: 'robot',
+    component: './ingest/assistant',
   },
   {
     component: './exception/404',

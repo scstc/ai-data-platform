@@ -56,7 +56,6 @@ export default {
   'menu.ingest.tasks': 'Ingestion Tasks',
   'menu.ingest.access': 'Data Access',
   'menu.ingest.files': 'File Management',
-  'menu.ingest.assistant': 'Ingestion Assistant',
   'menu.datasets': 'Dataset Repository',
   'menu.datasets.list': 'Dataset List',
   'menu.datasets.presets': 'Published Datasets',
@@ -72,4 +71,5 @@ export default {
   'menu.ops.dataTasks': 'Data Tasks',
   'menu.ops.lineage': 'Data Lineage',
   'menu.ops.security': 'Security Audit',
+  'menu.assistant': 'AI Assistant',
 };

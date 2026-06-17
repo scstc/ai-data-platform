@@ -56,7 +56,6 @@ export default {
   'menu.ingest.tasks': '采集任务',
   'menu.ingest.access': '数据接入',
   'menu.ingest.files': '文件管理',
-  'menu.ingest.assistant': '智能接入助手',
   'menu.datasets': '数据集仓库',
   'menu.datasets.list': '数据集列表',
   'menu.datasets.presets': '已发布数据集',
@@ -72,4 +71,5 @@ export default {
   'menu.ops.dataTasks': '数据任务',
   'menu.ops.lineage': '数据血缘',
   'menu.ops.security': '安全审计',
+  'menu.assistant': '智能助手',
 };
