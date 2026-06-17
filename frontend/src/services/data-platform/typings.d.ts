@@ -28,6 +28,19 @@ declare namespace DataPlatform {
   /** 数据源类型 */
   type DataSourceType = 's3' | 'hdfs' | 'database' | 'api';
 
+  /** 语义类型（与 dataType 功能键正交，承载 10 类 LLM 数据语义，见 docs/plan/14） */
+  type SemanticType =
+    | 'text'
+    | 'structured'
+    | 'unstructured'
+    | 'multimodal'
+    | 'cot'
+    | 'qa'
+    | 'preference'
+    | 'timeseries'
+    | 'gis'
+    | 'fusion';
+
   /** 数据库类型（当 DataSourceType 为 database 时使用） */
   type DbKind =
     | 'postgresql'
@@ -62,11 +75,15 @@ declare namespace DataPlatform {
     cron?: string;
   };
 
-  /** 采集对象（拉什么）：勾选的表（每张表一数据集）或 自定义 SQL */
+  /** 采集对象（拉什么）：勾选的表（每张表一数据集）、自定义 SQL 或路径/Glob（s3/hdfs） */
   type IngestExtract = {
-    mode: 'table' | 'sql';
+    mode: 'table' | 'sql' | 'path';
     tables?: string[];
     sql?: string;
+    /** mode='path' 时：显式路径列表（s3 key 或 hdfs 路径） */
+    paths?: string[];
+    /** mode='path' 时：glob 匹配模式（与 paths 二选一或叠加） */
+    glob?: string;
   };
 
   /** 采集产物概要（详情接口返回） */
@@ -306,6 +323,8 @@ declare namespace DataPlatform {
     format: string;
     rows?: number;
     size?: number;
+    /** 语义类型快照(与 dataType 正交,#1/#2/#8) */
+    semanticType?: SemanticType;
     origin: string;
     producedByJobId?: string;
     /** 外部 S3 托管(origin=hosted)版本据此找 S3 凭证；受管版本为空 */
@@ -328,7 +347,10 @@ declare namespace DataPlatform {
     id: string;
     name: string;
     description?: string;
+    /** 接入/格式功能键(分栏过滤用,free-string) */
     dataType?: string;
+    /** 语义类型(与 dataType 正交,#1/#2/#8) */
+    semanticType?: SemanticType;
     sensitivityLevel?: string;
     categoryId?: string | null;
     categoryName?: string | null;
@@ -386,6 +408,8 @@ declare namespace DataPlatform {
     // 可清空字段:显式传 null 才能把旧值置空(后端 exclude_unset 保留显式 null)
     description?: string | null;
     dataType?: string | null;
+    /** 语义类型:写入校验为枚举(非法 422);不传不改 */
+    semanticType?: SemanticType;
     sensitivityLevel?: string | null;
     // 受控分类:显式传 null 才能清空(后端 exclude_unset)
     categoryId?: string | null;
@@ -398,6 +422,7 @@ declare namespace DataPlatform {
     pageSize?: number;
     name?: string;
     dataType?: string;
+    semanticType?: SemanticType;
     creator?: string;
     categoryId?: string;
     createdStart?: string;

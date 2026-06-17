@@ -12,6 +12,7 @@ import { Alert, Button, Card, Drawer, message, Space, Typography } from 'antd';
 import { type FC, useEffect, useRef, useState } from 'react';
 import {
   createDataSource,
+  rotatePushToken,
   testDataSource,
   updateDataSource,
 } from '@/services/data-platform';
@@ -66,8 +67,8 @@ function pickConfig(
         ...(values.table ? { table: values.table } : {}),
       };
     default:
-      // api：推送地址由平台生成（mock 仅校验 url 存在）
-      return { url: values.url };
+      // api：推送地址由平台生成，不从表单字段取（新建时后端生成，编辑时保留现有值）
+      return values.url ? { url: values.url } : {};
   }
 }
 
@@ -85,6 +86,11 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
   const [testResult, setTestResult] =
     useState<DataPlatform.TestConnectionResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // api 类型：推送 url（后端回填真实地址；编辑态从 config.url 取）
+  const [pushUrl, setPushUrl] = useState<string>(
+    (record?.config?.url as string) || '',
+  );
+  const [rotating, setRotating] = useState(false);
 
   // 各步骤 form 实例集合，用于在测试步骤读取配置步骤的实时值
   const formMapRef = useRef<
@@ -96,6 +102,7 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
     if (open) {
       setType(record?.type ?? 's3');
       setTestResult(null);
+      setPushUrl((record?.config?.url as string) || '');
     }
   }, [open, record]);
 
@@ -103,11 +110,6 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
   const configInitialValues: Record<string, any> = record
     ? { ...record.config, dbKind: record.dbKind, categoryId: record.categoryId ?? undefined }
     : {};
-
-  // 推送地址（api 类型）：编辑用已有 url，新建给占位只读地址
-  const pushUrl =
-    (record?.config?.url as string) ||
-    'https://data-platform.internal/api/v1/push/<token>';
 
   /** 读取配置步骤当前填写的全部值 */
   const collectValues = (): Record<string, any> => {
@@ -340,18 +342,52 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
 
         {type === 'api' && (
           <>
-            <ProFormText
-              name="url"
-              label="推送地址"
-              initialValue={pushUrl}
-              fieldProps={{ readOnly: true }}
-              tooltip="该地址由平台自动生成，外部系统向此地址 POST 数据即可"
-            />
-            <Paragraph type="secondary">
-              请在请求头携带{' '}
-              <Text code>Authorization: Bearer &lt;token&gt;</Text>，token
-              在数据源 保存后于详情页获取，请妥善保管，泄露后可重新生成。
-            </Paragraph>
+            {isEdit && pushUrl ? (
+              <ProForm.Item label="推送地址">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Text
+                      code
+                      copyable={{ text: pushUrl }}
+                      style={{ wordBreak: 'break-all' }}
+                    >
+                      {pushUrl}
+                    </Text>
+                  </Space>
+                  <Button
+                    size="small"
+                    loading={rotating}
+                    danger
+                    onClick={async () => {
+                      setRotating(true);
+                      try {
+                        const res = await rotatePushToken(record!.id);
+                        if (res.success) {
+                          setPushUrl(res.data.url);
+                          message.success('推送 token 已轮换，旧 token 立即失效');
+                        }
+                      } catch {
+                        message.error('轮换失败，请重试');
+                      } finally {
+                        setRotating(false);
+                      }
+                    }}
+                  >
+                    轮换 Token
+                  </Button>
+                  <Paragraph type="secondary" style={{ margin: 0 }}>
+                    外部系统向上方地址 POST 数据（JSON 数组或 jsonl）即可接入。Token
+                    即鉴权凭证，泄露后点「轮换 Token」立即失效旧 token。
+                  </Paragraph>
+                </Space>
+              </ProForm.Item>
+            ) : (
+              <Paragraph type="secondary">
+                保存后平台将自动生成推送地址与 token，在编辑页面查看。
+                <br />
+                外部系统向推送地址 POST 数据（JSON 数组或 jsonl）即可接入。
+              </Paragraph>
+            )}
           </>
         )}
 

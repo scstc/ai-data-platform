@@ -22,8 +22,12 @@ class Dataset(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
-    # 数据类型(#2):text | multimodal | cot | qa | preference | timeseries | gis 等
+    # 接入/格式功能键(#2):text | multimodal | cot | qa | sql | image | csv-tsv 等。
+    # 被数据接入页分栏过滤 + 媒体字段解析复用,保持 free-string,勿收紧(见 docs/plan/14)。
     data_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 语义类型(#1/#2/#8,与 data_type 正交):10 类 LLM 语义之一(SemanticType 枚举,
+    # 校验在 Pydantic 层),供统一语义展示/筛选。存量行为空(见 docs/plan/14 §3)。
+    semantic_type: Mapped[str | None] = mapped_column(String, nullable=True)
     # 分级(#15):敏感级别,如 public | internal | confidential
     sensitivity_level: Mapped[str | None] = mapped_column(String, nullable=True)
     # 分类(#15):受控分类库引用 categories.id(无 FK,可空,单选);

@@ -45,6 +45,15 @@ class Settings(BaseSettings):
         "/Users/enjoy/ai-project/ai-data-platform/backend/var/datasets"
     )
 
+    # 外部 S3 托管(#18)物化缓存:避免每次加工/预览都从三方 S3 重复拉同一对象。
+    # 按 (endpoint,bucket,key,etag) 缓存到本地磁盘,LRU(按访问时间)+ 总量上限淘汰;
+    # 源对象 etag 变即自动失效重拉。缓存只是可丢弃的性能副本——绝不回写源、可随时清空,
+    # hosted "source of truth 在三方" 语义不变。max_bytes<=0 关闭缓存(回退按需下载)。
+    hosted_cache_dir: str = (
+        "/Users/enjoy/ai-project/ai-data-platform/backend/var/hosted-cache"
+    )
+    hosted_cache_max_bytes: int = 10 * 1024 * 1024 * 1024  # 10 GiB
+
     # data-juicer 加工引擎:dj-process 可执行文件(子进程调用)
     dj_process_bin: str = (
         "/Users/enjoy/ai-project/ai-data-platform/data-juicer/.venv/bin/dj-process"

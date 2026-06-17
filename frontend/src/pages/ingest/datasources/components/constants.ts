@@ -11,17 +11,27 @@ export const TYPE_META: Record<
   api: { label: 'API 推送', color: 'gold' },
 };
 
-/** 数据库品牌 → 中文名 */
+/**
+ * 数据库品牌 → 中文名
+ *
+ * 分组说明（对应后端连接器档位，见 docs/plan/14 §4.1）：
+ *   可真连：postgresql（asyncpg 真测）、goldendb（asyncmy，有本地 MySQL 可测）
+ *   品牌承诺级：hologres / kingbase / gaussdb（PG 线协议，代码路径同 postgresql；需真库验证）
+ *   结构就绪：dameng / sequoiadb / hive / doris（驱动懒加载，未装驱动时诚实返回 not-ready）
+ */
 export const DB_KIND_LABEL: Record<DataPlatform.DbKind, string> = {
+  // ── 可真连 ──────────────────────────────────────────────────────────────
   postgresql: 'PostgreSQL',
-  dameng: '达梦 DM',
-  goldendb: 'GoldenDB',
-  kingbase: '人大金仓 KingbaseES',
-  gaussdb: '华为 GaussDB',
-  hologres: '阿里 Hologres',
-  sequoiadb: '巨杉 SequoiaDB',
-  hive: 'Apache Hive',
-  doris: 'Apache Doris',
+  goldendb: 'GoldenDB（MySQL 兼容）',
+  // ── 品牌承诺级（PG 线协议，需真库验证）────────────────────────────────
+  hologres: '阿里 Hologres（承诺级）',
+  kingbase: '人大金仓 KingbaseES（承诺级）',
+  gaussdb: '华为 GaussDB（承诺级）',
+  // ── 结构就绪（驱动未装时返回明确提示，不伪造成功）────────────────────
+  dameng: '达梦 DM（结构就绪）',
+  sequoiadb: '巨杉 SequoiaDB（结构就绪）',
+  hive: 'Apache Hive（结构就绪）',
+  doris: 'Apache Doris（结构就绪）',
 };
 
 /** 数据库品牌下拉选项 */

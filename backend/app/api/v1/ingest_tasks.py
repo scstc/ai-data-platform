@@ -37,7 +37,8 @@ from app.schemas.ingest_task import (
     IngestTaskRead,
     IngestTaskUpdate,
 )
-from app.services.ingest_runner import IngestError, run_pg_ingest
+from app.services.connectors import resolve
+from app.services.connectors.base import ConnectorNotReady, IngestError
 
 router = APIRouter(tags=["ingest-tasks"])
 
@@ -114,7 +115,9 @@ async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
             "datasetName": dataset.name,
             "versionId": version.id,
             "versionNo": version.version_no,
-            "versionLabel": format_version_label(version.version_no, version.created_at),
+            "versionLabel": format_version_label(
+                version.version_no, version.created_at
+            ),
             "rows": version.rows,
         }
         for version, dataset in rows
@@ -252,27 +255,57 @@ async def rerun_ingest_task(
 ) -> Response:
     """运行/重跑任务。
 
-    PostgreSQL 数据源 + 已配采集对象 → 真实拉取并落地为 DatasetVersion(同步执行);
-    其余数据源 → 维持原模拟进度(真实连接器见 §三A)。
+    经连接器注册表派发(§4.8):resolve(ds.type, ds.db_kind) →
+    - PG 族 / goldendb / S3 + 已配采集对象 → 真实拉取并落地 DatasetVersion(同步);
+    - 未配采集对象 / 不支持类型 / 未装驱动 / 无集群 → 诚实 failed(不伪造成功)。
+    Job(type=ingest)创建逻辑不变。
     """
     task = await session.get(IngestTask, task_id)
     if task is None:
         return _not_found()
 
     datasource = await session.get(DataSource, task.datasource_id)
-    is_pg = (
-        datasource is not None
-        and datasource.type == "database"
-        and datasource.db_kind == "postgresql"
+    connector = (
+        resolve(datasource.type, datasource.db_kind)
+        if datasource is not None
+        else None
     )
 
     task.progress = 0
     task.last_run_at = _now()
 
-    if is_pg and task.extract:
+    # --- 诚实早退(不创建 job):无数据源 / 不支持类型 / api 推送 / 未配采集对象 ---
+    if datasource is None or connector is None:
+        kind = "?" if datasource is None else (
+            f"{datasource.type}/{datasource.db_kind}"
+            if datasource.db_kind
+            else datasource.type
+        )
+        task.status = "failed"
+        task.logs = [
+            *task.logs,
+            f"[ERROR] 数据源类型「{kind}」暂不支持自动采集,未产出任何数据集",
+        ]
+    elif datasource.type == "api":
+        # API 推送数据通过 POST /ingest/push/{token} 端点入站,不走采集任务 rerun
+        task.status = "failed"
+        task.logs = [
+            *task.logs,
+            "[ERROR] API 推送数据源不支持采集任务运行;"
+            "请由外部系统调用推送地址(config.url)入站",
+        ]
+    elif not task.extract:
+        # 诚实失败:已配连接器但没配采集对象 → 不可能产出数据集,不假装成功
+        task.status = "failed"
+        task.logs = [
+            *task.logs,
+            "[ERROR] 未配置采集对象,请先在任务中选择表/对象或填写 SQL 后再运行",
+        ]
+    else:
+        # --- 正常路径:建 job → 连接器真实拉取 ---
         task.status = "running"
         started = task.last_run_at or _now()
-        task.logs = [*task.logs, "[INFO] 开始采集(PostgreSQL 真实拉取)"]
+        task.logs = [*task.logs, f"[INFO] 开始采集({datasource.name} 真实拉取)"]
         # 每次运行一条 type=ingest 的 job(收编后 ingest_runs 的替代)
         job = Job(
             id=_new_job_id(),
@@ -287,7 +320,7 @@ async def rerun_ingest_task(
         session.add(job)
         await session.commit()
         try:
-            results = await run_pg_ingest(
+            results = await connector.run_ingest(
                 session, task, datasource, job_id=job.id
             )
             total_rows = sum(v.rows or 0 for _, v in results)
@@ -302,29 +335,13 @@ async def rerun_ingest_task(
             ]
             job.state = "success"
             job.progress = PROGRESS_DONE
-        except IngestError as exc:
+        except (IngestError, ConnectorNotReady) as exc:
             task.status = "failed"
             task.logs = [*task.logs, f"[ERROR] 采集失败:{exc}"]
             job.state = "failed"
             job.error = str(exc)
         job.finished_at = _now()
         task.run_count += 1
-    elif is_pg and not task.extract:
-        # 诚实失败:PG 源但没配采集对象 → 不可能产出数据集,不再假装 running/success
-        task.status = "failed"
-        task.logs = [
-            *task.logs,
-            "[ERROR] 未配置采集对象,请先在任务中选择表或填写 SQL 后再运行",
-        ]
-    else:
-        # 非 PostgreSQL 源:真实连接器尚未接入 → 明确标记不支持,而非伪造成功
-        src = datasource.name if datasource is not None else "?"
-        task.status = "failed"
-        task.logs = [
-            *task.logs,
-            f"[ERROR] 数据源「{src}」类型暂不支持自动采集(当前仅支持 PostgreSQL),"
-            "未产出任何数据集",
-        ]
 
     await session.commit()
     await session.refresh(task)

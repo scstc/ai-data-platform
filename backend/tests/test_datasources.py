@@ -176,7 +176,10 @@ async def test_update_not_found(client: AsyncClient) -> None:
 
 
 async def test_test_connection_success(client: AsyncClient) -> None:
-    """test 接口(api 类型):config 齐全 → 裸响应 success=true。"""
+    """test 接口(api 类型):PushConnector 本地永远就绪 → 裸响应 success=true。
+
+    (§4.8:删除 randint 假成功;api 推送连接器 probe 返回真实就绪态,latency=0。)
+    """
     resp = await client.post(
         "/api/v1/datasources/test",
         json={"type": "api", "config": {"url": "https://example.com/api"}},
@@ -185,7 +188,7 @@ async def test_test_connection_success(client: AsyncClient) -> None:
     body = resp.json()
     # 端点返回裸 TestConnectionResult(无 data 信封)
     assert body["success"] is True
-    assert 20 <= body["latencyMs"] <= 200
+    assert body["latencyMs"] == 0
     assert isinstance(body["message"], str)
 
 

@@ -40,6 +40,9 @@ class DatasetVersion(Base):
     # 行数 / 字节大小(#13 元信息)
     rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 语义类型快照(#1/#2/#8):该版本数据的 LLM 语义类型(SemanticType 之一);
+    # 跨类型加工/融合产物可追溯(融合记 fusion)。与 data_type 正交,见 docs/plan/14。
+    semantic_type: Mapped[str | None] = mapped_column(String, nullable=True)
     # 来源:managed(平台受管) | hosted(三方 S3 托管,#18,写/删受控)
     origin: Mapped[str] = mapped_column(String, nullable=False, default="managed")
     # hosted 版本据此找回 S3 凭证(指向 datasources.id);受管版本为空(#18)

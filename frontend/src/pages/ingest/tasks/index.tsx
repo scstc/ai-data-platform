@@ -178,7 +178,7 @@ const IngestTasksPage: React.FC = () => {
         rules={[{ required: true, message: '请选择调度方式' }]}
         options={[
           { label: '单次', value: 'once' },
-          { label: 'Cron 周期', value: 'cron' },
+          { label: 'Cron 周期（未启用）', value: 'cron', disabled: true },
         ]}
       />
       <ProFormDependency name={[['schedule', 'mode']]}>
@@ -196,55 +196,95 @@ const IngestTasksPage: React.FC = () => {
       <ProFormDependency name={[['datasourceId']]}>
         {({ datasourceId }) => {
           const ds = dsMap[datasourceId];
-          if (ds?.type !== 'database') return null;
-          return (
-            <>
-              <ProFormRadio.Group
-                name={['extract', 'mode']}
-                label="采集对象"
-                tooltip="拉什么数据。真实拉取当前支持 PostgreSQL 数据源"
-                options={[
-                  { label: '整张表', value: 'table' },
-                  { label: '自定义 SQL', value: 'sql' },
-                ]}
-              />
-              <ProFormDependency name={[['extract', 'mode']]}>
-                {({ extract }) =>
-                  extract?.mode === 'sql' ? (
-                    <ProFormTextArea
-                      name={['extract', 'sql']}
-                      label="SQL"
-                      placeholder="如 SELECT * FROM your_table"
-                      fieldProps={{ rows: 3 }}
-                      rules={[{ required: true, message: '请输入 SQL' }]}
-                    />
-                  ) : extract?.mode === 'table' ? (
-                    <ProFormSelect
-                      name={['extract', 'tables']}
-                      label="选择表"
-                      mode="multiple"
-                      placeholder="选择一张或多张表（每张表各产一个数据集）"
-                      rules={[{ required: true, message: '请至少选择一张表' }]}
-                      params={{ datasourceId }}
-                      request={async () => {
-                        if (!datasourceId) return [];
-                        try {
-                          const res = await listDatasourceTables(datasourceId);
-                          return (res.data ?? []).map((t) => ({
-                            label: t,
-                            value: t,
-                          }));
-                        } catch {
-                          return [];
-                        }
-                      }}
-                      fieldProps={{ showSearch: true }}
-                    />
-                  ) : null
-                }
-              </ProFormDependency>
-            </>
-          );
+          // 数据库类型：table / sql 模式
+          if (ds?.type === 'database') {
+            return (
+              <>
+                <ProFormRadio.Group
+                  name={['extract', 'mode']}
+                  label="采集对象"
+                  tooltip="数据库类型：整张表或自定义 SQL。PostgreSQL 可真连，其余品牌视驱动状态"
+                  options={[
+                    { label: '整张表', value: 'table' },
+                    { label: '自定义 SQL', value: 'sql' },
+                  ]}
+                />
+                <ProFormDependency name={[['extract', 'mode']]}>
+                  {({ extract }) =>
+                    extract?.mode === 'sql' ? (
+                      <ProFormTextArea
+                        name={['extract', 'sql']}
+                        label="SQL"
+                        placeholder="如 SELECT * FROM your_table"
+                        fieldProps={{ rows: 3 }}
+                        rules={[{ required: true, message: '请输入 SQL' }]}
+                      />
+                    ) : extract?.mode === 'table' ? (
+                      <ProFormSelect
+                        name={['extract', 'tables']}
+                        label="选择表"
+                        mode="multiple"
+                        placeholder="选择一张或多张表（每张表各产一个数据集）"
+                        rules={[{ required: true, message: '请至少选择一张表' }]}
+                        params={{ datasourceId }}
+                        request={async () => {
+                          if (!datasourceId) return [];
+                          try {
+                            const res = await listDatasourceTables(datasourceId);
+                            return (res.data ?? []).map((t) => ({
+                              label: t,
+                              value: t,
+                            }));
+                          } catch {
+                            return [];
+                          }
+                        }}
+                        fieldProps={{ showSearch: true }}
+                      />
+                    ) : null
+                  }
+                </ProFormDependency>
+              </>
+            );
+          }
+          // S3 / HDFS 类型：路径/glob 模式
+          if (ds?.type === 's3' || ds?.type === 'hdfs') {
+            return (
+              <>
+                <ProFormRadio.Group
+                  name={['extract', 'mode']}
+                  label="采集模式"
+                  tooltip="path：按路径列表或 glob 匹配拉取对象/文件"
+                  options={[{ label: '路径 / Glob', value: 'path' }]}
+                  initialValue="path"
+                />
+                <ProFormSelect
+                  name={['extract', 'paths']}
+                  label="路径列表（可选）"
+                  placeholder={
+                    ds.type === 's3'
+                      ? '输入 S3 key 后按 Enter 添加，如 raw/2026/data.jsonl'
+                      : '输入 HDFS 路径后按 Enter 添加，如 /user/data/train.jsonl'
+                  }
+                  tooltip="每条路径按 Enter 确认；与 Glob 可同时填写"
+                  mode="tags"
+                  options={[]}
+                  fieldProps={{ tokenSeparators: [',', '\n'] }}
+                />
+                <ProFormText
+                  name={['extract', 'glob']}
+                  label="Glob 模式（可选）"
+                  placeholder={
+                    ds.type === 's3'
+                      ? '如 raw/2026/**/*.jsonl'
+                      : '如 /user/data/**/*.csv'
+                  }
+                  tooltip="支持 ** 递归匹配；与路径列表可同时填写"
+                />
+              </>
+            );
+          }
+          return null;
         }}
       </ProFormDependency>
     </>
@@ -501,22 +541,34 @@ const IngestTasksPage: React.FC = () => {
                 {
                   title: '采集对象',
                   dataIndex: 'extract',
-                  render: (_, record) =>
-                    record.extract ? (
-                      record.extract.mode === 'sql' ? (
-                        <Typography.Text code>
-                          {record.extract.sql}
-                        </Typography.Text>
-                      ) : (
+                  render: (_, record) => {
+                    const ext = record.extract;
+                    if (!ext) return '-';
+                    if (ext.mode === 'sql') {
+                      return <Typography.Text code>{ext.sql}</Typography.Text>;
+                    }
+                    if (ext.mode === 'table') {
+                      return (
                         <span>
-                          {(record.extract.tables ?? []).map((t) => (
+                          {(ext.tables ?? []).map((t) => (
                             <Tag key={t}>{t}</Tag>
                           ))}
                         </span>
-                      )
-                    ) : (
-                      '-'
-                    ),
+                      );
+                    }
+                    // mode === 'path'
+                    return (
+                      <span>
+                        {ext.glob && (
+                          <Tag color="blue">glob: {ext.glob}</Tag>
+                        )}
+                        {(ext.paths ?? []).map((p) => (
+                          <Tag key={p}>{p}</Tag>
+                        ))}
+                        {!ext.glob && (ext.paths ?? []).length === 0 && '-'}
+                      </span>
+                    );
+                  },
                 },
                 {
                   title: '状态',

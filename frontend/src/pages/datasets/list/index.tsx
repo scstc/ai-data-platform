@@ -60,6 +60,20 @@ const DATA_TYPE_ENUM = {
   gis: { text: 'gis' },
 };
 
+/** 语义类型枚举（与 dataType 正交，承载 10 类 LLM 数据语义，列展示/筛选 + 编辑） */
+const SEMANTIC_TYPE_ENUM = {
+  text: { text: '文本' },
+  structured: { text: '结构化' },
+  unstructured: { text: '非结构化' },
+  multimodal: { text: '多模态' },
+  cot: { text: 'COT 思维链' },
+  qa: { text: 'QA 问答对' },
+  preference: { text: '偏好' },
+  timeseries: { text: '时序' },
+  gis: { text: 'GIS 位置' },
+  fusion: { text: '融合' },
+};
+
 /** 字节数转人类可读 */
 const fmtSize = (n?: number) => {
   if (!n && n !== 0) return '-';
@@ -284,6 +298,20 @@ const DatasetsList: React.FC = () => {
       valueType: 'select',
       valueEnum: DATA_TYPE_ENUM,
       render: (_, r) => (r.dataType ? <Tag>{r.dataType}</Tag> : '-'),
+    },
+    {
+      title: '语义类型',
+      dataIndex: 'semanticType',
+      valueType: 'select',
+      valueEnum: SEMANTIC_TYPE_ENUM,
+      render: (_, r) =>
+        r.semanticType ? (
+          <Tag color="blue">
+            {SEMANTIC_TYPE_ENUM[r.semanticType]?.text ?? r.semanticType}
+          </Tag>
+        ) : (
+          '-'
+        ),
     },
     {
       title: '分类',
@@ -563,6 +591,7 @@ const DatasetsList: React.FC = () => {
             pageSize: params.pageSize,
             name: params.name || undefined,
             dataType: params.dataType || undefined,
+            semanticType: params.semanticType || undefined,
             creator: params.creator || undefined,
             categoryId: (params.categoryId as string) || undefined,
             // dateRange 给的是纯日期:起取当日 0 点、止取当日 23:59:59,

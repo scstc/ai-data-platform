@@ -1,8 +1,10 @@
 """外部 S3 数据托管(#18)的客户端与物化解析器。
 
-物化策略=**纯引用·按需拉取**:平台只登记 S3 对象的引用(`s3://bucket/key`),
+物化策略=**纯引用·按需拉取 + 物化缓存**:平台只登记 S3 对象的引用(`s3://bucket/key`),
 任何"与受管数据相同"的操作(预览/加工/质量/审核)在需要本地文件时,经
-`materialized_version` 临时下载并规范化为 jsonl,用完即清理。
+`materialized_version` 取对象并规范化为 jsonl。取对象走 `cached_bytes`:按
+(endpoint,bucket,key,etag) 缓存到本地磁盘,命中即免重复下载,etag 变即自动作废重拉;
+缓存只是可丢弃的性能副本,绝不回写源——source of truth 始终在三方 S3。
 
 设计见 docs/plan/08-外部S3托管设计.md。
 
@@ -16,8 +18,11 @@ remove_bucket)——托管不破坏源数据,"取消托管"只删平台引用。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
+import os
+import shutil
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -182,9 +187,9 @@ async def list_objects(
 
 
 def _stat_object_sync(client: Minio, bucket: str, key: str) -> dict[str, Any]:
-    """同步 stat_object(供 to_thread):取 size,不下载。"""
+    """同步 stat_object(供 to_thread):取 size/etag,不下载。"""
     stat = client.stat_object(bucket, key)
-    return {"size": stat.size}
+    return {"size": stat.size, "etag": stat.etag}
 
 
 async def stat_object(
@@ -237,6 +242,106 @@ async def download_to_temp(
         raise ExternalStoreError(f"下载对象失败 {bucket}/{key}:{exc}") from exc
 
 
+# ---------------------------------------------------------------------------
+# 物化缓存(#18 性能优化):按 (endpoint,bucket,key,etag) 把三方 S3 对象缓存到
+# 本地磁盘,避免每次加工/预览重复拉取。缓存是可丢弃的性能副本——绝不回写源、
+# etag 变即自动作废重拉;LRU(按访问时间 mtime)+ 总量上限淘汰。
+# 语义不变:hosted 的 source of truth 仍在三方 S3,取消托管/清缓存都不动源。
+# ---------------------------------------------------------------------------
+# 每个 cache key 一把锁:同一对象并发命中只下载一次(去重 + 防半写读)
+_cache_locks: dict[str, asyncio.Lock] = {}
+_cache_locks_guard = asyncio.Lock()
+# 淘汰串行化:install/evict 这段(快)全局互斥,避免并发 iterdir/unlink 打架;
+# 真正慢的下载在此锁之外,不串行化。
+_evict_lock = asyncio.Lock()
+
+
+def _cache_key(config: dict[str, Any] | None, bucket: str, key: str, etag: str) -> str:
+    """缓存键:对 (endpoint,bucket,key,etag) 取 sha256;etag 入键 → 源变即换条目。"""
+    endpoint = str((config or {}).get("endpoint") or "")
+    raw = f"{endpoint}|{bucket}|{key}|{etag}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def _lock_for(cache_key: str) -> asyncio.Lock:
+    """取/建某 cache key 的锁(创建过程本身受 _cache_locks_guard 保护)。"""
+    async with _cache_locks_guard:
+        lock = _cache_locks.get(cache_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _cache_locks[cache_key] = lock
+        return lock
+
+
+def _install_and_evict(tmp_path: Path, cache_path: Path, max_bytes: int) -> None:
+    """把下载好的临时文件移入缓存并按总量上限淘汰(同步,供 to_thread)。
+
+    移动可能跨文件系统(临时目录 vs 缓存目录)→ 用 shutil.move(copy+del)。
+    淘汰:按 mtime 旧→新删除,直到总量 <= max_bytes;绝不删刚装入的 cache_path。
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(tmp_path), str(cache_path))
+    entries: list[tuple[float, int, Path]] = []
+    total = 0
+    for p in cache_path.parent.iterdir():
+        if not p.is_file():
+            continue
+        st = p.stat()
+        entries.append((st.st_mtime, st.st_size, p))
+        total += st.st_size
+    entries.sort()  # 最旧的在前
+    for _mtime, size, p in entries:
+        if total <= max_bytes:
+            break
+        if p == cache_path:
+            continue  # 刚装入的不淘汰(否则本次取数白下载)
+        try:
+            p.unlink()
+            total -= size
+        except OSError:
+            pass
+
+
+async def cached_bytes(
+    config: dict[str, Any] | None, bucket: str, key: str
+) -> bytes:
+    """取 S3 对象字节,优先命中本地物化缓存,未命中则下载并缓存。
+
+    - 缓存关闭(max_bytes<=0):退化为按需下载到临时区,读完即清(原行为)。
+    - 缓存开启:先 stat 取 etag(廉价 HEAD)→ 命中则 touch(更新 LRU 访问时间)直接读;
+      未命中则下载 → 移入缓存 → 淘汰 → 读。同 key 并发只下载一次。
+
+    与 download_to_temp 一致:S3/对象错误抛 ExternalStoreError(不 500、不动源)。
+    """
+    max_bytes = settings.hosted_cache_max_bytes
+    if max_bytes <= 0:
+        tmp_path = await download_to_temp(config, bucket, key)
+        try:
+            return await asyncio.to_thread(tmp_path.read_bytes)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    etag = str((await stat_object(config, bucket, key)).get("etag") or "")
+    ck = _cache_key(config, bucket, key, etag)
+    cache_path = Path(settings.hosted_cache_dir) / ck
+    lock = await _lock_for(ck)
+    async with lock:
+        if cache_path.exists():
+            # LRU touch:把访问时间推到最新,避免热对象被误淘汰
+            await asyncio.to_thread(os.utime, cache_path, None)
+            return await asyncio.to_thread(cache_path.read_bytes)
+        tmp_path = await download_to_temp(config, bucket, key)
+        try:
+            async with _evict_lock:
+                await asyncio.to_thread(
+                    _install_and_evict, tmp_path, cache_path, max_bytes
+                )
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return await asyncio.to_thread(cache_path.read_bytes)
+
+
 async def head_records(
     config: dict[str, Any] | None,
     bucket: str,
@@ -244,18 +349,13 @@ async def head_records(
     fmt: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """预览用:下载对象 → normalize_to_records 取前 limit 条。
+    """预览用:取对象(命中缓存则免下载)→ normalize_to_records 取前 limit 条。
 
-    简单稳妥(大对象成本在 spec §5 已注明,预览靠取前 N 缓解):整对象下载到
-    临时区,规范化后截前 limit。用完即清理临时文件。
+    简单稳妥(大对象成本在 spec §5 已注明,预览靠取前 N 缓解):规范化后截前 limit。
     """
-    tmp_path = await download_to_temp(config, bucket, key)
-    try:
-        content = await asyncio.to_thread(tmp_path.read_bytes)
-        records = normalize_to_records(content, fmt)
-        return records[:limit] if limit > 0 else records
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    content = await cached_bytes(config, bucket, key)
+    records = normalize_to_records(content, fmt)
+    return records[:limit] if limit > 0 else records
 
 
 def _write_jsonl_sync(records: list[dict[str, Any]]) -> Path:
@@ -275,7 +375,7 @@ def _write_jsonl_sync(records: list[dict[str, Any]]) -> Path:
 async def _version_cfg(
     version: DatasetVersion, session: AsyncSession
 ) -> dict[str, Any]:
-    """解析版本访问对象存储的凭证:有 source_datasource_id 用其数据源,否则平台 MinIO 回退。"""
+    """解析版本访问凭证:有 source_datasource_id 用其数据源,否则平台 MinIO 回退。"""
     if version.source_datasource_id:
         ds = await session.get(DataSource, version.source_datasource_id)
         if ds is None:
@@ -353,8 +453,8 @@ async def materialized_version(
 
     S3/对象错误抛 ExternalStoreError(由调用方转 4xx,不 500、不动源)。
     """
-    # 媒体批量接入(manifest):下载清单 + 各成员到同一临时目录,把 images/audios/videos
-    # 路径改写为本地相对文件名(dj 的 rel2abs 以 jsonl 所在目录为锚),剥掉平台旁路 __member。
+    # 媒体批量接入(manifest):下载清单+各成员到同一临时目录,把 images/audios/videos
+    # 路径改写为本地相对文件名(dj rel2abs 以 jsonl 所在目录为锚),剥掉 __member。
     if version.format == MANIFEST_FORMAT:
         async with _materialized_manifest(version, session) as mpath:
             yield mpath
@@ -381,15 +481,15 @@ async def materialized_version(
         cfg = platform_config()
 
     bucket, key = parse_s3_uri(version.storage_uri)
-    raw_path = await download_to_temp(cfg, bucket, key)
+    # 取源对象字节:命中物化缓存则免去重复下载(缓存自身的生命周期由 cached_bytes
+    # 管理,这里不再清理原始文件;只清理本次派生的临时 jsonl)。
+    content = await cached_bytes(cfg, bucket, key)
     jsonl_path: Path | None = None
     try:
-        content = await asyncio.to_thread(raw_path.read_bytes)
         records = normalize_to_records(content, version.format)
         jsonl_path = await asyncio.to_thread(_write_jsonl_sync, records)
         yield jsonl_path
     finally:
-        raw_path.unlink(missing_ok=True)
         if jsonl_path is not None:
             jsonl_path.unlink(missing_ok=True)
 

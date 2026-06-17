@@ -47,7 +47,8 @@ async def _create_task(
         json={
             "name": name,
             "datasourceId": datasource_id,
-            "schedule": {"mode": "cron", "cron": "0 2 * * *"},
+            # cron 调度本期未启用(§4.10),创建端会 422;一律用 once。
+            "schedule": {"mode": "once"},
         },
     )
     assert resp.status_code == 200, resp.text
@@ -88,16 +89,20 @@ async def test_create_sets_pending_and_redundant_name(
     assert data["datasourceName"] == ds.name  # 冗余自数据源表
     assert data["logs"] == ["[INFO] 任务已创建"]
     assert data["lastRunAt"] is None
-    # schedule 透传且为 camelCase 结构
-    assert data["schedule"] == {"mode": "cron", "cron": "0 2 * * *"}
+    # schedule 透传且为 camelCase 结构(cron 本期未启用,用 once)
+    assert data["schedule"] == {"mode": "once", "cron": None}
 
 
 @pytest.mark.asyncio
 async def test_lifecycle_unsupported_source_fails_honestly(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
-    """走查：create→rerun(非 PG 源如实失败,不伪造 running/success)→GET 稳定→stop→delete。"""
-    ds = await _seed_datasource(session_factory)  # type=s3,非 PG
+    """走查:create→rerun(S3 源已支持但未配采集对象→如实失败)→GET 稳定→stop→delete。
+
+    S3 连接器已接入(§4.9),但本任务未配 extract,故 rerun 在建 job 前诚实失败
+    (「未配置采集对象」),不伪造 running/success、不产出运行记录。
+    """
+    ds = await _seed_datasource(session_factory)  # type=s3,已支持但本例未配 extract
     task = await _create_task(client, ds.id)
     task_id = task["id"]
 
@@ -107,13 +112,13 @@ async def test_lifecycle_unsupported_source_fails_honestly(
     assert resp.json()["data"]["progress"] == 0
     assert resp.json()["data"]["status"] == "pending"
 
-    # 2) rerun → 非 PG 源如实失败(不再伪造 running)、last_run_at 落值、日志说明原因
+    # 2) rerun → 未配采集对象如实失败(不伪造 running)、last_run_at 落值、日志说明原因
     resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
     assert resp.status_code == 200
     rerun = resp.json()["data"]
     assert rerun["status"] == "failed"
     assert rerun["lastRunAt"] is not None
-    assert any("暂不支持自动采集" in line for line in rerun["logs"])
+    assert any("未配置采集对象" in line for line in rerun["logs"])
 
     # 3) 反复 GET 既不推进进度也不伪造成功:仍为 failed/0
     for _ in range(3):
@@ -305,12 +310,17 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
         version = (await session.scalars(select(DV))).one()
         assert version.produced_by_job_id == job_id
         assert version.rows == 1
+        # 语义维度(§4.4 新断言):PG 表落地写版本级 semantic_type='structured',
+        # 与 data_type 接入键正交。
+        assert version.semantic_type == "structured"
 
-        # 采集落地的数据集归到 SQL 接入栏(data_type='sql'),否则在数据接入页任何分栏都不可见
+        # 采集落地的数据集归到 SQL 接入栏(data_type='sql'),
+        # 否则在数据接入页任何分栏都不可见
         from app.models.dataset import Dataset as DSModel
 
         ds_row = await session.get(DSModel, version.dataset_id)
         assert ds_row is not None
+        # 铁律:data_type 一字不改、不收紧(test:314 历史断言保留)
         assert ds_row.data_type == "sql"
 
     # runs 端点 wire 形态与收编前一致
@@ -340,3 +350,87 @@ async def test_runs_empty_for_task_without_jobs(
     resp = await client.get(f"/api/v1/ingest-tasks/{task['id']}/runs")
     body = resp.json()
     assert body["total"] == 0 and body["data"] == []
+
+
+# ---------------------------------------------------------------------------
+# PG 族注册表派发(§4.4 / §9):hologres/kingbase/gaussdb 走同一 PgConnector
+# 用自引用 PG(datasource.config 指向测试库自身)各跑一例。
+# 诚实边界:只证 db_kind 字符串经 resolve() 路由到 PgConnector 并真 SELECT 落地,
+# **不证明对真实 hologres/kingbase/gaussdb 的方言/系统表/权限兼容**(那是承诺级)。
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize("db_kind", ["hologres", "kingbase", "gaussdb"])
+async def test_pg_family_db_kinds_route_through_pgconnector(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    db_kind: str,
+) -> None:
+    """hologres/kingbase/gaussdb 经注册表派发到 PgConnector,自引用 PG 真 SELECT 落地。
+
+    锁的意图:这三个 db_kind 不是空壳——它们经 resolve(("database", db_kind)) 命中
+    PgConnector(PG 线协议复用),run_ingest 走真实 asyncpg SELECT 并落地版本,
+    data_type 仍为 'sql'(接入键不变)、semantic_type 为 'structured'(语义维度)。
+    """
+    from urllib.parse import urlparse
+
+    from app.core.config import settings
+    from tests.conftest import TEST_DATABASE_URL
+
+    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
+
+    # 数据源指向测试库自身,但 db_kind 标成被测的 PG 族品牌
+    u = urlparse(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
+    ds_id = f"ds-pgfam-{db_kind}"
+    async with session_factory() as session:
+        session.add(
+            DataSource(
+                id=ds_id,
+                name=f"{db_kind}自引用",
+                type="database",
+                db_kind=db_kind,
+                status="connected",
+                config={
+                    "host": u.hostname,
+                    "port": u.port,
+                    "database": u.path.lstrip("/"),
+                    "username": u.username,
+                    "password": u.password,
+                },
+                creator="admin",
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/ingest-tasks",
+        json={
+            "name": f"{db_kind}采集",
+            "datasourceId": ds_id,
+            "schedule": {"mode": "once"},
+            "extract": {"mode": "sql", "sql": "SELECT 42 AS answer"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["data"]["id"]
+
+    # 真实拉取:经 PgConnector.run_ingest 落地
+    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
+    body = resp.json()
+    assert body["data"]["status"] == "success", body
+
+    # 落地版本:真 SELECT 一行 + data_type/semantic_type 正交
+    async with session_factory() as session:
+        from sqlalchemy import select
+
+        from app.models.dataset import Dataset as DSModel
+        from app.models.dataset_version import DatasetVersion as DV
+
+        version = (await session.scalars(select(DV))).one()
+        assert version.rows == 1
+        assert version.semantic_type == "structured"
+
+        ds_row = await session.get(DSModel, version.dataset_id)
+        assert ds_row is not None
+        assert ds_row.data_type == "sql"  # 接入键不变

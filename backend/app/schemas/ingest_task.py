@@ -4,28 +4,57 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from pydantic import model_validator
+
 from app.schemas.common import CamelModel, UtcDateTime
 
 IngestTaskStatus = Literal["pending", "running", "success", "failed"]
 
 
 class IngestSchedule(CamelModel):
-    """调度配置。"""
+    """调度配置。
+
+    cron 调度本期未启用(§4.10):mode 模型层仍接受 'cron'(兼容存量 schedule
+    透传/读取),但在 IngestTaskCreate/Update 校验器里拒绝创建 cron 任务,杜绝
+    「UI 可建 cron 却永不触发」的误导面。
+    """
 
     mode: Literal["once", "cron"]
     cron: str | None = None
 
 
 class IngestExtract(CamelModel):
-    """采集对象（extract spec）：拉什么。
+    """采集对象(extract spec):拉什么。
 
-    mode=table 用 tables（勾选的表名列表，每张表各产一个数据集，支持 schema.table）；
-    mode=sql 用 sql（单条查询语句，产一个数据集）。
+    - mode=table:用 tables(勾选的表名列表,每张表各产一个数据集,支持 schema.table)。
+    - mode=sql  :用 sql(单条查询语句,产一个数据集)。
+    - mode=path :用 paths(显式对象键/路径列表)和/或 glob(通配符),供 S3/HDFS 采集。
     """
 
-    mode: Literal["table", "sql"]
+    mode: Literal["table", "sql", "path"]
     tables: list[str] | None = None
     sql: str | None = None
+    paths: list[str] | None = None
+    glob: str | None = None
+
+    @model_validator(mode="after")
+    def _check_mode_fields(self) -> IngestExtract:
+        """校验 mode 与对应字段一致(空值不在此强制,留给连接器运行期诚实失败)。"""
+        if self.mode == "table" and self.sql:
+            raise ValueError("extract.mode=table 时不应携带 sql")
+        if self.mode == "sql" and self.tables:
+            raise ValueError("extract.mode=sql 时不应携带 tables")
+        if self.mode == "path" and (self.tables or self.sql):
+            raise ValueError("extract.mode=path 时不应携带 tables/sql")
+        if self.mode != "path" and (self.paths or self.glob):
+            raise ValueError("paths/glob 仅在 extract.mode=path 时有效")
+        return self
+
+
+def _reject_cron(schedule: IngestSchedule | None) -> None:
+    """拒绝 cron 调度创建/更新(§4.10 兜底,本期不做 cron 真跑)。"""
+    if schedule is not None and schedule.mode == "cron":
+        raise ValueError("cron 调度尚未启用")
 
 
 class IngestTaskRead(CamelModel):
@@ -75,6 +104,12 @@ class IngestTaskCreate(CamelModel):
     # 分类(#15):受控分类库引用 id,可空
     category_id: str | None = None
 
+    @model_validator(mode="after")
+    def _reject_cron_schedule(self) -> IngestTaskCreate:
+        """cron 调度尚未启用(§4.10):创建端拒绝,避免建了永不触发的任务。"""
+        _reject_cron(self.schedule)
+        return self
+
 
 class IngestTaskUpdate(CamelModel):
     """编辑采集任务入参:全部可选,仅更新显式传入的字段。"""
@@ -85,3 +120,9 @@ class IngestTaskUpdate(CamelModel):
     extract: IngestExtract | None = None
     # 分类(#15):受控分类库引用 id
     category_id: str | None = None
+
+    @model_validator(mode="after")
+    def _reject_cron_schedule(self) -> IngestTaskUpdate:
+        """cron 调度尚未启用(§4.10):更新端同样拒绝。"""
+        _reject_cron(self.schedule)
+        return self

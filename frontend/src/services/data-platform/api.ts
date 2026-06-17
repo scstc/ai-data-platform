@@ -128,7 +128,7 @@ export async function testDataSource(
   });
 }
 
-/** 列出数据源库内的表 GET /api/v1/datasources/{id}/tables（仅 PostgreSQL） */
+/** 列出数据源库内的表 GET /api/v1/datasources/{id}/tables */
 export async function listDatasourceTables(
   id: string,
   options?: { [key: string]: any },
@@ -137,6 +137,20 @@ export async function listDatasourceTables(
     `/api/v1/datasources/${id}/tables`,
     {
       method: 'GET',
+      ...(options || {}),
+    },
+  );
+}
+
+/** 轮换 API 数据源推送 token（旧 token 立即失效）POST /api/v1/datasources/{id}/rotate-push-token */
+export async function rotatePushToken(
+  id: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { pushToken: string; url: string }; success: boolean }>(
+    `/api/v1/datasources/${id}/rotate-push-token`,
+    {
+      method: 'POST',
       ...(options || {}),
     },
   );

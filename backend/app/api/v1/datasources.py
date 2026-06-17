@@ -9,12 +9,9 @@
 from __future__ import annotations
 
 import secrets
-from random import randint
-from time import perf_counter
 from typing import Annotated, Any
 
-import asyncpg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,8 +31,9 @@ from app.schemas import (
 )
 from app.schemas.common import CamelModel
 from app.services import external_store
+from app.services.connectors import resolve
+from app.services.connectors.base import ConnectorNotReady, IngestError
 from app.services.external_store import ExternalStoreError
-from app.services.ingest_runner import IngestError, list_tables
 
 router = APIRouter(tags=["datasources"])
 
@@ -67,31 +65,35 @@ def _new_id() -> str:
     return f"ds-{secrets.token_hex(3)}"
 
 
-async def _probe_postgres(config: dict[str, Any] | None) -> tuple[bool, int, str]:
-    """真实探测 PostgreSQL:建连 + SELECT 1 + 量真实往返延迟。
+def _push_url(request: Request, token: str) -> str:
+    """由当前请求的 host 构造真实入站推送地址 .../api/v1/ingest/push/<token>。
 
-    返回 (是否成功, 延迟毫秒, 文案);失败时延迟取 0,文案带原因。
-    连接失败可能是网络/认证/超时等多种原因,统一兜底为"连接失败"。
+    用请求 base_url(scheme+host)而非硬编码,适配代理/不同部署域名。
     """
-    config = config or {}
-    start = perf_counter()
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/api/v1/ingest/push/{token}"
+
+
+async def _probe_via_connector(
+    type_: str, db_kind: str | None, config: dict[str, Any] | None
+) -> tuple[bool, int, str]:
+    """经连接器注册表探测连接(§4.8 取代原 randint 假成功 + 单独的 PG 探测)。
+
+    - 命中连接器 → 调 ``probe`` 真测(PG/S3 真连;国产库未装驱动诚实 not-ready)。
+    - 未命中(如 db_kind 缺失/未知)→ (False, 0, 明确文案),绝不伪造 success(Rule 12)。
+    探测失败/驱动未就绪均不崩、不 500。
+    """
+    connector = resolve(type_, db_kind)
+    if connector is None:
+        kind = f"{type_}/{db_kind}" if db_kind else type_
+        return (False, 0, f"暂不支持的数据源类型「{kind}」,无可用连接器")
     try:
-        conn = await asyncpg.connect(
-            host=config.get("host"),
-            port=int(config.get("port") or 5432),
-            database=config.get("database"),
-            user=config.get("username"),
-            password=config.get("password"),
-            timeout=5,
-        )
-        try:
-            await conn.fetchval("SELECT 1")
-        finally:
-            await conn.close()
-    except Exception as exc:  # noqa: BLE001 探测失败统一上报为连接失败
-        return False, 0, f"连接失败:{exc}"
-    latency_ms = int((perf_counter() - start) * 1000)
-    return True, latency_ms, f"连接成功,往返延迟 {latency_ms}ms"
+        return await connector.probe(config or {})
+    except ConnectorNotReady as exc:
+        # 连接器结构就绪但环境未就绪(缺驱动/无集群):诚实失败,不崩
+        return (False, 0, str(exc))
+    except Exception as exc:  # noqa: BLE001 探测任何异常都不应 500
+        return (False, 0, f"连接失败:{exc}")
 
 
 class _SingleDataSource(CamelModel):
@@ -169,23 +171,37 @@ async def list_datasources(
 async def create_datasource(
     body: DataSourceCreate,
     session: SessionDep,
+    request: Request,
 ) -> _SingleDataSource:
-    """新建数据源:postgresql / s3 真连定状态，其余按 config 齐全→connected/pending。"""
+    """新建数据源。
+
+    - postgresql / s3:经连接器真连定状态(connected/failed)。
+    - api:生成入站 pushToken 并把 config.url 回填为真实入站地址,状态 connected。
+    - 其余:按 config 必填字段齐全 → connected,否则 pending。
+    """
+    config: dict[str, Any] = dict(body.config or {})
+    ds_id = _new_id()
     if body.type == "database" and body.db_kind == "postgresql":
-        ok, _, _ = await _probe_postgres(body.config)
+        ok, _, _ = await _probe_via_connector(body.type, body.db_kind, config)
         status = "connected" if ok else "failed"
     elif body.type == "s3":
-        ok, _, _ = await external_store.test_connection(body.config)
+        ok, _, _ = await _probe_via_connector(body.type, body.db_kind, config)
         status = "connected" if ok else "failed"
+    elif body.type == "api":
+        # API 推送:生成入站凭证 token 并回填真实入站地址(替换前端占位 url)。
+        token = secrets.token_urlsafe(16)
+        config["pushToken"] = token
+        config["url"] = _push_url(request, token)
+        status = "connected"
     else:
-        status = "connected" if _config_is_valid(body.type, body.config) else "pending"
+        status = "connected" if _config_is_valid(body.type, config) else "pending"
     item = DataSource(
-        id=_new_id(),
+        id=ds_id,
         name=body.name,
         type=body.type,
         db_kind=body.db_kind,
         status=status,
-        config=body.config,
+        config=config,
         description=body.description,
         category_id=body.category_id,
         creator="admin",
@@ -238,38 +254,46 @@ async def delete_datasource(
 
 @router.post("/datasources/test", response_model=TestConnectionResult)
 async def test_connection(body: TestConnectionParams) -> TestConnectionResult:
-    """测试连接：postgresql 真连(SELECT 1 量真实延迟)，其余按必填字段校验。
+    """测试连接:经连接器注册表派发 probe(§4.8,删除原 randint 假成功)。
 
-    返回 bare {success, latencyMs, message}（与 mock/前端契约一致，不套 data 信封）。
+    - PG/S3:真连真测;goldendb 有 asyncmy 时真测,否则诚实 not-ready。
+    - 国产库未装驱动 / 不支持类型:success=False + 明确文案,绝不伪造成功(Rule 12)。
+    返回 bare {success, latencyMs, message}(与 mock/前端契约一致,不套 data 信封)。
     """
-    if body.type == "database" and body.db_kind == "postgresql":
-        ok, latency_ms, message = await _probe_postgres(body.config)
-    elif body.type == "s3":
-        ok, latency_ms, message = await external_store.test_connection(body.config)
-    else:
-        ok = _config_is_valid(body.type, body.config)
-        latency_ms = randint(20, 200)
-        message = (
-            f"连接成功，往返延迟 {latency_ms}ms"
-            if ok
-            else "连接失败：必要的连接配置缺失，请检查并补全后重试"
-        )
+    ok, latency_ms, message = await _probe_via_connector(
+        body.type, body.db_kind, body.config
+    )
     return TestConnectionResult(success=ok, latency_ms=latency_ms, message=message)
 
 
 @router.get("/datasources/{ds_id}/tables")
 async def list_datasource_tables(ds_id: str, session: SessionDep) -> JSONResponse:
-    """列出数据源库内的表(供采集任务勾选)。当前仅支持 PostgreSQL。"""
+    """列出数据源库内的表/对象(供采集任务勾选)。
+
+    经连接器注册表派发 list_tables(§4.8,去掉原「仅 PostgreSQL」硬卡):
+    - PG/MySQL 族 → information_schema 表名;s3/hdfs → 对象/路径;
+    - 不支持的类型 / 未装驱动 / 无集群 → 400 明确文案,不崩、不 500。
+    """
     ds = await session.get(DataSource, ds_id)
     if ds is None:
         return _not_found()
-    if not (ds.type == "database" and ds.db_kind == "postgresql"):
+    connector = resolve(ds.type, ds.db_kind)
+    if connector is None:
+        kind = f"{ds.type}/{ds.db_kind}" if ds.db_kind else ds.type
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": "列表仅支持 PostgreSQL 数据源"},
+            content={
+                "success": False,
+                "message": f"暂不支持列出「{kind}」的表/对象,无可用连接器",
+            },
         )
     try:
-        tables = await list_tables(ds.config or {})
+        tables = await connector.list_tables(ds.config or {})
+    except ConnectorNotReady as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(exc)},
+        )
     except IngestError as exc:
         return JSONResponse(
             status_code=400,

@@ -17,6 +17,7 @@ from app.api.v1 import (
     datasets,
     datasources,
     files,
+    ingest_push,
     ingest_tasks,
     jobs,
     operators,
@@ -58,6 +59,7 @@ def create_app() -> FastAPI:
     app.include_router(quality.router, prefix="/api/v1")
     app.include_router(content_safety.router, prefix="/api/v1")
     app.include_router(ingest_tasks.router, prefix="/api/v1")
+    app.include_router(ingest_push.router, prefix="/api/v1")
     app.include_router(uploads.router, prefix="/api/v1")
     app.include_router(files.router, prefix="/api/v1")
     app.include_router(ai.router, prefix="/api/v1")

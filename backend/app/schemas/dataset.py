@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import computed_field
 
 from app.schemas.common import CamelModel, UtcDateTime, format_version_label
+from app.services.semantic_registry import SemanticType
 
 
 class DatasetVersionRead(CamelModel):
@@ -20,6 +21,8 @@ class DatasetVersionRead(CamelModel):
     format: str
     rows: int | None = None
     size: int | None = None
+    # 语义类型快照(与 data_type 正交,#1/#2/#8);读模型宽松为 str(防御历史值)
+    semantic_type: str | None = None
     origin: str
     # hosted 版本指向的数据源 id(S3 凭证来源);受管版本为空(#18)
     source_datasource_id: str | None = None
@@ -45,7 +48,10 @@ class DatasetRead(CamelModel):
     id: str
     name: str
     description: str | None = None
+    # 接入/格式功能键(free-string,分栏过滤用,不收紧)
     data_type: str | None = None
+    # 语义类型(与 data_type 正交);读模型宽松为 str(防御历史值)
+    semantic_type: str | None = None
     sensitivity_level: str | None = None
     # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
     category_id: str | None = None
@@ -104,7 +110,10 @@ class DatasetUpdate(CamelModel):
 
     name: str | None = None
     description: str | None = None
+    # data_type 保持 free-string,不收紧(避免编辑存量数据集 422,见 docs/plan/14)
     data_type: str | None = None
+    # semantic_type 写入路径校验为枚举:非法值 422;None 放行(向后兼容)
+    semantic_type: SemanticType | None = None
     sensitivity_level: str | None = None
     # 分类(#15):受控分类库引用 id;显式传 null 清空分类
     category_id: str | None = None

@@ -27,7 +27,9 @@ async def db_session(session_factory) -> AsyncGenerator[AsyncSession, None]:
 # Task 1: raw landing + 接入格式白名单扩展
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_land_upload_raw_stores_bytes_rows_null(db_session, tmp_path, monkeypatch):
+async def test_land_upload_raw_stores_bytes_rows_null(
+    db_session, tmp_path, monkeypatch
+):
     # datasets 落到临时目录,避免污染
     monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
     content = b"\x89PNG\r\n\x1a\n binary bytes"
@@ -76,6 +78,115 @@ async def test_upload_binary_lands_raw(client, monkeypatch, tmp_path):
     # 二进制不解析:版本 rows 为空
     assert body["data"]["versions"][0]["rows"] is None
     assert body["data"]["versions"][0]["format"] == "mp4"
+
+
+# ---------------------------------------------------------------------------
+# 数据接入重构 #1/#2/#8:semantic_type 正交维度(docs/plan/14)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_upload_explicit_semantic_type_normalizes_and_snapshots(
+    client, monkeypatch, tmp_path
+):
+    """显式 semanticType=qa:版本快照写 qa,且别名 q/a 归一为 question/answer。"""
+    monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    content = b'{"q": "1+1?", "a": "2"}\n'
+    files = {"file": ("qa.jsonl", content, "application/x-ndjson")}
+    resp = await client.post(
+        "/api/v1/datasets/upload",
+        files=files,
+        data={"data_type": "qa", "semanticType": "qa"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["semanticType"] == "qa"  # 数据集级快照
+    version = data["versions"][0]
+    assert version["semanticType"] == "qa"  # 版本级快照
+    # data_type 功能键不被语义层改写(仍为接入键 qa)
+    assert data["dataType"] == "qa"
+    # 别名归一已落盘:q→question、a→answer
+    import json as _json
+    from pathlib import Path
+
+    row = _json.loads(Path(version["storageUri"]).read_text().splitlines()[0])
+    assert row["question"] == "1+1?" and row["answer"] == "2"
+    assert "q" not in row and "a" not in row
+
+
+@pytest.mark.asyncio
+async def test_upload_invalid_semantic_type_returns_422(
+    client, monkeypatch, tmp_path
+):
+    """非法 semanticType → 422(写入路径枚举校验);dataType 仍是 free-string 不受限。"""
+    monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    files = {"file": ("a.jsonl", b'{"text":"x"}\n', "application/x-ndjson")}
+    resp = await client.post(
+        "/api/v1/datasets/upload",
+        files=files,
+        data={"semanticType": "nonsense-type"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_upload_data_type_maps_default_semantic(
+    client, monkeypatch, tmp_path
+):
+    """未显式给 semanticType 时,按 data_type 默认映射打标签,不改记录。"""
+    monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    # data_type=log → 默认 text(确定性映射)
+    files = {"file": ("a.log", b"line one\nline two\n", "text/plain")}
+    resp = await client.post(
+        "/api/v1/datasets/upload", files=files, data={"data_type": "log"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["semanticType"] == "text"
+
+
+@pytest.mark.asyncio
+async def test_upload_strict_semantic_rejects_bad_rows(
+    client, monkeypatch, tmp_path
+):
+    """strict=true 且记录不合规 → 422,不落地。"""
+    monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    files = {
+        "file": ("qa.jsonl", b'{"question": "no answer"}\n', "application/x-ndjson")
+    }
+    resp = await client.post(
+        "/api/v1/datasets/upload?strict=true",
+        files=files,
+        data={"semanticType": "qa"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_dataset_list_filter_by_semantic_type(client, monkeypatch, tmp_path):
+    """列表按 semanticType 过滤:命中含该语义的数据集,不命中其它。"""
+    monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    pref = b'{"prompt":"p","chosen":"c","rejected":"r"}\n'
+    files = {"file": ("p.jsonl", pref, "application/x-ndjson")}
+    resp = await client.post(
+        "/api/v1/datasets/upload",
+        files=files,
+        data={"name": "偏好集", "semanticType": "preference"},
+    )
+    assert resp.status_code == 200, resp.text
+    ds_id = resp.json()["data"]["id"]
+
+    hit = await client.get("/api/v1/datasets", params={"semanticType": "preference"})
+    assert ds_id in {d["id"] for d in hit.json()["data"]}
+    miss = await client.get("/api/v1/datasets", params={"semanticType": "cot"})
+    assert ds_id not in {d["id"] for d in miss.json()["data"]}
+
+
+@pytest.mark.asyncio
+async def test_semantic_types_catalog_endpoint(client):
+    """GET /semantic-types 返回 10 类目录,含 required/mediaFields。"""
+    resp = await client.get("/api/v1/semantic-types")
+    assert resp.status_code == 200
+    items = resp.json()["data"]
+    assert {i["key"] for i in items} >= {"qa", "cot", "preference", "multimodal"}
 
 
 @pytest.mark.asyncio
@@ -183,7 +294,7 @@ async def test_host_platform_unconfigured_returns_503(client, monkeypatch):
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_preview_hosted_platform_fallback(client, monkeypatch):
-    """平台零拷贝(source_datasource_id 为空)的预览用 platform_config 取数,不报缺数据源。"""
+    """平台零拷贝(source_datasource_id 为空)预览走 platform_config,不报缺数据源。"""
     from app.api.v1 import datasets as datasets_mod
 
     monkeypatch.setattr(
@@ -232,7 +343,9 @@ async def test_preview_binary_not_previewable(client, monkeypatch, tmp_path):
 # Task 5: materialized_version 平台凭证回退(加工路径)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_materialized_version_platform_fallback(db_session, monkeypatch):
+async def test_materialized_version_platform_fallback(
+    db_session, monkeypatch, tmp_path
+):
     """origin=hosted 且无 source_datasource_id → 用 platform_config 下载,不报缺凭证。"""
     import os
     import tempfile
@@ -246,8 +359,13 @@ async def test_materialized_version_platform_fallback(db_session, monkeypatch):
         "platform_config",
         lambda: {"endpoint": "x", "accessKey": "a", "secretKey": "b"},
     )
+    # 物化缓存指向临时目录,避免污染真实 var/hosted-cache
+    monkeypatch.setattr(es.settings, "hosted_cache_dir", str(tmp_path))
 
     seen = {}
+
+    async def fake_stat(cfg, bucket, key):
+        return {"size": 8, "etag": "etag-test"}
 
     async def fake_download(cfg, bucket, key):
         seen["cfg"] = cfg
@@ -257,6 +375,7 @@ async def test_materialized_version_platform_fallback(db_session, monkeypatch):
         p.write_bytes(b'{"x":1}\n')
         return p
 
+    monkeypatch.setattr(es, "stat_object", fake_stat)
     monkeypatch.setattr(es, "download_to_temp", fake_download)
 
     v = DatasetVersion(

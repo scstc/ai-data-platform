@@ -57,14 +57,29 @@ from app.services.landing import (
     land_upload,
     land_upload_raw,
 )
+from app.services.semantic_registry import (
+    SemanticValidationError,
+    parse_semantic_type,
+    semantic_type_catalog,
+)
 
 router = APIRouter(tags=["datasets"])
+
+
+@router.get("/semantic-types")
+async def list_semantic_types() -> JSONResponse:
+    """语义类型目录(#1/#2/#8):每类型 key/label/required/mediaFields,供前端下拉/校验。"""
+    return JSONResponse(
+        content={"data": semantic_type_catalog(), "success": True}
+    )
 
 # 依赖别名(与其他路由同款,规避 ruff B008)
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 UploadFileDep = Annotated[UploadFile, File(...)]
 NameForm = Annotated[str | None, Form()]
 DataTypeForm = Annotated[str | None, Form()]
+SemanticTypeForm = Annotated[str | None, Form(alias="semanticType")]
+StrictQuery = Annotated[bool, Query(alias="strict")]
 DescForm = Annotated[str | None, Form()]
 CategoryIdForm = Annotated[str | None, Form(alias="categoryId")]
 CreatedStartQuery = Annotated[datetime | None, Query(alias="createdStart")]
@@ -100,10 +115,24 @@ async def upload_as_dataset(
     session: SessionDep,
     name: NameForm = None,
     data_type: DataTypeForm = None,
+    semantic_type: SemanticTypeForm = None,
     description: DescForm = None,
     category_id: CategoryIdForm = None,
+    strict: StrictQuery = False,
 ) -> JSONResponse:
-    """本地上传连接器:文件 → 规范化 jsonl → 受管 Dataset(v1) + DatasetVersion。"""
+    """本地上传连接器:文件 → 规范化 jsonl → 受管 Dataset(v1) + DatasetVersion。
+
+    可选 `semanticType`(与 dataType 正交):传则按其标准 schema 归一+校验;
+    `?strict=true` 时不合规整单 422,否则只计数不阻断(见 docs/plan/14)。
+    """
+    # 显式语义类型先校验合法性(非法值 422),再交给落地层
+    try:
+        parse_semantic_type(semantic_type)
+    except SemanticValidationError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"success": False, "message": str(exc)},
+        )
     filename = file.filename or ""
     fmt = _file_ext(filename)
     content = await file.read()
@@ -118,6 +147,7 @@ async def upload_as_dataset(
                 source_format=fmt,
                 dataset_name=name,
                 data_type=data_type,
+                semantic_type=semantic_type,
                 description=description,
             )
         else:
@@ -128,8 +158,15 @@ async def upload_as_dataset(
                 source_format=fmt,
                 dataset_name=name,
                 data_type=data_type,
+                semantic_type=semantic_type,
                 description=description,
+                strict_semantic=strict,
             )
+    except SemanticValidationError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"success": False, "message": f"语义校验失败:{exc}"},
+        )
     except UnsupportedFormatError:
         return JSONResponse(
             status_code=400,
@@ -682,6 +719,7 @@ async def list_datasets(
     page_size: int = Query(10, ge=1, alias="pageSize"),
     name: str | None = Query(None),
     data_type: str | None = Query(None, alias="dataType"),
+    semantic_type: str | None = Query(None, alias="semanticType"),
     category_id: str | None = Query(None, alias="categoryId"),
     creator: str | None = Query(None),
     created_start: CreatedStartQuery = None,
@@ -697,6 +735,8 @@ async def list_datasets(
         conds.append(Dataset.name.ilike(f"%{name}%"))
     if data_type:
         conds.append(Dataset.data_type == data_type)
+    if semantic_type:
+        conds.append(Dataset.semantic_type == semantic_type)
     if category_id:
         conds.append(Dataset.category_id == category_id)
     if creator:
@@ -1222,7 +1262,7 @@ async def host_platform(
             status_code=400,
             content={"success": False, "message": "缺少存储桶"},
         )
-    # 先整批校验所有 key 的格式;任一非法即整批 400(此时尚未 stat、未 add session,无脏状态)
+    # 先整批校验 key 格式;任一非法即整批 400(未 stat、未 add session,无脏状态)
     for key in body.keys:
         fmt = _file_ext(key)
         if fmt not in INGESTABLE_FORMATS:

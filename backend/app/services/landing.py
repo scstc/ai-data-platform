@@ -19,6 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+from app.services.semantic_registry import (
+    apply_semantic_spec,
+    coerce_semantic_type,
+    infer_semantic_from_data_type,
+)
 
 # 文档类:用 markitdown 提取文本,按段落落地
 DOC_FORMATS = {"pdf", "doc", "docx", "ppt", "pptx", "html"}
@@ -45,8 +50,8 @@ BINARY_FORMATS = {
 # 数据接入可受理的全部格式(可规范化 + 二进制零拷贝)
 INGESTABLE_FORMATS = LANDABLE_FORMATS | BINARY_FORMATS
 
-# 媒体批量接入产物的版本 format:一份 manifest jsonl(每行引用对象存储里的媒体),
-# 物化时下载成员并改写为本地路径喂给 dj-process(见 external_store.materialized_version)。
+# 媒体批量接入版本 format:manifest jsonl(每行引用对象存储媒体),
+# 物化时下载成员并改写本地路径喂给 dj-process(见 external_store.materialized_version)。
 MANIFEST_FORMAT = "manifest"
 
 # markitdown 实例(懒加载,首次处理文档时才初始化,避免拖慢后端启动)
@@ -195,22 +200,41 @@ async def land_records(
     *,
     dataset_name: str,
     data_type: str | None = None,
+    semantic_type: str | None = None,
     description: str | None = None,
     note: str | None = None,
     produced_by_job_id: str | None = None,
     creator: str = "admin",
+    strict_semantic: bool = False,
 ) -> tuple[Dataset, DatasetVersion]:
     """统一落地出口:把规范化记录写 jsonl → 建 Dataset(v1) + DatasetVersion。
 
     所有连接器(上传 / 采集 / ...)最终都汇到这里。`produced_by_job_id` 记录
     产出者(上传为空;采集传任务 id),即血缘上游。非 JSON 原生类型(datetime/
     Decimal 等)经 `default=str` 兜底为字符串。
+
+    语义类型(与 data_type 正交,见 docs/plan/14):
+    - 显式传 `semantic_type` → 按其标准 schema 归一别名 + 校验(strict 模式
+      不合规抛 SemanticValidationError);记录会被归一后落地。
+    - 未传 → 按 data_type 默认映射只打**版本/数据集级标签**,**不改记录**(零回归)。
+    校验在写盘/建行之前完成,失败不留脏对象。
     """
+    explicit = coerce_semantic_type(semantic_type)
+    if explicit is not None:
+        records, _report = apply_semantic_spec(
+            records, explicit, strict=strict_semantic
+        )
+        effective_semantic: str | None = explicit.value
+    else:
+        inferred = infer_semantic_from_data_type(data_type)
+        effective_semantic = inferred.value if inferred else None
+
     dataset = Dataset(
         id=_new_dataset_id(),
         name=dataset_name or "未命名数据集",
         description=description,
         data_type=data_type,
+        semantic_type=effective_semantic,
         owner=creator,
         creator=creator,
     )
@@ -232,6 +256,7 @@ async def land_records(
         rows=len(records),
         size=out_path.stat().st_size,
         origin="managed",
+        semantic_type=effective_semantic,
         produced_by_job_id=produced_by_job_id,
         note=note,
     )
@@ -250,8 +275,10 @@ async def land_upload(
     source_format: str,
     dataset_name: str | None = None,
     data_type: str | None = None,
+    semantic_type: str | None = None,
     description: str | None = None,
     creator: str = "admin",
+    strict_semantic: bool = False,
 ) -> tuple[Dataset, DatasetVersion]:
     """本地上传连接器:规范化 → 落地。解析失败抛 LandingError,不留脏对象。"""
     records = normalize_to_records(content, source_format)
@@ -260,9 +287,11 @@ async def land_upload(
         records,
         dataset_name=dataset_name or Path(filename).stem or "未命名数据集",
         data_type=data_type,
+        semantic_type=semantic_type,
         description=description,
         note=f"本地上传落地:{filename}",
         creator=creator,
+        strict_semantic=strict_semantic,
     )
 
 
@@ -274,15 +303,28 @@ async def land_upload_raw(
     source_format: str,
     dataset_name: str | None = None,
     data_type: str | None = None,
+    semantic_type: str | None = None,
     description: str | None = None,
     creator: str = "admin",
 ) -> tuple[Dataset, DatasetVersion]:
-    """二进制本地上传:原样存储,不解析。版本 rows=None,format=源扩展名。"""
+    """二进制本地上传:原样存储,不解析。版本 rows=None,format=源扩展名。
+
+    二进制无 dict 行 → 不经 apply_semantic_spec(见 docs/plan/14 §3.6);仅按
+    显式 semantic_type 或 data_type 默认映射打**版本/数据集级标签**(结构就绪)。
+    """
+    explicit = coerce_semantic_type(semantic_type)
+    if explicit is not None:
+        effective_semantic: str | None = explicit.value
+    else:
+        inferred = infer_semantic_from_data_type(data_type)
+        effective_semantic = inferred.value if inferred else None
+
     dataset = Dataset(
         id=_new_dataset_id(),
         name=dataset_name or Path(filename).stem or "未命名数据集",
         description=description,
         data_type=data_type,
+        semantic_type=effective_semantic,
         owner=creator,
         creator=creator,
     )
@@ -309,6 +351,7 @@ async def land_upload_raw(
         rows=None,
         size=len(content),
         origin="managed",
+        semantic_type=effective_semantic,
         produced_by_job_id=None,
         note=f"本地上传(原样存):{filename}",
     )
