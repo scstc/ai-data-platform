@@ -156,7 +156,7 @@ const QualityEditor: React.FC = () => {
         operators: steps,
       });
       message.success('质量评估任务已创建');
-      history.push('/quality');
+      history.push('/governance/quality');
     } finally {
       setSubmitting(false);
     }

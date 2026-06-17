@@ -231,7 +231,7 @@ const Processing: React.FC = () => {
           <Button
             type="primary"
             key="new"
-            onClick={() => history.push('/processing/editor')}
+            onClick={() => history.push('/governance/processing/editor')}
           >
             新建任务
           </Button>,

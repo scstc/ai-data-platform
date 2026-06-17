@@ -500,7 +500,7 @@ const Quality: React.FC = () => {
           <Button
             key="create"
             type="primary"
-            onClick={() => history.push('/quality/editor')}
+            onClick={() => history.push('/governance/quality/editor')}
           >
             新建质量评估
           </Button>,

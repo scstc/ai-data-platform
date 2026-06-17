@@ -187,7 +187,7 @@ const Editor: React.FC = () => {
       });
       message.success('加工任务已创建，正在后台运行');
       clear();
-      history.push('/processing/jobs');
+      history.push('/governance/processing');
     } finally {
       setSubmitting(false);
     }

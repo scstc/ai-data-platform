@@ -396,7 +396,7 @@ const DatasetsList: React.FC = () => {
           <a
             onClick={() =>
               history.push(
-                `/content-safety?datasetId=${v.datasetId}&versionId=${v.id}`,
+                `/governance/content-safety?datasetId=${v.datasetId}&versionId=${v.id}`,
               )
             }
           >
@@ -405,7 +405,7 @@ const DatasetsList: React.FC = () => {
           <a
             onClick={() =>
               history.push(
-                `/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+                `/governance/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
               )
             }
           >
@@ -415,7 +415,7 @@ const DatasetsList: React.FC = () => {
             <a
               onClick={() =>
                 history.push(
-                  `/processing/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+                  `/governance/processing/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
                 )
               }
             >
