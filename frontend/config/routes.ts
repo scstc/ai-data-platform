@@ -24,8 +24,8 @@ export default [
   { path: '/processing', redirect: '/governance/processing' },
   { path: '/processing/jobs', redirect: '/governance/processing' },
   { path: '/processing/editor', redirect: '/governance/processing/editor' },
-  { path: '/processing/market', redirect: '/governance/operators' },
-  { path: '/operators', redirect: '/governance/operators' },
+  { path: '/processing/market', redirect: '/operators' },
+  { path: '/governance/operators', redirect: '/operators' },
   { path: '/annotation', redirect: '/governance/annotation' },
   { path: '/data-tasks', redirect: '/ops/data-tasks' },
   { path: '/lineage', redirect: '/ops/lineage' },
@@ -94,16 +94,18 @@ export default [
         hideInMenu: true,
       },
       {
-        path: '/governance/operators',
-        name: 'operators',
-        component: './processing/market',
-      },
-      {
         path: '/governance/annotation',
         name: 'annotation',
         component: './annotation',
       },
     ],
+  },
+  // 算子市场(独立顶级入口:data-juicer 算子目录,供加工任务编排选用)
+  {
+    path: '/operators',
+    name: 'operators',
+    icon: 'appstore',
+    component: './processing/market',
   },
   // ④ 运维监控(跨切面:任务 / 血缘 / 审计)
   {
