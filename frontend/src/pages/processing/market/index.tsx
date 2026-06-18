@@ -3,7 +3,6 @@ import { PageContainer } from '@ant-design/pro-components';
 import { history, useModel } from '@umijs/max';
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Col,
@@ -15,6 +14,7 @@ import {
   message,
   Pagination,
   Row,
+  Segmented,
   Space,
   Spin,
   Switch,
@@ -27,16 +27,25 @@ import { listOperatorCatalog } from '@/services/data-platform';
 
 const { Paragraph, Text } = Typography;
 
-/** 可运行状态 → 单一状态信号(一个圆点 + 文案,避免多标签堆叠) */
-const RUNNABLE_BADGE: Record<
+/** 算子执行要求 → 彩色分类标签(按"需要什么"归类,一眼区分可直接跑 / 需 AI / 需 GPU / 需媒体) */
+const RUNNABLE_TAG: Record<
   DataPlatform.CatalogOperator['runnable'],
-  { status: 'success' | 'warning' | 'default'; text: string }
+  { label: string; color: string }
 > = {
-  ready: { status: 'success', text: '可运行' },
-  needs_api: { status: 'warning', text: '需配置 LLM' },
-  needs_media: { status: 'default', text: '需媒体数据' },
-  needs_compute: { status: 'default', text: '需要算力' },
+  ready: { label: '可直接执行', color: 'green' },
+  needs_api: { label: '需要 AI', color: 'geekblue' },
+  needs_media: { label: '需要媒体', color: 'orange' },
+  needs_compute: { label: '需要 GPU', color: 'volcano' },
 };
+
+/** 类别筛选项:全部 + 四类执行要求(value 对应 runnable;'all' 不过滤) */
+const RUNNABLE_FILTER_OPTIONS = [
+  { label: '全部', value: 'all' },
+  { label: '可直接执行', value: 'ready' },
+  { label: '需要 AI', value: 'needs_api' },
+  { label: '需要媒体', value: 'needs_media' },
+  { label: '需要 GPU', value: 'needs_compute' },
+];
 
 const RESOURCE_LABEL: Record<string, string> = {
   cpu: 'CPU',
@@ -72,7 +81,7 @@ const Market: React.FC = () => {
   // 过滤条件
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
-  const [onlyReady, setOnlyReady] = useState(false);
+  const [runnableFilter, setRunnableFilter] = useState('all');
   const [onlyRecommend, setOnlyRecommend] = useState(true);
 
   // 分页
@@ -111,7 +120,8 @@ const Market: React.FC = () => {
   // 先按开关 + 关键字过滤(不含场景),用于计算分面计数
   const switchFiltered = useMemo(() => {
     return allOps.filter((op) => {
-      if (onlyReady && op.runnable !== 'ready') return false;
+      if (runnableFilter !== 'all' && op.runnable !== runnableFilter)
+        return false;
       if (onlyRecommend && !op.recommend) return false;
       if (keyword) {
         const kw = keyword.toLowerCase();
@@ -124,7 +134,7 @@ const Market: React.FC = () => {
       }
       return true;
     });
-  }, [allOps, onlyReady, onlyRecommend, keyword]);
+  }, [allOps, runnableFilter, onlyRecommend, keyword]);
 
   // 分面计数:在 switchFiltered 上按场景分组
   const scenarioCounts = useMemo(() => {
@@ -245,18 +255,16 @@ const Market: React.FC = () => {
                   setCurrent(1);
                 }}
               />
-              <Space size="large">
-                <Space size={6}>
-                  <Switch
-                    size="small"
-                    checked={onlyReady}
-                    onChange={(v) => {
-                      setOnlyReady(v);
-                      setCurrent(1);
-                    }}
-                  />
-                  <Text type="secondary">只看可运行</Text>
-                </Space>
+              <Space size="large" wrap>
+                <Segmented
+                  size="small"
+                  value={runnableFilter}
+                  options={RUNNABLE_FILTER_OPTIONS}
+                  onChange={(v) => {
+                    setRunnableFilter(v as string);
+                    setCurrent(1);
+                  }}
+                />
                 <Space size={6}>
                   <Switch
                     size="small"
@@ -303,7 +311,7 @@ const Market: React.FC = () => {
                   }}
                 >
                   {pageData.map((op) => {
-                    const badge = RUNNABLE_BADGE[op.runnable];
+                    const tag = RUNNABLE_TAG[op.runnable];
                     return (
                       <Card
                         key={op.name}
@@ -371,14 +379,9 @@ const Market: React.FC = () => {
                             alignItems: 'center',
                           }}
                         >
-                          <Badge
-                            status={badge.status}
-                            text={
-                              <Text type="secondary" style={{ fontSize: 12 }}>
-                                {badge.text}
-                              </Text>
-                            }
-                          />
+                          <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
+                            {tag.label}
+                          </Tag>
                           <Button
                             size="small"
                             type="primary"
@@ -436,10 +439,9 @@ const Market: React.FC = () => {
               <Tag>
                 {RESOURCE_LABEL[detail.resourceClass] ?? detail.resourceClass}
               </Tag>
-              <Badge
-                status={RUNNABLE_BADGE[detail.runnable].status}
-                text={RUNNABLE_BADGE[detail.runnable].text}
-              />
+              <Tag color={RUNNABLE_TAG[detail.runnable].color}>
+                {RUNNABLE_TAG[detail.runnable].label}
+              </Tag>
             </Space>
             {detail.zhUsageTip && (
               <Alert
