@@ -87,8 +87,14 @@ def meta_api() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 资源前置校验(执行守门)—— "把算子路由到合适后端"的落点
 # ---------------------------------------------------------------------------
-def runnable_reason(name: str, *, llm_configured: bool = False) -> str | None:
-    """返回该算子在当前环境不可执行的原因;None 表示可执行。"""
+def runnable_reason(
+    name: str, *, llm_configured: bool = False, media_ok: bool = False
+) -> str | None:
+    """返回该算子在当前环境不可执行的原因;None 表示可执行。
+
+    ``llm_configured``:平台已配 LLM API,放行 ``needs_api`` 算子。
+    ``media_ok``:输入是媒体/manifest 数据集且多模态引擎就绪,放行 ``needs_media`` 算子。
+    """
     op = get_operator(name)
     if op is None:
         return f"未知算子:{name}"
@@ -100,6 +106,8 @@ def runnable_reason(name: str, *, llm_configured: bool = False) -> str | None:
             return None
         return f"算子 {name} 需要配置 LLM API(在 .env 设置 OPENAI_*)"
     if status == "needs_media":
+        if media_ok:
+            return None
         return f"算子 {name} 需要图像/音视频数据,当前文本数据集不适用"
     return f"算子 {name} 需要 GPU/模型算力,当前环境不可执行"
 
@@ -181,15 +189,24 @@ def _ui_params(op: dict[str, Any]) -> list[dict[str, Any]]:
     return [f for f in (_ui_field(p) for p in op.get("params", [])) if f]
 
 
-def legacy_operators() -> list[dict[str, Any]]:
-    """旧 5 字段形态(name/category/label/description/params),仅含 ready 算子。
+def legacy_operators(
+    *, llm_configured: bool = False, multimodal_ready: bool = False
+) -> list[dict[str, Any]]:
+    """旧 5 字段形态(name/category/label/description/params),供加工页下拉与动态表单。
 
-    供现有加工页下拉与动态参数表单使用,保持向后兼容。``category`` 用场景分组
-    (比 mapper/filter 更贴近用户),``params`` 已归一为表单字段。
+    默认仅含 ready 算子(向后兼容)。``llm_configured`` 为真时额外纳入
+    ``needs_api`` 算子;``multimodal_ready`` 为真时纳入 ``needs_media`` 算子——它们
+    仍在提交时按数据类型二次校验(``runnable_reason``)。``needs_compute`` 始终不列出。
+    ``category`` 用场景分组(比 mapper/filter 更贴近用户),``params`` 已归一为表单字段。
     """
+    allowed = {"ready"}
+    if llm_configured:
+        allowed.add("needs_api")
+    if multimodal_ready:
+        allowed.add("needs_media")
     result: list[dict[str, Any]] = []
     for op in all_operators():
-        if op["runnable"] != "ready":
+        if op["runnable"] not in allowed:
             continue
         result.append(
             {

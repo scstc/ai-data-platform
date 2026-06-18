@@ -72,6 +72,34 @@ async def _multimodal_block(version: DatasetVersion) -> JSONResponse | None:
     return None
 
 
+def _operator_block(
+    operators: list[OperatorSpec], version: DatasetVersion
+) -> JSONResponse | None:
+    """按 LLM 配置 + 数据类型校验算子可执行性,有跑不了的返回 400(含原因)。
+
+    needs_api 看是否配了 LLM;needs_media 看输入是否为 manifest 媒体集
+    (_multimodal_block 已确保此处 manifest ⇒ torch 就绪);needs_compute 恒拦截。
+    调用前须已做"非空 + 算子存在"校验。
+    """
+    llm_configured = bool(settings.openai_api_key)
+    media_ok = version.format == MANIFEST_FORMAT
+    blocked = [
+        reason
+        for o in operators
+        if (
+            reason := oc.runnable_reason(
+                o.name, llm_configured=llm_configured, media_ok=media_ok
+            )
+        )
+    ]
+    if blocked:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "；".join(blocked)},
+        )
+    return None
+
+
 class JobItemResponse(CamelModel):
     """单个加工任务响应：{data:{...}, success:true}。"""
 
@@ -199,19 +227,6 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
             status_code=400,
             content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
         )
-    # 资源前置校验:把算子路由到合适后端,跑不了的直接拦截并给原因
-    llm_configured = bool(settings.openai_api_key)
-    blocked = [
-        reason
-        for o in body.operators
-        if (reason := oc.runnable_reason(o.name, llm_configured=llm_configured))
-    ]
-    if blocked:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "；".join(blocked)},
-        )
-
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:
         return JSONResponse(
@@ -221,6 +236,11 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
     if (blocked_resp := await _multimodal_block(input_version)) is not None:
+        return blocked_resp
+
+    # 资源前置校验:按 LLM 配置 + 数据类型把算子路由到合适后端,跑不了的提前拦截给原因。
+    # media_ok:输入是 manifest 媒体集(_multimodal_block 已确保此时 torch 就绪)。
+    if (blocked_resp := _operator_block(body.operators, input_version)) is not None:
         return blocked_resp
     if (
         body.output_mode == "new_dataset"
@@ -335,18 +355,6 @@ async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse
             status_code=400,
             content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
         )
-    llm_configured = bool(settings.openai_api_key)
-    blocked = [
-        reason
-        for o in body.operators
-        if (reason := oc.runnable_reason(o.name, llm_configured=llm_configured))
-    ]
-    if blocked:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "；".join(blocked)},
-        )
-
     size = max(1, min(body.sample_size, 200))
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:
@@ -357,6 +365,8 @@ async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
     if (blocked_resp := await _multimodal_block(input_version)) is not None:
+        return blocked_resp
+    if (blocked_resp := _operator_block(body.operators, input_version)) is not None:
         return blocked_resp
 
     try:

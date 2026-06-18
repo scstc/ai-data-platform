@@ -10,17 +10,25 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
+from app.core.config import settings
 from app.services import operator_catalog as oc
+from app.services.engine import multimodal_ready
 
 router = APIRouter(tags=["operators"])
 
 
 @router.get("/operators")
 async def list_operators() -> JSONResponse:
-    """加工算子目录(旧形态,仅 ready 算子,供加工页编排选择)。"""
-    return JSONResponse(
-        content={"data": oc.legacy_operators(), "success": True}
+    """加工算子目录(旧形态,供加工页编排选择)。
+
+    含 ready;并按当前部署能力额外纳入:配了 LLM API → needs_api;装了多模态引擎
+    (torch)→ needs_media。needs_compute 不列出(无 GPU 跑不通)。
+    """
+    data = oc.legacy_operators(
+        llm_configured=bool(settings.openai_api_key),
+        multimodal_ready=await multimodal_ready(),
     )
+    return JSONResponse(content={"data": data, "success": True})
 
 
 # 注意:/operators/catalog* 必须声明在 /operators/{name} 之前,

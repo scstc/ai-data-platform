@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
+from app.services import operator_catalog as oc
 from app.services.external_store import (
     materialized_version,
     persist_manifest_output,
@@ -36,6 +37,22 @@ _semaphore = asyncio.Semaphore(settings.engine_concurrency)
 # 运行中子进程注册表(单 worker 进程内有效):job_id -> dj-process 子进程。
 # 由 _run_dj 在进程起止时维护,供 terminate_job 停止任务。
 _running_procs: dict[str, asyncio.subprocess.Process] = {}
+
+
+def _subprocess_env() -> dict[str, str] | None:
+    """dj-process 子进程环境。
+
+    平台配了 LLM 时,把 OPENAI_* 注入子进程环境——needs_api 算子经 DJ 的 openai
+    客户端从环境变量读取凭证(pydantic 只把 .env 读进 settings,不写 os.environ,
+    故不显式注入子进程就拿不到)。未配 LLM 则返回 None,子进程直接继承当前环境。
+    """
+    if not settings.openai_api_key:
+        return None
+    env = dict(os.environ)
+    env["OPENAI_API_KEY"] = settings.openai_api_key
+    if settings.openai_base_url:
+        env["OPENAI_BASE_URL"] = settings.openai_base_url
+    return env
 
 
 def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
@@ -112,10 +129,22 @@ def build_config(
     """把算子编排序列化为 data-juicer 合法配置(dict)。
 
     operators: [{name, params}]; 无参算子 process 项值为 None(DJ 接受)。
+
+    配了 LLM 时,为带 ``api_model`` 参数的算子(needs_api)注入平台配置的模型名
+    ——DJ 该参数默认写死 ``gpt-4o``,不覆盖会向自定义端点请求不存在的模型而失败;
+    用户在表单里显式填了 ``api_model`` 则尊重用户值。
     """
     process: list[dict[str, Any]] = []
     for op in operators:
-        params = op.get("params") or {}
+        params = dict(op.get("params") or {})
+        if settings.openai_api_key:
+            meta = oc.get_operator(op["name"])
+            valid = {p["name"] for p in meta.get("params", [])} if meta else set()
+            # DJ 各算子模型参数名不统一(api_model / api_or_hf_model),默认都写死
+            # gpt-4o;不覆盖会向自定义端点请求不存在的模型而失败。用户显式填了则尊重。
+            for model_key in ("api_model", "api_or_hf_model"):
+                if model_key in valid and model_key not in params:
+                    params[model_key] = settings.openai_model
         process.append({op["name"]: (params or None)})
     # 路径统一正斜杠:DJ 用 POSIX shlex 解析 dataset_path,Windows 反斜杠
     # 会被当转义符吞掉,路径残缺后被误判成 huggingface 数据集
@@ -142,6 +171,8 @@ async def _run_dj(yaml_path: Path, *, job_id: str | None = None) -> tuple[int, s
         stderr=asyncio.subprocess.STDOUT,
         # 自成进程组:停止/超时时可整组杀,连带 dj fork 出的子孙(uv/pip 等)
         start_new_session=True,
+        # 配了 LLM 时把 OPENAI_* 注入,供 needs_api 算子的 openai 客户端读取
+        env=_subprocess_env(),
     )
     if job_id is not None:
         _running_procs[job_id] = proc
