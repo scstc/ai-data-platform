@@ -19,32 +19,84 @@
 from __future__ import annotations
 
 import fnmatch
+import io
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from app.core.config import settings
+from app.models.dataset import Dataset
+from app.models.dataset_version import DatasetVersion
 from app.services.connectors.base import ConnectorNotReady, IngestError
 from app.services.external_store import (
+    MAX_MANIFEST_MEMBERS,
+    MAX_MATERIALIZE_BYTES,
     ExternalStoreError,
     download_to_temp,
     list_objects,
+    platform_config,
+    remove_prefix,
     test_connection,
+    upload_object,
 )
 from app.services.landing import (
+    BINARY_FORMATS,
+    MANIFEST_FORMAT,
     UnsupportedFormatError,
+    _new_dataset_id,
+    _new_version_id,
     land_records,
+    media_kind,
     normalize_to_records,
 )
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from app.models.dataset import Dataset
-    from app.models.dataset_version import DatasetVersion
     from app.models.datasource import DataSource
     from app.models.ingest_task import IngestTask
 
 logger = logging.getLogger(__name__)
+
+# 模态名 → DJ 多模态 jsonl 字段 + 特殊 token(与 datasets.upload-media 契约一致)
+_MEDIA_FIELD = {"image": "images", "audio": "audios", "video": "videos"}
+_MEDIA_TOKEN = {
+    "image": "<__dj__image>",
+    "audio": "<__dj__audio>",
+    "video": "<__dj__video>",
+}
+
+
+def _ext(key: str) -> str:
+    """取对象键扩展名(小写、不含点);无扩展名返回空串。"""
+    suffix = Path(key).suffix
+    return suffix[1:].lower() if suffix else ""
+
+
+def _media_manifest_row(member_key: str, name: str, size: int, fmt: str) -> dict:
+    """构造一行媒体清单(DJ 多模态 jsonl 契约 + 平台旁路 __member + type 模态标注)。
+
+    - 多模态字段(images/audios/videos)按模态落 [member_key] 数组,喂 dj rel2abs;
+    - text 填该模态的 dj 特殊 token;
+    - **type 显式标注该文件模态**(image/audio/video)——满足「桶内多种文件混装时,
+      逐行 json 用 type 说明该文件类型」;
+    - __member 为平台旁路元信息(成员列表 / 预览 / 物化回传用,dj 物化时剥除)。
+    """
+    kind = media_kind(fmt)
+    field = _MEDIA_FIELD[kind]
+    return {
+        field: [member_key],
+        "type": kind,
+        "text": _MEDIA_TOKEN[kind],
+        "__member": {
+            "bucket": settings.storage_minio_upload_bucket,
+            "key": member_key,
+            "name": name,
+            "size": size,
+            "format": fmt,
+        },
+    }
 
 
 def _bucket_from_config(config: dict[str, Any]) -> str:
@@ -169,7 +221,14 @@ class S3Connector:
         *,
         job_id: str,
     ) -> list[tuple[Dataset, DatasetVersion]]:
-        """S3 平铺文件采集:下载 → normalize → land_records,每对象一个数据集。
+        """S3 平铺文件采集(s3/minio/oss/obs 同此连接器,endpoint 区分厂商)。
+
+        按对象扩展名分两路处理:
+        - **媒体二进制**(图/音/视频,BINARY_FORMATS):不解析,**原样复制进平台内置
+          MinIO**(uploads 桶),整批汇成**一个** manifest 数据集——每行带 images/audios/
+          videos 字段 + dj token + **type 模态标注**(满足多类型混装逐行说明);
+          下游加工物化时按 manifest 下载成员(见 external_store.materialized_version)。
+        - **结构化/文本/文档**:下载 → normalize → land_records,每对象一集(原行为)。
 
         extract.mode 须为 'path'(或 None);配置 paths/glob 指定对象范围。
         data_type 由数据源 config.dataType(前端传入)或留 None;
@@ -206,10 +265,14 @@ class S3Connector:
         # 由 extract spec 计算本次要采集的 key 列表
         keys = _keys_from_extract(extract, all_objects)
 
+        # 按扩展名分流:媒体走「复制进内置 MinIO + 汇成 manifest」,其余走逐对象落地
+        media_keys = [k for k in keys if _ext(k) in BINARY_FORMATS]
+        data_keys = [k for k in keys if _ext(k) not in BINARY_FORMATS]
+
         results: list[tuple[Dataset, DatasetVersion]] = []
         skipped = 0
 
-        for key in keys:
+        for key in data_keys:
             tmp_path: Path | None = None
             try:
                 # 1. 下载到临时文件
@@ -268,6 +331,21 @@ class S3Connector:
                 if tmp_path is not None:
                     tmp_path.unlink(missing_ok=True)
 
+        # 媒体文件:原样复制进平台内置 MinIO + 汇成一个 manifest 数据集(逐行带 type)
+        if media_keys:
+            results.append(
+                await self._ingest_media_to_manifest(
+                    session,
+                    task=task,
+                    datasource=datasource,
+                    src_config=config,
+                    src_bucket=bucket,
+                    media_keys=media_keys,
+                    data_type=data_type,
+                    job_id=job_id,
+                )
+            )
+
         if skipped:
             logger.info(
                 "S3 采集完成:成功 %d 个对象,跳过 %d 个(格式不支持或解析失败)",
@@ -276,3 +354,144 @@ class S3Connector:
             )
 
         return results
+
+    # ------------------------------------------------------------------
+    # 媒体清单落地 —— 复制进平台内置 MinIO + 汇成一个 manifest 数据集
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _gc_prefix(cfg: dict, bucket: str, prefix: str) -> None:
+        """尽力回收平台 MinIO 某前缀(失败半成品),不可达不阻断上层报错。"""
+        try:
+            await remove_prefix(cfg, bucket, prefix)
+        except ExternalStoreError:
+            pass
+
+    async def _ingest_media_to_manifest(
+        self,
+        session: AsyncSession,
+        *,
+        task: IngestTask,
+        datasource: DataSource,
+        src_config: dict[str, Any],
+        src_bucket: str,
+        media_keys: list[str],
+        data_type: str | None,
+        job_id: str,
+    ) -> tuple[Dataset, DatasetVersion]:
+        """媒体对象 → 逐个从源对象存储下载,原样复制进平台内置 MinIO(uploads 桶),
+        整批汇成**一个** format=manifest 数据集(每行带 images/audios/videos + dj token +
+        type 模态标注)。返回 (Dataset, DatasetVersion)。
+
+        与 datasets.upload-media 同一清单契约,故复用既有物化/成员/预览路径:不同点
+        仅在每行追加 type 字段(混装多模态时逐行说明类型,dj 物化时随其余字段透传)。
+
+        失败(下载/写入/超限)→ 回滚未提交行 + 回收已写平台对象 + 抛 IngestError;
+        绝不留下没有清单的孤儿对象,也绝不动源对象存储(只读源、只写平台)。
+        """
+        if len(media_keys) > MAX_MANIFEST_MEMBERS:
+            raise IngestError(
+                f"S3 媒体采集一次最多 {MAX_MANIFEST_MEMBERS} 个文件,"
+                f"实际 {len(media_keys)} 个,请缩小 paths/glob 范围"
+            )
+        try:
+            cfg = platform_config()
+        except ExternalStoreError as exc:
+            raise IngestError(
+                f"平台内置存储(MinIO)未配置,无法复制媒体文件:{exc}"
+            ) from exc
+
+        dst_bucket = settings.storage_minio_upload_bucket
+        dataset_id = _new_dataset_id()
+        prefix = f"{dataset_id}/"
+        manifest_rows: list[dict] = []
+        total_size = 0
+        try:
+            for idx, key in enumerate(media_keys):
+                tmp_path: Path | None = None
+                try:
+                    try:
+                        tmp_path = await download_to_temp(src_config, src_bucket, key)
+                    except ExternalStoreError as exc:
+                        raise IngestError(
+                            f"S3 媒体下载失败 {src_bucket}/{key}:{exc}"
+                        ) from exc
+                    size = tmp_path.stat().st_size
+                    total_size += size
+                    if total_size > MAX_MATERIALIZE_BYTES:
+                        raise IngestError(
+                            "本次媒体采集总体积超过上限,无法复制/加工"
+                        )
+                    fmt = _ext(key) or tmp_path.suffix.lstrip(".").lower()
+                    base = Path(key).name  # 去路径,防 key 注入
+                    member_key = f"{prefix}{idx:06d}-{base}"
+                    # 流式上传(从临时文件句柄,不把大媒体读进内存)
+                    with tmp_path.open("rb") as fp:
+                        await upload_object(cfg, dst_bucket, member_key, fp, size)
+                    manifest_rows.append(
+                        _media_manifest_row(member_key, base, size, fmt)
+                    )
+                finally:
+                    if tmp_path is not None:
+                        tmp_path.unlink(missing_ok=True)
+
+            manifest_bytes = (
+                "\n".join(
+                    json.dumps(r, ensure_ascii=False) for r in manifest_rows
+                )
+                + "\n"
+            ).encode("utf-8")
+            manifest_key = f"{prefix}manifest.jsonl"
+            await upload_object(
+                cfg,
+                dst_bucket,
+                manifest_key,
+                io.BytesIO(manifest_bytes),
+                len(manifest_bytes),
+                content_type="application/x-ndjson",
+            )
+
+            dataset = Dataset(
+                id=dataset_id,
+                name=task.name or datasource.name,
+                description=(
+                    f"S3 媒体采集:{datasource.name}"
+                    f"({len(manifest_rows)} 个文件)"
+                ),
+                data_type=data_type,
+                category_id=task.category_id,
+                owner="admin",
+                creator="admin",
+            )
+            session.add(dataset)
+            version = DatasetVersion(
+                id=_new_version_id(),
+                dataset_id=dataset_id,
+                version_no=1,
+                storage_uri=f"s3://{dst_bucket}/{manifest_key}",
+                format=MANIFEST_FORMAT,
+                rows=len(manifest_rows),
+                size=total_size,
+                origin="managed",
+                source_datasource_id=None,
+                produced_by_job_id=job_id,
+                note=(
+                    f"S3 媒体采集 job={job_id} src={src_bucket}"
+                    f"({len(manifest_rows)} 个文件)"
+                ),
+            )
+            session.add(version)
+            await session.commit()
+            await session.refresh(dataset)
+            await session.refresh(version)
+            return dataset, version
+        except IngestError:
+            await session.rollback()
+            await self._gc_prefix(cfg, dst_bucket, prefix)
+            raise
+        except ExternalStoreError as exc:
+            await session.rollback()
+            await self._gc_prefix(cfg, dst_bucket, prefix)
+            raise IngestError(
+                f"S3 媒体复制写入平台存储失败:{exc}"
+            ) from exc

@@ -40,12 +40,25 @@ LANDABLE_FORMATS = {
     *DOC_FORMATS,
 }
 
-# 二进制类:原样存储,不规范化(图像 / 音频 / 视频)
-BINARY_FORMATS = {
-    "png", "jpg", "jpeg", "gif", "bmp", "webp",
-    "mp3", "wav", "flac", "m4a", "aac", "ogg",
-    "mp4", "avi", "mov", "mkv", "webm",
+# 二进制类:原样存储,不规范化(图像 / 音频 / 视频)。
+# 按模态拆三组,BINARY_FORMATS 取并集——单一事实源,媒体分类(media_kind)复用,
+# 避免「能否落地」与「属哪种模态」两处枚举漂移。
+IMAGE_FORMATS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+AUDIO_FORMATS = {"mp3", "wav", "flac", "m4a", "aac", "ogg"}
+VIDEO_FORMATS = {"mp4", "avi", "mov", "mkv", "webm"}
+BINARY_FORMATS = IMAGE_FORMATS | AUDIO_FORMATS | VIDEO_FORMATS
+
+# 媒体扩展名 → 模态名(image/audio/video);非媒体 → None。
+_MEDIA_KIND_BY_FORMAT = {
+    **dict.fromkeys(IMAGE_FORMATS, "image"),
+    **dict.fromkeys(AUDIO_FORMATS, "audio"),
+    **dict.fromkeys(VIDEO_FORMATS, "video"),
 }
+
+
+def media_kind(fmt: str) -> str | None:
+    """媒体扩展名 → 模态名(image/audio/video);非媒体格式 → None。"""
+    return _MEDIA_KIND_BY_FORMAT.get(fmt.lower())
 
 # 数据接入可受理的全部格式(可规范化 + 二进制零拷贝)
 INGESTABLE_FORMATS = LANDABLE_FORMATS | BINARY_FORMATS

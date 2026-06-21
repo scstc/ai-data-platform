@@ -38,7 +38,11 @@ from app.services.connectors.hdfs import (
     _parse_liststatus,
 )
 from app.services.connectors.mysql import MysqlConnector
-from app.services.connectors.objectstore import S3Connector
+from app.services.connectors.objectstore import (
+    S3Connector,
+    _ext,
+    _media_manifest_row,
+)
 from app.services.connectors.pg import PgConnector
 from app.services.connectors.proprietary import (
     DamengConnector,
@@ -428,3 +432,56 @@ async def test_mysql_probe_not_ready_when_driver_absent(monkeypatch):
     assert ok is False
     assert latency == 0
     assert isinstance(msg, str) and msg
+
+
+# ===========================================================================
+# §4.5 / §4.9 S3 媒体清单:复制进内置 MinIO → manifest 行(逐行带 type 模态标注)
+# ===========================================================================
+@pytest.mark.parametrize(
+    "fmt, field, token, kind",
+    [
+        ("png", "images", "<__dj__image>", "image"),
+        ("JPG", "images", "<__dj__image>", "image"),  # 大写扩展名归一
+        ("mp4", "videos", "<__dj__video>", "video"),
+        ("wav", "audios", "<__dj__audio>", "audio"),
+    ],
+)
+def test_media_manifest_row_carries_type_and_dj_contract(fmt, field, token, kind):
+    """媒体清单一行:多模态字段 [member_key] + dj token + **type 模态标注** + __member。
+
+    意图(本特性核心):S3 桶内多种媒体混装时,每行 json 用 type 显式说明该文件类型;
+    同时 images/audios/videos 字段 + dj 特殊 token 维持 DJ 多模态契约(可直接物化加工)。
+    """
+    fmt_l = fmt.lower()
+    member_key = f"dset-x/000000-a.{fmt_l}"
+    row = _media_manifest_row(member_key, f"a.{fmt_l}", 123, fmt)
+
+    assert row[field] == [member_key]  # 模态字段落对象 key 数组
+    assert row["type"] == kind  # 逐行 type 说明文件模态
+    assert row["text"] == token  # dj 特殊 token 与模态一致
+    assert row["__member"]["key"] == member_key
+    assert row["__member"]["name"] == f"a.{fmt_l}"
+    assert row["__member"]["size"] == 123
+    assert row["__member"]["format"] == fmt  # 原样保留传入扩展名
+
+
+def test_media_manifest_rows_mixed_kinds_self_describe():
+    """图/音/视频混装:同一清单逐行 type 各异,字段各落各模态——满足「多种文件」诉求。"""
+    rows = [
+        _media_manifest_row("d/0-a.png", "a.png", 1, "png"),
+        _media_manifest_row("d/1-b.mp4", "b.mp4", 2, "mp4"),
+        _media_manifest_row("d/2-c.mp3", "c.mp3", 3, "mp3"),
+    ]
+    assert [r["type"] for r in rows] == ["image", "video", "audio"]
+    assert "images" in rows[0] and "videos" in rows[1] and "audios" in rows[2]
+
+
+def test_ext_partitions_media_from_data():
+    """_ext 决定分流:媒体扩展名 ∈ BINARY_FORMATS 走清单,其余走逐对象落地。"""
+    from app.services.landing import BINARY_FORMATS
+
+    assert _ext("a/b/pic.PNG") == "png"
+    assert _ext("clip.MP4") in BINARY_FORMATS
+    assert _ext("data.csv") not in BINARY_FORMATS
+    assert _ext("notes.jsonl") not in BINARY_FORMATS
+    assert _ext("noext") == ""  # 无扩展名 → 非媒体,走 data 路(可能被诚实跳过)
