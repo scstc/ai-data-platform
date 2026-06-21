@@ -8,8 +8,10 @@ import {
 } from '@ant-design/pro-components';
 import {
   Alert,
+  AutoComplete,
   Badge,
   Button,
+  Drawer,
   Form,
   Input,
   message,
@@ -25,10 +27,15 @@ import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   activateLlmProvider,
+  addProviderModel,
   createLlmProvider,
   deleteLlmProvider,
+  deleteProviderModel,
+  fetchProviderModels,
   getLlmUsage,
   listLlmProviders,
+  listProviderModels,
+  selectProviderModel,
   testLlmProvider,
   updateLlmProvider,
 } from '@/services/data-platform';
@@ -66,6 +73,31 @@ const PROVIDER_LABELS: Record<DataPlatform.LlmProvider['provider'], string> = {
   minimax: 'MiniMax',
   openai: 'OpenAI',
   custom: '自定义',
+};
+
+/**
+ * 各供应商常见模型名 —— 拉取失败 / 供应商无 /models 接口（如 GLM）时的兜底候选，
+ * 也用作「模型」输入框的自动补全建议；始终可手填覆盖。
+ */
+const PRESET_MODELS: Record<DataPlatform.LlmProvider['provider'], string[]> = {
+  deepseek: [
+    'deepseek-chat',
+    'deepseek-reasoner',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+  ],
+  glm: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4-plus', 'glm-4-flash'],
+  minimax: ['MiniMax-M2', 'MiniMax-Text-01', 'abab6.5s-chat'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'o3-mini', 'gpt-4.1', 'gpt-4.1-mini'],
+  custom: [],
+};
+
+const SOURCE_META: Record<
+  DataPlatform.LlmModel['source'],
+  { text: string; color: string }
+> = {
+  fetched: { text: '拉取', color: 'geekblue' },
+  manual: { text: '手填', color: 'default' },
 };
 
 type EditingProvider = Partial<DataPlatform.LlmProvider> | null;
@@ -203,6 +235,198 @@ const UsagePanel: React.FC = () => {
   );
 };
 
+// ─── 模型管理抽屉（主从式详情） ───────────────────────────────────────────────
+
+const ModelsDrawer: React.FC<{
+  provider: DataPlatform.LlmProvider | null;
+  open: boolean;
+  onClose: () => void;
+  /** 当前模型变更后通知主表刷新 */
+  onProviderChanged: () => void;
+}> = ({ provider, open, onClose, onProviderChanged }) => {
+  const [models, setModels] = useState<DataPlatform.LlmModel[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  const [currentModel, setCurrentModel] = useState('');
+  const [newModel, setNewModel] = useState('');
+
+  const loadModels = useCallback(async (pid: string) => {
+    setLoading(true);
+    try {
+      const res = await listProviderModels(pid);
+      if (res.success) setModels(res.data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && provider) {
+      setCurrentModel(provider.model);
+      setNewModel('');
+      loadModels(provider.id);
+    }
+  }, [open, provider, loadModels]);
+
+  const presetOptions = provider
+    ? PRESET_MODELS[provider.provider].map((m) => ({ value: m }))
+    : [];
+
+  const handleFetch = async () => {
+    if (!provider) return;
+    setFetching(true);
+    try {
+      const res = await fetchProviderModels(provider.id);
+      setModels(res.data.models);
+      if (res.data.success) {
+        message.success(res.data.message);
+      } else {
+        message.warning(
+          `拉取失败:${res.data.message}。可用下方预置候选手动添加`,
+        );
+      }
+    } catch (e: any) {
+      message.error(e?.message ?? '拉取失败');
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const handleAdd = async () => {
+    if (!provider) return;
+    const m = newModel.trim();
+    if (!m) return;
+    try {
+      const res = await addProviderModel(provider.id, m);
+      if (res.success) {
+        setModels(res.data);
+        setNewModel('');
+        message.success('已添加');
+      }
+    } catch (e: any) {
+      message.error(e?.message ?? '添加失败');
+    }
+  };
+
+  const handleSelect = async (model: string) => {
+    if (!provider) return;
+    try {
+      await selectProviderModel(provider.id, model);
+      setCurrentModel(model);
+      message.success(`已设为当前模型:${model}`);
+      onProviderChanged();
+    } catch (e: any) {
+      message.error(e?.message ?? '设置失败');
+    }
+  };
+
+  const handleDeleteModel = async (modelId: string) => {
+    if (!provider) return;
+    try {
+      await deleteProviderModel(provider.id, modelId);
+      setModels((prev) => prev.filter((x) => x.id !== modelId));
+      message.success('已删除');
+    } catch (e: any) {
+      message.error(e?.message ?? '删除失败');
+    }
+  };
+
+  const cols: ColumnsType<DataPlatform.LlmModel> = [
+    {
+      title: '模型',
+      dataIndex: 'model',
+      render: (_, r) => (
+        <Space>
+          <span>{r.model}</span>
+          {r.model === currentModel && <Tag color="green">当前</Tag>}
+        </Space>
+      ),
+    },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      width: 90,
+      render: (_, r) => (
+        <Tag color={SOURCE_META[r.source].color}>
+          {SOURCE_META[r.source].text}
+        </Tag>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 150,
+      render: (_, r) => (
+        <Space size="small">
+          <Button
+            type="link"
+            size="small"
+            disabled={r.model === currentModel}
+            onClick={() => handleSelect(r.model)}
+          >
+            设为当前
+          </Button>
+          <Popconfirm
+            title="删除该模型?"
+            onConfirm={() => handleDeleteModel(r.id)}
+            okText="删除"
+            cancelText="取消"
+          >
+            <Button type="link" size="small" danger>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <Drawer
+      title={provider ? `管理模型 · ${provider.name}` : '管理模型'}
+      size="large"
+      open={open}
+      onClose={onClose}
+      destroyOnHidden
+    >
+      {provider && (
+        <>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`当前生效模型:${currentModel || '(未设置)'}`}
+            description="「获取模型」调用供应商接口拉取清单;部分供应商(如 GLM)无该接口,可用下方预置候选手动添加。"
+          />
+          <Space style={{ marginBottom: 16 }} wrap>
+            <Button type="primary" loading={fetching} onClick={handleFetch}>
+              获取模型
+            </Button>
+            <AutoComplete
+              value={newModel}
+              options={presetOptions}
+              style={{ width: 240 }}
+              placeholder="手动输入或选择模型名"
+              onChange={(v) => setNewModel(v)}
+            />
+            <Button onClick={handleAdd} disabled={!newModel.trim()}>
+              添加
+            </Button>
+          </Space>
+          <Table<DataPlatform.LlmModel>
+            size="small"
+            rowKey="id"
+            loading={loading}
+            dataSource={models}
+            columns={cols}
+            pagination={false}
+          />
+        </>
+      )}
+    </Drawer>
+  );
+};
+
 // ─── 主页面 ───────────────────────────────────────────────────────────────────
 
 const LlmSettings: React.FC = () => {
@@ -210,9 +434,16 @@ const LlmSettings: React.FC = () => {
   const [listLoading, setListLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<EditingProvider>(null);
-  const [testingId, setTestingId] = useState<number | null>(null);
-  const [activatingId, setActivatingId] = useState<number | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [activatingId, setActivatingId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [managing, setManaging] = useState<DataPlatform.LlmProvider | null>(
+    null,
+  );
   const [form] = Form.useForm();
+  const watchedProvider = Form.useWatch('provider', form) as
+    | DataPlatform.LlmProvider['provider']
+    | undefined;
   const actionRef = useRef(null);
 
   const loadProviders = useCallback(async () => {
@@ -275,7 +506,7 @@ const LlmSettings: React.FC = () => {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: string) => {
     try {
       await deleteLlmProvider(id);
       message.success('已删除');
@@ -285,7 +516,7 @@ const LlmSettings: React.FC = () => {
     }
   };
 
-  const handleActivate = async (id: number) => {
+  const handleActivate = async (id: string) => {
     setActivatingId(id);
     try {
       await activateLlmProvider(id);
@@ -298,7 +529,12 @@ const LlmSettings: React.FC = () => {
     }
   };
 
-  const handleTest = async (id: number) => {
+  const openManage = (record: DataPlatform.LlmProvider) => {
+    setManaging(record);
+    setDrawerOpen(true);
+  };
+
+  const handleTest = async (id: string) => {
     setTestingId(id);
     try {
       const res = await testLlmProvider(id);
@@ -368,9 +604,9 @@ const LlmSettings: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 220,
+      width: 300,
       render: (_, r) => (
-        <Space size="small">
+        <Space size="small" wrap>
           <Button
             type="link"
             size="small"
@@ -378,6 +614,9 @@ const LlmSettings: React.FC = () => {
             onClick={() => handleTest(r.id)}
           >
             测试
+          </Button>
+          <Button type="link" size="small" onClick={() => openManage(r)}>
+            管理模型
           </Button>
           <Button
             type="link"
@@ -482,12 +721,19 @@ const LlmSettings: React.FC = () => {
           placeholder="https://api.example.com/v1"
           rules={[{ required: true, message: '请输入 Base URL' }]}
         />
-        <ProFormText
+        <Form.Item
           name="model"
           label="模型"
-          placeholder="model-name"
           rules={[{ required: true, message: '请输入模型名称' }]}
-        />
+        >
+          <AutoComplete
+            options={(watchedProvider
+              ? PRESET_MODELS[watchedProvider]
+              : []
+            ).map((m) => ({ value: m }))}
+            placeholder="选择或输入模型名;保存后可在「管理模型」拉取完整列表"
+          />
+        </Form.Item>
         <Form.Item
           name="apiKey"
           label="API Key"
@@ -508,6 +754,13 @@ const LlmSettings: React.FC = () => {
           已激活的配置将被 AI 助手 / needs_api 算子使用
         </div>
       </ModalForm>
+
+      <ModelsDrawer
+        provider={managing}
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        onProviderChanged={loadProviders}
+      />
     </PageContainer>
   );
 };

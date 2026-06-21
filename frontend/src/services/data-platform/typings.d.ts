@@ -697,7 +697,7 @@ declare namespace DataPlatform {
 
   /** LLM 供应商配置 */
   interface LlmProvider {
-    id: number;
+    id: string;
     name: string;
     /** 供应商类型 */
     provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
@@ -732,6 +732,26 @@ declare namespace DataPlatform {
     latencyMs: number;
     message: string;
     model: string;
+  }
+
+  /** 供应商下一个可选模型 */
+  interface LlmModel {
+    id: string;
+    providerId: string;
+    model: string;
+    /** 来源:fetched=接口拉取 / manual=手动添加 */
+    source: 'fetched' | 'manual';
+    createdAt: string;
+  }
+
+  /** 「获取模型」拉取结果 */
+  interface LlmFetchModelsResult {
+    /** 拉取是否成功;false 时前端走预置清单兜底 */
+    success: boolean;
+    message: string;
+    /** 本次新增模型数 */
+    added: number;
+    models: LlmModel[];
   }
 
   interface LlmUsageByFeature {

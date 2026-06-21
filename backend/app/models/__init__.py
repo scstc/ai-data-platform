@@ -9,6 +9,7 @@ from app.models.datasource import DataSource
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.llm_model import LlmModel
 from app.models.llm_provider import LlmProvider
 from app.models.llm_usage import LlmUsage
 from app.models.review_finding import ReviewFinding
@@ -25,6 +26,7 @@ __all__ = [
     "IngestTask",
     "Job",
     "JobInput",
+    "LlmModel",
     "LlmProvider",
     "LlmUsage",
     "ReviewFinding",

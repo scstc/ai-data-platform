@@ -946,7 +946,7 @@ export async function createLlmProvider(body: DataPlatform.LlmProviderCreate) {
 
 /** 更新 LLM 供应商 PUT /api/v1/llm-providers/{id} */
 export async function updateLlmProvider(
-  id: number,
+  id: string,
   body: DataPlatform.LlmProviderUpdate,
 ) {
   return request<{ data: DataPlatform.LlmProvider; success: boolean }>(
@@ -960,14 +960,14 @@ export async function updateLlmProvider(
 }
 
 /** 删除 LLM 供应商 DELETE /api/v1/llm-providers/{id} */
-export async function deleteLlmProvider(id: number) {
+export async function deleteLlmProvider(id: string) {
   return request<{ success: boolean }>(`/api/v1/llm-providers/${id}`, {
     method: 'DELETE',
   });
 }
 
 /** 激活 LLM 供应商 POST /api/v1/llm-providers/{id}/activate */
-export async function activateLlmProvider(id: number) {
+export async function activateLlmProvider(id: string) {
   return request<{ data: DataPlatform.LlmProvider; success: boolean }>(
     `/api/v1/llm-providers/${id}/activate`,
     {
@@ -978,7 +978,7 @@ export async function activateLlmProvider(id: number) {
 }
 
 /** 测试 LLM 供应商连通性 POST /api/v1/llm-providers/{id}/test */
-export async function testLlmProvider(id: number) {
+export async function testLlmProvider(id: string) {
   return request<{ data: DataPlatform.LlmTestResult; success: boolean }>(
     `/api/v1/llm-providers/${id}/test`,
     {
@@ -994,6 +994,62 @@ export async function getLlmUsage(days = 7) {
     '/api/v1/llm-providers/usage',
     {
       params: { days },
+    },
+  );
+}
+
+/** 列出供应商可选模型 GET /api/v1/llm-providers/{id}/models */
+export async function listProviderModels(providerId: string) {
+  return request<{ data: DataPlatform.LlmModel[]; success: boolean }>(
+    `/api/v1/llm-providers/${providerId}/models`,
+  );
+}
+
+/** 拉取供应商模型清单(调供应商 /models)并入库 POST /api/v1/llm-providers/{id}/fetch-models */
+export async function fetchProviderModels(providerId: string) {
+  return request<{
+    data: DataPlatform.LlmFetchModelsResult;
+    success: boolean;
+  }>(`/api/v1/llm-providers/${providerId}/fetch-models`, {
+    method: 'POST',
+    skipErrorHandler: true,
+  });
+}
+
+/** 手动添加一个模型 POST /api/v1/llm-providers/{id}/models */
+export async function addProviderModel(providerId: string, model: string) {
+  return request<{ data: DataPlatform.LlmModel[]; success: boolean }>(
+    `/api/v1/llm-providers/${providerId}/models`,
+    {
+      method: 'POST',
+      data: { model },
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 删除一个模型 DELETE /api/v1/llm-providers/{id}/models/{modelId} */
+export async function deleteProviderModel(
+  providerId: string,
+  modelId: string,
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/llm-providers/${providerId}/models/${modelId}`,
+    {
+      method: 'DELETE',
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 设为当前生效模型 POST /api/v1/llm-providers/{id}/select-model */
+export async function selectProviderModel(providerId: string, model: string) {
+  return request<{ data: DataPlatform.LlmProvider; success: boolean }>(
+    `/api/v1/llm-providers/${providerId}/select-model`,
+    {
+      method: 'POST',
+      data: { model },
+      skipErrorHandler: true,
     },
   );
 }
