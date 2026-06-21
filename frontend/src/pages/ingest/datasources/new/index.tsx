@@ -130,14 +130,24 @@ const NewDataSourcePage: FC = () => {
           marginTop: 4,
         }}
       >
-        <div>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
           <SectionTitle>文件接入</SectionTitle>
           <Card
             hoverable
             data-testid="method-local-upload"
             onClick={() => go('/ingest/access')}
-            style={{ borderStyle: 'dashed' }}
-            styles={{ body: { padding: '32px 20px', textAlign: 'center' } }}
+            style={{ borderStyle: 'dashed', flex: 1 }}
+            styles={{
+              body: {
+                padding: '32px 20px',
+                textAlign: 'center',
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+              },
+            }}
           >
             <InboxOutlined style={{ fontSize: 32, color: '#1677ff' }} />
             <Title level={5} style={{ margin: '12px 0 4px' }}>
@@ -148,13 +158,21 @@ const NewDataSourcePage: FC = () => {
             </Text>
           </Card>
         </div>
-        <div>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
           <SectionTitle>外部 API</SectionTitle>
           <Card
             hoverable
             data-testid="method-api"
             onClick={() => go('/ingest/datasources/new/api')}
-            styles={{ body: { padding: 20 } }}
+            style={{ flex: 1 }}
+            styles={{
+              body: {
+                padding: 20,
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+              },
+            }}
           >
             <div style={{ marginBottom: 12 }}>
               <ThunderboltOutlined style={{ fontSize: 22, color: '#1677ff' }} />
@@ -165,7 +183,7 @@ const NewDataSourcePage: FC = () => {
             <Text type="secondary" style={{ fontSize: 13 }}>
               由外部系统主动 POST 数据到平台生成的推送端点,适合实时数据流。
             </Text>
-            <div style={{ marginTop: 16 }}>
+            <div style={{ marginTop: 'auto', paddingTop: 16 }}>
               <Tag color="blue" style={{ fontSize: 11, letterSpacing: 0.5 }}>
                 <ApiOutlined /> REAL-TIME
               </Tag>
