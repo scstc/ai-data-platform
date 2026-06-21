@@ -54,6 +54,63 @@ const BARS: { id: string; h: number; outlier: boolean }[] = [
 /** X 轴时间刻度 */
 const X_AXIS = ['14:00:00', '14:00:15', '14:00:30', '14:00:45', '14:01:00'];
 
+// ─── 上传文件的真实预览(前端解析 CSV) ──────────────────────────────────────
+const PREVIEW_MAX_BARS = 24; // 柱状图最多展示的采样点
+const PREVIEW_CHART_H = 200; // 最高柱(px)
+const PREVIEW_MIN_BAR = 8; // 最矮柱(px),保证最小值也可见
+const PREVIEW_READ_BYTES = 1_000_000; // 仅读文件前 ~1MB 做预览
+
+type Preview = {
+  name: string;
+  count: number; // 解析到的总点数(预览范围内)
+  bars: { id: string; h: number }[];
+  xaxis: string[];
+};
+
+/** 解析 CSV 文本(timestamp,sensor_id,value)→ 预览柱状图数据;失败返回 null。 */
+function parseCsvPreview(text: string, name: string): Preview | null {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
+  if (lines.length < 2) return null;
+  const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+  const tsIdx = header.findIndex((h) =>
+    ['timestamp', 'time', 'ts'].includes(h),
+  );
+  let valIdx = header.findIndex((h) => ['value', 'val'].includes(h));
+  if (valIdx < 0) valIdx = header.length - 1; // 兜底:最后一列当数值
+  const rows: { ts: string; v: number }[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',');
+    const v = Number((cols[valIdx] ?? '').trim());
+    if (!Number.isFinite(v)) continue;
+    rows.push({ ts: (tsIdx >= 0 ? cols[tsIdx] : `${i}`)?.trim() || `${i}`, v });
+  }
+  if (rows.length === 0) return null;
+  // 等距下采样到 <= PREVIEW_MAX_BARS
+  const step = Math.max(1, Math.ceil(rows.length / PREVIEW_MAX_BARS));
+  const sampled = rows
+    .filter((_, i) => i % step === 0)
+    .slice(0, PREVIEW_MAX_BARS);
+  const vals = sampled.map((r) => r.v);
+  const min = Math.min(...vals);
+  const span = Math.max(...vals) - min || 1;
+  const bars = sampled.map((r, i) => ({
+    id: `rb-${i}`,
+    h: Math.round(
+      PREVIEW_MIN_BAR +
+        ((r.v - min) / span) * (PREVIEW_CHART_H - PREVIEW_MIN_BAR),
+    ),
+  }));
+  const pick = (frac: number) =>
+    sampled[
+      Math.min(sampled.length - 1, Math.round(frac * (sampled.length - 1)))
+    ]?.ts ?? '';
+  const xaxis =
+    sampled.length >= 2
+      ? [pick(0), pick(0.25), pick(0.5), pick(0.75), pick(1)]
+      : sampled.map((s) => s.ts);
+  return { name, count: rows.length, bars, xaxis };
+}
+
 /** 聚合函数候选 */
 const AGG_FUNCS = ['AVG', 'MAX', 'MIN', 'SUM'];
 
@@ -120,6 +177,32 @@ const TimeSeriesIngestPage: React.FC = () => {
   const [timezone, setTimezone] = useState('UTC +08:00 (Asia/Shanghai)');
   const [lateArrival, setLateArrival] = useState('30');
   const [watermark, setWatermark] = useState<string[]>(['event']);
+  const [preview, setPreview] = useState<Preview | null>(null);
+
+  // 暂存文件变化 → 解析首个 CSV 渲染真实预览;无文件则回退演示数据
+  const onFiles = async (files: File[]) => {
+    const f = files[0];
+    if (!f) {
+      setPreview(null);
+      return;
+    }
+    try {
+      const text = await f.slice(0, PREVIEW_READ_BYTES).text();
+      setPreview(parseCsvPreview(text, f.name));
+    } catch {
+      setPreview(null);
+    }
+  };
+
+  // 预览存在用真实数据,否则用演示柱
+  const chartBars = preview
+    ? preview.bars.map((b) => ({ id: b.id, h: b.h, color: '#69b1ff' }))
+    : BARS.map((b) => ({
+        id: b.id,
+        h: b.h,
+        color: b.outlier ? '#ff7875' : '#69b1ff',
+      }));
+  const chartXAxis = preview ? preview.xaxis : X_AXIS;
 
   const toggleAgg = (fn: string) =>
     setAggFuncs((prev) =>
@@ -157,7 +240,7 @@ const TimeSeriesIngestPage: React.FC = () => {
         </Button>,
       ]}
     >
-      <ScenarioImportCard semanticType="timeseries" />
+      <ScenarioImportCard semanticType="timeseries" onFilesChange={onFiles} />
       {/* ROW 1 */}
       <div
         style={{
@@ -312,7 +395,7 @@ const TimeSeriesIngestPage: React.FC = () => {
               </SectionTitle>
               <span
                 style={{
-                  background: '#389e0d',
+                  background: preview ? '#1677ff' : '#389e0d',
                   color: '#fff',
                   fontSize: 10,
                   padding: '1px 6px',
@@ -320,7 +403,7 @@ const TimeSeriesIngestPage: React.FC = () => {
                   marginLeft: 8,
                 }}
               >
-                LIVE STREAM
+                {preview ? 'FILE PREVIEW' : 'LIVE STREAM'}
               </span>
             </span>
           }
@@ -358,17 +441,17 @@ const TimeSeriesIngestPage: React.FC = () => {
                 display: 'flex',
                 alignItems: 'flex-end',
                 height: 220,
-                gap: 10,
+                gap: chartBars.length > 16 ? 4 : 10,
                 padding: '0 8px',
               }}
             >
-              {BARS.map((b) => (
+              {chartBars.map((b) => (
                 <div
                   key={b.id}
                   style={{
                     flex: 1,
                     height: b.h,
-                    background: b.outlier ? '#ff7875' : '#69b1ff',
+                    background: b.color,
                     borderRadius: '4px 4px 0 0',
                   }}
                 />
@@ -384,35 +467,47 @@ const TimeSeriesIngestPage: React.FC = () => {
                 marginTop: 6,
               }}
             >
-              {X_AXIS.map((t) => (
-                <span key={t}>{t}</span>
+              {chartXAxis.map((t, i) => (
+                <span key={`${t}-${i}`}>{t}</span>
               ))}
             </div>
 
-            {/* floating 活跃节点详情 */}
-            <div
-              style={{
-                position: 'absolute',
-                top: 8,
-                right: 8,
-                background: '#fff',
-                border: '1px solid #f0f0f0',
-                borderRadius: 8,
-                padding: 10,
-                fontSize: 12,
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
-                minWidth: 150,
-              }}
-            >
-              <div
-                style={{ fontWeight: 700, color: '#1677ff', marginBottom: 6 }}
-              >
-                活跃节点详情
+            {preview ? (
+              /* 真实文件预览说明 */
+              <div style={{ color: '#8c8c8c', fontSize: 12, marginTop: 8 }}>
+                预览自「{preview.name}」· 解析 {preview.count} 点,采样展示{' '}
+                {chartBars.length} 点
               </div>
-              <DetailRow label="当前值" value="42.85 °C" />
-              <DetailRow label="偏离度" value="+12.4%" valueColor="#fa8c16" />
-              <DetailRow label="节点ID" value="SN-992-X" />
-            </div>
+            ) : (
+              /* floating 活跃节点详情(演示) */
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 8,
+                  right: 8,
+                  background: '#fff',
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 8,
+                  padding: 10,
+                  fontSize: 12,
+                  boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
+                  minWidth: 150,
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 700,
+                    color: '#1677ff',
+                    marginBottom: 6,
+                  }}
+                >
+                  活跃节点详情
+                </div>
+                <DetailRow label="当前值" value="42.85 °C" />
+                <DetailRow label="偏离度" value="+12.4%" valueColor="#fa8c16" />
+                <DetailRow label="节点ID" value="SN-992-X" />
+              </div>
+            )}
           </div>
         </Card>
       </div>

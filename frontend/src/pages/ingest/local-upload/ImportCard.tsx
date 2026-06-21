@@ -112,14 +112,21 @@ const CONFIG: Record<string, TypeConfig> = {
   },
 };
 
-type Props = { semanticType: string };
+type Props = {
+  semanticType: string;
+  /** 暂存文件变化时回调(供父页做本地预览,如时序图表);仅传 originFileObj。 */
+  onFilesChange?: (files: File[]) => void;
+};
 
 const getExt = (filename: string): string => {
   const i = filename.lastIndexOf('.');
   return i >= 0 ? filename.slice(i + 1).toLowerCase() : '';
 };
 
-const ScenarioImportCard: React.FC<Props> = ({ semanticType }) => {
+const ScenarioImportCard: React.FC<Props> = ({
+  semanticType,
+  onFilesChange,
+}) => {
   const cfg = CONFIG[semanticType];
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -247,7 +254,12 @@ const ScenarioImportCard: React.FC<Props> = ({ semanticType }) => {
         multiple
         fileList={fileList}
         beforeUpload={beforeUpload}
-        onChange={({ fileList: fl }) => setFileList(fl)}
+        onChange={({ fileList: fl }) => {
+          setFileList(fl);
+          onFilesChange?.(
+            fl.flatMap((f) => (f.originFileObj ? [f.originFileObj] : [])),
+          );
+        }}
         accept={accept}
       >
         <p className="ant-upload-drag-icon">
