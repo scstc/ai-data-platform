@@ -31,6 +31,13 @@ export default [
   { path: '/lineage', redirect: '/ops/lineage' },
   { path: '/security', redirect: '/ops/security' },
   { path: '/ingest/assistant', redirect: '/assistant' },
+  // 算子市场(置顶 · 独立顶级入口:data-juicer 算子目录,供加工任务编排选用)
+  {
+    path: '/operators',
+    name: 'operators',
+    icon: 'appstore',
+    component: './processing/market',
+  },
   // ① 数据接入
   {
     path: '/ingest',
@@ -175,13 +182,6 @@ export default [
         component: './annotation',
       },
     ],
-  },
-  // 算子市场(独立顶级入口:data-juicer 算子目录,供加工任务编排选用)
-  {
-    path: '/operators',
-    name: 'operators',
-    icon: 'appstore',
-    component: './processing/market',
   },
   // ④ 运维监控(跨切面:任务 / 血缘 / 审计)
   {
