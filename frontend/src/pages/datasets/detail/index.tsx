@@ -177,7 +177,14 @@ const DatasetDetail: React.FC = () => {
     {
       title: '版本',
       dataIndex: 'versionNo',
-      render: (_, v) => v.versionLabel ?? `v${v.versionNo}`,
+      render: (_, v) => (
+        <a
+          onClick={() => loadPreview(v.id)}
+          style={{ fontWeight: activeVersion === v.id ? 600 : undefined }}
+        >
+          {v.versionLabel ?? `v${v.versionNo}`}
+        </a>
+      ),
     },
     { title: '行数', dataIndex: 'rows', render: (_, v) => v.rows ?? '-' },
     { title: '大小', dataIndex: 'size', render: (_, v) => fmtSize(v.size) },
@@ -272,12 +279,11 @@ const DatasetDetail: React.FC = () => {
       title: '操作',
       render: (_, v) => (
         <Space size="small" wrap>
-          <a
-            onClick={() => loadPreview(v.id)}
-            style={{ fontWeight: activeVersion === v.id ? 600 : undefined }}
-          >
-            预览
-          </a>
+          {activeVersion === v.id ? (
+            <Tag color="blue">预览中</Tag>
+          ) : (
+            <a onClick={() => loadPreview(v.id)}>预览</a>
+          )}
           {access.canAdmin &&
             (v.publishStatus === 'published' ? (
               <Popconfirm
@@ -340,6 +346,11 @@ const DatasetDetail: React.FC = () => {
       ),
     },
   ];
+
+  // 当前预览的版本标签(供数据预览标题展示「正在看哪个版本」)
+  const activeVer = detail?.versions.find((v) => v.id === activeVersion);
+  const activeVerLabel =
+    activeVer?.versionLabel ?? (activeVer ? `v${activeVer.versionNo}` : '');
 
   return (
     <PageContainer
@@ -444,10 +455,17 @@ const DatasetDetail: React.FC = () => {
               pagination={false}
               dataSource={detail.versions}
               columns={versionColumns}
+              onRow={(v) => ({
+                style:
+                  activeVersion === v.id
+                    ? { background: 'var(--ant-color-primary-bg)' }
+                    : undefined,
+              })}
             />
 
             <Typography.Title level={5} style={{ marginTop: 16 }}>
               数据预览
+              {activeVerLabel ? ` · ${activeVerLabel}` : ''}
               {preview ? `（共 ${preview.total} 行，前 50 行）` : ''}
             </Typography.Title>
             <Spin spinning={previewLoading}>

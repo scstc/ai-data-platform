@@ -23,7 +23,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.job_input import JobInput
-from app.schemas.common import CamelModel, PageResponse
+from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.dataset import (
     DatasetDetailRead,
     DatasetMemberRead,
@@ -954,6 +954,27 @@ async def list_datasets(
                 )
             ).all()
         )
+    # 一次查出本页各数据集的最新版本(version_no 最大者),格式化成展示标签,避免 N+1
+    latest_label: dict[str, str] = {}
+    if page_ids:
+        ver_rows = (
+            await session.execute(
+                select(
+                    DatasetVersion.dataset_id,
+                    DatasetVersion.version_no,
+                    DatasetVersion.created_at,
+                ).where(DatasetVersion.dataset_id.in_(page_ids))
+            )
+        ).all()
+        best: dict[str, tuple[int, object]] = {}
+        for ds_id, vno, created in ver_rows:
+            cur = best.get(ds_id)
+            if cur is None or vno > cur[0]:
+                best[ds_id] = (vno, created)
+        latest_label = {
+            ds_id: format_version_label(vno, created)  # type: ignore[arg-type]
+            for ds_id, (vno, created) in best.items()
+        }
     # 批量取本页分类名(避免 N+1),回填 categoryName
     cat_names = await build_category_name_map(
         session, [r.category_id for r in rows]
@@ -962,6 +983,7 @@ async def list_datasets(
     for r in rows:
         item = DatasetRead.model_validate(r)
         item.hosted = r.id in hosted_ids
+        item.latest_version_label = latest_label.get(r.id)
         if r.category_id:
             item.category_name = cat_names.get(r.category_id)
         data.append(item)

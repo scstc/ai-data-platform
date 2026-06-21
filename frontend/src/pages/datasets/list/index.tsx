@@ -156,6 +156,18 @@ const DatasetsList: React.FC = () => {
       render: (_, r) => (r.dataType ? <Tag>{r.dataType}</Tag> : '-'),
     },
     {
+      title: '版本',
+      dataIndex: 'latestVersionLabel',
+      search: false,
+      width: 150,
+      render: (_, r) =>
+        r.latestVersionLabel ? (
+          <Tag color="blue">{r.latestVersionLabel}</Tag>
+        ) : (
+          '-'
+        ),
+    },
+    {
       title: '语义类型',
       dataIndex: 'semanticType',
       valueType: 'select',

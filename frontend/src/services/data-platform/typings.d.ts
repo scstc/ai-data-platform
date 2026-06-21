@@ -380,6 +380,8 @@ declare namespace DataPlatform {
     validUntil?: string;
     /** 是否含外部 S3 托管版本(#18)：true 时隐藏删除、改显「取消托管」并打「S3 托管」徽标 */
     hosted?: boolean;
+    /** 最新版本展示标签(如 v2026.6.21 (#1));无版本时为 null */
+    latestVersionLabel?: string | null;
     createdAt: string;
     updatedAt: string;
   };
