@@ -194,6 +194,23 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
         raise ParseError(str(exc)) from exc
 
 
+def records_to_jsonl_bytes(records: list[dict]) -> bytes:
+    """把记录列表序列化为 jsonl 字节(每行一个 JSON 对象,UTF-8)。
+
+    与 land_records 的本地落地一致:ensure_ascii=False 保留中文,非 JSON 原生
+    类型(datetime/Decimal 等)经 default=str 兜底;嵌套对象(JSONB 列)按结构保留。
+    空记录 → 空字节。
+    """
+    if not records:
+        return b""
+    return (
+        "\n".join(
+            json.dumps(rec, ensure_ascii=False, default=str) for rec in records
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 async def land_records(
     session: AsyncSession,
     records: list[dict],

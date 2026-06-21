@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.categories import build_category_name_map
+from app.core.config import settings
 from app.core.db import get_session
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
@@ -41,7 +42,30 @@ from app.schemas.ingest_task import (
 from app.services import operator_catalog as oc
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
+from app.services.external_store import (
+    ExternalStoreError,
+    upload_jsonl_to_uploads,
+)
+from app.services.landing import (
+    _new_dataset_id,
+    _new_version_id,
+    records_to_jsonl_bytes,
+)
 from app.services.llm_config import get_active_llm_config
+
+# 可直连拉取记录的数据库品牌:PG 族走 asyncpg,goldendb 走 asyncmy
+_PG_KINDS = {"postgresql", "hologres", "kingbase", "gaussdb"}
+_CSV_DATASET_KINDS = _PG_KINDS | {"goldendb"}
+
+
+async def _fetch_db_records(datasource: DataSource, task: IngestTask) -> list[dict]:
+    """按数据库品牌派发,拉取记录(不落地)。仅 PG 族 / goldendb 支持。"""
+    db_kind = (datasource.db_kind or "").lower()
+    if db_kind == "goldendb":
+        from app.services.connectors.mysql import fetch_records
+    else:
+        from app.services.connectors.pg import fetch_records
+    return await fetch_records(datasource, task)
 
 router = APIRouter(tags=["ingest-tasks"])
 
@@ -377,6 +401,146 @@ async def rerun_ingest_task(
     await session.refresh(task)
     return JSONResponse(
         content=_item(task, category_name=await _category_name(session, task))
+    )
+
+
+@router.post("/ingest-tasks/{task_id}/generate-dataset")
+async def generate_dataset(task_id: str, session: SessionDep) -> Response:
+    """生成数据集:库数据 → jsonl → 平台 MinIO(文件管理)uploads/<dataset_id>/v<n>/。
+
+    - 仅数据库直连(PG 族 / goldendb)+ 已配采集对象可用。
+    - 首次生成建数据集(绑定 task.dataset_id),后续生成在同一数据集追加新版本
+      (v1/v2/... 各落不同文件夹)。版本 origin=hosted、storage_uri=s3://uploads/...,
+      source_datasource_id 留空 → 预览/物化经 platform_config 回退到平台 MinIO。
+    """
+    task = await session.get(IngestTask, task_id)
+    if task is None:
+        return _not_found()
+    datasource = await session.get(DataSource, task.datasource_id)
+    if datasource is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据源不存在"},
+        )
+    if datasource.type != "database":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "仅数据库直连数据源支持生成数据集",
+            },
+        )
+    if (datasource.db_kind or "").lower() not in _CSV_DATASET_KINDS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": (
+                    f"数据库品牌「{datasource.db_kind}」暂不支持生成数据集"
+                    "(仅 PG 系 / GoldenDB)"
+                ),
+            },
+        )
+    if not task.extract:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "未配置采集对象(请先选择表或填写 SQL)",
+            },
+        )
+
+    # 1) 拉取库记录(不落地)
+    try:
+        records = await _fetch_db_records(datasource, task)
+    except ConnectorNotReady as exc:
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": str(exc)}
+        )
+    except IngestError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"采集失败:{exc}"},
+        )
+
+    # 2) 取/建该任务绑定的数据集 + 计算下一个版本号
+    dataset = (
+        await session.get(Dataset, task.dataset_id) if task.dataset_id else None
+    )
+    if dataset is None:
+        dataset = Dataset(
+            id=_new_dataset_id(),
+            name=task.name,
+            description=f"采集任务「{task.name}」生成(来源 {datasource.name})",
+            data_type="csv-tsv",
+            semantic_type="structured",
+            category_id=task.category_id,
+            owner="admin",
+            creator="admin",
+        )
+        session.add(dataset)
+        await session.flush()
+        task.dataset_id = dataset.id
+        next_version = 1
+    else:
+        max_v = await session.scalar(
+            select(func.max(DatasetVersion.version_no)).where(
+                DatasetVersion.dataset_id == dataset.id
+            )
+        )
+        next_version = (max_v or 0) + 1
+
+    # 3) jsonl → 上传平台 MinIO(uploads/<dataset_id>/v<n>/data.jsonl)
+    jsonl_bytes = records_to_jsonl_bytes(records)
+    try:
+        storage_uri = await upload_jsonl_to_uploads(
+            dataset.id, next_version, jsonl_bytes
+        )
+    except ExternalStoreError as exc:
+        await session.rollback()
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+
+    # 4) 登记 hosted jsonl 版本(source_datasource_id 留空 → 回退平台 MinIO)
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset.id,
+        version_no=next_version,
+        storage_uri=storage_uri,
+        format="jsonl",
+        rows=len(records),
+        size=len(jsonl_bytes),
+        origin="hosted",
+        source_datasource_id=None,
+        semantic_type="structured",
+        note=f"采集生成 jsonl(来源 {datasource.name},v{next_version})",
+    )
+    session.add(version)
+    task.last_run_at = _now()
+    task.run_count += 1
+    task.logs = [
+        *task.logs,
+        f"[INFO] 生成数据集 v{next_version}:{len(records)} 行 → {storage_uri}",
+    ]
+    await session.commit()
+    await session.refresh(version)
+
+    bucket = settings.storage_minio_upload_bucket
+    return JSONResponse(
+        content={
+            "data": {
+                "datasetId": dataset.id,
+                "datasetName": dataset.name,
+                "versionId": version.id,
+                "versionNo": next_version,
+                "rows": len(records),
+                "bucket": bucket,
+                "fileKey": f"{dataset.id}/v{next_version}/data.jsonl",
+                "storageUri": storage_uri,
+            },
+            "success": True,
+        }
     )
 
 

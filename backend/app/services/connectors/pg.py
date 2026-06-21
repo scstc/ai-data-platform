@@ -20,6 +20,31 @@ from app.services.connectors.base import (
     apply_filter_operators,
 )
 
+
+async def fetch_records(datasource: Any, task: Any) -> list[dict[str, Any]]:
+    """拉取 PG 族记录(不落地):跑 extract 全部查询 → 合并 → 过滤算子。
+
+    供「生成 CSV 数据集」复用:只取记录,落地(CSV→MinIO)由调用方负责,
+    不写本地受管 jsonl。连接/查询失败抛 IngestError。
+    """
+    queries = _build_queries(task.extract)
+    cfg = datasource.config or {}
+    out: list[dict[str, Any]] = []
+    try:
+        conn = await _connect(cfg)
+        try:
+            for _suffix, query in queries:
+                rows = await conn.fetch(query)
+                records = [dict(r) for r in rows]
+                out.extend(await apply_filter_operators(task, records))
+        finally:
+            await conn.close()
+    except IngestError:
+        raise
+    except Exception as exc:  # noqa: BLE001 连接/查询失败统一上报
+        raise IngestError(str(exc)) from exc
+    return out
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 

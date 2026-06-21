@@ -72,6 +72,36 @@ async def _connect(cfg: dict[str, Any]):  # noqa: ANN202
     )
 
 
+async def fetch_records(datasource: Any, task: Any) -> list[dict[str, Any]]:
+    """拉取 MySQL(goldendb)记录(不落地):跑 extract 全部查询 → 合并 → 过滤算子。
+
+    供「生成 CSV 数据集」复用。驱动未装抛 ConnectorNotReady;查询失败抛 IngestError。
+    """
+    _import_asyncmy()  # 未装则抛 ConnectorNotReady
+    queries = _build_queries(task.extract)
+    cfg = datasource.config or {}
+    out: list[dict[str, Any]] = []
+    try:
+        conn = await _connect(cfg)
+        try:
+            for _suffix, query in queries:
+                async with conn.cursor() as cur:
+                    await cur.execute(query)
+                    columns = [desc[0] for desc in cur.description]
+                    raw_rows = await cur.fetchall()
+                records = [
+                    dict(zip(columns, row, strict=False)) for row in raw_rows
+                ]
+                out.extend(await apply_filter_operators(task, records))
+        finally:
+            conn.close()
+    except (ConnectorNotReady, IngestError):
+        raise
+    except Exception as exc:  # noqa: BLE001 连接/查询失败统一上报
+        raise IngestError(str(exc)) from exc
+    return out
+
+
 class MysqlConnector:
     """MySQL 族连接器(goldendb)。
 

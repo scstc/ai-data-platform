@@ -324,6 +324,30 @@ export async function rerunIngestTask(id: string, options?: { [key: string]: any
   );
 }
 
+/** 生成数据集（库数据→jsonl→平台 MinIO，不同版本不同文件夹）POST /api/v1/ingest-tasks/:id/generate-dataset */
+export async function generateDataset(
+  id: string,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: {
+      datasetId: string;
+      datasetName: string;
+      versionId: string;
+      versionNo: number;
+      rows: number;
+      bucket: string;
+      fileKey: string;
+      storageUri: string;
+    };
+    success: boolean;
+  }>(`/api/v1/ingest-tasks/${id}/generate-dataset`, {
+    method: 'POST',
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
 /** 编辑采集任务 PUT /api/v1/ingest-tasks/:id */
 export async function updateIngestTask(
   id: string,

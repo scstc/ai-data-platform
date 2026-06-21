@@ -589,6 +589,42 @@ def platform_config() -> dict[str, Any]:
     return {"endpoint": endpoint, "accessKey": access_key, "secretKey": secret_key}
 
 
+async def ensure_upload_bucket() -> None:
+    """启动时确保平台上传桶存在(best-effort,由调用方吞异常)。
+
+    - 平台 MinIO 未配置 → 直接跳过(文件管理端点仍各自返回 503)。
+    - 已配置:桶不存在则创建,已存在则幂等跳过。
+    创建桶是写操作但不涉删除,符合"绝不删源"红线。
+    """
+    cfg = platform_config()  # 未配置抛 ExternalStoreError,由调用方吞掉
+    bucket = settings.storage_minio_upload_bucket
+    client = client_for(cfg)
+
+    def _ensure() -> None:
+        if not client.bucket_exists(bucket):
+            client.make_bucket(bucket)
+
+    await asyncio.to_thread(_ensure)
+
+
+async def upload_jsonl_to_uploads(
+    dataset_id: str, version_no: int, jsonl_bytes: bytes
+) -> str:
+    """把 jsonl 字节上传到平台 MinIO uploads 桶,键 = ``<dataset_id>/v<n>/data.jsonl``。
+
+    不同版本落不同文件夹(v1/v2/...),与 persist_manifest_output 同一前缀约定。
+    返回 storage_uri(``s3://<bucket>/<key>``)。平台未配置 → ExternalStoreError。
+    """
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/data.jsonl"
+    await upload_object(
+        cfg, bucket, key, io.BytesIO(jsonl_bytes), len(jsonl_bytes),
+        content_type="application/x-ndjson",
+    )
+    return f"s3://{bucket}/{key}"
+
+
 def _list_dir_sync(
     client: Minio, bucket: str, prefix: str
 ) -> dict[str, list[Any]]:
