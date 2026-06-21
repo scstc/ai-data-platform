@@ -45,6 +45,7 @@ from app.services.external_store import (
     remove_object,
     remove_prefix,
     stat_object,
+    upload_jsonl_to_uploads,
     upload_object,
 )
 from app.services.landing import (
@@ -53,12 +54,18 @@ from app.services.landing import (
     LANDABLE_FORMATS,
     MANIFEST_FORMAT,
     LandingError,
+    ParseError,
     UnsupportedFormatError,
     land_upload,
     land_upload_raw,
+    normalize_to_records,
+    records_to_jsonl_bytes,
 )
 from app.services.semantic_registry import (
     SemanticValidationError,
+    apply_semantic_spec,
+    coerce_semantic_type,
+    infer_semantic_from_data_type,
     parse_semantic_type,
     semantic_type_catalog,
 )
@@ -416,6 +423,171 @@ async def upload_media_as_dataset(
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
+@router.post("/datasets/upload-batch")
+async def upload_batch_as_dataset(
+    files: MediaFilesDep,
+    session: SessionDep,
+    name: NameForm = None,
+    data_type: DataTypeForm = None,
+    semantic_type: SemanticTypeForm = None,
+    category_id: CategoryIdForm = None,
+) -> JSONResponse:
+    """单一格式批量本地上传:一批同格式文本/结构化文件 → 原文件复制进平台内置 MinIO
+    + 合并解析为一个 data.jsonl(也存 MinIO)→ 生成一个受管数据集。
+
+    与 /datasets/upload(单文件一集、落本地盘)、/datasets/upload-media(媒体→manifest)
+    互补:本端点面向**非二进制、可规范化**格式(csv/tsv/txt/log/json/jsonl/xlsx/xls/
+    pdf/doc/docx/ppt/pptx/html),一批文件合成**一个**数据集:
+      - 原件逐个 upload_object 到 uploads/<id>/originals/<idx>-<name>(留存可下载);
+      - 各文件 normalize_to_records 合并 → records_to_jsonl_bytes → 传
+        uploads/<dataset_id>/v1/data.jsonl;
+      - 登记 DatasetVersion(format='jsonl', origin='managed', storage_uri=s3://…)。
+        origin='managed'(非 'hosted'):平台自有、可正常删除(删除回收整个 <id>/ 前缀);
+        预览/物化按 storage_uri 的 s3:// scheme 走平台 MinIO(见 preview_version /
+        external_store.materialized_version),不再凭 origin 二分。
+
+    多模态(COT/GIS 等)接入逻辑后续单独处理;本端点只收非二进制单一格式。
+    任一步失败回滚 DB + 回收整个 <id>/ 前缀,绝不留孤儿对象。
+    """
+    # 语义类型合法性(可选;与 data_type 正交,非法值 422)
+    try:
+        parse_semantic_type(semantic_type)
+    except SemanticValidationError as exc:
+        return JSONResponse(
+            status_code=422, content={"success": False, "message": str(exc)}
+        )
+    if not files:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "请至少选择一个文件"},
+        )
+    # 只收非二进制、可规范化格式:二进制走 /upload-media,未知格式直接拒绝
+    for f in files:
+        ext = _file_ext(f.filename or "")
+        if ext in BINARY_FORMATS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"文件 {f.filename} 是媒体二进制,请走媒体接入",
+                },
+            )
+        if ext not in LANDABLE_FORMATS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"文件 {f.filename} 的格式 .{ext} 暂不支持落地",
+                },
+            )
+    if len(files) > MAX_MANIFEST_MEMBERS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": f"一次最多接入 {MAX_MANIFEST_MEMBERS} 个文件",
+            },
+        )
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+
+    bucket = settings.storage_minio_upload_bucket
+    dataset_id = _new_dataset_id()
+    prefix = f"{dataset_id}/"
+    # 任一步失败(体积/解析/对象写入/落库)都回收本数据集前缀,绝不留孤儿对象
+    try:
+        all_records: list[dict] = []
+        total_size = 0
+        for idx, f in enumerate(files):
+            content = await f.read()
+            if len(content) > _MAX_MEDIA_FILE_BYTES:
+                raise ValueError(f"文件 {f.filename} 超过单文件 200MB 上限")
+            total_size += len(content)
+            if total_size > MAX_MATERIALIZE_BYTES:
+                raise ValueError("本批文件总体积超过上限")
+            fmt = _file_ext(f.filename or "")
+            base = Path(f.filename or f"file{idx}").name  # 去路径,防 key 注入
+            orig_key = f"{prefix}originals/{idx:06d}-{base}"
+            await upload_object(
+                cfg, bucket, orig_key, io.BytesIO(content), len(content),
+                content_type=f.content_type or "application/octet-stream",
+            )
+            all_records.extend(normalize_to_records(content, fmt))
+
+        # 语义维度(与 data_type 正交):显式→归一+校验(非严格只计数);否则按 data_type 推断
+        explicit = coerce_semantic_type(semantic_type)
+        if explicit is not None:
+            all_records, _report = apply_semantic_spec(
+                all_records, explicit, strict=False
+            )
+            effective_semantic: str | None = explicit.value
+        else:
+            inferred = infer_semantic_from_data_type(data_type)
+            effective_semantic = inferred.value if inferred else None
+
+        jsonl_bytes = records_to_jsonl_bytes(all_records)
+        storage_uri = await upload_jsonl_to_uploads(dataset_id, 1, jsonl_bytes)
+
+        dataset = Dataset(
+            id=dataset_id,
+            name=name or (Path(files[0].filename or "本地数据集").stem),
+            data_type=data_type,
+            semantic_type=effective_semantic,
+            category_id=category_id,
+            owner="admin",
+            creator="admin",
+        )
+        session.add(dataset)
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=1,
+            storage_uri=storage_uri,
+            format="jsonl",
+            rows=len(all_records),
+            size=len(jsonl_bytes),
+            origin="managed",
+            source_datasource_id=None,
+            semantic_type=effective_semantic,
+            note=(
+                f"单一格式批量上传:{len(files)} 个文件"
+                f"(原件存 {prefix}originals/)"
+            ),
+        )
+        session.add(version)
+        await session.commit()
+        await session.refresh(dataset)
+        await session.refresh(version)
+    except (ValueError, UnsupportedFormatError, ParseError) as exc:
+        await session.rollback()
+        await _gc_manifest_objects((bucket, prefix))
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": str(exc)}
+        )
+    except ExternalStoreError as exc:
+        await session.rollback()
+        await _gc_manifest_objects((bucket, prefix))
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": f"对象写入失败:{exc}"},
+        )
+    except Exception:
+        await session.rollback()
+        await _gc_manifest_objects((bucket, prefix))
+        raise
+
+    detail = _to_detail(dataset, [version])
+    if dataset.category_id:
+        names = await build_category_name_map(session, [dataset.category_id])
+        detail.category_name = names.get(dataset.category_id)
+    payload = DatasetResult(data=detail)
+    return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
+
+
 @router.get("/dataset-versions/{version_id}/members")
 async def list_version_members(
     version_id: str, session: SessionDep
@@ -431,7 +603,7 @@ async def list_version_members(
     if version.format != MANIFEST_FORMAT:
         bucket = ""
         key = version.storage_uri
-        if version.origin == "hosted":
+        if str(version.storage_uri).startswith("s3://"):
             try:
                 bucket, key = parse_s3_uri(version.storage_uri)
             except ExternalStoreError:
@@ -897,22 +1069,28 @@ def _rmdir(dataset_id: str) -> None:
 async def _manifest_gc_target(
     session: SessionDep, dataset_id: str
 ) -> tuple[str, str] | None:
-    """数据集含 manifest 版本(平台自有媒体)→ 返回 (bucket, prefix) 供删除时回收对象。"""
-    v = (
+    """数据集在平台 MinIO 有自有对象(媒体 manifest 或批量 jsonl,storage_uri=s3://…)。
+
+    返回 (bucket, '<id>/') 供删除时回收整个前缀;无 s3 版本→None。
+    仅用于可删除(非 hosted)数据集:hosted 外部数据在删除门控处已被拦截,不会走到这里,
+    故按 dataset 前缀回收平台对象不会误删任何外部源。"""
+    versions = (
         await session.scalars(
             select(DatasetVersion).where(
                 DatasetVersion.dataset_id == dataset_id,
-                DatasetVersion.format == MANIFEST_FORMAT,
             )
         )
-    ).first()
-    if v is None:
-        return None
-    try:
-        bucket, _ = parse_s3_uri(v.storage_uri)
-    except ExternalStoreError:
-        return None
-    return bucket, f"{dataset_id}/"
+    ).all()
+    for ver in versions:
+        uri = str(ver.storage_uri or "")
+        if not uri.startswith("s3://"):
+            continue
+        try:
+            bucket, _ = parse_s3_uri(uri)
+        except ExternalStoreError:
+            continue
+        return bucket, f"{dataset_id}/"
+    return None
 
 
 async def _gc_manifest_objects(target: tuple[str, str] | None) -> None:
@@ -1062,8 +1240,9 @@ async def preview_version(
             }
         )
 
-    # hosted:按需从 S3 取前 offset+limit 条再切片(预览成本由取前 N 缓解)
-    if version.origin == "hosted":
+    # s3:// 背书(hosted 外部 / 平台自有 jsonl):按需取前 offset+limit 条再切片
+    # (按 storage_uri scheme 路由,不再凭 origin 二分;平台自有 jsonl 走 source=None 分支)
+    if str(version.storage_uri).startswith("s3://"):
         if version.source_datasource_id:
             ds = await session.get(DataSource, version.source_datasource_id)
             if ds is None:

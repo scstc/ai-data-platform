@@ -460,11 +460,14 @@ async def materialized_version(
             yield mpath
         return
 
-    if version.origin != "hosted":
+    # 按 storage_uri scheme 路由(不再凭 origin 二分):本地路径直接透传;s3:// 走对象存储。
+    # 这样平台自有的 managed jsonl(单一格式批量上传,storage_uri=s3://uploads/…)也能物化,
+    # 而不破坏 hosted 外部 S3 / 平台零拷贝(均为 s3://)与本地受管(本地路径)的既有行为。
+    if not str(version.storage_uri).startswith("s3://"):
         yield Path(version.storage_uri)
         return
 
-    # 二进制 hosted 版本无法规范化为 jsonl(加工/物化不适用)→ 明确报错,
+    # 二进制 s3 版本无法规范化为 jsonl(加工/物化不适用)→ 明确报错,
     # 避免 normalize_to_records 对二进制字节抛未捕获的 UnsupportedFormatError(冒 500)
     if version.format in BINARY_FORMATS:
         raise ExternalStoreError(

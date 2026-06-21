@@ -31,6 +31,7 @@ import {
   listCategories,
   testDataSource,
 } from '@/services/data-platform';
+import { buildBreadcrumb } from '@/utils/breadcrumb';
 import {
   CONFIG_TITLE,
   DB_KIND_LABEL,
@@ -264,13 +265,11 @@ const DataSourceConfigPage: FC = () => {
 
   return (
     <PageContainer
-      breadcrumb={{
-        items: [
-          { title: '数据源' },
-          { title: '新建连接' },
-          { title: crumbLast },
-        ],
-      }}
+      breadcrumb={buildBreadcrumb([
+        { title: '数据源', path: '/ingest/datasources' },
+        { title: '新建连接', path: '/ingest/datasources/new' },
+        { title: crumbLast },
+      ])}
       title={
         <Space>
           {TYPE_ICON[type]}

@@ -500,6 +500,86 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
     assert resp.status_code == 400
 
 
+def _mem_store_patch_both(monkeypatch) -> dict:
+    """共享内存 store 同时给 datasets 与 external_store 打补丁,使 upload-batch 的
+    「原件 upload_object(datasets 命名空间)」与「合并 jsonl upload_jsonl_to_uploads
+    (external_store 命名空间)」写入同一内存 store(否则后者会走真 MinIO)。"""
+    from app.api.v1 import datasets as dmod
+    from app.services import external_store as esmod
+
+    store: dict[tuple[str, str], bytes] = {}
+
+    def _cfg():
+        return {"endpoint": "x", "accessKey": "a", "secretKey": "b"}
+
+    async def fake_upload(cfg, bucket, key, data, length, content_type="x"):
+        store[(bucket, key)] = data.read()
+
+    for m in (dmod, esmod):
+        monkeypatch.setattr(m, "platform_config", _cfg)
+        monkeypatch.setattr(m, "upload_object", fake_upload)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_upload_batch_single_format_originals_and_merged_jsonl(
+    client, monkeypatch
+):
+    """单一格式批量上传:多个同格式文件 → 原件逐个存内置 MinIO 的 <id>/originals/,
+    合并解析为一个 <id>/v1/data.jsonl;数据集 version=jsonl/managed/rows=总行数。
+
+    这是 goal「这些文件都上传到数据集(minio)中,然后生成一个 jsonl 文件」的回归锚:
+    原件入 MinIO + 合并出单一 jsonl + 单个受管(可删)数据集,而非每文件一集、落本地盘。"""
+    import json
+
+    store = _mem_store_patch_both(monkeypatch)
+    files = [
+        ("files", ("a.csv", b"a,b\n1,2\n3,4", "text/csv")),
+        ("files", ("c.csv", b"a,b\n5,6", "text/csv")),
+    ]
+    resp = await client.post(
+        "/api/v1/datasets/upload-batch",
+        files=files,
+        data={"data_type": "csv", "name": "我的表集"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["name"] == "我的表集"
+    assert data["dataType"] == "csv"
+    v = data["versions"][0]
+    assert v["format"] == "jsonl"
+    assert v["origin"] == "managed"  # 平台自有、可删除(非 hosted)
+    assert v["rows"] == 3  # 2 + 1 行合并
+
+    did = data["id"]
+    # 原件逐个入 MinIO 的 originals/ 前缀(2 个,保序编号)
+    originals = sorted(
+        k[1] for k in store if k[0] == "uploads" and f"{did}/originals/" in k[1]
+    )
+    assert len(originals) == 2
+    assert originals[0].endswith("originals/000000-a.csv")
+    assert originals[1].endswith("originals/000001-c.csv")
+    # 合并 jsonl 入 <id>/v1/data.jsonl,3 行 = 各文件解析记录并集
+    jsonl = store[("uploads", f"{did}/v1/data.jsonl")].decode()
+    rows = [json.loads(ln) for ln in jsonl.splitlines() if ln.strip()]
+    assert len(rows) == 3
+    assert rows[0] == {"a": "1", "b": "2"}
+    assert rows[2] == {"a": "5", "b": "6"}
+
+
+@pytest.mark.asyncio
+async def test_upload_batch_rejects_binary(client, monkeypatch):
+    """单一格式端点只收非二进制可规范化格式:媒体二进制 → 400(应走 upload-media)。"""
+    _mem_store_patch_both(monkeypatch)
+    resp = await client.post(
+        "/api/v1/datasets/upload-batch",
+        files=[("files", ("x.png", b"PNG", "image/png"))],
+        data={"data_type": "image"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["success"] is False
+
+
 @pytest.mark.asyncio
 async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch):
     """manifest 物化:images 路径改写为本地相对名、成员文件就近落盘、__member 剥除;

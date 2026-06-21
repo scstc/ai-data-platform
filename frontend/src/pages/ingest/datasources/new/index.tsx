@@ -11,6 +11,7 @@ import { PageContainer } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Card, Tag, Typography } from 'antd';
 import type { FC } from 'react';
+import { buildBreadcrumb } from '@/utils/breadcrumb';
 import { DB_KIND_CARDS, STORAGE_CARDS } from '../components/constants';
 
 const { Text, Title } = Typography;
@@ -48,9 +49,10 @@ const NewDataSourcePage: FC = () => {
 
   return (
     <PageContainer
-      breadcrumb={{
-        items: [{ title: '数据接入' }, { title: '选择接入方式' }],
-      }}
+      breadcrumb={buildBreadcrumb([
+        { title: '数据接入', path: '/ingest/datasources' },
+        { title: '选择接入方式' },
+      ])}
       title="选择数据接入方式"
       content="对接你的数据生态:从云厂商、传统数据库,到手动上传,开启数据接入流程。"
     >
@@ -135,7 +137,7 @@ const NewDataSourcePage: FC = () => {
           <Card
             hoverable
             data-testid="method-local-upload"
-            onClick={() => go('/ingest/access')}
+            onClick={() => go('/ingest/local-upload')}
             style={{ borderStyle: 'dashed', flex: 1 }}
             styles={{
               body: {

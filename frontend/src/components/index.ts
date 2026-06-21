@@ -14,7 +14,7 @@ import { AvatarDropdown } from './RightContent/AvatarDropdown';
  */
 export { default as ArticleListContent } from './ArticleListContent';
 export { default as AvatarList } from './AvatarList';
-export { default as CategoryManager } from './CategoryManager';
+export { CategoryPanel, default as CategoryManager } from './CategoryManager';
 export { default as ErrorBoundary } from './ErrorBoundary';
 export { default as OfflineBanner } from './OfflineBanner';
 export { default as PlaceholderPage } from './PlaceholderPage';

@@ -1,0 +1,68 @@
+{
+  "type": "FeatureCollection",
+  "name": "shanghai_poi",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "urn:ogc:def:crs:OGC:1.3:CRS84"
+    }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [121.4997, 31.2397]
+      },
+      "properties": {
+        "name": "东方明珠广播电视塔",
+        "category": "landmark",
+        "district": "浦东新区",
+        "address": "世纪大道1号",
+        "elevation_m": 468
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [121.4737, 31.2304]
+      },
+      "properties": {
+        "name": "外滩",
+        "category": "scenic_spot",
+        "district": "黄浦区",
+        "address": "中山东一路",
+        "elevation_m": 5
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [121.8083, 31.1434]
+      },
+      "properties": {
+        "name": "上海浦东国际机场",
+        "category": "transport",
+        "district": "浦东新区",
+        "address": "启航路300号",
+        "elevation_m": 4
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [121.5447, 31.2204]
+      },
+      "properties": {
+        "name": "上海图书馆东馆",
+        "category": "public_facility",
+        "district": "浦东新区",
+        "address": "合欢路300号",
+        "elevation_m": 6
+      }
+    }
+  ]
+}

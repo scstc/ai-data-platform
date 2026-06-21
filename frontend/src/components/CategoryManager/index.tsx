@@ -15,13 +15,16 @@ import {
   updateCategory,
 } from '@/services/data-platform';
 
-interface CategoryManagerProps {
-  open: boolean;
-  onClose: () => void;
+interface CategoryPanelProps {
   /** 当前用户是否为管理员：决定新增/编辑/删除是否可用 */
   canAdmin?: boolean;
   /** 分类发生增/改/删后回调（供宿主页刷新分类筛选选项与列表） */
   onChanged?: () => void;
+}
+
+interface CategoryManagerProps extends CategoryPanelProps {
+  open: boolean;
+  onClose: () => void;
 }
 
 /** 从后端错误对象里取 message（409 等业务错误，后端返回 {success,message}） */
@@ -31,13 +34,11 @@ const pickErrMsg = (err: unknown, fallback: string): string => {
 };
 
 /**
- * 分类管理抽屉（受控词表 CRUD，#15）。
+ * 分类 CRUD 面板（无外壳，可嵌入抽屉或独立页面，#15）。
  * 列表所有登录用户可见；新增/编辑/删除仅 admin（canAdmin）。
  * 删除被引用项时按后端 409 message 提示用量。
  */
-const CategoryManager: FC<CategoryManagerProps> = ({
-  open,
-  onClose,
+export const CategoryPanel: FC<CategoryPanelProps> = ({
   canAdmin,
   onChanged,
 }) => {
@@ -118,7 +119,7 @@ const CategoryManager: FC<CategoryManagerProps> = ({
   ];
 
   return (
-    <Drawer width={720} open={open} title="分类管理" onClose={onClose}>
+    <>
       <ProTable<DataPlatform.Category>
         actionRef={actionRef}
         rowKey="id"
@@ -148,7 +149,9 @@ const CategoryManager: FC<CategoryManagerProps> = ({
         modalProps={{ destroyOnHidden: true }}
         onOpenChange={setEditOpen}
         initialValues={
-          editing ? { name: editing.name, note: editing.note ?? undefined } : undefined
+          editing
+            ? { name: editing.name, note: editing.note ?? undefined }
+            : undefined
         }
         onFinish={async (values) => {
           try {
@@ -164,7 +167,10 @@ const CategoryManager: FC<CategoryManagerProps> = ({
             return true;
           } catch (err) {
             message.error(
-              pickErrMsg(err, editing ? '保存失败，请重试' : '创建失败，请重试'),
+              pickErrMsg(
+                err,
+                editing ? '保存失败，请重试' : '创建失败，请重试',
+              ),
             );
             return false;
           }
@@ -183,8 +189,20 @@ const CategoryManager: FC<CategoryManagerProps> = ({
           fieldProps={{ rows: 3 }}
         />
       </ModalForm>
-    </Drawer>
+    </>
   );
 };
+
+/** 分类管理抽屉（受控词表 CRUD，#15）。内容复用 CategoryPanel，外壳为抽屉。 */
+const CategoryManager: FC<CategoryManagerProps> = ({
+  open,
+  onClose,
+  canAdmin,
+  onChanged,
+}) => (
+  <Drawer width={720} open={open} title="分类管理" onClose={onClose}>
+    <CategoryPanel canAdmin={canAdmin} onChanged={onChanged} />
+  </Drawer>
+);
 
 export default CategoryManager;

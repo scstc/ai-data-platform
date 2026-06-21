@@ -502,6 +502,18 @@ export async function uploadMediaDataset(
   );
 }
 
+/** 单一格式批量本地上传:一批同格式文件 → 原文件存 MinIO + 合并生成一个 jsonl 数据集
+ * POST /api/v1/datasets/upload-batch */
+export async function uploadBatchDataset(
+  formData: FormData,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(
+    '/api/v1/datasets/upload-batch',
+    { method: 'POST', data: formData, ...(options || {}) },
+  );
+}
+
 /** 列出版本的成员文件 GET /api/v1/dataset-versions/{id}/members */
 export async function listDatasetMembers(
   versionId: string,

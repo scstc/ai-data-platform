@@ -25,7 +25,6 @@ import {
 } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
-import FilterOperatorPicker from './components/FilterOperatorPicker';
 import {
   createIngestTask,
   deleteIngestTask,
@@ -41,6 +40,7 @@ import {
   updateIngestTask,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+import FilterOperatorPicker from './components/FilterOperatorPicker';
 
 /** 状态 → 中文标签与 Tag 颜色 */
 const STATUS_META: Record<
@@ -245,12 +245,15 @@ const IngestTasksPage: React.FC = () => {
                         label="选择表"
                         mode="multiple"
                         placeholder="选择一张或多张表（每张表各产一个数据集）"
-                        rules={[{ required: true, message: '请至少选择一张表' }]}
+                        rules={[
+                          { required: true, message: '请至少选择一张表' },
+                        ]}
                         params={{ datasourceId }}
                         request={async () => {
                           if (!datasourceId) return [];
                           try {
-                            const res = await listDatasourceTables(datasourceId);
+                            const res =
+                              await listDatasourceTables(datasourceId);
                             return (res.data ?? []).map((t) => ({
                               label: t,
                               value: t,
@@ -589,9 +592,7 @@ const IngestTasksPage: React.FC = () => {
                     // mode === 'path'
                     return (
                       <span>
-                        {ext.glob && (
-                          <Tag color="blue">glob: {ext.glob}</Tag>
-                        )}
+                        {ext.glob && <Tag color="blue">glob: {ext.glob}</Tag>}
                         {(ext.paths ?? []).map((p) => (
                           <Tag key={p}>{p}</Tag>
                         ))}

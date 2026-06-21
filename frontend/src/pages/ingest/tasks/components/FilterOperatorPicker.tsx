@@ -147,7 +147,14 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
           style={{ margin: '12px 0' }}
         />
       ) : (
-        <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div
+          style={{
+            marginTop: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}
+        >
           {value.map((step, idx) => {
             const meta = byName[step.name];
             const params = meta?.params ?? [];
@@ -158,7 +165,10 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
                 title={
                   <Space>
                     <Text strong>{meta?.zhLabel ?? step.name}</Text>
-                    <Text type="secondary" style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                    <Text
+                      type="secondary"
+                      style={{ fontSize: 12, fontFamily: 'monospace' }}
+                    >
                       {step.name}
                     </Text>
                   </Space>
@@ -177,13 +187,21 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
                     无参数
                   </Text>
                 ) : (
-                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Space
+                    direction="vertical"
+                    size={8}
+                    style={{ width: '100%' }}
+                  >
                     {params
                       .filter((p) => !['args', 'kwargs'].includes(p.name))
                       .map((p) => (
                         <div
                           key={p.name}
-                          style={{ display: 'flex', alignItems: 'center', gap: 12 }}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 12,
+                          }}
                         >
                           <Text
                             style={{ width: 180, fontSize: 12 }}
