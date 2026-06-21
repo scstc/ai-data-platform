@@ -45,6 +45,13 @@ class AIProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def suggest_dataset_name(
+        self, filenames: list[str], data_type: str, category: str | None
+    ) -> dict[str, str]:
+        """据文件名 / 格式 / 分类建议一个简洁中文数据集名，返回 {"name": str}。"""
+        raise NotImplementedError
+
+    @abstractmethod
     async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
         """内容安全审核(#4):对一批文本逐条分类。
 

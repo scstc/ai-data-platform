@@ -88,3 +88,18 @@ class QaAnswer(CamelModel):
     """问答结果（作为 {data, success} 的 data，形状为 {answer}）。"""
 
     answer: str
+
+
+# ---- 数据集 AI 命名 ----
+class SuggestDatasetNameRequest(CamelModel):
+    """AI 命名请求：据文件名 / 格式 / 分类起一个数据集名。"""
+
+    filenames: list[str]
+    data_type: str
+    category: str | None = None
+
+
+class SuggestedDatasetName(CamelModel):
+    """AI 建议的数据集名（作为 {data, success} 的 data）。"""
+
+    name: str

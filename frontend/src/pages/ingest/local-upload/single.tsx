@@ -1,4 +1,4 @@
-import { InboxOutlined } from '@ant-design/icons';
+import { InboxOutlined, RobotOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
 import type { UploadFile, UploadProps } from 'antd';
@@ -14,7 +14,11 @@ import {
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { CategoryManager } from '@/components';
-import { listCategories, uploadBatchDataset } from '@/services/data-platform';
+import {
+  listCategories,
+  suggestDatasetName,
+  uploadBatchDataset,
+} from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
 
 const { Text } = Typography;
@@ -80,6 +84,7 @@ const SingleUploadPage: React.FC = () => {
   >([]);
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [naming, setNaming] = useState(false);
   const [catMgrOpen, setCatMgrOpen] = useState(false);
   const access = useAccess();
 
@@ -118,6 +123,25 @@ const SingleUploadPage: React.FC = () => {
       return Upload.LIST_IGNORE;
     }
     return false;
+  };
+
+  // AI 命名:据已选文件名 + 格式 + 分类生成一个数据集名(后端 LLM/启发式)
+  const onAiName = async () => {
+    if (fileList.length === 0) return;
+    setNaming(true);
+    try {
+      const category = categories.find((c) => c.value === categoryId)?.label;
+      const res = await suggestDatasetName({
+        filenames: fileList.map((f) => f.name),
+        dataType: format ?? '',
+        category,
+      });
+      if (res.success && res.data.name) setName(res.data.name);
+    } catch (e: any) {
+      message.error(e?.data?.message ?? e?.message ?? 'AI 命名失败');
+    } finally {
+      setNaming(false);
+    }
   };
 
   const onSubmit = async () => {
@@ -183,13 +207,22 @@ const SingleUploadPage: React.FC = () => {
           </div>
           <div>
             <Text strong>数据集名称</Text>
-            <Input
-              style={{ marginTop: 8 }}
-              placeholder="可选,留空则取首个文件名"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              allowClear
-            />
+            <Space.Compact style={{ width: '100%', marginTop: 8 }}>
+              <Input
+                placeholder="可选,留空则取首个文件名"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                allowClear
+              />
+              <Button
+                icon={<RobotOutlined />}
+                loading={naming}
+                disabled={fileList.length === 0}
+                onClick={onAiName}
+              >
+                AI 命名
+              </Button>
+            </Space.Compact>
           </div>
           <div>
             <div

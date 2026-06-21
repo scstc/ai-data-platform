@@ -23,6 +23,8 @@ from app.schemas.ai import (
     InferSchemaRequest,
     QaAnswer,
     QaRequest,
+    SuggestDatasetNameRequest,
+    SuggestedDatasetName,
 )
 from app.schemas.common import CamelModel
 from app.services import operator_catalog as oc
@@ -65,6 +67,13 @@ class QaResponse(CamelModel):
     success: bool = True
 
 
+class SuggestDatasetNameResponse(CamelModel):
+    """数据集 AI 命名响应。"""
+
+    data: SuggestedDatasetName
+    success: bool = True
+
+
 class GeneratePipelineResponse(CamelModel):
     """流水线生成响应。"""
 
@@ -100,6 +109,22 @@ async def qa(
     """回答平台使用相关问题。"""
     result = await provider.qa(body.question)
     return QaResponse(data=QaAnswer.model_validate(result))
+
+
+@router.post(
+    "/suggest-dataset-name", response_model=SuggestDatasetNameResponse
+)
+async def suggest_dataset_name(
+    body: SuggestDatasetNameRequest,
+    provider: ProviderDep,
+) -> SuggestDatasetNameResponse:
+    """据文件名 / 格式 / 分类用 AI 建议一个数据集名（LLM 或启发式）。"""
+    result = await provider.suggest_dataset_name(
+        body.filenames, body.data_type, body.category
+    )
+    return SuggestDatasetNameResponse(
+        data=SuggestedDatasetName.model_validate(result)
+    )
 
 
 @router.post("/generate-pipeline", response_model=GeneratePipelineResponse)

@@ -205,6 +205,18 @@ declare namespace DataPlatform {
     explanation: string;
   };
 
+  /** AI 命名入参（据文件名/格式/分类建议数据集名） */
+  type SuggestDatasetNameParams = {
+    filenames: string[];
+    dataType: string;
+    category?: string;
+  };
+
+  /** AI 命名结果 */
+  type SuggestedDatasetName = {
+    name: string;
+  };
+
   /** 样例试跑结果 */
   type PreviewResult = {
     before: Record<string, any>[];
@@ -725,6 +737,13 @@ declare namespace DataPlatform {
     /** 留空则不修改 */
     apiKey?: string;
     model?: string;
+  }
+
+  /** 用未保存的配置测试连通性（新建/编辑对话框保存前校验） */
+  interface LlmProviderTest {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
   }
 
   interface LlmTestResult {

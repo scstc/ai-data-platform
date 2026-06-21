@@ -480,6 +480,16 @@ export async function generateQuality(body: DataPlatform.GeneratePipelineParams)
   );
 }
 
+/** AI:据文件名/格式/分类建议数据集名 POST /api/v1/ai/suggest-dataset-name */
+export async function suggestDatasetName(
+  body: DataPlatform.SuggestDatasetNameParams,
+) {
+  return request<{
+    data: DataPlatform.SuggestedDatasetName;
+    success: boolean;
+  }>('/api/v1/ai/suggest-dataset-name', { method: 'POST', data: body });
+}
+
 /** 上传文件并落地为数据集 POST /api/v1/datasets/upload */
 export async function uploadDataset(
   formData: FormData,
@@ -1021,6 +1031,28 @@ export async function testLlmProvider(id: string) {
       method: 'POST',
       skipErrorHandler: true,
     },
+  );
+}
+
+/** 用未保存的配置测试 LLM 连通性 POST /api/v1/llm-providers/test */
+export async function testLlmProviderConfig(
+  body: DataPlatform.LlmProviderTest,
+) {
+  return request<{ data: DataPlatform.LlmTestResult; success: boolean }>(
+    '/api/v1/llm-providers/test',
+    {
+      method: 'POST',
+      data: body,
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 下发明文 API Key（仅管理员，供编辑回填） GET /api/v1/llm-providers/{id}/reveal */
+export async function revealLlmProviderKey(id: string) {
+  return request<{ data: { apiKey: string }; success: boolean }>(
+    `/api/v1/llm-providers/${id}/reveal`,
+    { skipErrorHandler: true },
   );
 }
 

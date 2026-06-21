@@ -434,6 +434,26 @@ def generate_pipeline_from_goal(
 
 
 # ---------------------------------------------------------------------------
+# 数据集命名（首个文件名清洗）
+# ---------------------------------------------------------------------------
+
+
+def suggest_name_from_files(
+    filenames: list[str], data_type: str, category: str | None
+) -> dict[str, str]:
+    """启发式数据集命名：取首个文件名去路径/扩展名并清洗；空则按格式兜底。"""
+    first = filenames[0] if filenames else ""
+    stem = first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    dot = stem.rfind(".")
+    if dot > 0:
+        stem = stem[:dot]
+    stem = re.sub(r"[_\-]+", " ", stem).strip()
+    if not stem:
+        stem = f"{(data_type or '数据').upper()} 数据集"
+    return {"name": stem[:60]}
+
+
+# ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
 
@@ -454,6 +474,11 @@ class HeuristicProvider(AIProvider):
         self, goal: str, ready_ops: list[dict[str, Any]]
     ) -> dict[str, Any]:
         return generate_pipeline_from_goal(goal, ready_ops)
+
+    async def suggest_dataset_name(
+        self, filenames: list[str], data_type: str, category: str | None
+    ) -> dict[str, str]:
+        return suggest_name_from_files(filenames, data_type, category)
 
     async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
         """无 LLM 时的保守兜底:全部判为正常。

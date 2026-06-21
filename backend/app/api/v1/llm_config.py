@@ -1,7 +1,8 @@
 """LLM 提供商配置路由：CRUD + 激活 + 连接测试 + 用量统计。
 
 设计约束：
-- api_key 在读端点统一掩码（first4...last4），不下发明文。
+- api_key 在列表/读端点统一掩码（first4...last4），不下发明文；
+  唯一例外是 GET /{id}/reveal（require_admin），供编辑对话框回填真实 Key。
 - 写端点（新建/编辑/删除/激活）均需 require_admin。
 - GET /llm-providers/usage 必须声明在 GET /llm-providers/{id} 之前，
   否则 "usage" 会被当成 id 命中详情路由。
@@ -9,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
@@ -65,6 +67,14 @@ class LlmProviderUpdate(CamelModel):
     base_url: str | None = None
     api_key: str | None = None  # 空串 / None = 保留旧值
     model: str | None = None
+
+
+class LlmProviderTest(CamelModel):
+    """无落库的连通性测试入参（用对话框里正在输入的配置，保存前校验）。"""
+
+    base_url: str
+    api_key: str
+    model: str
 
 
 class LlmModelRead(CamelModel):
@@ -175,6 +185,46 @@ async def _list_models_payload(
     return [
         _model_to_read(row).model_dump(by_alias=True, mode="json") for row in rows
     ]
+
+
+async def _probe_chat(base_url: str, api_key: str, model: str) -> dict[str, Any]:
+    """向 {base_url}/chat/completions 发一条最小请求，验证连通性与凭证（timeout=15s）。
+
+    返回 {success, latencyMs, message, model}；任何异常都转成 success=False
+    并带上错误信息，绝不抛出（由调用方包成统一响应）。
+    """
+    base = base_url.rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 5,
+        "temperature": 0,
+    }
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{base}/chat/completions", json=payload, headers=headers
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return {
+            "success": True,
+            "latencyMs": int((time.monotonic() - t0) * 1000),
+            "message": "连接成功",
+            "model": data.get("model", model),
+        }
+    except Exception as exc:  # noqa: BLE001 — 网络/凭证错误均转为 success=False
+        return {
+            "success": False,
+            "latencyMs": int((time.monotonic() - t0) * 1000),
+            "message": str(exc),
+            "model": model,
+        }
 
 
 # ---- 端点 ---------------------------------------------------------------
@@ -411,64 +461,47 @@ async def activate_llm_provider(
     )
 
 
+@router.post("/llm-providers/test", dependencies=[Depends(require_admin)])
+async def test_llm_provider_config(body: LlmProviderTest) -> JSONResponse:
+    """用未保存的配置测试连通性（不读写数据库）。
+
+    供「新建/编辑供应商」对话框在保存前校验 base_url / api_key / model。
+    路径无 {id} 段，与 /llm-providers/{id}/test 不冲突。
+    """
+    data = await _probe_chat(body.base_url, body.api_key, body.model)
+    return JSONResponse(content={"data": data, "success": True})
+
+
 @router.post("/llm-providers/{provider_id}/test")
 async def test_llm_provider(
     provider_id: str, session: SessionDep
 ) -> JSONResponse:
-    """向提供商发一条最小请求，验证连通性与凭证有效性（timeout=15s）。"""
-    import time
-
+    """向已保存的提供商发一条最小请求，验证连通性与凭证有效性（timeout=15s）。"""
     row = await session.get(LlmProvider, provider_id)
     if row is None:
         return _not_found()
+    data = await _probe_chat(row.base_url, row.api_key, row.model)
+    return JSONResponse(content={"data": data, "success": True})
 
-    base_url = row.base_url.rstrip("/")
-    headers = {
-        "Authorization": f"Bearer {row.api_key}",
-        "Content-Type": "application/json",
-    }
-    payload: dict[str, Any] = {
-        "model": row.model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 5,
-        "temperature": 0,
-    }
-    t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        latency_ms = int((time.monotonic() - t0) * 1000)
-        model_used = data.get("model", row.model)
-        return JSONResponse(
-            content={
-                "data": {
-                    "success": True,
-                    "latencyMs": latency_ms,
-                    "message": "连接成功",
-                    "model": model_used,
-                },
-                "success": True,
-            }
-        )
-    except Exception as exc:  # noqa: BLE001
-        latency_ms = int((time.monotonic() - t0) * 1000)
-        return JSONResponse(
-            content={
-                "data": {
-                    "success": False,
-                    "latencyMs": latency_ms,
-                    "message": str(exc),
-                    "model": row.model,
-                },
-                "success": True,
-            }
-        )
+
+@router.get(
+    "/llm-providers/{provider_id}/reveal",
+    dependencies=[Depends(require_admin)],
+)
+async def reveal_llm_provider_key(
+    provider_id: str, session: SessionDep
+) -> JSONResponse:
+    """下发某供应商的明文 API Key（仅管理员，供编辑对话框回填）。
+
+    本模块"读端点只下发掩码"的唯一例外：受 require_admin 保护，
+    仅服务于管理员可见的编辑页面。
+    """
+    row = await session.get(LlmProvider, provider_id)
+    if row is None:
+        return _not_found()
+    return JSONResponse(
+        content={"data": {"apiKey": row.api_key}, "success": True}
+    )
 
 
 # ---- 模型清单（多模型管理 + 获取模型） ------------------------------------

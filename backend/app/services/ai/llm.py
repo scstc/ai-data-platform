@@ -44,6 +44,11 @@ _QA_SYSTEM_PROMPT = (
     "cron 调度、测试连接的问题。只输出一个 JSON 对象："
     '{"answer":string(中文)}，不要任何额外解释或 markdown 代码块。'
 )
+_SUGGEST_NAME_SYSTEM_PROMPT = (
+    "你是数据集命名助手。根据用户给出的文件名列表、数据格式、可选分类，"
+    "起一个简洁、概括性的中文数据集名称（不超过 20 字，不带文件扩展名、不带引号）。"
+    '只输出一个 JSON 对象：{"name":string(中文)}，不要任何额外解释或 markdown 代码块。'
+)
 _PIPELINE_SYSTEM_PROMPT = (
     "你是 data-juicer 数据加工流水线助手。用户给出加工目标,你只能从"
     "【可用算子清单】里选择算子,按合理顺序组成线性流水线。"
@@ -204,6 +209,31 @@ class OpenAICompatProvider(AIProvider):
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM generate_pipeline 失败，回退启发式：%s", exc)
             return await self._heuristic.generate_pipeline(goal, ready_ops)
+
+    async def suggest_dataset_name(
+        self, filenames: list[str], data_type: str, category: str | None
+    ) -> dict[str, str]:
+        user = (
+            f"数据格式：{data_type}\n"
+            f"分类：{category or '(无)'}\n"
+            f"文件名：{', '.join(filenames) or '(无)'}"
+        )
+        try:
+            result = await self._chat_json(
+                _SUGGEST_NAME_SYSTEM_PROMPT, user, feature="suggest_name"
+            )
+        except Exception as exc:  # noqa: BLE001 — 任何失败都回退，保证可用性
+            logger.warning("LLM suggest_dataset_name 失败，回退启发式：%s", exc)
+            return await self._heuristic.suggest_dataset_name(
+                filenames, data_type, category
+            )
+        name = result.get("name")
+        if not isinstance(name, str) or not name.strip():
+            logger.warning("LLM suggest_dataset_name 返回缺少 name 字段，回退启发式")
+            return await self._heuristic.suggest_dataset_name(
+                filenames, data_type, category
+            )
+        return {"name": name.strip()}
 
     async def _moderate_batch(self, batch: list[str]) -> list[dict[str, Any]]:
         """审核一批文本(<=_MODERATE_BATCH 条),返回与 batch 等长、按下标对齐的结果。

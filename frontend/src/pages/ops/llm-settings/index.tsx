@@ -35,8 +35,10 @@ import {
   getLlmUsage,
   listLlmProviders,
   listProviderModels,
+  revealLlmProviderKey,
   selectProviderModel,
   testLlmProvider,
+  testLlmProviderConfig,
   updateLlmProvider,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
@@ -434,6 +436,9 @@ const LlmSettings: React.FC = () => {
   const [listLoading, setListLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<EditingProvider>(null);
+  const [dialogTesting, setDialogTesting] = useState(false);
+  const [dialogTestResult, setDialogTestResult] =
+    useState<DataPlatform.LlmTestResult | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [activatingId, setActivatingId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -463,10 +468,11 @@ const LlmSettings: React.FC = () => {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
+    setDialogTestResult(null);
     setModalOpen(true);
   };
 
-  const openEdit = (record: DataPlatform.LlmProvider) => {
+  const openEdit = async (record: DataPlatform.LlmProvider) => {
     setEditing(record);
     form.setFieldsValue({
       name: record.name,
@@ -475,7 +481,15 @@ const LlmSettings: React.FC = () => {
       model: record.model,
       apiKey: '',
     });
+    setDialogTestResult(null);
     setModalOpen(true);
+    // 回填真实 Key（管理员专用 reveal 接口）；失败则保持留空 = 不修改
+    try {
+      const res = await revealLlmProviderKey(record.id);
+      if (res.success) form.setFieldsValue({ apiKey: res.data.apiKey });
+    } catch {
+      // 忽略：保持空，提交时按"留空 = 不修改"处理
+    }
   };
 
   const handleProviderChange = (val: DataPlatform.LlmProvider['provider']) => {
@@ -532,6 +546,40 @@ const LlmSettings: React.FC = () => {
   const openManage = (record: DataPlatform.LlmProvider) => {
     setManaging(record);
     setDrawerOpen(true);
+  };
+
+  /** 对话框内测试：用当前表单值校验连通性（保存前）。
+   * 编辑态且 API Key 留空时改用已保存密钥测已存供应商。 */
+  const handleDialogTest = async () => {
+    const fields = editing?.id
+      ? ['baseUrl', 'model']
+      : ['baseUrl', 'model', 'apiKey'];
+    try {
+      await form.validateFields(fields);
+    } catch {
+      return; // 必填项未填，表单已就地提示
+    }
+    const baseUrl = (form.getFieldValue('baseUrl') as string).trim();
+    const model = (form.getFieldValue('model') as string).trim();
+    const apiKey = ((form.getFieldValue('apiKey') as string) ?? '').trim();
+    setDialogTesting(true);
+    setDialogTestResult(null);
+    try {
+      const res =
+        editing?.id && !apiKey
+          ? await testLlmProvider(editing.id)
+          : await testLlmProviderConfig({ baseUrl, model, apiKey });
+      setDialogTestResult(res.data);
+    } catch (e: any) {
+      setDialogTestResult({
+        success: false,
+        latencyMs: 0,
+        message: e?.message ?? '测试失败',
+        model,
+      });
+    } finally {
+      setDialogTesting(false);
+    }
   };
 
   const handleTest = async (id: string) => {
@@ -604,9 +652,9 @@ const LlmSettings: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 300,
+      width: 360,
       render: (_, r) => (
-        <Space size="small" wrap>
+        <Space size="small">
           <Button
             type="link"
             size="small"
@@ -694,6 +742,9 @@ const LlmSettings: React.FC = () => {
           if (!open) setModalOpen(false);
         }}
         onFinish={handleSubmit}
+        onValuesChange={() => {
+          if (dialogTestResult) setDialogTestResult(null);
+        }}
         modalProps={{ destroyOnHidden: true }}
       >
         <ProFormText
@@ -743,6 +794,34 @@ const LlmSettings: React.FC = () => {
             placeholder={editing ? '留空则不修改' : '请输入 API Key'}
             autoComplete="new-password"
           />
+        </Form.Item>
+        <Form.Item>
+          <Button loading={dialogTesting} onClick={handleDialogTest}>
+            测试连接
+          </Button>
+          {editing && (
+            <span
+              style={{
+                color: 'var(--ant-color-text-secondary)',
+                fontSize: 12,
+                marginLeft: 12,
+              }}
+            >
+              API Key 留空将用已保存密钥测试
+            </span>
+          )}
+          {dialogTestResult && (
+            <Alert
+              style={{ marginTop: 12 }}
+              type={dialogTestResult.success ? 'success' : 'error'}
+              showIcon
+              message={
+                dialogTestResult.success
+                  ? `连接成功 · ${dialogTestResult.model} · ${dialogTestResult.latencyMs} ms`
+                  : `连接失败：${dialogTestResult.message}`
+              }
+            />
+          )}
         </Form.Item>
         <div
           style={{

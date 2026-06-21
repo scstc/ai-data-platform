@@ -22,6 +22,7 @@ const SCENARIO_TYPES: {
   title: string;
   desc: string;
   icon: ReactNode;
+  color: string; // 卡片主题色(图标底色 + 强调)
   route?: string; // 有 route 的直接跳转,否则占位提示
 }[] = [
   {
@@ -29,6 +30,7 @@ const SCENARIO_TYPES: {
     title: 'COT 思维数据',
     desc: '思维链:问题 / 推理过程 / 答案',
     icon: <BranchesOutlined />,
+    color: '#722ed1',
     route: '/ingest/local-upload/cot',
   },
   {
@@ -36,6 +38,7 @@ const SCENARIO_TYPES: {
     title: '问答对数据',
     desc: '问题 / 答案成对',
     icon: <CommentOutlined />,
+    color: '#1677ff',
     route: '/ingest/local-upload/qa',
   },
   {
@@ -43,6 +46,7 @@ const SCENARIO_TYPES: {
     title: '偏好数据',
     desc: '优劣对比(RLHF 偏好对)',
     icon: <HeartOutlined />,
+    color: '#eb2f96',
     route: '/ingest/local-upload/preference',
   },
   {
@@ -50,6 +54,7 @@ const SCENARIO_TYPES: {
     title: '时序数据',
     desc: '带时间戳的序列数据',
     icon: <LineChartOutlined />,
+    color: '#13c2c2',
     route: '/ingest/local-upload/timeseries',
   },
   {
@@ -57,6 +62,7 @@ const SCENARIO_TYPES: {
     title: 'GIS 位置数据',
     desc: '经纬度 / 地理位置',
     icon: <EnvironmentOutlined />,
+    color: '#52c41a',
     route: '/ingest/local-upload/gis',
   },
   {
@@ -64,6 +70,7 @@ const SCENARIO_TYPES: {
     title: '多模态数据',
     desc: '视频 / 音频 / 图像 / PDF 跨模态解析',
     icon: <ApartmentOutlined />,
+    color: '#fa541c',
     route: '/ingest/local-upload/multimodal',
   },
 ];
@@ -90,15 +97,15 @@ const ScenarioDataPage: React.FC = () => {
       <Alert
         type="info"
         showIcon
-        style={{ maxWidth: 920, marginBottom: 16 }}
+        style={{ maxWidth: 1280, marginBottom: 20 }}
         message="「多模态」已开放配置页;其余类型的接入逻辑待定,确定后逐项开放。"
       />
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-          gap: 16,
-          maxWidth: 920,
+          gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+          gap: 20,
+          maxWidth: 1280,
         }}
       >
         {SCENARIO_TYPES.map((t) => (
@@ -107,24 +114,52 @@ const ScenarioDataPage: React.FC = () => {
             hoverable
             data-testid={`scenario-type-${t.key}`}
             onClick={() => onPick(t)}
-            styles={{ body: { padding: 20 } }}
+            style={{ height: '100%', borderRadius: 12 }}
+            styles={{
+              body: {
+                padding: 28,
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+              },
+            }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 22, color: '#722ed1' }}>{t.icon}</span>
-              <Text strong>{t.title}</Text>
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 14,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 28,
+                color: t.color,
+                background: `${t.color}1a`,
+                marginBottom: 18,
+              }}
+            >
+              {t.icon}
             </div>
+            <Text strong style={{ fontSize: 17 }}>
+              {t.title}
+            </Text>
             <Text
               type="secondary"
-              style={{ fontSize: 12, display: 'block', marginTop: 8 }}
+              style={{
+                fontSize: 13,
+                display: 'block',
+                marginTop: 8,
+                lineHeight: 1.6,
+                flex: 1,
+              }}
             >
               {t.desc}
             </Text>
-            <Tag
-              color={t.route ? 'purple' : undefined}
-              style={{ marginTop: 12, fontSize: 11 }}
-            >
-              {t.route ? '可配置' : '待开放'}
-            </Tag>
+            <div style={{ marginTop: 18 }}>
+              <Tag color={t.route ? 'purple' : 'default'}>
+                {t.route ? '可配置' : '待开放'}
+              </Tag>
+            </div>
           </Card>
         ))}
       </div>
