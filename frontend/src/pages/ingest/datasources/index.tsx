@@ -1,7 +1,7 @@
 import { PlusOutlined } from '@ant-design/icons';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { Access, useAccess } from '@umijs/max';
+import { Access, history, useAccess } from '@umijs/max';
 import { Badge, Button, message, Popconfirm, Tag } from 'antd';
 import { type FC, useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
@@ -37,10 +37,8 @@ const DataSourcesPage: FC = () => {
     loadCategories();
   }, [loadCategories]);
 
-  const openCreate = () => {
-    setEditingRecord(undefined);
-    setDrawerOpen(true);
-  };
+  // 新建走接入方式选择落地页(新模式);编辑仍用抽屉
+  const openCreate = () => history.push('/ingest/datasources/new');
 
   const openEdit = (record: DataPlatform.DataSource) => {
     setEditingRecord(record);

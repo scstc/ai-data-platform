@@ -43,6 +43,18 @@ export default [
         name: 'datasources',
         component: './ingest/datasources',
       },
+      {
+        path: '/ingest/datasources/new',
+        name: 'datasource-new',
+        hideInMenu: true,
+        component: './ingest/datasources/new',
+      },
+      {
+        path: '/ingest/datasources/new/:type',
+        name: 'datasource-config',
+        hideInMenu: true,
+        component: './ingest/datasources/config',
+      },
       { path: '/ingest/tasks', name: 'tasks', component: './ingest/tasks' },
       { path: '/ingest/access', name: 'access', component: './ingest/access' },
       { path: '/ingest/files', name: 'files', component: './files' },

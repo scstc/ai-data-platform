@@ -68,3 +68,112 @@ export const TYPE_CARDS: {
   },
   { type: 'api', title: 'API 推送', desc: '由外部系统主动推送数据到平台' },
 ];
+
+// ---------------------------------------------------------------------------
+// 接入方式选择落地页(/ingest/datasources/new):按类目分组的卡片
+// ---------------------------------------------------------------------------
+
+/** S3 兼容对象存储的厂商档(后端同为 type=s3,仅前端呈现/默认 Endpoint 不同) */
+export type S3Provider = 's3' | 'minio' | 'oss' | 'obs';
+
+export const S3_PROVIDERS: Record<
+  S3Provider,
+  {
+    title: string;
+    endpointPlaceholder: string;
+    /** AK/SK 字段标签(OBS 习惯用 AK/SK 叫法) */
+    akLabel: string;
+    skLabel: string;
+  }
+> = {
+  s3: {
+    title: '配置 S3 对象存储连接',
+    endpointPlaceholder: 'https://s3.amazonaws.com',
+    akLabel: 'Access Key ID',
+    skLabel: 'Secret Key',
+  },
+  minio: {
+    title: '配置 MinIO 连接',
+    endpointPlaceholder: 'http://minio.internal:9000',
+    akLabel: 'Access Key',
+    skLabel: 'Secret Key',
+  },
+  oss: {
+    title: '配置阿里云 OSS 连接',
+    endpointPlaceholder: 'oss-cn-hangzhou.aliyuncs.com',
+    akLabel: 'Access Key ID',
+    skLabel: 'Access Key Secret',
+  },
+  obs: {
+    title: '配置华为云 OBS 连接',
+    endpointPlaceholder: 'obs.cn-north-4.myhuaweicloud.com',
+    akLabel: 'Access Key ID (AK)',
+    skLabel: 'Secret Access Key (SK)',
+  },
+};
+
+/** 云 / 分布式存储 — 大卡片(S3 / 阿里云 OSS / 华为云 OBS 分开,均落 s3 配置页) */
+export const STORAGE_CARDS: {
+  key: S3Provider | 'hdfs';
+  route: string;
+  title: string;
+  desc: string;
+  tag: string;
+}[] = [
+  {
+    key: 's3',
+    route: '/ingest/datasources/new/s3',
+    title: 'Amazon S3',
+    desc: '通用 S3 协议对象存储,适合分布式数据集与日志的零拷贝接入。',
+    tag: 'S3 COMPATIBLE',
+  },
+  {
+    key: 'minio',
+    route: '/ingest/datasources/new/s3?provider=minio',
+    title: 'MinIO',
+    desc: '自建 S3 兼容对象存储,适合私有化部署的数据湖。',
+    tag: 'SELF-HOSTED',
+  },
+  {
+    key: 'oss',
+    route: '/ingest/datasources/new/s3?provider=oss',
+    title: '阿里云 OSS',
+    desc: '阿里云对象存储服务,S3 兼容协议接入。',
+    tag: 'ALIYUN',
+  },
+  {
+    key: 'obs',
+    route: '/ingest/datasources/new/s3?provider=obs',
+    title: '华为云 OBS',
+    desc: '华为云对象存储服务,S3 兼容协议接入。',
+    tag: 'HUAWEI',
+  },
+  {
+    key: 'hdfs',
+    route: '/ingest/datasources/new/hdfs',
+    title: 'HDFS',
+    desc: '直接从 Hadoop 分布式文件系统集群接入。',
+    tag: 'BIG DATA',
+  },
+];
+
+/** 数据库连接 — 网格小卡片(承接 DB_KIND_LABEL 全部品牌) */
+export const DB_KIND_CARDS: { kind: DataPlatform.DbKind; title: string }[] = [
+  { kind: 'dameng', title: 'DM(达梦)' },
+  { kind: 'goldendb', title: 'GoldenDB' },
+  { kind: 'kingbase', title: 'Kingbase(金仓)' },
+  { kind: 'gaussdb', title: 'GaussDB' },
+  { kind: 'hologres', title: 'Hologres' },
+  { kind: 'sequoiadb', title: 'SequoiaDB(巨杉)' },
+  { kind: 'hive', title: 'Hive' },
+  { kind: 'doris', title: 'Doris' },
+  { kind: 'postgresql', title: 'PostgreSQL' },
+];
+
+/** 配置页标题(按类型) */
+export const CONFIG_TITLE: Record<DataPlatform.DataSourceType, string> = {
+  s3: '配置 S3 对象存储连接',
+  hdfs: '配置 HDFS 连接',
+  database: '配置数据库连接',
+  api: 'API 推送接入配置',
+};
