@@ -71,5 +71,6 @@ export default {
   'menu.ops.dataTasks': 'Data Tasks',
   'menu.ops.lineage': 'Data Lineage',
   'menu.ops.security': 'Security Audit',
+  'menu.ops.llmSettings': 'LLM Settings',
   'menu.assistant': 'AI Assistant',
 };

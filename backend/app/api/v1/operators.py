@@ -10,10 +10,10 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
-from app.core.config import settings
 from app.services import capabilities as caps
 from app.services import operator_catalog as oc
 from app.services.engine import multimodal_ready
+from app.services.llm_config import get_active_llm_config
 
 router = APIRouter(tags=["operators"])
 
@@ -32,7 +32,7 @@ async def list_operators() -> JSONResponse:
     (torch)→ needs_media。needs_compute 不列出(无 GPU 跑不通)。
     """
     data = oc.legacy_operators(
-        llm_configured=bool(settings.openai_api_key),
+        llm_configured=bool(get_active_llm_config().api_key),
         multimodal_ready=await multimodal_ready(),
     )
     return JSONResponse(content={"data": data, "success": True})

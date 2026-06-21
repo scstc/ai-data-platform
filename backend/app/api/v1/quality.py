@@ -31,6 +31,7 @@ from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.schemas.job import QualityJobCreate
 from app.services import operator_catalog as oc
+from app.services.llm_config import get_active_llm_config
 from app.services.quality import QualityError, run_quality_job
 
 router = APIRouter(tags=["quality"])
@@ -72,7 +73,7 @@ async def create_quality_job(
             },
         )
     # 资源前置校验:跑不了的直接拦截并给原因(同 jobs.py)
-    llm_configured = bool(settings.openai_api_key)
+    llm_configured = bool(get_active_llm_config().api_key)
     blocked = [
         reason
         for o in body.operators

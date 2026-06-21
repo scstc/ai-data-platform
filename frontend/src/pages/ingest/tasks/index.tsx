@@ -14,6 +14,7 @@ import { Access, useAccess } from '@umijs/max';
 import {
   Button,
   Drawer,
+  Form,
   message,
   Popconfirm,
   Progress,
@@ -24,6 +25,7 @@ import {
 } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
+import FilterOperatorPicker from './components/FilterOperatorPicker';
 import {
   createIngestTask,
   deleteIngestTask,
@@ -244,6 +246,13 @@ const IngestTasksPage: React.FC = () => {
                     ) : null
                   }
                 </ProFormDependency>
+                <Form.Item
+                  name={['extract', 'operators']}
+                  label="过滤算子（可选）"
+                  tooltip="采集到的记录在落地前依次过算子过滤/清洗（仅数据库采集生效）"
+                >
+                  <FilterOperatorPicker />
+                </Form.Item>
               </>
             );
           }

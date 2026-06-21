@@ -3,12 +3,16 @@
 通过 httpx 调用 `{base_url}/chat/completions`，system prompt 强制只输出 JSON；
 任何请求异常或 JSON 解析失败，一律回退到内部持有的 HeuristicProvider 对应方法，
 并记 logging.warning，保证对外行为始终可用（前端契约不破）。
+
+每次 _chat_json / _moderate_batch 调用后 best-effort 写一条 llm_usage 记录（
+token 数 + 延迟 + 成功/失败），异常全部吞掉，不影响主流程。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -95,8 +99,15 @@ class OpenAICompatProvider(AIProvider):
         # 内部持有启发式兜底实例
         self._heuristic = heuristic or HeuristicProvider()
 
-    async def _chat_json(self, system_prompt: str, user_content: str) -> dict[str, Any]:
-        """调用 LLM 并解析其 JSON 输出；任一环节失败抛异常交由调用方回退。"""
+    async def _chat_json(
+        self, system_prompt: str, user_content: str, *, feature: str = "chat"
+    ) -> dict[str, Any]:
+        """调用 LLM 并解析其 JSON 输出；任一环节失败抛异常交由调用方回退。
+
+        同时 best-effort 记录一条 llm_usage（成功/失败 + token + 延迟）。
+        """
+        from app.services.llm_config import record_usage  # 延迟导入避免循环
+
         payload = {
             "model": self._model,
             "messages": [
@@ -110,14 +121,37 @@ class OpenAICompatProvider(AIProvider):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            t1 = time.monotonic()
+            usage = data.get("usage") or {}
+            await record_usage(
+                feature=feature,
+                model=self._model,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                success=True,
+                latency_ms=int((t1 - t0) * 1000),
             )
-            resp.raise_for_status()
-            data = resp.json()
+        except Exception:
+            t1 = time.monotonic()
+            await record_usage(
+                feature=feature,
+                model=self._model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                success=False,
+                latency_ms=int((t1 - t0) * 1000),
+            )
+            raise
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
@@ -126,21 +160,25 @@ class OpenAICompatProvider(AIProvider):
 
     async def infer_schema(self, sample: str) -> dict[str, Any]:
         try:
-            return await self._chat_json(_SCHEMA_SYSTEM_PROMPT, sample)
+            return await self._chat_json(
+                _SCHEMA_SYSTEM_PROMPT, sample, feature="infer_schema"
+            )
         except Exception as exc:  # noqa: BLE001 — 任何失败都回退，保证可用性
             logger.warning("LLM infer_schema 失败，回退启发式：%s", exc)
             return await self._heuristic.infer_schema(sample)
 
     async def generate_task(self, prompt: str) -> dict[str, Any]:
         try:
-            return await self._chat_json(_TASK_SYSTEM_PROMPT, prompt)
+            return await self._chat_json(
+                _TASK_SYSTEM_PROMPT, prompt, feature="generate_task"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM generate_task 失败，回退启发式：%s", exc)
             return await self._heuristic.generate_task(prompt)
 
     async def qa(self, question: str) -> dict[str, str]:
         try:
-            result = await self._chat_json(_QA_SYSTEM_PROMPT, question)
+            result = await self._chat_json(_QA_SYSTEM_PROMPT, question, feature="qa")
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM qa 失败，回退启发式：%s", exc)
             return await self._heuristic.qa(question)
@@ -160,7 +198,9 @@ class OpenAICompatProvider(AIProvider):
                 for o in ready_ops
             )
             user = f"加工目标:{goal}\n\n【可用算子清单】\n{catalog}"
-            return await self._chat_json(_PIPELINE_SYSTEM_PROMPT, user)
+            return await self._chat_json(
+                _PIPELINE_SYSTEM_PROMPT, user, feature="generate_pipeline"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM generate_pipeline 失败，回退启发式：%s", exc)
             return await self._heuristic.generate_pipeline(goal, ready_ops)
@@ -169,7 +209,10 @@ class OpenAICompatProvider(AIProvider):
         """审核一批文本(<=_MODERATE_BATCH 条),返回与 batch 等长、按下标对齐的结果。
 
         任一环节失败(请求异常/超时/解析失败/缺编号)直接抛,交 moderate_texts 处理。
+        同时 best-effort 记录用量（feature='moderate'）。
         """
+        from app.services.llm_config import record_usage  # 延迟导入避免循环
+
         numbered = "\n".join(f"[{i}] {t}" for i, t in enumerate(batch))
         payload = {
             "model": self._model,
@@ -184,14 +227,37 @@ class OpenAICompatProvider(AIProvider):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=_MODERATE_TIMEOUT) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=_MODERATE_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            t1 = time.monotonic()
+            usage = data.get("usage") or {}
+            await record_usage(
+                feature="moderate",
+                model=self._model,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                success=True,
+                latency_ms=int((t1 - t0) * 1000),
             )
-            resp.raise_for_status()
-            data = resp.json()
+        except Exception:
+            t1 = time.monotonic()
+            await record_usage(
+                feature="moderate",
+                model=self._model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                success=False,
+                latency_ms=int((t1 - t0) * 1000),
+            )
+            raise
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         results = parsed.get("results") if isinstance(parsed, dict) else parsed

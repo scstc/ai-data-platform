@@ -22,6 +22,7 @@ from app.services.connectors.base import (
     ConnectorNotReady,
     IngestError,
     _build_queries,
+    apply_filter_operators,
 )
 
 if TYPE_CHECKING:
@@ -162,6 +163,8 @@ class MysqlConnector:
                         dict(zip(columns, row, strict=False))
                         for row in raw_rows
                     ]
+                    # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
+                    records = await apply_filter_operators(task, records)
                     name = f"{task.name} - {suffix}" if suffix else task.name
                     ds, ver = await land_records(
                         session,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -20,6 +21,7 @@ from app.api.v1 import (
     ingest_push,
     ingest_tasks,
     jobs,
+    llm_config,
     operators,
     quality,
     uploads,
@@ -28,13 +30,22 @@ from app.core.audit import audit_middleware
 from app.core.config import settings
 from app.core.db import async_session_factory
 from app.services import job_runner
+from app.services.llm_config import refresh_cache
+
+_logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    """启动时回收孤儿任务:重启会中断在跑的加工子进程,残留 running 的统一标失败。"""
+    """启动时：回收孤儿任务 + best-effort 刷新 LLM 配置缓存。"""
     async with async_session_factory() as session:
         await job_runner.reconcile_orphans(session)
+    # best-effort：LLM 缓存刷新失败不阻断启动
+    try:
+        async with async_session_factory() as session:
+            await refresh_cache(session)
+    except Exception:  # noqa: BLE001
+        _logger.warning("启动时刷新 LLM 配置缓存失败（已忽略）", exc_info=True)
     yield
 
 
@@ -65,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(ai.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")
     app.include_router(categories.router, prefix="/api/v1")
+    app.include_router(llm_config.router, prefix="/api/v1")
     app.include_router(compat.router, prefix="/api")
 
     @app.get("/healthz")

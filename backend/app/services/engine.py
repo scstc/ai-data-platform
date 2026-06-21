@@ -30,6 +30,7 @@ from app.services.external_store import (
     persist_manifest_output,
 )
 from app.services.landing import MANIFEST_FORMAT
+from app.services.llm_config import get_active_llm_config
 
 # 多 job 并发上限
 _semaphore = asyncio.Semaphore(settings.engine_concurrency)
@@ -46,12 +47,13 @@ def _subprocess_env() -> dict[str, str] | None:
     客户端从环境变量读取凭证(pydantic 只把 .env 读进 settings,不写 os.environ,
     故不显式注入子进程就拿不到)。未配 LLM 则返回 None,子进程直接继承当前环境。
     """
-    if not settings.openai_api_key:
+    cfg = get_active_llm_config()
+    if not cfg.api_key:
         return None
     env = dict(os.environ)
-    env["OPENAI_API_KEY"] = settings.openai_api_key
-    if settings.openai_base_url:
-        env["OPENAI_BASE_URL"] = settings.openai_base_url
+    env["OPENAI_API_KEY"] = cfg.api_key
+    if cfg.base_url:
+        env["OPENAI_BASE_URL"] = cfg.base_url
     return env
 
 
@@ -134,17 +136,18 @@ def build_config(
     ——DJ 该参数默认写死 ``gpt-4o``,不覆盖会向自定义端点请求不存在的模型而失败;
     用户在表单里显式填了 ``api_model`` 则尊重用户值。
     """
+    cfg = get_active_llm_config()
     process: list[dict[str, Any]] = []
     for op in operators:
         params = dict(op.get("params") or {})
-        if settings.openai_api_key:
+        if cfg.api_key:
             meta = oc.get_operator(op["name"])
             valid = {p["name"] for p in meta.get("params", [])} if meta else set()
             # DJ 各算子模型参数名不统一(api_model / api_or_hf_model),默认都写死
             # gpt-4o;不覆盖会向自定义端点请求不存在的模型而失败。用户显式填了则尊重。
             for model_key in ("api_model", "api_or_hf_model"):
                 if model_key in valid and model_key not in params:
-                    params[model_key] = settings.openai_model
+                    params[model_key] = cfg.model
         process.append({op["name"]: (params or None)})
     # 路径统一正斜杠:DJ 用 POSIX shlex 解析 dataset_path,Windows 反斜杠
     # 会被当转义符吞掉,路径残缺后被误判成 huggingface 数据集
@@ -211,6 +214,53 @@ def _column_union(*row_lists: list[dict[str, Any]]) -> list[str]:
         for row in rows:
             keys.update(dict.fromkeys(row.keys()))
     return list(keys)
+
+
+async def filter_records(
+    records: list[dict[str, Any]],
+    operators: list[dict[str, Any]],
+    *,
+    project_name: str = "ingest-filter",
+) -> tuple[list[dict[str, Any]], str]:
+    """对一批记录跑算子流水线过滤/清洗,返回 (存活记录, 运行日志)。
+
+    供采集连接器在 fetch 之后、land 之前内联调用:records 进 → 落临时 jsonl →
+    dj-process 跑算子 → 读回存活记录。无算子或无记录则原样返回。
+    全程在临时目录内完成,不建 DatasetVersion、不写 DB。dj-process 失败抛
+    EngineError(由连接器转 IngestError,诚实失败不伪成功)。
+    """
+    if not operators or not records:
+        return records, ""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        in_path = tmp_dir / "in.jsonl"
+        out_path = tmp_dir / "out.jsonl"
+        yaml_path = tmp_dir / "job.yaml"
+        in_path.write_text(
+            "".join(
+                json.dumps(r, ensure_ascii=False, default=str) + "\n"
+                for r in records
+            ),
+            encoding="utf-8",
+        )
+        cfg = build_config(
+            project_name=project_name,
+            input_path=str(in_path),
+            output_path=str(out_path),
+            operators=operators,
+        )
+        yaml_path.write_text(
+            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        async with _semaphore:
+            code, log = await _run_dj(yaml_path)
+        if code != 0 or not out_path.exists():
+            tail = "\n".join(log.strip().splitlines()[-8:])
+            raise EngineError(f"算子过滤失败(dj-process 退出码 {code})\n{tail}")
+        # limit<=0 读全部存活行(全部被过滤掉时 out.jsonl 为空 → 返回 [])
+        kept = _read_jsonl_head(out_path, 0)
+    return kept, log
 
 
 async def run_preview(

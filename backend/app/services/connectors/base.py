@@ -123,3 +123,26 @@ def _build_queries(extract: dict[str, Any] | None) -> list[tuple[str | None, str
             raise IngestError("采集对象为表,但未选择任何表")
         return [(t, f"SELECT * FROM {_quote_ident(t)}") for t in tables]
     raise IngestError("未配置采集对象(请选择表或填写 SQL)")
+
+
+async def apply_filter_operators(
+    task: IngestTask, records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """采集落地前的算子过滤:按 ``task.extract.operators`` 跑 data-juicer 算子流水线。
+
+    供 PG/MySQL/专有库等 DB 连接器在 fetch 之后、``land_records`` 之前内联调用:
+    每张表/查询取回的 records 先过算子流水线,存活记录再落地为受管版本。
+    extract 未配 operators 或为空 → 原样返回(零回归)。dj-process 失败转
+    IngestError(诚实失败,中止本次采集,已落地的早表保留)。
+    """
+    operators = (task.extract or {}).get("operators") or []
+    if not operators:
+        return records
+    # 延迟导入避免连接器层在 import 期拉起 engine(及其 DJ 子进程相关依赖)
+    from app.services.engine import EngineError, filter_records  # noqa: PLC0415
+
+    try:
+        kept, _log = await filter_records(records, operators)
+    except EngineError as exc:
+        raise IngestError(f"采集算子过滤失败:{exc}") from exc
+    return kept

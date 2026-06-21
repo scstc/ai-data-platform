@@ -71,5 +71,6 @@ export default {
   'menu.ops.dataTasks': '数据任务',
   'menu.ops.lineage': '数据血缘',
   'menu.ops.security': '安全审计',
+  'menu.ops.llmSettings': 'LLM 配置',
   'menu.assistant': '智能助手',
 };

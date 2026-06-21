@@ -9,7 +9,6 @@ provider 通过 ``get_ai_provider_dep`` 依赖注入，底层是模块级单例
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -32,9 +31,11 @@ from app.services.ai import AIProvider, get_ai_provider
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 
-@lru_cache(maxsize=1)
 def get_ai_provider_dep() -> AIProvider:
-    """模块级单例：按全局配置选择 AI 提供者（启发式 / LLM）。"""
+    """按当前活跃 LLM 配置选择 AI 提供者（启发式 / LLM）。
+
+    每次请求重新解析，保证激活/切换配置后立即生效（不缓存）。
+    """
     return get_ai_provider(settings)
 
 

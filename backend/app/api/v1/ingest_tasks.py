@@ -32,17 +32,35 @@ from app.models.ingest_task import IngestTask
 from app.models.job import Job
 from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.ingest_task import (
+    IngestExtract,
     IngestRunRead,
     IngestTaskCreate,
     IngestTaskRead,
     IngestTaskUpdate,
 )
+from app.services import operator_catalog as oc
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
+from app.services.llm_config import get_active_llm_config
 
 router = APIRouter(tags=["ingest-tasks"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+def _invalid_operator_reason(extract: IngestExtract | None) -> str | None:
+    """校验 extract.operators 在当前环境均可运行;返回首个不可用原因,全可用→None。
+
+    采集落地为结构化记录(非媒体),media 类算子也拒绝(默认 media_ok=False)。
+    """
+    if extract is None or not extract.operators:
+        return None
+    llm_configured = bool(get_active_llm_config().api_key)
+    for step in extract.operators:
+        reason = oc.runnable_reason(step.name, llm_configured=llm_configured)
+        if reason:
+            return reason
+    return None
 
 PROGRESS_DONE = 100
 
@@ -173,6 +191,11 @@ async def create_ingest_task(
     if datasource is None:
         return _not_found()
 
+    if reason := _invalid_operator_reason(payload.extract):
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": reason}
+        )
+
     task = IngestTask(
         id=_new_task_id(),
         name=payload.name,
@@ -203,6 +226,13 @@ async def update_ingest_task(
     task = await session.get(IngestTask, task_id)
     if task is None:
         return _not_found()
+
+    if body.extract is not None and (
+        reason := _invalid_operator_reason(body.extract)
+    ):
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": reason}
+        )
 
     if body.name is not None:
         task.name = body.name

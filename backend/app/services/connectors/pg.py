@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from app.services.connectors.base import IngestError, _build_queries
+from app.services.connectors.base import (
+    IngestError,
+    _build_queries,
+    apply_filter_operators,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,6 +94,8 @@ async def run_pg_ingest(
             for suffix, query in queries:
                 rows = await conn.fetch(query)
                 records = [dict(r) for r in rows]
+                # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
+                records = await apply_filter_operators(task, records)
                 name = f"{task.name} - {suffix}" if suffix else task.name
                 ds, ver = await land_records(
                     session,

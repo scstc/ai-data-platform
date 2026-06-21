@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from app.core.config import settings
+from app.services.llm_config import get_active_llm_config
 
 # 子进程探测超时(秒):DJ venv 冷启 import torch 可能略慢
 _PROBE_TIMEOUT = 30.0
@@ -120,7 +121,7 @@ def get_capabilities() -> Capabilities:
         cuda=_detect_cuda(),
         vllm=_detect_vllm(),
         ray=_detect_ray(),
-        llm=bool(settings.openai_api_key),
+        llm=bool(get_active_llm_config().api_key),
     )
 
 

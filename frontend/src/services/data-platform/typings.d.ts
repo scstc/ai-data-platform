@@ -694,4 +694,76 @@ declare namespace DataPlatform {
     folders: string[];
     files: FileEntry[];
   };
+
+  /** LLM 供应商配置 */
+  interface LlmProvider {
+    id: number;
+    name: string;
+    /** 供应商类型 */
+    provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
+    baseUrl: string;
+    model: string;
+    /** 掩码后的 API Key，如 "sk-1…abcd" 或 "未配置" */
+    apiKeyMasked: string;
+    isActive: boolean;
+    createdAt: string;
+    updatedAt: string;
+  }
+
+  interface LlmProviderCreate {
+    name: string;
+    provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+  }
+
+  interface LlmProviderUpdate {
+    name?: string;
+    provider?: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
+    baseUrl?: string;
+    /** 留空则不修改 */
+    apiKey?: string;
+    model?: string;
+  }
+
+  interface LlmTestResult {
+    success: boolean;
+    latencyMs: number;
+    message: string;
+    model: string;
+  }
+
+  interface LlmUsageByFeature {
+    feature: string;
+    calls: number;
+    tokens: number;
+  }
+
+  interface LlmUsageByDay {
+    day: string;
+    calls: number;
+    tokens: number;
+  }
+
+  interface LlmUsageRecent {
+    feature: string;
+    model: string;
+    totalTokens: number;
+    success: boolean;
+    latencyMs: number;
+    createdAt: string;
+  }
+
+  interface LlmUsageSummary {
+    totalCalls: number;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    /** 0..1 */
+    successRate: number;
+    byFeature: LlmUsageByFeature[];
+    byDay: LlmUsageByDay[];
+    recent: LlmUsageRecent[];
+  }
 }

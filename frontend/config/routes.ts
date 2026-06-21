@@ -134,6 +134,12 @@ export default [
         access: 'canAdmin',
         component: './security',
       },
+      {
+        path: '/ops/llm-settings',
+        name: 'llmSettings',
+        access: 'canAdmin',
+        component: './ops/llm-settings',
+      },
     ],
   },
   // 智能助手(独立顶级入口,放在菜单最后)

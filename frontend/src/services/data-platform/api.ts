@@ -922,3 +922,78 @@ export async function deleteFolder(
     },
   );
 }
+
+// LLM 供应商管理
+
+/** 获取 LLM 供应商列表 GET /api/v1/llm-providers */
+export async function listLlmProviders() {
+  return request<{ data: DataPlatform.LlmProvider[]; success: boolean }>(
+    '/api/v1/llm-providers',
+  );
+}
+
+/** 新建 LLM 供应商 POST /api/v1/llm-providers */
+export async function createLlmProvider(body: DataPlatform.LlmProviderCreate) {
+  return request<{ data: DataPlatform.LlmProvider; success: boolean }>(
+    '/api/v1/llm-providers',
+    {
+      method: 'POST',
+      data: body,
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 更新 LLM 供应商 PUT /api/v1/llm-providers/{id} */
+export async function updateLlmProvider(
+  id: number,
+  body: DataPlatform.LlmProviderUpdate,
+) {
+  return request<{ data: DataPlatform.LlmProvider; success: boolean }>(
+    `/api/v1/llm-providers/${id}`,
+    {
+      method: 'PUT',
+      data: body,
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 删除 LLM 供应商 DELETE /api/v1/llm-providers/{id} */
+export async function deleteLlmProvider(id: number) {
+  return request<{ success: boolean }>(`/api/v1/llm-providers/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+/** 激活 LLM 供应商 POST /api/v1/llm-providers/{id}/activate */
+export async function activateLlmProvider(id: number) {
+  return request<{ data: DataPlatform.LlmProvider; success: boolean }>(
+    `/api/v1/llm-providers/${id}/activate`,
+    {
+      method: 'POST',
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 测试 LLM 供应商连通性 POST /api/v1/llm-providers/{id}/test */
+export async function testLlmProvider(id: number) {
+  return request<{ data: DataPlatform.LlmTestResult; success: boolean }>(
+    `/api/v1/llm-providers/${id}/test`,
+    {
+      method: 'POST',
+      skipErrorHandler: true,
+    },
+  );
+}
+
+/** 获取 LLM 用量统计 GET /api/v1/llm-providers/usage */
+export async function getLlmUsage(days = 7) {
+  return request<{ data: DataPlatform.LlmUsageSummary; success: boolean }>(
+    '/api/v1/llm-providers/usage',
+    {
+      params: { days },
+    },
+  );
+}

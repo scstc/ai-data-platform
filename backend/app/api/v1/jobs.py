@@ -13,7 +13,6 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
-from app.core.config import settings
 from app.core.db import get_session
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
@@ -31,6 +30,7 @@ from app.services.engine import (
 )
 from app.services.external_store import ExternalStoreError
 from app.services.landing import BINARY_FORMATS, MANIFEST_FORMAT
+from app.services.llm_config import get_active_llm_config
 
 router = APIRouter(tags=["jobs"])
 
@@ -81,7 +81,7 @@ def _operator_block(
     (_multimodal_block 已确保此处 manifest ⇒ torch 就绪);needs_compute 恒拦截。
     调用前须已做"非空 + 算子存在"校验。
     """
-    llm_configured = bool(settings.openai_api_key)
+    llm_configured = bool(get_active_llm_config().api_key)
     media_ok = version.format == MANIFEST_FORMAT
     blocked = [
         reason

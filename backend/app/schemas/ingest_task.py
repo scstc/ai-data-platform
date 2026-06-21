@@ -23,12 +23,21 @@ class IngestSchedule(CamelModel):
     cron: str | None = None
 
 
+class PipelineStep(CamelModel):
+    """流水线算子步骤:算子名 + 参数(与前端 opCart / DataPlatform.PipelineStep 同形)。"""
+
+    name: str
+    params: dict[str, Any] = {}
+
+
 class IngestExtract(CamelModel):
-    """采集对象(extract spec):拉什么。
+    """采集对象(extract spec):拉什么 + 落地前怎么过滤。
 
     - mode=table:用 tables(勾选的表名列表,每张表各产一个数据集,支持 schema.table)。
     - mode=sql  :用 sql(单条查询语句,产一个数据集)。
     - mode=path :用 paths(显式对象键/路径列表)和/或 glob(通配符),供 S3/HDFS 采集。
+    - operators:可选 data-juicer 算子流水线,记录落地前依次过滤/清洗
+      (DB 连接器 fetch 之后、land 之前内联跑,见 base.apply_filter_operators)。
     """
 
     mode: Literal["table", "sql", "path"]
@@ -36,6 +45,7 @@ class IngestExtract(CamelModel):
     sql: str | None = None
     paths: list[str] | None = None
     glob: str | None = None
+    operators: list[PipelineStep] | None = None
 
     @model_validator(mode="after")
     def _check_mode_fields(self) -> IngestExtract:
