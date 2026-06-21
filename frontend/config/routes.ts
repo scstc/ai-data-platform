@@ -131,6 +131,12 @@ export default [
         name: 'presets',
         component: './datasets/presets',
       },
+      {
+        path: '/datasets/:id',
+        name: 'dataset-detail',
+        hideInMenu: true,
+        component: './datasets/detail',
+      },
     ],
   },
   // ③ 数据治理(安全扫描 / 质量评估 / 数据加工 / 数据标注)
