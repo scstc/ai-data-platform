@@ -33,6 +33,17 @@
 
 > ⚠️ 注意:data-juicer 的 `main` 代表**阿里上游镜像**而非「本地稳定版」,本地稳定版在 `prod`。保持 `main` 干净(无本地提交),上游同步才能始终是无冲突的快进合并。
 
+## 平台功能(ai-data-platform)
+
+`backend/`(FastAPI + PostgreSQL)与 `frontend/`(Ant Design Pro v6)构成数据平台,围绕「数据接入 → 数据集版本化 → 加工 / 质量 / 审核 → 发布」闭环。启动见 `CLAUDE.md` 的 `/adp-web`(:8001)与 `/adp-server`(:18003)。
+
+- **数据源接入**:S3 兼容对象存储(S3 / MinIO / OSS / OBS)、HDFS、数据库直连(PostgreSQL 系 / GoldenDB 等)、API 推送。
+- **采集任务**:按整表 / 自定义 SQL 从数据库拉取,支持落地前 data-juicer 算子过滤。
+  - **生成数据集**:把库数据转成 **JSONL** 直接存入平台内置 MinIO(文件管理),路径 `uploads/<dataset_id>/v<n>/data.jsonl`;同一任务再次生成即在同一数据集追加新版本,**不同版本落不同文件夹**(v1 / v2 / …)。
+- **文件管理**:浏览 / 上传 / 删除平台内置 MinIO 对象存储。由 `STORAGE_MINIO_*` 配置;后端启动时自建 `uploads` 桶,开箱即用。
+- **数据集与版本**:不可变版本快照,支持本地受管(jsonl)与对象存储托管(`s3://…`)两类;提供预览、加工、质量评分、内容审核与发布门控。
+- **大模型配置中心**:多供应商配置 + 一键获取模型列表 + 连接测试 + 用量统计。
+
 ## Data-Juicer 简介
 
 Data-Juicer 是阿里巴巴开源的一个面向大模型(LLM)的数据处理系统,主要用于多模态数据的清洗、处理和分析。
