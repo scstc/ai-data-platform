@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     # 单个加工任务超时(秒);超时杀子进程并标记失败。0/负 = 不限时
     engine_job_timeout: int = 3600
 
+    # 运行时能力(算子有效可运行状态的事实来源,见 services/capabilities.py)
+    # vLLM 推理服务地址(配置后探测其 /v1/models 决定 vllm 类算子是否可用)
+    vllm_base_url: str | None = None
+    # 是否启用 Ray 分布式 executor(需 DJ venv 装 ray + 引擎支持,默认关)
+    ray_enabled: bool = False
+    # 强制覆盖探测结果(None=自动探测;调试 / CI 用)
+    cuda_force: bool | None = None
+    vllm_force: bool | None = None
+    ray_force: bool | None = None
+
     # 允许的跨域来源（前端 dev server）
     cors_origins: list[str] = [
         "http://localhost:8001",

@@ -23,7 +23,10 @@ import {
   Typography,
 } from 'antd';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { listOperatorCatalog } from '@/services/data-platform';
+import {
+  getOperatorCapabilities,
+  listOperatorCatalog,
+} from '@/services/data-platform';
 
 const { Paragraph, Text } = Typography;
 
@@ -78,6 +81,9 @@ const Market: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
 
+  // 当前环境执行能力(GPU/LLM/vLLM/Ray),用于「环境能力」指示
+  const [caps, setCaps] = useState<DataPlatform.OperatorCapabilities>();
+
   // 过滤条件
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
@@ -95,6 +101,9 @@ const Market: React.FC = () => {
     setLoading(true);
     setLoadError(false);
     try {
+      getOperatorCapabilities()
+        .then((r) => setCaps(r.data))
+        .catch(() => undefined);
       const first = await listOperatorCatalog({ pageSize: 500, current: 1 });
       const ops = [...(first.data ?? [])];
       while (ops.length < (first.total ?? 0)) {
@@ -198,9 +207,34 @@ const Market: React.FC = () => {
     message.success(`已加入「${op.zhLabel}」`);
   };
 
+  // 「环境能力」指示:把灰/绿的成因显式化(GPU 已启用则 GPU 类算子转可运行)
+  const CAP_LABELS: [keyof DataPlatform.OperatorCapabilities, string][] = [
+    ['cuda', 'GPU'],
+    ['llm', 'LLM'],
+    ['vllm', 'vLLM'],
+    ['ray', 'Ray'],
+  ];
+  const headerContent = (
+    <Space direction="vertical" size={4}>
+      <Text type="secondary">{headerStats ?? ' '}</Text>
+      {caps && (
+        <Space size={6} wrap>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            环境能力:
+          </Text>
+          {CAP_LABELS.map(([key, label]) => (
+            <Tag key={key} color={caps[key] ? 'success' : 'default'}>
+              {label} {caps[key] ? '✓' : '✗'}
+            </Tag>
+          ))}
+        </Space>
+      )}
+    </Space>
+  );
+
   return (
     <PageContainer
-      content={headerStats ?? ' '}
+      content={headerContent}
       footer={
         steps.length
           ? [

@@ -179,6 +179,14 @@ declare namespace DataPlatform {
     recommend: boolean;
   };
 
+  /** 当前环境探测到的执行能力(决定 GPU/LLM/vLLM/Ray 类算子是否可运行) */
+  type OperatorCapabilities = {
+    cuda: boolean;
+    vllm: boolean;
+    ray: boolean;
+    llm: boolean;
+  };
+
   /** 流水线步骤:算子名 + 参数 */
   type PipelineStep = {
     name: string;

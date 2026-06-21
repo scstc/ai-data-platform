@@ -731,6 +731,16 @@ export async function getOperatorCatalogMeta(options?: {
   );
 }
 
+/** 算子市场:当前环境执行能力 GET /api/v1/operators/capabilities */
+export async function getOperatorCapabilities(options?: {
+  [key: string]: any;
+}) {
+  return request<{
+    data: DataPlatform.OperatorCapabilities;
+    success: boolean;
+  }>('/api/v1/operators/capabilities', { method: 'GET', ...(options || {}) });
+}
+
 /** 算子市场:目录查询(分面 + 分页) GET /api/v1/operators/catalog */
 export async function listOperatorCatalog(
   params?: DataPlatform.OperatorCatalogParams,

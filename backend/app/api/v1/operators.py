@@ -11,10 +11,17 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
+from app.services import capabilities as caps
 from app.services import operator_catalog as oc
 from app.services.engine import multimodal_ready
 
 router = APIRouter(tags=["operators"])
+
+
+@router.get("/operators/capabilities")
+async def operator_capabilities() -> JSONResponse:
+    """当前环境探测到的执行能力(cuda/vllm/ray/llm),供前端「环境能力」指示。"""
+    return JSONResponse(content={"data": caps.capabilities_api(), "success": True})
 
 
 @router.get("/operators")

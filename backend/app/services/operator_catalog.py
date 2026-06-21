@@ -15,6 +15,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from app.services.capabilities import Capabilities, get_capabilities
+
+_MEDIA_MODALITIES = {"image", "video", "audio", "multimodal"}
+
 _CATALOG_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "operators_catalog.json"
 )
@@ -75,13 +79,51 @@ _META_KEY_MAP = {
 
 
 def to_api(op: dict[str, Any]) -> dict[str, Any]:
-    """单个算子 → camelCase 出参形态。"""
-    return {_OP_KEY_MAP.get(k, k): v for k, v in op.items()}
+    """单个算子 → camelCase 出参形态;``runnable`` 用运行时有效状态覆盖。"""
+    out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items()}
+    out["runnable"] = effective_runnable(op)
+    return out
 
 
 def meta_api() -> dict[str, Any]:
-    """目录概览 → camelCase 出参形态(保留嵌套统计的原始键)。"""
-    return {_META_KEY_MAP.get(k, k): v for k, v in catalog_meta().items()}
+    """目录概览 → camelCase 出参形态;``byRunnable`` 按当前环境实时重算。"""
+    out = {_META_KEY_MAP.get(k, k): v for k, v in catalog_meta().items()}
+    caps = get_capabilities()
+    counts: dict[str, int] = {}
+    for op in all_operators():
+        status = effective_runnable(op, caps)
+        counts[status] = counts.get(status, 0) + 1
+    out["byRunnable"] = counts
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 有效可运行状态:静态需求(resource_class)× 运行时能力(capabilities)
+# ---------------------------------------------------------------------------
+# 目录 JSON 里烤死的 ``runnable`` 是"无 GPU 环境"快照,运行时不再采信——改由
+# 本函数按当前环境真实能力实时计算,守门 / 徽章 / 计数 / AI 上下文统一口径。
+def effective_runnable(op: dict[str, Any], caps: Capabilities | None = None) -> str:
+    """算子在当前环境的有效可运行状态。
+
+    优先级与构建期 ``runnable()`` 一致,但每条算力门改为按 ``caps`` 实时判定:
+    媒体模态(平台受管数据集为文本 jsonl,永不适用)→ needs_media;否则按
+    resource_class / ray_ 前缀对应所需能力,满足则 ready,不满足给对应阻塞态。
+    """
+    caps = caps or get_capabilities()
+    res = op["resource_class"]
+    mod = set(op.get("modality") or [])
+    name = op["name"]
+    if mod & _MEDIA_MODALITIES:
+        return "needs_media"
+    if res == "api_llm":
+        return "ready" if caps.llm else "needs_api"
+    if name.startswith("ray_"):
+        return "ready" if caps.ray else "needs_compute"
+    if res in ("gpu", "hf_model"):
+        return "ready" if caps.cuda else "needs_compute"
+    if res == "vllm":
+        return "ready" if caps.vllm else "needs_compute"
+    return "ready"
 
 
 # ---------------------------------------------------------------------------
@@ -92,18 +134,20 @@ def runnable_reason(
 ) -> str | None:
     """返回该算子在当前环境不可执行的原因;None 表示可执行。
 
-    ``llm_configured``:平台已配 LLM API,放行 ``needs_api`` 算子。
+    ``llm_configured``:平台已配 LLM API,放行 ``needs_api`` 算子(显式覆盖探测值)。
     ``media_ok``:输入是媒体/manifest 数据集且多模态引擎就绪,放行 ``needs_media`` 算子。
+    其余算力门(GPU/vLLM/Ray)由 ``effective_runnable`` 按运行时能力实时判定。
     """
     op = get_operator(name)
     if op is None:
         return f"未知算子:{name}"
-    status = op["runnable"]
+    caps = get_capabilities()
+    if llm_configured:
+        caps = Capabilities(cuda=caps.cuda, vllm=caps.vllm, ray=caps.ray, llm=True)
+    status = effective_runnable(op, caps)
     if status == "ready":
         return None
     if status == "needs_api":
-        if llm_configured:
-            return None
         return f"算子 {name} 需要配置 LLM API(在 .env 设置 OPENAI_*)"
     if status == "needs_media":
         if media_ok:
@@ -199,14 +243,15 @@ def legacy_operators(
     仍在提交时按数据类型二次校验(``runnable_reason``)。``needs_compute`` 始终不列出。
     ``category`` 用场景分组(比 mapper/filter 更贴近用户),``params`` 已归一为表单字段。
     """
-    allowed = {"ready"}
+    caps = get_capabilities()
     if llm_configured:
-        allowed.add("needs_api")
+        caps = Capabilities(cuda=caps.cuda, vllm=caps.vllm, ray=caps.ray, llm=True)
+    allowed = {"ready"}
     if multimodal_ready:
         allowed.add("needs_media")
     result: list[dict[str, Any]] = []
     for op in all_operators():
-        if op["runnable"] not in allowed:
+        if effective_runnable(op, caps) not in allowed:
             continue
         result.append(
             {
@@ -237,6 +282,7 @@ def query_catalog(
 ) -> dict[str, Any]:
     """按多维条件过滤算子目录,返回分页数据 + 总数。"""
     kw = keyword.lower().strip() if keyword else None
+    caps = get_capabilities()
 
     def match(op: dict[str, Any]) -> bool:
         if scenario and op["scenario_group"] != scenario:
@@ -247,7 +293,7 @@ def query_catalog(
             return False
         if resource_class and op["resource_class"] != resource_class:
             return False
-        if runnable and op["runnable"] != runnable:
+        if runnable and effective_runnable(op, caps) != runnable:
             return False
         if recommend is not None and op["recommend"] != recommend:
             return False
@@ -275,9 +321,10 @@ def ready_operator_context(category: str | None = None) -> list[dict[str, Any]]:
 
     ``category`` 可选,传入时只保留该类算子(如 ``"filter"``)。
     """
+    caps = get_capabilities()
     ctx: list[dict[str, Any]] = []
     for op in all_operators():
-        if op["runnable"] != "ready":
+        if effective_runnable(op, caps) != "ready":
             continue
         if category and op["category"] != category:
             continue
@@ -296,11 +343,12 @@ def sanitize_pipeline(
     steps: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """裁剪到可执行流水线:丢弃未知/非 ready 算子,删除不在该算子参数表里的键。"""
+    caps = get_capabilities()
     result: list[dict[str, Any]] = []
     for step in steps:
         name = step.get("name")
         op = get_operator(name) if name else None
-        if op is None or op["runnable"] != "ready":
+        if op is None or effective_runnable(op, caps) != "ready":
             continue
         # 排除 args/kwargs 变长占位项(与 _ui_field 口径一致):它们不是可配置参数,
         # 若放行经 build_config 进入 DJ YAML 会在运行期被 dj-process 当非法参数报错。
