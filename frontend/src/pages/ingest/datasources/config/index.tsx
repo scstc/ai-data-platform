@@ -78,6 +78,19 @@ const TYPE_ICON: Record<DataPlatform.DataSourceType, React.ReactNode> = {
   api: <ApiOutlined />,
 };
 
+/** 数据库品牌 → 连接名示例用的英文短标识(连接名称占位符按所选品牌变化) */
+const DB_BRAND_TOKEN: Record<DataPlatform.DbKind, string> = {
+  postgresql: 'Postgres',
+  goldendb: 'GoldenDB',
+  hologres: 'Hologres',
+  kingbase: 'Kingbase',
+  gaussdb: 'GaussDB',
+  dameng: 'Dameng',
+  sequoiadb: 'SequoiaDB',
+  hive: 'Hive',
+  doris: 'Doris',
+};
+
 /** 右侧浏览面板:保存前显示"需先连接"空态(浏览接口需已保存的数据源 id) */
 const BrowserPanel: FC<{ type: DataPlatform.DataSourceType }> = ({ type }) => {
   const titleMap: Record<DataPlatform.DataSourceType, string> = {
@@ -167,6 +180,29 @@ const DataSourceConfigPage: FC = () => {
     }
     return CONFIG_TITLE[type] ?? '配置数据源连接';
   }, [type, dbKindFromQuery, s3Meta]);
+
+  // 连接名称示例:按类型给不同提示(S3 按厂商档、数据库按所选品牌),避免千篇一律
+  const watchedDbKind = Form.useWatch('dbKind', form) as
+    | DataPlatform.DbKind
+    | undefined;
+  const namePlaceholder = useMemo(() => {
+    if (type === 's3') {
+      const byProvider: Record<S3Provider, string> = {
+        s3: 'Production_S3_Warehouse',
+        minio: 'MinIO_DataLake_Prod',
+        oss: 'Aliyun_OSS_Warehouse',
+        obs: 'Huawei_OBS_Warehouse',
+      };
+      return byProvider[s3Provider] ?? byProvider.s3;
+    }
+    if (type === 'database') {
+      const kind = watchedDbKind ?? dbKindFromQuery ?? undefined;
+      const brand = kind ? DB_BRAND_TOKEN[kind] : 'Database';
+      return `${brand}_Orders_Prod`;
+    }
+    if (type === 'hdfs') return 'Hadoop_HDFS_RawZone';
+    return 'API_Push_OrderStream';
+  }, [type, s3Provider, watchedDbKind, dbKindFromQuery]);
 
   const handleTest = async () => {
     let values: Record<string, any>;
@@ -278,7 +314,7 @@ const DataSourceConfigPage: FC = () => {
                 label="连接名称"
                 rules={[{ required: true, message: '请输入连接名称' }]}
               >
-                <Input placeholder="如 Production_S3_Warehouse" />
+                <Input placeholder={`如 ${namePlaceholder}`} />
               </Form.Item>
 
               {type === 's3' && (
