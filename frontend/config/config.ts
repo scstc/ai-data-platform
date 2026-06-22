@@ -98,6 +98,11 @@ export default defineConfig({
    * @description 生成资源清单，配合 routePrefetch 使用
    */
   manifest: {},
+  /**
+   * @name 站点图标（浏览器标签页 favicon）
+   * @description 复用平台 logo.svg，替换 Ant Design Pro 默认图标
+   */
+  favicons: ['/logo.svg'],
   //============== 以下都是max的插件配置 ===============
   /**
    * @name 数据流插件
