@@ -204,6 +204,8 @@ class MysqlConnector:
                         data_type="sql",
                         # 语义维度:结构化(§4.5)
                         semantic_type="structured",
+                        # 三轴:来源=数据库;数据库直连无文件载体,格式留空
+                        source_kind="database",
                         note=f"采集落地:{task.name}(来源 {datasource.name})",
                         produced_by_job_id=job_id,
                     )

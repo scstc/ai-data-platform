@@ -131,6 +131,8 @@ async def run_pg_ingest(
                     data_type="sql",
                     # 语义维度:PG 表结构化数据
                     semantic_type="structured",
+                    # 三轴:来源=数据库;数据库直连无文件载体,格式留空
+                    source_kind="database",
                     note=f"采集落地:{task.name}(来源 {datasource.name})",
                     produced_by_job_id=job_id,
                 )

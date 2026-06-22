@@ -320,6 +320,9 @@ class S3Connector:
                     dataset_name=dataset_name,
                     data_type=data_type,
                     # semantic_type 不传 → land_records 内按 data_type 推断(零回归)
+                    # 三轴:来源=对象存储;格式=对象原始扩展名
+                    source_kind="object_store",
+                    source_format=ext,
                     description=f"S3 采集:{datasource.name} / {key}",
                     note=f"S3 采集 job={job_id} bucket={bucket} key={key}",
                     produced_by_job_id=job_id,

@@ -892,6 +892,7 @@ async def list_datasets(
     name: str | None = Query(None),
     data_type: str | None = Query(None, alias="dataType"),
     semantic_type: str | None = Query(None, alias="semanticType"),
+    source_kind: str | None = Query(None, alias="sourceKind"),
     category_id: str | None = Query(None, alias="categoryId"),
     creator: str | None = Query(None),
     created_start: CreatedStartQuery = None,
@@ -909,6 +910,8 @@ async def list_datasets(
         conds.append(Dataset.data_type == data_type)
     if semantic_type:
         conds.append(Dataset.semantic_type == semantic_type)
+    if source_kind:
+        conds.append(Dataset.source_kind == source_kind)
     if category_id:
         conds.append(Dataset.category_id == category_id)
     if creator:

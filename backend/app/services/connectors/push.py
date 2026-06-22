@@ -163,6 +163,9 @@ async def land_push_records(
             description=f"api 数据源「{datasource.name}」的推送数据集",
             data_type=cfg.get("dataType") or cfg.get("data_type"),
             semantic_type=effective_semantic,
+            # 三轴:来源=API 推送;推送即结构化记录,格式记 jsonl
+            source_kind="api_push",
+            source_format="jsonl",
             owner=datasource.creator,
             creator=datasource.creator,
         )

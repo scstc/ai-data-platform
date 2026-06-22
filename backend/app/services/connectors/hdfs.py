@@ -326,6 +326,9 @@ class HdfsConnector:
                 dataset_name=dataset_name,
                 data_type=config.get("data_type"),
                 semantic_type=config.get("semantic_type"),
+                # 三轴:来源=HDFS;格式=拉取对象原始扩展名
+                source_kind="hdfs",
+                source_format=ext,
                 note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
                 produced_by_job_id=job_id,
             )

@@ -28,6 +28,13 @@ class Dataset(Base):
     # 语义类型(#1/#2/#8,与 data_type 正交):10 类 LLM 语义之一(SemanticType 枚举,
     # 校验在 Pydantic 层),供统一语义展示/筛选。存量行为空(见 docs/plan/14 §3)。
     semantic_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 来源/接入方式(三轴拆分,取代 data_type 的来源语义):受控枚举
+    # database | object_store | hdfs | local_upload | api_push;接入时确定。
+    # 托管(origin=hosted)本期留空。设计见 docs/superpowers/specs §类型三轴拆分。
+    source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 原始格式(三轴拆分):接入时捕获的用户视角格式(txt/docx/csv/jsonl/image…),
+    # 与 DatasetVersion.format(归一后存储格式,恒 jsonl)区分;数据库直连留空。
+    source_format: Mapped[str | None] = mapped_column(String, nullable=True)
     # 分级(#15):敏感级别,如 public | internal | confidential
     sensitivity_level: Mapped[str | None] = mapped_column(String, nullable=True)
     # 分类(#15):受控分类库引用 categories.id(无 FK,可空,单选);

@@ -52,6 +52,9 @@ class DatasetRead(CamelModel):
     data_type: str | None = None
     # 语义类型(与 data_type 正交);读模型宽松为 str(防御历史值)
     semantic_type: str | None = None
+    # 三轴拆分:来源/接入方式(database|object_store|hdfs|local_upload|api_push)+ 原始格式
+    source_kind: str | None = None
+    source_format: str | None = None
     sensitivity_level: str | None = None
     # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
     category_id: str | None = None
