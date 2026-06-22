@@ -8,16 +8,22 @@ import {
   ProFormTextArea,
 } from '@ant-design/pro-components';
 import { history, useAccess, useParams } from '@umijs/max';
-import type { TableColumnsType } from 'antd';
 import {
   Button,
+  Card,
+  Col,
+  Descriptions,
+  Divider,
+  Empty,
+  Flex,
   Input,
+  List,
   Modal,
   message,
   Popconfirm,
+  Row,
   Space,
   Spin,
-  Table,
   Tag,
   Tooltip,
   Typography,
@@ -35,6 +41,7 @@ import {
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { SemanticTypeTag } from '@/utils/semanticType';
+import { SourceKindTag } from '@/utils/sourceKind';
 import DatasetDataView from './views/DataView';
 
 /** 数据类型枚举（编辑表单复用） */
@@ -173,179 +180,162 @@ const DatasetDetail: React.FC = () => {
     }
   };
 
-  const versionColumns: TableColumnsType<DataPlatform.DatasetVersion> = [
-    {
-      title: '版本',
-      dataIndex: 'versionNo',
-      render: (_, v) => (
+  const renderLineage = (v: DataPlatform.DatasetVersion) =>
+    v.producedByJobId ? (
+      <a
+        onClick={() =>
+          history.push(`/ops/data-tasks?highlight=${v.producedByJobId}`)
+        }
+      >
+        加工自任务
+      </a>
+    ) : (
+      <Tag>原始接入</Tag>
+    );
+
+  const renderPipelineLinks = (v: DataPlatform.DatasetVersion) => (
+    <Space size="small" wrap>
+      <a
+        onClick={() =>
+          history.push(
+            `/governance/content-safety?datasetId=${v.datasetId}&versionId=${v.id}`,
+          )
+        }
+      >
+        安全扫描
+      </a>
+      <a
+        onClick={() =>
+          history.push(
+            `/governance/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+          )
+        }
+      >
+        质量评估
+      </a>
+      {access.canAdmin && (
         <a
-          onClick={() => loadPreview(v.id)}
-          style={{ fontWeight: activeVersion === v.id ? 600 : undefined }}
+          onClick={() =>
+            history.push(
+              `/governance/processing/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+            )
+          }
         >
-          {v.versionLabel ?? `v${v.versionNo}`}
+          数据加工
         </a>
-      ),
-    },
-    { title: '行数', dataIndex: 'rows', render: (_, v) => v.rows ?? '-' },
-    { title: '大小', dataIndex: 'size', render: (_, v) => fmtSize(v.size) },
-    {
-      title: '来源',
-      dataIndex: 'origin',
-      render: (_, v) => (
-        <Tag color={v.origin === 'managed' ? 'green' : 'gold'}>{v.origin}</Tag>
-      ),
-    },
-    {
-      title: '加工血缘',
-      key: 'lineage',
-      render: (_, v) =>
-        v.producedByJobId ? (
-          <a
+      )}
+    </Space>
+  );
+
+  /** 管理员才有的发布门操作（预览由左侧选中隐式触发，故不再有单独「预览」入口）。 */
+  const renderVersionActions = (v: DataPlatform.DatasetVersion) => (
+    <Space size="small" wrap>
+      {v.publishStatus === 'published' ? (
+        <Popconfirm
+          title="确认下架该版本？"
+          description="算法工程师将不再能选用它。"
+          onConfirm={() => handleUnpublish(v.id)}
+        >
+          <Button size="small">下架</Button>
+        </Popconfirm>
+      ) : (
+        <Tooltip
+          title={
+            v.scanVerdict === 'unscanned'
+              ? '需先完成内容安全全量扫描（或管理员人工接受风险）才能发布'
+              : v.scanVerdict === 'failed'
+                ? '安全扫描未通过，请在加工中挂隐私脱敏算子产出新版本重扫，或人工接受风险'
+                : undefined
+          }
+        >
+          <Button
+            size="small"
+            type="primary"
+            disabled={v.scanVerdict !== 'passed'}
             onClick={() =>
-              history.push(`/ops/data-tasks?highlight=${v.producedByJobId}`)
+              v.scanVerdict === 'passed' ? handlePublish(v.id) : undefined
             }
           >
-            加工自任务
-          </a>
-        ) : (
-          <Tag>原始接入</Tag>
-        ),
-    },
-    {
-      title: '扫描结论',
-      dataIndex: 'scanVerdict',
-      render: (_, v) => {
-        const t =
-          SCAN_VERDICT_TAG[v.scanVerdict ?? 'unscanned'] ??
-          SCAN_VERDICT_TAG.unscanned;
-        return (
-          <Tooltip title={v.verdictNote}>
-            <Tag color={t.color}>
-              {t.text}
-              {v.verdictSource === 'manual' ? '·人工' : ''}
+            发布
+          </Button>
+        </Tooltip>
+      )}
+      {v.scanVerdict !== 'passed' && (
+        <Button
+          size="small"
+          onClick={() => {
+            setVerdictModal({ versionId: v.id, verdict: 'passed' });
+            setVerdictNote('');
+          }}
+        >
+          接受风险
+        </Button>
+      )}
+      {v.scanVerdict !== 'failed' && (
+        <Button
+          size="small"
+          danger
+          onClick={() => {
+            setVerdictModal({ versionId: v.id, verdict: 'failed' });
+            setVerdictNote('');
+          }}
+        >
+          驳回
+        </Button>
+      )}
+    </Space>
+  );
+
+  /** 右侧:选中版本的完整详情(行数/大小/来源/血缘/扫描/发布 + 流程 + 操作)。 */
+  const renderVersionDetail = (v: DataPlatform.DatasetVersion) => {
+    const scan =
+      SCAN_VERDICT_TAG[v.scanVerdict ?? 'unscanned'] ??
+      SCAN_VERDICT_TAG.unscanned;
+    const pub =
+      PUBLISH_STATUS_TAG[v.publishStatus ?? 'draft'] ??
+      PUBLISH_STATUS_TAG.draft;
+    return (
+      <Card
+        size="small"
+        title={
+          <Space>
+            <span>{v.versionLabel ?? `v${v.versionNo}`}</span>
+            <Tag color={v.origin === 'managed' ? 'green' : 'gold'}>
+              {v.origin}
             </Tag>
-          </Tooltip>
-        );
-      },
-    },
-    {
-      title: '发布状态',
-      dataIndex: 'publishStatus',
-      render: (_, v) => {
-        const t =
-          PUBLISH_STATUS_TAG[v.publishStatus ?? 'draft'] ??
-          PUBLISH_STATUS_TAG.draft;
-        return <Tag color={t.color}>{t.text}</Tag>;
-      },
-    },
-    {
-      title: '流程',
-      key: 'pipeline',
-      render: (_, v) => (
-        <Space size="small" wrap>
-          <a
-            onClick={() =>
-              history.push(
-                `/governance/content-safety?datasetId=${v.datasetId}&versionId=${v.id}`,
-              )
-            }
-          >
-            安全扫描
-          </a>
-          <a
-            onClick={() =>
-              history.push(
-                `/governance/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
-              )
-            }
-          >
-            质量评估
-          </a>
-          {access.canAdmin && (
-            <a
-              onClick={() =>
-                history.push(
-                  `/governance/processing/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
-                )
-              }
-            >
-              数据加工
-            </a>
-          )}
-        </Space>
-      ),
-    },
-    {
-      title: '操作',
-      render: (_, v) => (
-        <Space size="small" wrap>
-          {activeVersion === v.id ? (
-            <Tag color="blue">预览中</Tag>
-          ) : (
-            <a onClick={() => loadPreview(v.id)}>预览</a>
-          )}
-          {access.canAdmin &&
-            (v.publishStatus === 'published' ? (
-              <Popconfirm
-                title="确认下架该版本？"
-                description="算法工程师将不再能选用它。"
-                onConfirm={() => handleUnpublish(v.id)}
-              >
-                <a>下架</a>
-              </Popconfirm>
-            ) : (
-              <Tooltip
-                title={
-                  v.scanVerdict === 'unscanned'
-                    ? '需先完成内容安全全量扫描（或管理员人工接受风险）才能发布'
-                    : v.scanVerdict === 'failed'
-                      ? '安全扫描未通过，请在加工中挂隐私脱敏算子产出新版本重扫，或人工接受风险'
-                      : undefined
-                }
-              >
-                <a
-                  onClick={() =>
-                    v.scanVerdict === 'passed' ? handlePublish(v.id) : undefined
-                  }
-                  style={
-                    v.scanVerdict !== 'passed'
-                      ? {
-                          color:
-                            'var(--ant-color-text-disabled, rgba(0,0,0,.25))',
-                          cursor: 'not-allowed',
-                        }
-                      : undefined
-                  }
-                >
-                  发布
-                </a>
-              </Tooltip>
-            ))}
-          {access.canAdmin && v.scanVerdict !== 'passed' && (
-            <a
-              onClick={() => {
-                setVerdictModal({ versionId: v.id, verdict: 'passed' });
-                setVerdictNote('');
-              }}
-            >
-              接受风险
-            </a>
-          )}
-          {access.canAdmin && v.scanVerdict !== 'failed' && (
-            <a
-              style={{ color: 'var(--ant-color-error, #ff4d4f)' }}
-              onClick={() => {
-                setVerdictModal({ versionId: v.id, verdict: 'failed' });
-                setVerdictNote('');
-              }}
-            >
-              驳回
-            </a>
-          )}
-        </Space>
-      ),
-    },
-  ];
+          </Space>
+        }
+      >
+        <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
+          <Descriptions.Item label="行数">{v.rows ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="大小">{fmtSize(v.size)}</Descriptions.Item>
+          <Descriptions.Item label="扫描结论">
+            <Tooltip title={v.verdictNote}>
+              <Tag color={scan.color}>
+                {scan.text}
+                {v.verdictSource === 'manual' ? '·人工' : ''}
+              </Tag>
+            </Tooltip>
+          </Descriptions.Item>
+          <Descriptions.Item label="发布状态">
+            <Tag color={pub.color}>{pub.text}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="加工血缘">
+            {renderLineage(v)}
+          </Descriptions.Item>
+          <Descriptions.Item label="流程">
+            {renderPipelineLinks(v)}
+          </Descriptions.Item>
+        </Descriptions>
+        {access.canAdmin && (
+          <>
+            <Divider style={{ margin: '12px 0' }} />
+            {renderVersionActions(v)}
+          </>
+        )}
+      </Card>
+    );
+  };
 
   // 当前预览的版本标签(供数据预览标题展示「正在看哪个版本」)
   const activeVer = detail?.versions.find((v) => v.id === activeVersion);
@@ -398,14 +388,20 @@ const DatasetDetail: React.FC = () => {
                 { title: 'ID', dataIndex: 'id' },
                 { title: '名称', dataIndex: 'name' },
                 {
-                  title: '类型',
-                  dataIndex: 'dataType',
-                  render: (_, r) => r.dataType ?? '-',
+                  title: '来源',
+                  dataIndex: 'sourceKind',
+                  render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
                 },
                 {
-                  title: '语义类型',
+                  title: '数据类型',
                   dataIndex: 'semanticType',
                   render: (_, r) => <SemanticTypeTag type={r.semanticType} />,
+                },
+                {
+                  title: '格式',
+                  dataIndex: 'sourceFormat',
+                  render: (_, r) =>
+                    r.sourceFormat ? r.sourceFormat.toUpperCase() : '-',
                 },
                 {
                   title: '分级',
@@ -447,21 +443,78 @@ const DatasetDetail: React.FC = () => {
             />
 
             <Typography.Title level={5} style={{ marginTop: 16 }}>
-              版本
+              版本（{detail.versions.length}）
             </Typography.Title>
-            <Table<DataPlatform.DatasetVersion>
-              rowKey="id"
-              size="small"
-              pagination={false}
-              dataSource={detail.versions}
-              columns={versionColumns}
-              onRow={(v) => ({
-                style:
-                  activeVersion === v.id
-                    ? { background: 'var(--ant-color-primary-bg)' }
-                    : undefined,
-              })}
-            />
+            <Row gutter={16}>
+              <Col xs={24} md={9} lg={7}>
+                <List<DataPlatform.DatasetVersion>
+                  size="small"
+                  bordered
+                  rowKey="id"
+                  dataSource={[...detail.versions].reverse()}
+                  style={{
+                    maxHeight: 248,
+                    overflowY: 'auto',
+                    borderRadius: 8,
+                  }}
+                  renderItem={(v) => {
+                    const selected = activeVersion === v.id;
+                    const pub =
+                      PUBLISH_STATUS_TAG[v.publishStatus ?? 'draft'] ??
+                      PUBLISH_STATUS_TAG.draft;
+                    const scan =
+                      SCAN_VERDICT_TAG[v.scanVerdict ?? 'unscanned'] ??
+                      SCAN_VERDICT_TAG.unscanned;
+                    return (
+                      <List.Item
+                        onClick={() => loadPreview(v.id)}
+                        style={{
+                          cursor: 'pointer',
+                          paddingInline: 12,
+                          background: selected
+                            ? 'var(--ant-color-primary-bg)'
+                            : undefined,
+                          borderInlineStart: `2px solid ${
+                            selected
+                              ? 'var(--ant-color-primary)'
+                              : 'transparent'
+                          }`,
+                          transition: 'background 0.2s',
+                        }}
+                      >
+                        <Flex vertical gap={2} style={{ width: '100%' }}>
+                          <Typography.Text strong={selected}>
+                            {v.versionLabel ?? `v${v.versionNo}`}
+                          </Typography.Text>
+                          <Space size={4} wrap>
+                            <Tag
+                              color={pub.color}
+                              style={{ marginInlineEnd: 0 }}
+                            >
+                              {pub.text}
+                            </Tag>
+                            <Tag
+                              color={scan.color}
+                              style={{ marginInlineEnd: 0 }}
+                            >
+                              {scan.text}
+                              {v.verdictSource === 'manual' ? '·人工' : ''}
+                            </Tag>
+                          </Space>
+                        </Flex>
+                      </List.Item>
+                    );
+                  }}
+                />
+              </Col>
+              <Col xs={24} md={15} lg={17}>
+                {activeVer ? (
+                  renderVersionDetail(activeVer)
+                ) : (
+                  <Empty description="选择左侧版本查看详情" />
+                )}
+              </Col>
+            </Row>
 
             <Typography.Title level={5} style={{ marginTop: 16 }}>
               数据预览

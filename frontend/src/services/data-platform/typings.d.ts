@@ -367,10 +367,14 @@ declare namespace DataPlatform {
     id: string;
     name: string;
     description?: string;
-    /** 接入/格式功能键(分栏过滤用,free-string) */
+    /** 接入/格式功能键(分栏过滤用,free-string;已退出展示层) */
     dataType?: string;
     /** 语义类型(与 dataType 正交,#1/#2/#8) */
     semanticType?: SemanticType;
+    /** 来源/接入方式(类型三轴之一):database|object_store|hdfs|local_upload|api_push */
+    sourceKind?: string;
+    /** 原始格式(类型三轴之一):txt/docx/csv/jsonl/image… */
+    sourceFormat?: string;
     sensitivityLevel?: string;
     categoryId?: string | null;
     categoryName?: string | null;
@@ -445,6 +449,7 @@ declare namespace DataPlatform {
     name?: string;
     dataType?: string;
     semanticType?: SemanticType;
+    sourceKind?: string;
     creator?: string;
     categoryId?: string;
     createdStart?: string;

@@ -25,6 +25,7 @@ import {
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
+import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 
 /** 数据集类型枚举（列表搜索 + 托管表单复用） */
 const DATA_TYPE_ENUM = {
@@ -149,11 +150,11 @@ const DatasetsList: React.FC = () => {
       ),
     },
     {
-      title: '类型',
-      dataIndex: 'dataType',
+      title: '来源',
+      dataIndex: 'sourceKind',
       valueType: 'select',
-      valueEnum: DATA_TYPE_ENUM,
-      render: (_, r) => (r.dataType ? <Tag>{r.dataType}</Tag> : '-'),
+      valueEnum: SOURCE_KIND_ENUM,
+      render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
     },
     {
       title: '版本',
@@ -168,7 +169,7 @@ const DatasetsList: React.FC = () => {
         ),
     },
     {
-      title: '语义类型',
+      title: '数据类型',
       dataIndex: 'semanticType',
       valueType: 'select',
       valueEnum: SEMANTIC_TYPE_ENUM,
@@ -294,8 +295,8 @@ const DatasetsList: React.FC = () => {
             current: params.current,
             pageSize: params.pageSize,
             name: params.name || undefined,
-            dataType: params.dataType || undefined,
             semanticType: params.semanticType || undefined,
+            sourceKind: params.sourceKind || undefined,
             creator: params.creator || undefined,
             categoryId: (params.categoryId as string) || undefined,
             // dateRange 给的是纯日期:起取当日 0 点、止取当日 23:59:59,
