@@ -35,7 +35,7 @@ export default [
   {
     path: '/operators',
     name: 'operators',
-    icon: 'appstore',
+    icon: 'block',
     component: './processing/market',
   },
   // ① 数据接入
