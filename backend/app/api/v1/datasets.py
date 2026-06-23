@@ -23,6 +23,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.job_input import JobInput
+from app.models.tag import DatasetTag, Tag
 from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.dataset import (
     DatasetDetailRead,
@@ -114,6 +115,63 @@ def _to_detail(
     detail.versions = [DatasetVersionRead.model_validate(v) for v in versions]
     detail.hosted = any(v.origin == "hosted" for v in versions)
     return detail
+
+
+def _new_tag_id() -> str:
+    """生成形如 tag-<6位hex> 的标签主键。"""
+    return f"tag-{secrets.token_hex(3)}"
+
+
+async def _dataset_tags_map(
+    session: AsyncSession, dataset_ids: list[str]
+) -> dict[str, list[str]]:
+    """批量取 {dataset_id: [tag_name,...]}(按名排序),供列表/详情回填 tags(避免 N+1)。"""
+    if not dataset_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(DatasetTag.dataset_id, Tag.name)
+            .join(Tag, Tag.id == DatasetTag.tag_id)
+            .where(DatasetTag.dataset_id.in_(dataset_ids))
+            .order_by(DatasetTag.dataset_id, Tag.name)
+        )
+    ).all()
+    mp: dict[str, list[str]] = {}
+    for ds_id, name in rows:
+        mp.setdefault(ds_id, []).append(name)
+    return mp
+
+
+async def _sync_dataset_tags(
+    session: AsyncSession, dataset_id: str, names: list[str]
+) -> None:
+    """全量替换某数据集的标签:names 去重去空白 → find-or-create Tag → 删旧关联 → 建新。"""
+    seen: set[str] = set()
+    clean: list[str] = []
+    for n in names:
+        v = (n or "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            clean.append(v)
+    existing: dict[str, str] = {}  # name -> id
+    if clean:
+        rows = (
+            await session.execute(
+                select(Tag.id, Tag.name).where(Tag.name.in_(clean))
+            )
+        ).all()
+        existing = {name: tid for tid, name in rows}
+    for n in clean:
+        if n not in existing:
+            tag = Tag(id=_new_tag_id(), name=n)
+            session.add(tag)
+            await session.flush()
+            existing[n] = tag.id
+    await session.execute(
+        delete(DatasetTag).where(DatasetTag.dataset_id == dataset_id)
+    )
+    for n in clean:
+        session.add(DatasetTag(dataset_id=dataset_id, tag_id=existing[n]))
 
 
 @router.post("/datasets/upload")
@@ -894,6 +952,9 @@ async def list_datasets(
     semantic_type: str | None = Query(None, alias="semanticType"),
     source_kind: str | None = Query(None, alias="sourceKind"),
     category_id: str | None = Query(None, alias="categoryId"),
+    # 选父含子筛选:逗号分隔的分类 id 列表(前端展开选中分类的全部后代 id),IN 查询。
+    category_ids: str | None = Query(None, alias="categoryIds"),
+    tags: str | None = Query(None),
     creator: str | None = Query(None),
     created_start: CreatedStartQuery = None,
     created_end: CreatedEndQuery = None,
@@ -914,6 +975,21 @@ async def list_datasets(
         conds.append(Dataset.source_kind == source_kind)
     if category_id:
         conds.append(Dataset.category_id == category_id)
+    # 选父含子:categoryIds(逗号分隔)展开成 id 列表 IN 查询,选中父分类时连带所有子孙。
+    if category_ids:
+        cat_id_list = [x.strip() for x in category_ids.split(",") if x.strip()]
+        if cat_id_list:
+            conds.append(Dataset.category_id.in_(cat_id_list))
+    # 标签过滤(多标签 OR):tags(逗号分隔)→ 命中含任一标签的数据集。
+    if tags:
+        tag_names = [x.strip() for x in tags.split(",") if x.strip()]
+        if tag_names:
+            tagged_ds_ids = (
+                select(DatasetTag.dataset_id)
+                .join(Tag, Tag.id == DatasetTag.tag_id)
+                .where(Tag.name.in_(tag_names))
+            )
+            conds.append(Dataset.id.in_(tagged_ds_ids))
     if creator:
         conds.append(Dataset.creator.ilike(f"%{creator}%"))
     if created_start is not None:
@@ -982,6 +1058,8 @@ async def list_datasets(
     cat_names = await build_category_name_map(
         session, [r.category_id for r in rows]
     )
+    # 批量取本页标签(避免 N+1),回填 tags
+    tags_map = await _dataset_tags_map(session, page_ids)
     data = []
     for r in rows:
         item = DatasetRead.model_validate(r)
@@ -989,6 +1067,7 @@ async def list_datasets(
         item.latest_version_label = latest_label.get(r.id)
         if r.category_id:
             item.category_name = cat_names.get(r.category_id)
+        item.tags = tags_map.get(r.id, [])
         data.append(item)
     return PageResponse[DatasetRead](data=data, total=total or 0)
 
@@ -1013,6 +1092,9 @@ async def get_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
+    detail.tags = (await _dataset_tags_map(session, [dataset_id])).get(
+        dataset_id, []
+    )
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
@@ -1028,7 +1110,11 @@ async def update_dataset(
             status_code=404,
             content={"success": False, "message": "数据集不存在"},
         )
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    # tags 是多对多关联(非 Dataset 列),单独同步,不走 setattr。
+    if "tags" in updates:
+        await _sync_dataset_tags(session, dataset_id, updates.pop("tags") or [])
+    for field, value in updates.items():
         setattr(dataset, field, value)
     dataset.last_modifier = "admin"
     await session.commit()
@@ -1044,6 +1130,9 @@ async def update_dataset(
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
+    detail.tags = (await _dataset_tags_map(session, [dataset_id])).get(
+        dataset_id, []
+    )
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
@@ -1628,6 +1717,19 @@ async def publish_version(version_id: str, session: SessionDep) -> JSONResponse:
         )
     # 幂等:已发布则不改写 published_at(保留首次发布时间,见模型注释"可追溯")
     if version.publish_status != "published":
+        # 不变量:同数据集同时只允许一个 published 版本——发布此版本前,
+        # 下架同数据集其他已发布版本(算法侧消费唯一的"当前发布版")。
+        others = (
+            await session.scalars(
+                select(DatasetVersion)
+                .where(DatasetVersion.dataset_id == version.dataset_id)
+                .where(DatasetVersion.publish_status == "published")
+                .where(DatasetVersion.id != version_id)
+            )
+        ).all()
+        for o in others:
+            o.publish_status = "unpublished"
+            o.published_at = None
         version.publish_status = "published"
         version.published_at = _now()
         await session.commit()

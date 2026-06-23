@@ -63,7 +63,7 @@ async def test_create_returns_pending_runs_in_background(
     await _seed(session_factory)
 
     async def fake_run(
-        session, *, job_id, input_version, operators, output_dataset=None
+        session, *, job_id, input_version, operators
     ):
         return None, "process: []", "/tmp/run.log"
 
@@ -99,7 +99,7 @@ async def test_stop_running_job_cancels(
     release = asyncio.Event()
 
     async def blocking_run(
-        session, *, job_id, input_version, operators, output_dataset=None
+        session, *, job_id, input_version, operators
     ):
         started.set()  # 已进入执行(running 已提交)
         await release.wait()  # 挂住,模拟子进程在跑
@@ -325,7 +325,7 @@ async def test_manifest_job_allowed_with_multimodal(
         return True
 
     async def _fake_run(
-        session, *, job_id, input_version, operators, output_dataset=None
+        session, *, job_id, input_version, operators
     ):
         return None, "process: []", "/tmp/run.log"
 

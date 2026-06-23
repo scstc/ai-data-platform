@@ -55,7 +55,7 @@ def _stub_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     """打桩 run_process_job:产出一条带 produced_by_job_id 的版本 + 一条血缘边。"""
 
     async def fake_run(
-        session, *, job_id, input_version, operators, output_dataset=None
+        session, *, job_id, input_version, operators
     ):
         version = DatasetVersion(
             id=f"dsv-out-{job_id}",

@@ -21,7 +21,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
 from app.services import operator_catalog as oc
@@ -346,17 +345,12 @@ async def run_process_job(
     job_id: str,
     input_version: DatasetVersion,
     operators: list[dict[str, Any]],
-    output_dataset: Dataset | None = None,
 ) -> tuple[DatasetVersion, str, str]:
-    """对一个输入版本跑算子流水线 → 产出新版本。
-
-    output_dataset 为 None(默认)时写回输入数据集,产出新版本(沿用历史行为);
-    传入一个未持久化的 Dataset 时另存为新数据集,产物为其 v1——该 Dataset
-    仅在加工成功时随产物一起入库,失败不会留下空数据集。
+    """对一个输入版本跑算子流水线 → 写回输入数据集,产出新版本。
 
     返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 EngineError。
     """
-    dataset_id = output_dataset.id if output_dataset is not None else input_version.dataset_id
+    dataset_id = input_version.dataset_id
     max_vno = await session.scalar(
         select(func.max(DatasetVersion.version_no)).where(
             DatasetVersion.dataset_id == dataset_id
@@ -428,8 +422,6 @@ async def run_process_job(
             produced_by_job_id=job_id,
             note=f"加工产出(来自 v{input_version.version_no})",
         )
-    if output_dataset is not None:
-        session.add(output_dataset)
     session.add(version)
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
     await session.commit()

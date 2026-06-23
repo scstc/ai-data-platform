@@ -25,7 +25,7 @@ class Job(Base):
     # 主键形如 "job-" + 6 位 hex
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    # 类型:ingest | clean | quality | synth | process | review | annotate
+    # 类型:ingest | clean | quality | synth | process | review | annotate | distillation | synthesis(make) | augmentation
     type: Mapped[str] = mapped_column(String, nullable=False)
     # type=ingest 时回指所属采集任务配置(ingest_tasks.id);其余类型为空
     ingest_task_id: Mapped[str | None] = mapped_column(

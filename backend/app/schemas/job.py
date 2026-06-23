@@ -21,11 +21,6 @@ class JobCreate(CamelModel):
     type: str = "clean"
     dataset_version_id: str
     operators: list[OperatorSpec]
-    # 产物去向:
-    #   version     → 写回输入数据集,产出新版本(默认,保持原行为)
-    #   new_dataset → 另存为新数据集(名取 output_dataset_name),产物为其 v1
-    output_mode: str = "version"
-    output_dataset_name: str | None = None
 
 
 class QualityJobCreate(CamelModel):

@@ -13,17 +13,21 @@ from app.api import compat
 from app.api.v1 import (
     ai,
     audit,
+    augment,
     categories,
     content_safety,
     datasets,
     datasources,
+    distillation,
     files,
     ingest_push,
     ingest_tasks,
     jobs,
     llm_config,
+    make,
     operators,
     quality,
+    tags,
     uploads,
 )
 from app.core.audit import audit_middleware
@@ -75,6 +79,9 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(operators.router, prefix="/api/v1")
     app.include_router(quality.router, prefix="/api/v1")
+    app.include_router(distillation.router, prefix="/api/v1")
+    app.include_router(make.router, prefix="/api/v1")
+    app.include_router(augment.router, prefix="/api/v1")
     app.include_router(content_safety.router, prefix="/api/v1")
     app.include_router(ingest_tasks.router, prefix="/api/v1")
     app.include_router(ingest_push.router, prefix="/api/v1")
@@ -83,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(ai.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")
     app.include_router(categories.router, prefix="/api/v1")
+    app.include_router(tags.router, prefix="/api/v1")
     app.include_router(llm_config.router, prefix="/api/v1")
     app.include_router(compat.router, prefix="/api")
 

@@ -23,6 +23,101 @@ _CATALOG_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "operators_catalog.json"
 )
 
+# 蒸馏场景白名单:平台侧硬编码,data-juicer 仓无 PR
+# 限定"第一期只暴露轻量 CPU 算子":文本规则 filter + 文本去重 + 5 类 selector
+# (不含 LLM 评分、embedding 相似度、image/video 多模态算子)
+DISTILLATION_OPS: frozenset[str] = frozenset(
+    {
+        # text filters
+        "text_length_filter",
+        "token_num_filter",
+        "word_repetition_filter",
+        "character_repetition_filter",
+        "language_id_score_filter",
+        "perplexity_filter",
+        "flagged_words_filter",
+        "stopwords_filter",
+        "alphanumeric_filter",
+        "special_characters_filter",
+        # deduplicators (轻量,无 GPU/embedding)
+        "document_minhash_deduplicator",
+        "document_simhash_deduplicator",
+        # selectors
+        "topk_specified_field_selector",
+        "range_specified_field_selector",
+        "frequency_specified_field_selector",
+        "tags_specified_field_selector",
+        "random_selector",
+    }
+)
+
+
+def is_distillation_operator(name: str) -> bool:
+    """该算子是否在蒸馏白名单内(供 distillation router 校验)。"""
+    return name in DISTILLATION_OPS
+
+
+# 清洗场景白名单:数据清洗(需求 #7)的"清洗算子"——规则类 mapper + 繁简 / 标点 / 表情等
+# 与加工页通用 mapper 列表重叠但更聚焦,前端在加工页顶部 Select 选「清洗」时只显示这些
+CLEANSING_OPS: frozenset[str] = frozenset(
+    {
+        # 字符级 / 格式规范化
+        "remove_specific_chars_mapper",
+        "remove_repeat_sentences_mapper",
+        "remove_long_duplicate_sentences_mapper",
+        "remove_text_to_remove_mapper",
+        "clean_email_mapper",
+        "clean_ip_mapper",
+        "clean_links_mapper",
+        "clean_html_mapper",
+        "chinese_convert_mapper",
+        "punctuation_normalization_mapper",
+        "whitespace_normalization_mapper",
+        "unicode_normalization_mapper",
+        "replace_content_mapper",
+        # 语言识别(虽属 filter,但在清洗场景里常用)
+        "language_id_score_filter",
+        "flagged_words_filter",
+    }
+)
+
+
+# 合成与增强白名单:全部 LLM-based mapper(需求 #8)
+# 需求文档 #8 关键能力:LLM 造数据 + LLM 改写 + 蒸馏 + 区分原始/合成
+# 全部依赖 LLM,未配 OPENAI_API_KEY 时 _operator_block 走 needs_api 拦截
+# 拆为两个独立白名单:合成(make)=造新数据;增强(augment)=改写已有数据
+MAKE_OPS: frozenset[str] = frozenset(
+    {
+        # 合成:从无结构 / 种子 / 上下文生成新数据
+        "generate_qa_from_text_mapper",  # 1→N,无结构文本→QA 对
+        "generate_qa_from_examples_mapper",  # Self-Instruct:从种子示例生成新 QA
+        "optimize_prompt_mapper",  # 上下文扩展:few-shot 合成新 prompt
+    }
+)
+
+AUGMENT_OPS: frozenset[str] = frozenset(
+    {
+        # 增强:改写/扩写/校准/打标(均 1→1)
+        "optimize_qa_mapper",  # 优化 QA 对(同时优化 q+a)
+        "optimize_query_mapper",  # Evol-Instruct:只优化 query
+        "optimize_response_mapper",  # Evol-Instruct:只优化 response
+        "sentence_augmentation_mapper",  # 通用 paraphrasing/改写/扩写
+        "calibrate_qa_mapper",  # 事实校准 QA
+        "calibrate_response_mapper",  # 事实校准 response
+        "llm_extract_mapper",  # 通用结构化抽取
+        "pair_preference_mapper",  # DPO 偏好数据构造
+        "text_tagging_by_prompt_mapper",  # LLM 文本分类打标
+    }
+)
+
+
+def is_make_operator(name: str) -> bool:
+    return name in MAKE_OPS
+
+
+def is_augment_operator(name: str) -> bool:
+    return name in AUGMENT_OPS
+
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
 
 
@@ -79,9 +174,23 @@ _META_KEY_MAP = {
 
 
 def to_api(op: dict[str, Any]) -> dict[str, Any]:
-    """单个算子 → camelCase 出参形态;``runnable`` 用运行时有效状态覆盖。"""
+    """单个算子 → camelCase 出参形态;``runnable`` 用运行时有效状态覆盖。
+
+    一个算子可以同时打多个 scenarioGroup 标签(同时在加工和清洗场景里都合理):
+    前端 OperatorLibrary 用 scenarioGroup 过滤时显示"凡含此标签的算子"即可。
+    """
     out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items()}
     out["runnable"] = effective_runnable(op)
+    # 多个 scenarioGroup 标签并存:首次设置,后续 append。
+    # (前端暂只展示第一个;未来多标签场景再切到数组。)
+    if out["name"] in DISTILLATION_OPS:
+        out["scenarioGroup"] = "distillation"
+    elif out["name"] in CLEANSING_OPS:
+        out["scenarioGroup"] = "cleansing"
+    elif out["name"] in MAKE_OPS:
+        out["scenarioGroup"] = "make"
+    elif out["name"] in AUGMENT_OPS:
+        out["scenarioGroup"] = "augment"
     return out
 
 

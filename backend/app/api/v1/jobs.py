@@ -242,14 +242,6 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
     # media_ok:输入是 manifest 媒体集(_multimodal_block 已确保此时 torch 就绪)。
     if (blocked_resp := _operator_block(body.operators, input_version)) is not None:
         return blocked_resp
-    if (
-        body.output_mode == "new_dataset"
-        and not (body.output_dataset_name or "").strip()
-    ):
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "另存为新数据集时请填写新数据集名称"},
-        )
 
     job = Job(
         id=_new_job_id(),

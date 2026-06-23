@@ -71,6 +71,8 @@ class DatasetRead(CamelModel):
     # 最新版本展示标签(如 v2026.6.16 (#5));无版本时 None。
     # 非 ORM 字段,由路由批量聚合填充。
     latest_version_label: str | None = None
+    # 标签名列表(多对多);非 ORM 字段,由路由批量聚合填充。
+    tags: list[str] = []
 
 
 class HostS3Request(CamelModel):
@@ -124,3 +126,5 @@ class DatasetUpdate(CamelModel):
     # 分类(#15):受控分类库引用 id;显式传 null 清空分类
     category_id: str | None = None
     valid_until: datetime | None = None
+    # 标签名列表(多对多);传入(含空 list)即全量替换,不传不动。
+    tags: list[str] | None = None

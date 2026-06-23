@@ -18,13 +18,18 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import async_session_factory
-from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
+from app.schemas.augment import AugmentGoal
+from app.schemas.distillation import DistillationGoal
 from app.schemas.job import JobCreate
+from app.schemas.make import MakeGoal
 from app.services import engine
+from app.services.augment import run_augment_job
+from app.services.distillation import run_distillation_job
 from app.services.engine import EngineError, run_process_job
 from app.services.external_store import ExternalStoreError
+from app.services.make import run_make_job
 
 # 后台任务引用(防被 GC 回收)
 _tasks: set[asyncio.Task] = set()
@@ -49,9 +54,30 @@ def request_cancel(job_id: str) -> None:
     _cancelled.add(job_id)
 
 
-def spawn(job_id: str, body: JobCreate) -> None:
-    """起一个后台任务执行该加工任务(立即返回,不等跑完)。"""
-    task = asyncio.create_task(_run_job(job_id, body))
+def spawn(
+    job_id: str,
+    body: JobCreate,
+    *,
+    goal: DistillationGoal | None = None,
+    make_goal: MakeGoal | None = None,
+    augment_goal: AugmentGoal | None = None,
+    output_dataset_id: str | None = None,
+) -> None:
+    """起一个后台任务执行该加工任务(立即返回,不等跑完)。
+
+    蒸馏:goal;合成(make):make_goal;增强(augment):augment_goal;
+    加工:不传任何 goal。
+    """
+    task = asyncio.create_task(
+        _run_job(
+            job_id,
+            body,
+            goal=goal,
+            make_goal=make_goal,
+            augment_goal=augment_goal,
+            output_dataset_id=output_dataset_id,
+        )
+    )
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
@@ -78,12 +104,22 @@ async def reconcile_orphans(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
-async def _run_job(job_id: str, body: JobCreate) -> None:
+async def _run_job(
+    job_id: str,
+    body: JobCreate,
+    *,
+    goal: DistillationGoal | None = None,
+    make_goal: MakeGoal | None = None,
+    augment_goal: AugmentGoal | None = None,
+    output_dataset_id: str | None = None,
+) -> None:
     """后台执行:排队(信号量)→ running → 跑算子流水线 → 落终态。
 
     用独立会话(请求会话已关闭)。被 terminate_job 杀掉的子进程会非零退出 →
     run_process_job 抛 EngineError,据 _cancelled 区分是「被停止(cancelled)」还是
     「真失败(failed)」。
+
+    四类分支:goal → 蒸馏;make_goal → 合成;augment_goal → 增强;否则加工。
     """
     async with async_session_factory() as session:
         job = await session.get(Job, job_id)
@@ -103,19 +139,6 @@ async def _run_job(job_id: str, body: JobCreate) -> None:
             _cancelled.discard(job_id)
             return
 
-        # 另存为新数据集:在此构建(不入库),由 run_process_job 加工成功后随产物落库
-        output_dataset = None
-        if body.output_mode == "new_dataset":
-            src = await session.get(Dataset, input_version.dataset_id)
-            output_dataset = Dataset(
-                id=_new_dataset_id(),
-                name=(body.output_dataset_name or "").strip(),
-                data_type=src.data_type if src else None,
-                category_id=src.category_id if src else None,
-                owner="admin",
-                creator="admin",
-            )
-
         try:
             # 并发信号量(engine 持有,跨模块按需取以便测试可整体重建)
             async with engine._semaphore:
@@ -124,13 +147,40 @@ async def _run_job(job_id: str, body: JobCreate) -> None:
                 job.state = "running"
                 job.started_at = _now()
                 await session.commit()
-                _version, yaml_text, log_path = await run_process_job(
-                    session,
-                    job_id=job_id,
-                    input_version=input_version,
-                    operators=[o.model_dump() for o in body.operators],
-                    output_dataset=output_dataset,
-                )
+                if goal is not None:
+                    _version, yaml_text, log_path, _report = await run_distillation_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        operators=[o.model_dump() for o in body.operators],
+                        goal=goal,
+                        output_dataset_id=output_dataset_id,
+                    )
+                elif make_goal is not None:
+                    _version, yaml_text, log_path, _report = await run_make_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        operators=[o.model_dump() for o in body.operators],
+                        goal=make_goal,
+                        output_dataset_id=output_dataset_id,
+                    )
+                elif augment_goal is not None:
+                    _version, yaml_text, log_path, _report = await run_augment_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        operators=[o.model_dump() for o in body.operators],
+                        goal=augment_goal,
+                        output_dataset_id=output_dataset_id,
+                    )
+                else:
+                    _version, yaml_text, log_path = await run_process_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        operators=[o.model_dump() for o in body.operators],
+                    )
             job.state = "success"
             job.progress = 100
             job.config_yaml = yaml_text
