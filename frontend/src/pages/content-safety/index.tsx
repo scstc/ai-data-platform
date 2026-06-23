@@ -41,6 +41,7 @@ const STATE_META: Record<
 > = {
   pending: { text: '待运行', color: 'default' },
   running: { text: '运行中', color: 'processing' },
+  paused: { text: '已暂停', color: 'gold' },
   success: { text: '成功', color: 'success' },
   failed: { text: '失败', color: 'error' },
   cancelled: { text: '已取消', color: 'warning' },

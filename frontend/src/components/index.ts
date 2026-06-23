@@ -20,5 +20,6 @@ export { default as OfflineBanner } from './OfflineBanner';
 export { default as PlaceholderPage } from './PlaceholderPage';
 export { default as StandardFormRow } from './StandardFormRow';
 export { default as TagSelect } from './TagSelect';
+export { default as VersionFilePreview } from './VersionFilePreview';
 
 export { AvatarDropdown, Footer, LangDropdown, THEME_STORAGE_KEY, ThemeSwitch };

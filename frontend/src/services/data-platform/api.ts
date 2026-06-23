@@ -663,6 +663,28 @@ export async function listJobs(
   });
 }
 
+/** 数据任务统一列表(跨治理+评估类型)GET /api/v1/data-tasks
+ *  types=逗号分隔类型白名单;state=单值;keyword=任务名模糊。 */
+export async function listDataTasks(
+  params?: {
+    current?: number;
+    pageSize?: number;
+    types?: string;
+    state?: string;
+    keyword?: string;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.PageResult<DataPlatform.Job>>(
+    '/api/v1/data-tasks',
+    {
+      method: 'GET',
+      params: { ...params },
+      ...(options || {}),
+    },
+  );
+}
+
 /** 新建并执行加工任务 POST /api/v1/jobs */
 export async function createJob(
   body: DataPlatform.JobCreate,
@@ -689,6 +711,25 @@ export async function stopJob(id: string, options?: { [key: string]: any }) {
   return request<{ success: boolean }>(`/api/v1/jobs/${id}/stop`, {
     method: 'POST',
     // skipErrorHandler:交由调用方 catch 展示后端「不在运行中」等 message
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
+/** 暂停运行中/排队中的任务（杀子进程并标记 paused，保留 spec）POST /api/v1/jobs/:id/pause。
+ *  dj-process 无原生暂停,故暂停=终止当前运行;继续(resume)将按 spec 从头重跑。 */
+export async function pauseJob(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/jobs/${id}/pause`, {
+    method: 'POST',
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
+/** 继续已暂停的任务（重置 pending 并按原 spec 从头重跑，复用同一记录）POST /api/v1/jobs/:id/resume */
+export async function resumeJob(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/jobs/${id}/resume`, {
+    method: 'POST',
     skipErrorHandler: true,
     ...(options || {}),
   });

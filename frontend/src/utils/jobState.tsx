@@ -1,5 +1,5 @@
-// 任务状态枚举 + 渲染辅助:从 processing 页抽出来,供 distillation 等新模块共用。
-// 与后端 Job.state 严格对齐(pending/running/success/failed/cancelled)。
+// 任务状态枚举 + 渲染辅助:从 processing 页抽出来,供 distillation/data-tasks 等模块共用。
+// 与后端 Job.state 严格对齐(pending/running/paused/success/failed/cancelled)。
 import { Tag } from 'antd';
 
 export const STATE_META: Record<
@@ -8,6 +8,7 @@ export const STATE_META: Record<
 > = {
   pending: { text: '待运行', color: 'default' },
   running: { text: '运行中', color: 'processing' },
+  paused: { text: '已暂停', color: 'gold' },
   success: { text: '成功', color: 'success' },
   failed: { text: '失败', color: 'error' },
   cancelled: { text: '已取消', color: 'warning' },

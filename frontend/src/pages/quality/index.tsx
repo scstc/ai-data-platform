@@ -16,6 +16,7 @@ import {
   Drawer,
   Empty,
   message,
+  Popconfirm,
   Spin,
   Statistic,
   Tabs,
@@ -26,7 +27,9 @@ import {
 } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  batchDeleteJobs,
   createJob,
+  deleteJob,
   getJob,
   getQualityReport,
   getVersionStats,
@@ -41,6 +44,7 @@ const STATE_META: Record<
 > = {
   pending: { text: '待运行', color: 'default' },
   running: { text: '运行中', color: 'processing' },
+  paused: { text: '已暂停', color: 'gold' },
   success: { text: '成功', color: 'success' },
   failed: { text: '失败', color: 'error' },
   cancelled: { text: '已取消', color: 'warning' },
@@ -241,7 +245,9 @@ const FilterTab: React.FC<{
   // running=true 时禁止重复提交，并展示轮询进度 Alert
   const [running, setRunning] = useState(false);
   const [statusText, setStatusText] = useState('');
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   // 组件卸载时清理轮询定时器，避免在抽屉关闭后仍写 state
   useEffect(
@@ -251,7 +257,10 @@ const FilterTab: React.FC<{
     [],
   );
 
-  const pollUntilDone = (jobId: string, outputSnapshot: DataPlatform.IngestOutput | undefined) => {
+  const pollUntilDone = (
+    jobId: string,
+    outputSnapshot: DataPlatform.IngestOutput | undefined,
+  ) => {
     const tick = async () => {
       try {
         const res = await getJob(jobId);
@@ -265,7 +274,9 @@ const FilterTab: React.FC<{
           setRunning(false);
           setStatusText('');
           // 优先用 job 最新 output，其次用提交时快照
-          const out = (j.output as DataPlatform.IngestOutput | undefined) ?? outputSnapshot;
+          const out =
+            (j.output as DataPlatform.IngestOutput | undefined) ??
+            outputSnapshot;
           if (out) {
             message.success(
               `低质过滤完成，产出 ${out.datasetName} ${out.versionLabel ?? `v${out.versionNo}`}（${out.rows ?? '-'} 行）`,
@@ -351,7 +362,9 @@ const FilterTab: React.FC<{
               setRunning(false);
               setStatusText('');
               if (created.state === 'success') {
-                const out = created.output as DataPlatform.IngestOutput | undefined;
+                const out = created.output as
+                  | DataPlatform.IngestOutput
+                  | undefined;
                 if (out) {
                   message.success(
                     `低质过滤完成，产出 ${out.datasetName} ${out.versionLabel ?? `v${out.versionNo}`}（${out.rows ?? '-'} 行）`,
@@ -413,6 +426,7 @@ const Quality: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
+  const [selectedRows, setSelectedRows] = useState<DataPlatform.Job[]>([]);
   const [qualityOps, setQualityOps] = useState<DataPlatform.Operator[]>([]);
   const opMap = useMemo(
     () => Object.fromEntries(qualityOps.map((o) => [o.name, o])),
@@ -440,6 +454,40 @@ const Quality: React.FC = () => {
       history.push(`/datasets/list?highlight=${output.datasetId}`);
     } else {
       history.push('/datasets/list');
+    }
+  };
+
+  /** 删除单个质量任务(通用 /jobs/:id;后端只挡 running,前端对 running 隐藏入口)。 */
+  const handleDelete = async (id: string) => {
+    const hide = message.loading('正在删除…', 0);
+    try {
+      await deleteJob(id);
+      hide();
+      message.success('任务已删除');
+      if (currentJob?.id === id) {
+        setDetailOpen(false);
+        setCurrentJob(undefined);
+      }
+      actionRef.current?.reload();
+    } catch {
+      hide();
+      message.error('删除失败，请重试');
+    }
+  };
+
+  /** 批量删除质量任务(后端跳过 running 的,返回实际删除数)。 */
+  const handleBatchDelete = async () => {
+    const ids = selectedRows.map((r) => r.id);
+    const hide = message.loading('正在批量删除…', 0);
+    try {
+      const res = await batchDeleteJobs(ids);
+      hide();
+      message.success(`已删除 ${res?.data?.deleted ?? ids.length} 个任务`);
+      setSelectedRows([]);
+      actionRef.current?.reload();
+    } catch {
+      hide();
+      message.error('批量删除失败，请重试');
     }
   };
 
@@ -477,6 +525,29 @@ const Quality: React.FC = () => {
       dataIndex: 'createdAt',
       render: (_, r) => formatDateTime(r.createdAt),
     },
+    {
+      title: '操作',
+      valueType: 'option',
+      key: 'option',
+      width: 80,
+      render: (_, r) =>
+        // 运行中的任务后端拒绝删除(需先停止);其余状态给删除入口
+        r.state === 'running'
+          ? []
+          : [
+              <Popconfirm
+                key="delete"
+                title="删除该任务记录？"
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleDelete(r.id)}
+              >
+                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>
+                  删除
+                </a>
+              </Popconfirm>,
+            ],
+    },
   ];
 
   return (
@@ -487,6 +558,23 @@ const Quality: React.FC = () => {
         rowKey="id"
         search={false}
         options={{ reload: true }}
+        rowSelection={{
+          selectedRowKeys: selectedRows.map((r) => r.id),
+          onChange: (_keys, rows) =>
+            setSelectedRows(rows as DataPlatform.Job[]),
+        }}
+        tableAlertOptionRender={() => (
+          <Popconfirm
+            title={`确认删除选中的 ${selectedRows.length} 个任务？`}
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={handleBatchDelete}
+          >
+            <Button type="link" danger>
+              批量删除
+            </Button>
+          </Popconfirm>
+        )}
         request={async (params) => {
           const res = await listJobs({
             current: params.current,
