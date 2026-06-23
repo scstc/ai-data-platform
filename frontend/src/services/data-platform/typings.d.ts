@@ -509,6 +509,37 @@ declare namespace DataPlatform {
     tags?: string[];
   };
 
+  /** 血缘图节点:版本 或 任务 */
+  type LineageNode = {
+    id: string;
+    kind: 'version' | 'job';
+    createdAt: string;
+    // version 字段
+    datasetId?: string;
+    datasetName?: string;
+    versionNo?: number;
+    versionLabel?: string;
+    origin?: string;
+    rows?: number;
+    scanVerdict?: string;
+    publishStatus?: string;
+    /** 原始接入(无产出任务) */
+    isOriginal?: boolean;
+    /** 属于当前选中数据集(前端高亮) */
+    isFocus?: boolean;
+    // job 字段
+    name?: string;
+    jobType?: string;
+    state?: string;
+    /** 该任务执行的算子链(name+params,来自 job.spec.operators);review 类无 */
+    operators?: { name: string; params: Record<string, any> }[];
+  };
+
+  /** 血缘边:输入版本 --input--> 任务 --output--> 产出版本 */
+  type LineageEdge = { from: string; to: string; kind: 'input' | 'output' };
+
+  type LineageGraph = { nodes: LineageNode[]; edges: LineageEdge[] };
+
   /** 外部 S3 桶内对象（列对象接口返回项，#18） */
   type S3Object = {
     key: string;

@@ -1,15 +1,20 @@
 /**
  * 已发布数据集 — 算法工程师消费视图。
  * 只展示含已发布(publishStatus=published)版本的数据集，前端只读，无删除/编辑权限。
+ * 详情抽屉:已发布版本表 + 数据预览(选版本 → 文件清单 + 按文件预览,复用 VersionFilePreview)。
  */
 import type { ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { Tag, Tooltip, Typography } from 'antd';
-import { getDataset, listDatasets, previewDatasetVersion } from '@/services/data-platform';
-import { formatDateTime } from '@/utils/format';
-import { useState } from 'react';
-import { Drawer, Spin, Table, Empty } from 'antd';
 import type { TableColumnsType } from 'antd';
+import { Drawer, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { useState } from 'react';
+import { VersionFilePreview } from '@/components';
+import { getDataset, listDatasets } from '@/services/data-platform';
+import { formatDateTime } from '@/utils/format';
+import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
+import { sensitivityLevelTag } from '@/utils/sensitivityLevel';
+import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
+import { tagColor } from '@/utils/tags';
 
 const { Title } = Typography;
 
@@ -20,38 +25,26 @@ const fmtSize = (n?: number) => {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 };
 
-const cellText = (v: unknown) =>
-  v === null || v === undefined
-    ? ''
-    : typeof v === 'object'
-      ? JSON.stringify(v)
-      : String(v);
-
 const DatasetsPresets: React.FC = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
-  const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
-  const [previewLoading, setPreviewLoading] = useState(false);
+  // 当前预览的版本 id(默认首个已发布版本);文件清单 + 按文件预览交给 VersionFilePreview
+  const [previewVersionId, setPreviewVersionId] = useState<string>();
 
   const openDetail = async (id: string) => {
     const res = await getDataset(id);
     if (res?.success) {
       setDetail(res.data);
-      setPreview(undefined);
+      const published = res.data.versions.find(
+        (v) => v.publishStatus === 'published',
+      );
+      setPreviewVersionId(published?.id);
       setDetailOpen(true);
-      // 默认预览第一个已发布版本
-      const published = res.data.versions.find((v) => v.publishStatus === 'published');
-      if (published) {
-        setPreviewLoading(true);
-        try {
-          const pv = await previewDatasetVersion(published.id, { limit: 50 });
-          setPreview(pv);
-        } finally {
-          setPreviewLoading(false);
-        }
-      }
     }
   };
+
+  const publishedVersions =
+    detail?.versions.filter((v) => v.publishStatus === 'published') ?? [];
 
   const versionColumns: TableColumnsType<DataPlatform.DatasetVersion> = [
     {
@@ -110,21 +103,68 @@ const DatasetsPresets: React.FC = () => {
       ),
     },
     {
-      title: '类型',
-      dataIndex: 'dataType',
+      title: '来源',
+      dataIndex: 'sourceKind',
       valueType: 'select',
-      valueEnum: {
-        text: { text: 'text' },
-        multimodal: { text: 'multimodal' },
-        qa: { text: 'qa' },
-        cot: { text: 'cot' },
-        preference: { text: 'preference' },
-        timeseries: { text: 'timeseries' },
-        gis: { text: 'gis' },
-      },
-      render: (_, r) => (r.dataType ? <Tag>{r.dataType}</Tag> : '-'),
+      valueEnum: SOURCE_KIND_ENUM,
+      render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
     },
-    { title: '分类', dataIndex: 'categoryName', render: (_, r) => r.categoryName || '-', search: false },
+    {
+      title: '版本',
+      dataIndex: 'latestVersionLabel',
+      search: false,
+      width: 150,
+      render: (_, r) =>
+        r.latestVersionLabel ? (
+          <Tag color="blue">{r.latestVersionLabel}</Tag>
+        ) : (
+          '-'
+        ),
+    },
+    {
+      title: '数据类型',
+      dataIndex: 'semanticType',
+      valueType: 'select',
+      valueEnum: SEMANTIC_TYPE_ENUM,
+      render: (_, r) => <SemanticTypeTag type={r.semanticType} />,
+    },
+    {
+      title: '分类',
+      dataIndex: 'categoryName',
+      search: false,
+      render: (_, r) => r.categoryName || <Tag bordered={false}>未设置</Tag>,
+    },
+    {
+      title: '分级',
+      dataIndex: 'sensitivityLevel',
+      search: false,
+      width: 96,
+      render: (_, r) => {
+        const tag = sensitivityLevelTag(r.sensitivityLevel);
+        return tag ? (
+          <Tag color={tag.color}>{tag.label}</Tag>
+        ) : (
+          <Tag bordered={false}>未设置</Tag>
+        );
+      },
+    },
+    {
+      title: '标签',
+      dataIndex: 'tags',
+      search: false,
+      render: (_, r) =>
+        r.tags?.length ? (
+          r.tags.map((t) => (
+            <Tag key={t} color={tagColor(t)}>
+              {t}
+            </Tag>
+          ))
+        ) : (
+          <Tag bordered={false}>未设置</Tag>
+        ),
+    },
+    { title: '描述', dataIndex: 'description', search: false, ellipsis: true },
+    { title: '创建人', dataIndex: 'creator', search: false },
     {
       title: '创建时间',
       dataIndex: 'createdAt',
@@ -142,14 +182,6 @@ const DatasetsPresets: React.FC = () => {
     },
   ];
 
-  const previewColumns = (preview?.columns ?? []).map((c) => ({
-    title: c,
-    dataIndex: c,
-    key: c,
-    ellipsis: true,
-    render: (v: unknown) => cellText(v),
-  }));
-
   return (
     <PageContainer>
       <ProTable<DataPlatform.Dataset>
@@ -162,7 +194,8 @@ const DatasetsPresets: React.FC = () => {
             current: params.current,
             pageSize: params.pageSize,
             name: params.name || undefined,
-            dataType: params.dataType || undefined,
+            semanticType: params.semanticType || undefined,
+            sourceKind: params.sourceKind || undefined,
             publishStatus: 'published',
           });
           return { data: res.data, total: res.total, success: res.success };
@@ -171,13 +204,13 @@ const DatasetsPresets: React.FC = () => {
       />
 
       <Drawer
-        width={860}
+        width={1100}
         open={detailOpen}
         title={detail?.name}
         onClose={() => {
           setDetailOpen(false);
           setDetail(undefined);
-          setPreview(undefined);
+          setPreviewVersionId(undefined);
         }}
       >
         {detail && (
@@ -187,30 +220,30 @@ const DatasetsPresets: React.FC = () => {
               rowKey="id"
               size="small"
               pagination={false}
-              dataSource={detail.versions.filter((v) => v.publishStatus === 'published')}
+              dataSource={publishedVersions}
               columns={versionColumns}
             />
 
             <Title level={5} style={{ marginTop: 16 }}>
-              数据预览{preview ? `（共 ${preview.total} 行，前 50 行）` : ''}
+              数据预览
             </Title>
-            <Spin spinning={previewLoading}>
-              {preview && preview.data.length > 0 ? (
-                <Table
-                  rowKey={(_, i) => String(i)}
-                  size="small"
-                  scroll={{ x: 'max-content' }}
-                  pagination={{ pageSize: 10 }}
-                  dataSource={preview.data}
-                  columns={previewColumns}
-                />
-              ) : (
-                <Empty
-                  description={preview?.message ?? '暂无数据'}
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                />
-              )}
-            </Spin>
+            <Space style={{ marginBottom: 8 }}>
+              <Typography.Text type="secondary">版本</Typography.Text>
+              <Select
+                size="small"
+                style={{ width: 280 }}
+                value={previewVersionId}
+                onChange={setPreviewVersionId}
+                options={publishedVersions.map((v) => ({
+                  label: v.versionLabel ?? `v${v.versionNo}`,
+                  value: v.id,
+                }))}
+              />
+            </Space>
+            <VersionFilePreview
+              versionId={previewVersionId}
+              semanticType={detail.semanticType}
+            />
           </>
         )}
       </Drawer>

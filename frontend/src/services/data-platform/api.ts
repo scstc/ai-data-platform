@@ -599,6 +599,17 @@ export async function getDataset(id: string, options?: { [key: string]: any }) {
   );
 }
 
+/** 数据集血缘图(版本↔任务 DAG,跨数据集)GET /api/v1/datasets/{id}/lineage */
+export async function getDatasetLineage(
+  datasetId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.LineageGraph; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/lineage`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
 /** 更新数据集元数据 PATCH /api/v1/datasets/{id} */
 export async function updateDataset(id: string, body: DataPlatform.DatasetUpdate) {
   return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(

@@ -8,7 +8,7 @@ import {
   ProFormTextArea,
   ProFormTreeSelect,
 } from '@ant-design/pro-components';
-import { history, useAccess, useParams } from '@umijs/max';
+import { history, useAccess, useParams, useSearchParams } from '@umijs/max';
 import {
   Button,
   Card,
@@ -88,6 +88,7 @@ const PUBLISH_STATUS_TAG: Record<string, { color: string; text: string }> = {
  *  取代原列表内的详情抽屉,不同类型数据集进入同一路由、按 semanticType 渲染不同数据视图。 */
 const DatasetDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const access = useAccess();
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
   const [loading, setLoading] = useState(true);
@@ -114,13 +115,25 @@ const DatasetDetail: React.FC = () => {
       const res = await getDataset(id);
       if (res?.success) {
         setDetail(res.data);
-        const latest = res.data.versions[res.data.versions.length - 1];
-        if (latest) await loadPreview(latest.id);
+        // 深链 ?version=<id> 命中(如从"数据血缘"点版本跳来)则定位到该版本,否则落最新版
+        const wanted = searchParams.get('version');
+        const target =
+          wanted && res.data.versions.some((v) => v.id === wanted)
+            ? wanted
+            : res.data.versions[res.data.versions.length - 1]?.id;
+        if (target) await loadPreview(target);
       }
     } finally {
       setLoading(false);
     }
-  }, [id, loadPreview]);
+  }, [id, loadPreview, searchParams]);
+
+  // 深链定位:activeVersion 变化后,把左侧版本列表里对应项滚到可见区
+  useEffect(() => {
+    if (!activeVersion) return;
+    const el = document.querySelector(`[data-version-id="${activeVersion}"]`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [activeVersion]);
 
   useEffect(() => {
     load();
@@ -481,6 +494,7 @@ const DatasetDetail: React.FC = () => {
                       SCAN_VERDICT_TAG.unscanned;
                     return (
                       <List.Item
+                        data-version-id={v.id}
                         onClick={() => loadPreview(v.id)}
                         style={{
                           cursor: 'pointer',
