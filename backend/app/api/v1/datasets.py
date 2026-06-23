@@ -34,12 +34,15 @@ from app.schemas.dataset import (
     HostS3Request,
     PlatformHostRequest,
 )
+from app.services.ai import get_ai_provider
+from app.services.engine import _semaphore
 from app.services.external_store import (
     MAX_MANIFEST_MEMBERS,
     MAX_MATERIALIZE_BYTES,
     ExternalStoreError,
     download_to_temp,
     head_records,
+    list_objects,
     parse_s3_uri,
     platform_config,
     presigned_get_url,
@@ -62,6 +65,7 @@ from app.services.landing import (
     normalize_to_records,
     records_to_jsonl_bytes,
 )
+from app.services.review import precheck_records
 from app.services.semantic_registry import (
     SemanticValidationError,
     apply_semantic_spec,
@@ -90,6 +94,8 @@ SemanticTypeForm = Annotated[str | None, Form(alias="semanticType")]
 StrictQuery = Annotated[bool, Query(alias="strict")]
 DescForm = Annotated[str | None, Form()]
 CategoryIdForm = Annotated[str | None, Form(alias="categoryId")]
+SafetyCheckForm = Annotated[bool, Form(alias="safety_check")]
+SafetyUseLlmForm = Annotated[bool, Form(alias="safety_use_llm")]
 CreatedStartQuery = Annotated[datetime | None, Query(alias="createdStart")]
 CreatedEndQuery = Annotated[datetime | None, Query(alias="createdEnd")]
 
@@ -489,6 +495,8 @@ async def upload_batch_as_dataset(
     data_type: DataTypeForm = None,
     semantic_type: SemanticTypeForm = None,
     category_id: CategoryIdForm = None,
+    safety_check: SafetyCheckForm = True,
+    safety_use_llm: SafetyUseLlmForm = False,
 ) -> JSONResponse:
     """单一格式批量本地上传:一批同格式文本/结构化文件 → 原文件复制进平台内置 MinIO
     + 合并解析为一个 data.jsonl(也存 MinIO)→ 生成一个受管数据集。
@@ -587,6 +595,36 @@ async def upload_batch_as_dataset(
             inferred = infer_semantic_from_data_type(data_type)
             effective_semantic = inferred.value if inferred else None
 
+        # 内容安全前置预检(#4):数据集落库前对全量解析文本跑审核,违规则回滚 + 回收
+        # MinIO 原件,绝不创建脏数据集。默认敏感词 + PII(秒级),LLM 可选(默认关)。
+        # 拦截口径:高危命中 或 违规占比 ≥ _BLOCK_RATIO(见 review.precheck_records)。
+        if safety_check:
+            pre_cfg = {
+                "useFlaggedWords": True,
+                "usePii": True,
+                "useLlm": safety_use_llm,
+                "sampleLimit": 500,
+            }
+            provider = get_ai_provider(settings) if safety_use_llm else None
+            async with _semaphore:
+                pre = await precheck_records(
+                    all_records, pre_cfg, provider=provider
+                )
+            if pre["blocked"]:
+                await session.rollback()
+                await _gc_manifest_objects((bucket, prefix))
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "success": False,
+                        "message": "内容安全预检未通过,已拦截创建",
+                        "reviewReport": pre["report"],
+                        "findings": pre["findings_sample"],
+                        "ratio": pre["ratio"],
+                        "highSeverity": pre["highSeverity"],
+                    },
+                )
+
         jsonl_bytes = records_to_jsonl_bytes(all_records)
         storage_uri = await upload_jsonl_to_uploads(dataset_id, 1, jsonl_bytes)
 
@@ -659,6 +697,31 @@ async def list_version_members(
         )
 
     if version.format != MANIFEST_FORMAT:
+        # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件,供按文件预览
+        if version.origin == "managed" and str(version.storage_uri).startswith(
+            "s3://"
+        ):
+            try:
+                cfg = platform_config()
+                bucket, _vkey = parse_s3_uri(version.storage_uri)
+                objs = await list_objects(
+                    cfg, bucket, f"{version.dataset_id}/originals/"
+                )
+            except ExternalStoreError:
+                objs = []
+            if objs:
+                members = [
+                    DatasetMemberRead(
+                        name=Path(o["key"]).name,
+                        key=o["key"],
+                        bucket=bucket,
+                        format=_file_ext(Path(o["key"]).name),
+                        size=o.get("size"),
+                    ).model_dump(by_alias=True)
+                    for o in objs
+                ]
+                return JSONResponse(content={"data": members, "success": True})
+        # 回退:单一成员(合并 jsonl 本身)
         bucket = ""
         key = version.storage_uri
         if str(version.storage_uri).startswith("s3://"):
@@ -1300,6 +1363,7 @@ async def preview_version(
     session: SessionDep,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    key: str | None = Query(None, description="指定则预览该原件(单文件,列纯净)"),
 ) -> JSONResponse:
     """预览某版本的数据(读 jsonl,分页返回若干行 + 列名 + 总行数)。
 
@@ -1351,6 +1415,35 @@ async def preview_version(
                 "total": version.rows or 0,
                 "success": True,
                 "message": "二进制文件不支持预览,请下载查看",
+            }
+        )
+
+    # 指定原件预览(受管批量版本的某个原始文件):单文件 normalize,列纯净,
+    # 绕开合并 jsonl 的全行 key 并集,消除多文件字段错乱
+    if key:
+        try:
+            cfg = platform_config()
+            bucket, _vk = parse_s3_uri(version.storage_uri)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503, content={"success": False, "message": str(exc)}
+            )
+        try:
+            rows = await head_records(
+                cfg, bucket, key, _file_ext(Path(key).name), offset + limit
+            )
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"读取原件失败:{exc}"},
+            )
+        rows = rows[offset : offset + limit]
+        return JSONResponse(
+            content={
+                "data": rows,
+                "columns": _columns_of(rows),
+                "total": version.rows or len(rows),
+                "success": True,
             }
         )
 

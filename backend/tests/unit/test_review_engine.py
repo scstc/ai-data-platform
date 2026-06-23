@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from app.services.review import scan_version
+from app.services.review import precheck_records, scan_version
 
 
 def _run(rows: list[dict[str, Any]], config: dict[str, Any]):
@@ -122,3 +122,75 @@ def test_no_sample_limit_scans_all() -> None:
     _findings, _tagged, report = _run(rows, {})
     assert report["scannedRows"] == 3
     assert report["sampleLimitApplied"] is False
+
+
+# ---- precheck_records:上传前置审核阈值判定(高危即拦 或 占比 ≥ _BLOCK_RATIO=10%) ----
+
+
+def _run_precheck(
+    rows: list[dict[str, Any]], config: dict[str, Any], provider: Any = None
+) -> dict[str, Any]:
+    return asyncio.run(precheck_records(rows, config, provider=provider))
+
+
+def test_precheck_clean_passes() -> None:
+    """干净文本:blocked=False,零违规。"""
+    rows = [{"text": "正常的技术文档内容"}] * 10
+    pre = _run_precheck(rows, {"useFlaggedWords": True, "usePii": False})
+    assert pre["blocked"] is False
+    assert pre["flaggedRows"] == 0
+    assert pre["highSeverity"] == 0
+    assert pre["ratio"] == 0.0
+
+
+def test_precheck_ratio_blocks() -> None:
+    """违规占比 ≥ 10% 拦截(内置词表命中,severity=medium,非高危,靠占比拦)。"""
+    rows = [{"text": "赌博网站推广"}] * 3 + [{"text": "正常内容"}] * 7  # 30% >= 10%
+    pre = _run_precheck(rows, {"useFlaggedWords": True, "usePii": False})
+    assert pre["blocked"] is True
+    assert pre["flaggedRows"] == 3
+    assert pre["ratio"] >= 0.10
+    assert pre["highSeverity"] == 0  # 内置词表命中是 medium
+
+
+def test_precheck_below_ratio_passes() -> None:
+    """少量违规(占比 < 10%)且无高危 → 放行。"""
+    rows = [{"text": "赌博"}] + [{"text": "正常"}] * 19  # 5% < 10%
+    pre = _run_precheck(rows, {"useFlaggedWords": True, "usePii": False})
+    assert pre["blocked"] is False
+    assert pre["flaggedRows"] == 1
+    assert pre["ratio"] < 0.10
+
+
+def test_precheck_findings_sample_capped() -> None:
+    """findings_sample 最多 20 条(避免大表全量回传前端)。"""
+    rows = [{"text": "赌博"}] * 30
+    pre = _run_precheck(rows, {"useFlaggedWords": True, "usePii": False})
+    assert len(pre["findings_sample"]) <= 20
+
+
+class _FakeHighSeverityProvider:
+    """模拟 LLM provider:对所有文本返回 high severity 违规(测"高危即拦"路径)。"""
+
+    async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
+        return [
+            {
+                "flagged": True,
+                "category": "politics",
+                "severity": "high",
+                "reason": "测试高危",
+            }
+            for _ in texts
+        ]
+
+
+def test_precheck_high_severity_blocks() -> None:
+    """高危命中(severity=high)即拦,即使占比 < 10%。"""
+    rows = [{"text": "某内容"}] + [{"text": "正常"}] * 19  # 5% < 10%, 但 high
+    pre = _run_precheck(
+        rows,
+        {"useLlm": True, "useFlaggedWords": False, "usePii": False},
+        provider=_FakeHighSeverityProvider(),  # type: ignore[arg-type]
+    )
+    assert pre["blocked"] is True
+    assert pre["highSeverity"] >= 1

@@ -38,6 +38,8 @@ _SNIPPET_MAX = 200
 _MAX_SCAN_CHARS = 20_000
 # 严重度优先级(取每行最高时用)
 _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+# 上传前置审核拦截阈值:违规占比(flaggedRows/scannedRows) ≥ 此值即拦截
+_BLOCK_RATIO = 0.10
 # 各 source 命中的默认严重度
 _KEYWORD_SEVERITY = "medium"
 _FLAGGED_SEVERITY = "medium"
@@ -355,3 +357,38 @@ async def scan_version(
         "warnings": warnings,
     }
     return findings, tagged_rows, report
+
+
+async def precheck_records(
+    records: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    provider: AIProvider | None = None,
+) -> dict[str, Any]:
+    """上传前置内容安全预检:对已解析 records 跑 scan_version,按阈值判定是否放行。
+
+    纯判定、无副作用、不碰 DB/存储,供上传 handler 在数据集落库前调用。
+    拦截口径(阈值 _BLOCK_RATIO):
+      - 高危命中(bySeverity.high > 0):severity=high 的违规即拦;
+      - 违规占比(flaggedRows / scannedRows ≥ _BLOCK_RATIO):量大也拦。
+    满足任一即 blocked=True。
+
+    返回 {blocked, report, flaggedRows, highSeverity, ratio, findings_sample}。
+    findings_sample 取前 20 条供前端展示。本判定基于采样(默认前 500 行)+ 阈值,
+    通过仅代表"未触发拦截",不等同整版安全——完整结论仍由后续正式审核给出。
+    """
+    findings, _tagged, report = await scan_version(
+        records, config, provider=provider
+    )
+    flagged = int(report.get("flaggedRows", 0))
+    scanned = int(report.get("scannedRows", 0)) or 1
+    high = int(report.get("bySeverity", {}).get("high", 0))
+    ratio = flagged / scanned
+    return {
+        "blocked": high > 0 or ratio >= _BLOCK_RATIO,
+        "report": report,
+        "flaggedRows": flagged,
+        "highSeverity": high,
+        "ratio": round(ratio, 4),
+        "findings_sample": findings[:20],
+    }
