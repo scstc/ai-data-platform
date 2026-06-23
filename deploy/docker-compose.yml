@@ -1,5 +1,7 @@
-# ai-data-platform 生产编排:PostgreSQL + 后端(含 data-juicer 引擎) + 前端(nginx)。
+# ai-data-platform 生产编排:PostgreSQL + 后端(含 data-juicer 引擎) + 前端(nginx) + kkFileView(文件预览)。
 # 在仓库根目录执行:docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+# kkFileView:独立预览服务,前端对非结构化格式(pdf/word/ppt/视频/音频/图片/...)统一走
+#   http://<host>:${KK_PORT:-8012}/onlinePreview?url=${base64(presignedUrl)} 嵌入 iframe。
 name: adp
 
 services:
@@ -65,6 +67,13 @@ services:
       - "${WEB_PORT:-80}:80"
     depends_on:
       - backend
+    restart: unless-stopped
+
+  kkfileview:
+    image: keking/kkfileview:latest
+    container_name: adp-kkfileview
+    ports:
+      - "${KK_PORT:-8012}:8012"
     restart: unless-stopped
 
 volumes:
