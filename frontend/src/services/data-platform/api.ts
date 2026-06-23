@@ -643,6 +643,23 @@ export async function previewDatasetVersion(
   );
 }
 
+/** dj-analyze 分析报告(overall.csv 聚合表 + analysis/ PNG 清单)
+ *  GET /api/v1/dataset-versions/{versionId}/analysis-report
+ *  无报告时 data 为 null(前端回退到手算聚合)。 */
+export async function getAnalysisReport(
+  versionId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.AnalysisReport | null;
+    success: boolean;
+    message?: string;
+  }>(`/api/v1/dataset-versions/${versionId}/analysis-report`, {
+    method: 'GET',
+    ...(options || {}),
+  });
+}
+
 /** 加工算子目录 GET /api/v1/operators */
 export async function listOperators(options?: { [key: string]: any }) {
   return request<{ data: DataPlatform.Operator[]; success: boolean }>(

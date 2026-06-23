@@ -441,6 +441,13 @@ declare namespace DataPlatform {
     metrics: QualityMetric[];
   };
 
+  /** dj-analyze 产出的分析报告(analysis/ 目录):overall.csv 聚合表 + PNG 清单 */
+  type AnalysisReport = {
+    /** overall.csv:首行表头,其余为数据行(首列是指标名) */
+    overall: { columns: string[]; rows: string[][] } | null;
+    images: { name: string; kind: 'distributions' | 'correlation' | 'other' }[];
+  };
+
   /** 数据集版本（不可变快照） */
   type DatasetVersion = {
     id: string;

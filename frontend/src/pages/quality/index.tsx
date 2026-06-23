@@ -19,6 +19,7 @@ import {
   Popconfirm,
   Spin,
   Statistic,
+  Table,
   Tabs,
   Tag,
   Tooltip,
@@ -30,6 +31,7 @@ import {
   batchDeleteJobs,
   createJob,
   deleteJob,
+  getAnalysisReport,
   getJob,
   getQualityReport,
   getVersionStats,
@@ -84,19 +86,37 @@ const renderParamField = (
   return <ProFormText key={key} {...common} />;
 };
 
-/** Tab 1:质量报告（指标统计 + 纯 div 直方图） */
+/** Tab 1:质量报告——优先展示 dj-analyze 产出的 analysis 报告(overall 表 + PNG),
+ *  无则回退到手算聚合(数值指标 + 纯 div 直方图)。 */
 const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
   const { token } = theme.useToken();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const [analysis, setAnalysis] =
+    useState<DataPlatform.AnalysisReport | null>();
   const [report, setReport] = useState<DataPlatform.QualityReport>();
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getQualityReport(versionId)
-      .then((res) => {
-        if (!cancelled) setReport(res.data);
+    setAnalysis(undefined);
+    setReport(undefined);
+    getAnalysisReport(versionId)
+      .then(async (res) => {
+        if (cancelled) return;
+        const d = res.data;
+        if (d && (d.overall || (d.images?.length ?? 0) > 0)) {
+          setAnalysis(d);
+        } else {
+          // 无 dj-analyze 报告 → 回退手算聚合
+          try {
+            const r = await getQualityReport(versionId);
+            if (!cancelled) setReport(r.data);
+          } catch {
+            if (!cancelled)
+              setError('质量报告加载失败（该版本可能尚未完成质量评估）');
+          }
+        }
       })
       .catch(() => {
         if (!cancelled)
@@ -113,6 +133,68 @@ const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
   if (loading)
     return <Spin style={{ display: 'block', margin: '48px auto' }} />;
   if (error) return <Empty description={error} />;
+
+  // 主路径:dj-analyze 分析报告(overall.csv 聚合表 + analysis/ PNG)
+  if (analysis) {
+    const overallCols =
+      analysis.overall?.columns.map((c, i) => ({
+        title: i === 0 ? '指标' : c,
+        dataIndex: String(i),
+        key: String(i),
+        ellipsis: i > 0,
+        width: i === 0 ? 160 : undefined,
+      })) ?? [];
+    const overallRows = (analysis.overall?.rows ?? []).map((r, ri) => {
+      const obj: Record<string, any> = { key: ri };
+      r.forEach((v, ci) => {
+        obj[String(ci)] = v;
+      });
+      return obj;
+    });
+    const labelOf = (k: string) =>
+      k === 'distributions'
+        ? '指标分布（直方图 / 箱线图 / 词云）'
+        : k === 'correlation'
+          ? '指标相关性热力图'
+          : '分析图';
+    return (
+      <div>
+        {analysis.overall && (
+          <>
+            <Typography.Title level={5}>
+              指标总体统计（overall）
+            </Typography.Title>
+            <Table
+              size="small"
+              bordered
+              pagination={false}
+              scroll={{ x: 'max-content' }}
+              columns={overallCols}
+              dataSource={overallRows}
+              style={{ marginBottom: 24 }}
+            />
+          </>
+        )}
+        {analysis.images.map((im) => (
+          <div key={im.name} style={{ marginBottom: 24 }}>
+            <Typography.Title level={5}>{labelOf(im.kind)}</Typography.Title>
+            <img
+              alt={im.name}
+              style={{
+                maxWidth: '100%',
+                marginTop: 8,
+                border: `1px solid ${token.colorBorderSecondary}`,
+              }}
+              src={`/api/v1/dataset-versions/${versionId}/analysis-image?name=${encodeURIComponent(
+                im.name,
+              )}`}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   if (!report?.metrics?.length) {
     return <Empty description="暂无数值型质量指标" />;
   }
@@ -542,9 +624,7 @@ const Quality: React.FC = () => {
                 okButtonProps={{ danger: true }}
                 onConfirm={() => handleDelete(r.id)}
               >
-                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>
-                  删除
-                </a>
+                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
               </Popconfirm>,
             ],
     },
