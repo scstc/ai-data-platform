@@ -35,6 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |------|------|
 | `/adp-init` | 首次初始化工作区：clone data-juicer（dev 分支）到 `data-juicer/` |
 | `/adp-dashboard` | 同步最新图谱数据到 `dashboard/` 并后台启动 `python3 -m http.server 8765` |
+| `/adp-start` | **一键本地启动数据平台**（后端 :18003 + 前端 :8001 真实后端）——日常"把项目跑起来"首选 |
 | `/adp-web` | 启动数据平台前端（Ant Design Pro v6，`:8001`，登录 admin/ant.design） |
 | `/adp-server` | 启动数据平台后端（FastAPI+PG，`:18003`，Swagger 在 `/docs`；PG 容器 `:55433`） |
 | `/dj-demo` | 安装 data-juicer 环境（`uv sync --python 3.11`）并跑通最简 CLI 示例 |
@@ -42,6 +43,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `/dj-api` | 启动 data-juicer HTTP API（FastAPI/uvicorn，`:8000`，Swagger 在 `/docs`） |
 
 dashboard 是纯静态产物（demo 模式，无访问控制），随仓库提交。重建产物的流程见 `.claude/commands/adp-dashboard.md`。
+
+## 本地运行（速查）
+
+日常本地跑数据平台用 `/adp-start`（起后端 + 前端，前端连真实后端）。关键点：
+
+| 项 | 值 |
+|---|---|
+| 前端 | http://127.0.0.1:8001/ （Ant Design Pro，登录 `admin / ant.design`） |
+| 后端 | http://127.0.0.1:18003/docs （FastAPI Swagger） |
+| 数据库 | 远程 PG `10.60.1.119:55433`（经 `backend/.env` 的 `DATABASE_URL`，无需本地 docker） |
+| 前端命令 | `cd frontend && PORT=8001 MOCK=none npm run dev`（`PORT=8001` 避开 dj-api 的 8000；`MOCK=none` 走真实后端） |
+| 后端命令 | `cd backend && ./.venv/Scripts/uvicorn.exe app.main:app --port 18003`（**勿用 `uv run uvicorn`，本机 `uv` exit 127**；无 `--reload`，改 `.py` 手动重启） |
+| 停止 | kill 后台任务；或按端口清进程（会话退出可能留 node/uvicorn 残留致端口占用） |
+
+> `/adp-server` 命令文件里的 `uv run uvicorn` 与本地 docker PG 是默认值；本机实际用 venv `uvicorn.exe` + 远程 PG（见上表与 `backend/.env`）。
 
 ## GitHub Pages 发布
 
