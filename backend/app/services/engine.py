@@ -126,6 +126,7 @@ def build_config(
     input_path: str,
     output_path: str,
     operators: list[dict[str, Any]],
+    text_key: str | None = None,
 ) -> dict[str, Any]:
     """把算子编排序列化为 data-juicer 合法配置(dict)。
 
@@ -134,6 +135,9 @@ def build_config(
     配了 LLM 时,为带 ``api_model`` 参数的算子(needs_api)注入平台配置的模型名
     ——DJ 该参数默认写死 ``gpt-4o``,不覆盖会向自定义端点请求不存在的模型而失败;
     用户在表单里显式填了 ``api_model`` 则尊重用户值。
+
+    text_key:数据主文本字段名。DJ 默认 text_key='text',数据无 text 字段时(如新闻
+    用 title)必须显式指定,否则 load_dataset 报 'no key [text]'。None 时不写(用 DJ 默认)。
     """
     cfg = get_active_llm_config()
     process: list[dict[str, Any]] = []
@@ -150,13 +154,17 @@ def build_config(
         process.append({op["name"]: (params or None)})
     # 路径统一正斜杠:DJ 用 POSIX shlex 解析 dataset_path,Windows 反斜杠
     # 会被当转义符吞掉,路径残缺后被误判成 huggingface 数据集
-    return {
+    result = {
         "project_name": project_name,
         "dataset_path": Path(input_path).as_posix(),
         "np": settings.engine_np,
         "export_path": Path(output_path).as_posix(),
         "process": process,
     }
+    if text_key:
+        # DJ 配置项是 text_keys(复数、列表),默认 ["text"];非 text 字段须显式指定
+        result["text_keys"] = [text_key]
+    return result
 
 
 async def _run_dj(yaml_path: Path, *, job_id: str | None = None) -> tuple[int, str]:
@@ -206,6 +214,50 @@ def _read_jsonl_head(path: Path, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
+# 常见文本字段名:数据无 text 时按此优先级匹配主文本字段(text_key)
+_TEXT_KEY_CANDIDATES = (
+    "text",
+    "content",
+    "body",
+    "title",
+    "sentence",
+    "document",
+    "passage",
+    "prompt",
+    "question",
+    "answer",
+    "response",
+    "description",
+    "raw",
+)
+
+
+def detect_text_key(records: list[dict[str, Any]]) -> str | None:
+    """从前若干条记录推断主文本字段名,供 build_config 设 text_key。
+
+    data-juicer 默认 text_key='text';数据无 text 时(如新闻用 title)必须显式指定,
+    否则 load_dataset 报 'no key [text]'。优先级:已知文本字段名 > 平均值最长的字符串字段。
+    仅看值为 str 的字段;无字符串字段返回 None(交给 DJ 默认/由其报错)。
+    """
+    if not records:
+        return None
+    str_lens: dict[str, list[int]] = {}
+    for r in records[:50]:
+        if not isinstance(r, dict):
+            continue
+        for k, v in r.items():
+            if isinstance(v, str):
+                # 防御:剥离首键可能残留的 U+FEFF BOM(CSV 转 JSON 粘到列名上)
+                str_lens.setdefault(k.lstrip("﻿"), []).append(len(v))
+    if not str_lens:
+        return None
+    for cand in _TEXT_KEY_CANDIDATES:
+        if cand in str_lens:
+            return cand
+    # 兜底:平均长度最长的字符串字段(最可能是正文)
+    return max(str_lens, key=lambda k: sum(str_lens[k]) / len(str_lens[k]))
+
+
 def _column_union(*row_lists: list[dict[str, Any]]) -> list[str]:
     """按出现顺序求多组样本的键并集(dict.fromkeys 保序去重)。"""
     keys: dict[str, None] = {}
@@ -247,6 +299,7 @@ async def filter_records(
             input_path=str(in_path),
             output_path=str(out_path),
             operators=operators,
+            text_key=detect_text_key(records),
         )
         yaml_path.write_text(
             yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
@@ -308,6 +361,7 @@ async def run_preview(
                     input_path=str(sample_path),
                     output_path=str(out_path),
                     operators=operators,
+                    text_key=detect_text_key(before),
                 )
                 yaml_path.write_text(
                     yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
@@ -366,11 +420,14 @@ async def run_process_job(
     # 输入经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
     # 产出仍写受管存储(origin=managed),源不动;血缘 JobInput 指向 hosted 输入版本。
     async with materialized_version(input_version, session) as input_path:
+        # 数据无 text 字段时(如新闻用 title)显式指定 text_key,否则 DJ load_dataset 报错
+        text_key = detect_text_key(_read_jsonl_head(input_path, 50))
         cfg = build_config(
             project_name=job_id,
             input_path=str(input_path),
             output_path=str(out_path),
             operators=operators,
+            text_key=text_key,
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")

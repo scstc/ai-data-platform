@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import statistics
 from itertools import islice
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.v1.jobs import (
     SessionDep,
@@ -163,6 +164,103 @@ async def _get_version_with_stats(
             content={"success": False, "message": _NO_STATS_MSG},
         )
     return version, stats_path
+
+
+def _analysis_dir(version: DatasetVersion) -> Path | None:
+    """从版本 stats_uri 推导 dj-analyze 产出的 analysis 目录,并校验落在受管数据目录内。
+
+    stats_uri 形如 <datasets_dir>/<ds>/quality/<job_id>/data_stats.jsonl,
+    analysis 即其同级 analysis/(dj-analyze 写 overall.csv + PNG 到此)。
+    """
+    stats_path = _safe_path(version.stats_uri)
+    if stats_path is None:
+        return None
+    analysis = (stats_path.parent / "analysis").resolve()
+    root = Path(settings.datasets_dir).resolve()
+    return analysis if analysis.is_relative_to(root) else None
+
+
+@router.get("/dataset-versions/{version_id}/analysis-report")
+async def analysis_report(version_id: str, session: SessionDep) -> JSONResponse:
+    """dj-analyze 分析报告:overall.csv(跨算子聚合统计表)+ analysis/ 下 PNG 清单。
+
+    无 analysis/(任务未完成或未产出)→ data=None + 提示,前端回退到手算聚合。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    analysis = _analysis_dir(version)
+    if analysis is None or not analysis.exists():
+        return JSONResponse(
+            content={
+                "data": None,
+                "success": True,
+                "message": "该版本无 dj-analyze 分析报告",
+            }
+        )
+    overall: dict[str, Any] | None = None
+    overall_csv = analysis / "overall.csv"
+    if overall_csv.exists():
+        # utf-8-sig 兼容 pandas to_csv 可能带的 BOM
+        with overall_csv.open(encoding="utf-8-sig") as fp:
+            rows = [r for r in csv.reader(fp)]
+        if rows:
+            overall = {"columns": rows[0], "rows": rows[1:]}
+    images: list[dict[str, str]] = []
+    for p in sorted(analysis.glob("*.png")):
+        name = p.name
+        if name.startswith("stats-corr"):
+            kind = "correlation"
+        elif (
+            name.startswith("all-stats")
+            or name.endswith("-hist.png")
+            or name.endswith("-box.png")
+            or name.endswith("-wordcloud.png")
+        ):
+            kind = "distributions"
+        else:
+            kind = "other"
+        images.append({"name": name, "kind": kind})
+    return JSONResponse(
+        content={"data": {"overall": overall, "images": images}, "success": True}
+    )
+
+
+@router.get("/dataset-versions/{version_id}/analysis-image", response_model=None)
+async def analysis_image(
+    version_id: str,
+    session: SessionDep,
+    name: Annotated[str, Query()],
+) -> JSONResponse | FileResponse:
+    """取 analysis/ 下某张 PNG(供前端 <img> 直接嵌入)。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    analysis = _analysis_dir(version)
+    if analysis is None or not analysis.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "无分析报告"},
+        )
+    # 防 path traversal:name 仅允许纯文件名
+    if "/" in name or "\\" in name or ".." in name:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "非法文件名"},
+        )
+    img = (analysis / name).resolve()
+    if not img.is_relative_to(analysis) or not img.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "图片不存在"},
+        )
+    return FileResponse(str(img), media_type="image/png")
 
 
 def _scan_stats(

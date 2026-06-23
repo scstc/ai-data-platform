@@ -464,7 +464,20 @@ async def materialized_version(
     # 这样平台自有的 managed jsonl(单一格式批量上传,storage_uri=s3://uploads/…)也能物化,
     # 而不破坏 hosted 外部 S3 / 平台零拷贝(均为 s3://)与本地受管(本地路径)的既有行为。
     if not str(version.storage_uri).startswith("s3://"):
-        yield Path(version.storage_uri)
+        raw = Path(version.storage_uri)
+        # 若含 U+FEFF BOM(原始 CSV 带 BOM、转 JSON 时粘到首列名上,如 "﻿title"),
+        # DJ 不剥离 → text_key 对不上、load_dataset 报 'no key [text]'。仅此时写一份
+        # 去 BOM 的临时文件供 DJ 读,用完清理;干净文件仍零 IO 透传。
+        data = raw.read_bytes()
+        if b"\xef\xbb\xbf" not in data:
+            yield raw
+            return
+        tmp = Path(tempfile.mktemp(prefix="nobom-", suffix=".jsonl"))
+        tmp.write_bytes(data.replace(b"\xef\xbb\xbf", b""))
+        try:
+            yield tmp
+        finally:
+            tmp.unlink(missing_ok=True)
         return
 
     # 二进制 s3 版本无法规范化为 jsonl(加工/物化不适用)→ 明确报错,

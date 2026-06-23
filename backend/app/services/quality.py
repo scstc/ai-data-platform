@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
-from app.services.engine import _kill_proc_tree, _running_procs, build_config
+from app.services.engine import (
+    _kill_proc_tree,
+    _read_jsonl_head,
+    _running_procs,
+    build_config,
+    detect_text_key,
+)
 from app.services.external_store import materialized_version
 
 
@@ -88,11 +94,15 @@ async def run_quality_job(
     # 输入经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
     # stats 回写到 hosted 输入版本的 stats_uri,源不动。
     async with materialized_version(input_version, session) as input_path:
+        # 数据无 text 字段时(如新闻用 title)显式指定 text_key,否则 dj-analyze 报
+        # 'no key [text]'(读取原件失败)
+        text_key = detect_text_key(_read_jsonl_head(input_path, 50))
         cfg = build_config(
             project_name=job_id,
             input_path=str(input_path),
             output_path=str(export_path),
             operators=operators,
+            text_key=text_key,
         )
         # 固定 work_dir 与 job_id:work_dir 以 job_id 结尾时 DJ 不再追加时间戳
         # 目录,分析产物稳定落在 out_dir/analysis/
