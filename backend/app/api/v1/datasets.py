@@ -6,6 +6,9 @@ import io
 import json
 import secrets
 import shutil
+import tempfile
+import zipfile
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -14,6 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
 
 from app.api.deps import require_admin
 from app.api.v1.categories import build_category_name_map
@@ -22,6 +26,7 @@ from app.core.db import get_session
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
+from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.tag import DatasetTag, Tag
 from app.schemas.common import CamelModel, PageResponse, format_version_label
@@ -40,6 +45,7 @@ from app.services.external_store import (
     MAX_MANIFEST_MEMBERS,
     MAX_MATERIALIZE_BYTES,
     ExternalStoreError,
+    cached_bytes,
     download_to_temp,
     head_records,
     list_objects,
@@ -684,20 +690,157 @@ async def upload_batch_as_dataset(
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
-@router.get("/dataset-versions/{version_id}/members")
-async def list_version_members(
-    version_id: str, session: SessionDep
-) -> JSONResponse:
-    """列出版本的成员文件:manifest 版本从 __member 取;其余版本回退为单一成员。"""
-    version = await session.get(DatasetVersion, version_id)
-    if version is None:
+@router.get("/datasets/{dataset_id}/lineage")
+async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
+    """数据集血缘图(#11):以该数据集各版本为起点,BFS 上下游(可跨数据集)构建
+    版本↔任务 DAG,返回 nodes + edges 供前端分层渲染。深度上限防图过大。
+
+    边:输入版本 --input--> 任务 --output--> 产出版本。
+    """
+    starts = (
+        await session.scalars(
+            select(DatasetVersion).where(DatasetVersion.dataset_id == dataset_id)
+        )
+    ).all()
+    if not starts:
         return JSONResponse(
             status_code=404,
-            content={"success": False, "message": "版本不存在"},
+            content={"success": False, "message": "数据集不存在或无版本"},
         )
 
+    MAX_DEPTH = 6
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, str]] = []
+    seen_edge: set[tuple[str, str]] = set()
+    seen_v: set[str] = set()
+    seen_j: set[str] = set()
+    ds_cache: dict[str, str] = {}
+
+    async def ds_name(did: str) -> str:
+        if did not in ds_cache:
+            d = await session.get(Dataset, did)
+            ds_cache[did] = d.name if d else did
+        return ds_cache[did]
+
+    def add_edge(a: str, b: str, kind: str) -> None:
+        if (a, b) not in seen_edge:
+            seen_edge.add((a, b))
+            edges.append({"from": a, "to": b, "kind": kind})
+
+    def job_node(job: Job) -> dict[str, Any]:
+        """任务节点:含其执行的算子链(name+params,从 job.spec 取)——供前端在版本/
+        任务卡上展示「经什么任务、跑了哪些算子及参数」。"""
+        spec = job.spec or {}
+        ops = [
+            {"name": o.get("name"), "params": o.get("params") or {}}
+            for o in (spec.get("operators") or [])
+            if isinstance(o, dict)
+        ]
+        # review 等非算子任务:无 operators 但有 config → 把 config 原语字段作为
+        # 伪算子("审核配置")吐出,让版本卡能看到 LLM/PII/抽样等设置。
+        # 旧任务(spec 为空,早于 spec 存储特性)仍为空。
+        if not ops and isinstance(spec.get("config"), dict):
+            parts = {
+                k: v
+                for k, v in spec["config"].items()
+                if isinstance(v, (str, int, float, bool))
+            }
+            if parts:
+                ops = [{"name": "审核配置", "params": parts}]
+        return {
+            "id": job.id,
+            "kind": "job",
+            "name": job.name,
+            "jobType": job.type,
+            "state": job.state,
+            "operators": ops,
+            "createdAt": job.created_at.isoformat(),
+        }
+
+    dq: deque[tuple[str, int]] = deque((v.id, 0) for v in starts)
+    while dq:
+        vid, depth = dq.popleft()
+        if vid in seen_v:
+            continue
+        seen_v.add(vid)
+        version = await session.get(DatasetVersion, vid)
+        if version is None:
+            continue
+        nodes[vid] = {
+            "id": vid,
+            "kind": "version",
+            "datasetId": version.dataset_id,
+            "datasetName": await ds_name(version.dataset_id),
+            "versionNo": version.version_no,
+            "versionLabel": format_version_label(
+                version.version_no, version.created_at
+            ),
+            "origin": version.origin,
+            "rows": version.rows,
+            "scanVerdict": version.scan_verdict,
+            "publishStatus": version.publish_status,
+            "isOriginal": version.produced_by_job_id is None,
+            "isFocus": version.dataset_id == dataset_id,
+            "createdAt": version.created_at.isoformat(),
+        }
+        if depth >= MAX_DEPTH:
+            continue
+        # 上游:产出该版本的任务(及其输入版本)
+        jid = version.produced_by_job_id
+        if jid and jid not in seen_j:
+            seen_j.add(jid)
+            job = await session.get(Job, jid)
+            if job:
+                nodes[jid] = job_node(job)
+                add_edge(jid, vid, "output")
+                in_jis = (
+                    await session.scalars(
+                        select(JobInput).where(JobInput.job_id == jid)
+                    )
+                ).all()
+                for ji in in_jis:
+                    add_edge(ji.dataset_version_id, jid, "input")
+                    if ji.dataset_version_id not in seen_v:
+                        dq.append((ji.dataset_version_id, depth + 1))
+        # 下游:消费该版本的任务(及其产出版本)
+        down_jis = (
+            await session.scalars(
+                select(JobInput).where(JobInput.dataset_version_id == vid)
+            )
+        ).all()
+        for ji in down_jis:
+            jid2 = ji.job_id
+            add_edge(vid, jid2, "input")
+            if jid2 in seen_j:
+                continue
+            seen_j.add(jid2)
+            job2 = await session.get(Job, jid2)
+            if job2 is None:
+                continue
+            nodes[jid2] = job_node(job2)
+            out_vs = (
+                await session.scalars(
+                    select(DatasetVersion).where(
+                        DatasetVersion.produced_by_job_id == jid2
+                    )
+                )
+            ).all()
+            for ov in out_vs:
+                add_edge(jid2, ov.id, "output")
+                if ov.id not in seen_v:
+                    dq.append((ov.id, depth + 1))
+    return JSONResponse(
+        content={"data": {"nodes": list(nodes.values()), "edges": edges}, "success": True}
+    )
+
+
+async def _members_of(
+    version: DatasetVersion, session: AsyncSession
+) -> list[DatasetMemberRead]:
+    """枚举版本的成员文件(manifest → __member;受管批量上传 s3 → originals/;其余 → 单一成员)。
+    复用于 members 端点与多文件 zip 下载。存储错误抛 ExternalStoreError。"""
     if version.format != MANIFEST_FORMAT:
-        # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件,供按文件预览
+        # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件
         if version.origin == "managed" and str(version.storage_uri).startswith(
             "s3://"
         ):
@@ -710,17 +853,16 @@ async def list_version_members(
             except ExternalStoreError:
                 objs = []
             if objs:
-                members = [
+                return [
                     DatasetMemberRead(
                         name=Path(o["key"]).name,
                         key=o["key"],
                         bucket=bucket,
                         format=_file_ext(Path(o["key"]).name),
                         size=o.get("size"),
-                    ).model_dump(by_alias=True)
+                    )
                     for o in objs
                 ]
-                return JSONResponse(content={"data": members, "success": True})
         # 回退:单一成员(合并 jsonl 本身)
         bucket = ""
         key = version.storage_uri
@@ -729,39 +871,51 @@ async def list_version_members(
                 bucket, key = parse_s3_uri(version.storage_uri)
             except ExternalStoreError:
                 bucket, key = "", version.storage_uri
-        member = DatasetMemberRead(
-            name=Path(key).name,
-            key=key,
-            bucket=bucket,
-            format=version.format,
-            size=version.size,
-        )
-        return JSONResponse(
-            content={
-                "data": [member.model_dump(by_alias=True)],
-                "success": True,
-            }
-        )
-
+        return [
+            DatasetMemberRead(
+                name=Path(key).name,
+                key=key,
+                bucket=bucket,
+                format=version.format,
+                size=version.size,
+            )
+        ]
+    # manifest 媒体集:从清单 __member 取
     cfg = await _version_storage_cfg(version, session)
     if cfg is None:
-        return JSONResponse(
-            status_code=503,
-            content={"success": False, "message": "平台存储(MinIO)未配置"},
-        )
-    try:
-        rows = await _read_manifest_rows(cfg, version.storage_uri)
-    except ExternalStoreError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": f"读取清单失败:{exc}"},
-        )
-    members = [
-        DatasetMemberRead(**m).model_dump(by_alias=True)
+        raise ExternalStoreError("平台存储(MinIO)未配置")
+    rows = await _read_manifest_rows(cfg, version.storage_uri)
+    return [
+        DatasetMemberRead(**m)
         for r in rows
         if isinstance((m := r.get("__member")), dict)
     ]
-    return JSONResponse(content={"data": members, "success": True})
+
+
+@router.get("/dataset-versions/{version_id}/members")
+async def list_version_members(
+    version_id: str, session: SessionDep
+) -> JSONResponse:
+    """列出版本的成员文件:manifest 版本从 __member 取;其余版本回退为单一成员。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    try:
+        members = await _members_of(version, session)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"读取成员失败:{exc}"},
+        )
+    return JSONResponse(
+        content={
+            "data": [m.model_dump(by_alias=True) for m in members],
+            "success": True,
+        }
+    )
 
 
 @router.get("/dataset-versions/{version_id}/member-url")
@@ -1894,15 +2048,89 @@ async def override_verdict(
 # 读路径一致不强制登录,门控落在发布状态上(草稿区数据取不出去)。
 
 
-@router.get("/dataset-versions/{version_id}/download")
-async def download_version(version_id: str, session: SessionDep) -> JSONResponse:
+async def _download_zip(
+    version: DatasetVersion,
+    members: list[DatasetMemberRead],
+    session: AsyncSession,
+) -> JSONResponse | FileResponse:
+    """打包版本全部成员为 zip 流式下发(单文件也打包——下载体验一致)。
+
+    s3 成员从对象存储拉字节(cached_bytes),本地成员读盘;同名成员自动加序号去重;
+    拉取/读取失败的成员跳过;响应结束(BackgroundTask)清理临时文件。
+    """
+    has_s3 = any(m.bucket for m in members)
+    cfg = await _version_storage_cfg(version, session) if has_s3 else None
+    if has_s3 and cfg is None:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "平台存储(MinIO)未配置"},
+        )
+    try:
+        own_bucket, _ = parse_s3_uri(version.storage_uri)
+    except ExternalStoreError:
+        own_bucket = ""
+    tmp = Path(tempfile.mktemp(suffix=".zip"))
+    used: set[str] = set()
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for m in members:
+                if m.bucket:  # s3 成员
+                    try:
+                        data = await cached_bytes(
+                            cfg, m.bucket or own_bucket, m.key
+                        )
+                    except ExternalStoreError:
+                        continue
+                else:  # 本地路径成员(managed 本地 jsonl)
+                    p = Path(m.key)
+                    if not p.exists():
+                        continue
+                    data = p.read_bytes()
+                name = m.name or Path(m.key).name or "file"
+                if name in used:
+                    pp = Path(name)
+                    n = 1
+                    while f"{pp.stem} ({n}){pp.suffix}" in used:
+                        n += 1
+                    name = f"{pp.stem} ({n}){pp.suffix}"
+                used.add(name)
+                zf.writestr(name, data)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"打包失败:{exc}"},
+        )
+    if not used:
+        tmp.unlink(missing_ok=True)
+        return JSONResponse(
+            status_code=410,
+            content={"success": False, "message": "无可用成员文件,无法打包"},
+        )
+    # 文件名用「数据集名 + 版本号」;名取不到回退 dataset_id;剥文件名非法字符
+    ds = await session.get(Dataset, version.dataset_id)
+    raw_name = ds.name if ds else version.dataset_id
+    safe_name = (
+        "".join("_" if c in '\\/:*?"<>|' else c for c in raw_name).strip()
+        or version.dataset_id
+    )
+    filename = f"{safe_name}_v{version.version_no}.zip"
+    return FileResponse(
+        str(tmp),
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(lambda t=tmp: t.unlink(missing_ok=True)),
+    )
+
+
+@router.get("/dataset-versions/{version_id}/download", response_model=None)
+async def download_version(
+    version_id: str, session: SessionDep
+) -> JSONResponse | FileResponse:
     """导出/下载一个已发布版本的数据(闭环终点:算法工程师选已发布版本取走训练集)。
 
-    门:``publish_status`` 必须为 ``published``,否则 409(草稿/已下架不可消费)。
-    - managed 本地版本(storage_uri 为本地路径)→ 直接流式下发文件(FileResponse)。
-    - s3 背书版本(hosted 单对象 / manifest 媒体集,storage_uri=s3://…)→ 302 跳转
-      预签名 GET URL(浏览器直连对象存储下载)。manifest 下发的是自包含清单 jsonl,
-      其媒体成员经 members / member-url 取(完整打包为后续增强)。
+    门:``publish_status`` 必须为 ``published``,否则 409。统一打包为 zip 下发
+    (单文件亦打包,体验一致);成员含本地文件与/或 s3 对象。
     """
     version = await session.get(DatasetVersion, version_id)
     if version is None:
@@ -1921,35 +2149,11 @@ async def download_version(version_id: str, session: SessionDep) -> JSONResponse
                 ),
             },
         )
-
-    uri = version.storage_uri
-    # s3 背书(hosted 单对象 / manifest 媒体集):签发预签名 URL 并 302 跳转
-    if uri.startswith("s3://"):
-        cfg = await _version_storage_cfg(version, session)
-        if cfg is None:
-            return JSONResponse(
-                status_code=503,
-                content={"success": False, "message": "平台存储(MinIO)未配置"},
-            )
-        try:
-            bucket, key = parse_s3_uri(uri)
-            url = await presigned_get_url(cfg, bucket, key)
-        except ExternalStoreError as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": f"生成下载链接失败:{exc}"},
-            )
-        return RedirectResponse(url)
-
-    # managed 本地版本:流式下发产物文件(强制下载,文件名带数据集与版本号)
-    path = Path(uri)
-    if not path.exists():
+    try:
+        members = await _members_of(version, session)
+    except ExternalStoreError as exc:
         return JSONResponse(
-            status_code=410,
-            content={"success": False, "message": "产物文件缺失,无法下载"},
+            status_code=503,
+            content={"success": False, "message": f"读取成员失败:{exc}"},
         )
-    ext = version.format or "jsonl"
-    filename = f"{version.dataset_id}_v{version.version_no}.{ext}"
-    return FileResponse(
-        path, media_type="application/octet-stream", filename=filename
-    )
+    return await _download_zip(version, members, session)
