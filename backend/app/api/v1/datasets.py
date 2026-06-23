@@ -1419,8 +1419,10 @@ async def preview_version(
         )
 
     # 指定原件预览(受管批量版本的某个原始文件):单文件 normalize,列纯净,
-    # 绕开合并 jsonl 的全行 key 并集,消除多文件字段错乱
-    if key:
+    # 绕开合并 jsonl 的全行 key 并集,消除多文件字段错乱。
+    # 仅对 s3:// 背书的版本生效——本地单文件版本(任务产出/输入 jsonl)的成员 key
+    # 即其本地 storage_uri,应直接走末尾的本地读盘分支,而非尝试 S3 解析(否则 503)。
+    if key and str(version.storage_uri).startswith("s3://"):
         try:
             cfg = platform_config()
             bucket, _vk = parse_s3_uri(version.storage_uri)

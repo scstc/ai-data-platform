@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import computed_field
+
 from app.schemas.common import CamelModel, UtcDateTime
 
 
@@ -50,3 +52,24 @@ class JobRead(CamelModel):
     input: dict[str, Any] | None = None
     # 是否可重跑(存有原始执行规格 spec;早于重跑特性的任务为 False)
     can_rerun: bool = False
+
+    # 以下三个控制位由 state 派生,供「数据任务」统一控制台按状态渲染操作按钮。
+    # computed_field + to_camel 别名 → 序列化为 canPause / canResume / canStop,
+    # 任何构建 JobRead 的端点(list/detail/per-type)都自动带上,无需逐处手填。
+    @computed_field
+    @property
+    def can_pause(self) -> bool:
+        """可暂停:运行中或排队中。"""
+        return self.state in ("pending", "running")
+
+    @computed_field
+    @property
+    def can_resume(self) -> bool:
+        """可继续:已暂停(继续=按 spec 从头重跑)。"""
+        return self.state == "paused"
+
+    @computed_field
+    @property
+    def can_stop(self) -> bool:
+        """可停止:运行中/排队中/已暂停。"""
+        return self.state in ("pending", "running", "paused")

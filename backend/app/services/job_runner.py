@@ -1,11 +1,18 @@
-"""加工任务后台执行编排:把任务放到后台 asyncio 任务里跑,支持停止 / 超时 / 重启回收。
+"""任务后台执行编排:把任务放到后台 asyncio 任务里跑,支持暂停/继续/停止/超时/重启回收。
 
 为什么独立成模块:执行从「创建请求里同步跑完」改为「后台跑」后,需要一处统一管理
-后台任务生命周期(spawn / 取消意图 / drain)与重启时的孤儿回收,且后台任务必须用
-**独立 DB 会话**(请求会话在响应返回后即关闭)。子进程注册表与「杀进程」动作放在
-engine.py(贴近子进程创建处),本模块只管编排与状态机。
+后台任务生命周期(spawn / 暂停 / 停止意图 / drain)与重启时的孤儿回收,且后台任务
+必须用**独立 DB 会话**(请求会话在响应返回后即关闭)。子进程注册表与「杀进程」动作
+放在 engine.py(贴近子进程创建处),本模块只管编排与状态机。
 
-状态机:pending(已建,排队等信号量)→ running(子进程已起)→ success | failed | cancelled。
+状态机:
+    pending(已建,排队等信号量)→ running(子进程已起)→ success | failed | cancelled
+    pending/running --pause--> paused --resume(按 spec 从头重跑)--> pending
+dj-process 子进程无原生暂停,故 pause=杀进程、resume=按 spec 重跑(不保留进度)。
+
+分派方式:按 ``job.type`` 选 runner(process/clean/distillation/synthesis/augmentation/
+quality/review),入参 body 一律从 ``job.spec`` 重建,故 spawn 只需 job_id —— 统一了
+新建、重跑(rerun 由各类型 router 走 _start_* 建新记录)、继续(resume 复用原记录)。
 """
 
 from __future__ import annotations
@@ -13,32 +20,41 @@ from __future__ import annotations
 import asyncio
 import secrets
 from datetime import UTC, datetime
+from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import async_session_factory
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
-from app.schemas.augment import AugmentGoal
-from app.schemas.distillation import DistillationGoal
 from app.schemas.job import JobCreate
-from app.schemas.make import MakeGoal
 from app.services import engine
 from app.services.augment import run_augment_job
 from app.services.distillation import run_distillation_job
 from app.services.engine import EngineError, run_process_job
 from app.services.external_store import ExternalStoreError
 from app.services.make import run_make_job
+from app.services.quality import QualityError, run_quality_job
+from app.services.review_runner import ReviewError, run_review
 
 # 后台任务引用(防被 GC 回收)
 _tasks: set[asyncio.Task] = set()
+# job_id -> 后台协程:供 cancel_running_task 取消无子进程的运行中任务(如 review)
+_task_by_job: dict[str, asyncio.Task] = {}
 # 已请求停止的 job_id:让排队中的任务起跑前自动放弃、让被杀任务记 cancelled 而非 failed
 _cancelled: set[str] = set()
+# 已请求暂停的 job_id:同上,让被杀任务记 paused 而非 failed;resume 时清空
+_paused: set[str] = set()
 
 
 class _Cancelled(Exception):
     """内部信号:任务在排队 / 起跑前已被请求停止。"""
+
+
+class _Paused(Exception):
+    """内部信号:任务在排队 / 起跑前(或运行中被杀)已被请求暂停。"""
 
 
 def _now() -> datetime:
@@ -54,32 +70,69 @@ def request_cancel(job_id: str) -> None:
     _cancelled.add(job_id)
 
 
-def spawn(
-    job_id: str,
-    body: JobCreate,
-    *,
-    goal: DistillationGoal | None = None,
-    make_goal: MakeGoal | None = None,
-    augment_goal: AugmentGoal | None = None,
-    output_dataset_id: str | None = None,
-) -> None:
-    """起一个后台任务执行该加工任务(立即返回,不等跑完)。
+def request_pause(job_id: str) -> None:
+    """登记暂停意图(由 pause 端点调用,配合 engine.terminate_job 杀子进程)。"""
+    _paused.add(job_id)
 
-    蒸馏:goal;合成(make):make_goal;增强(augment):augment_goal;
-    加工:不传任何 goal。
+
+def cancel_running_task(job_id: str) -> bool:
+    """取消某 job 正在跑的后台协程——供无子进程的任务(如 review 纯计算/LLM 扫描)
+    暂停/停止:terminate_job 找不到子进程时改用此处取消协程。返回是否确有任务被取消。"""
+    task = _task_by_job.get(job_id)
+    if task is not None and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
+def body_from_spec(job: Job) -> Any:
+    """按 ``job.type`` 把 ``job.spec`` 重建为对应 body schema;损坏抛 ValidationError。
+
+    供 _run_job 在后台执行时重建入参,也供 resume 端点前置校验 spec 是否可继续。
+    类型 schema 局部 import:避免本模块在 import 期与各 schema 形成环。
     """
-    task = asyncio.create_task(
-        _run_job(
-            job_id,
-            body,
-            goal=goal,
-            make_goal=make_goal,
-            augment_goal=augment_goal,
-            output_dataset_id=output_dataset_id,
-        )
-    )
+    spec = job.spec or {}
+    job_type = job.type
+    if job_type in ("process", "clean"):
+        return JobCreate.model_validate(spec)
+    if job_type == "distillation":
+        from app.schemas.distillation import DistillationJobCreate
+
+        return DistillationJobCreate.model_validate(spec)
+    if job_type == "synthesis":
+        from app.schemas.make import MakeJobCreate
+
+        return MakeJobCreate.model_validate(spec)
+    if job_type == "augmentation":
+        from app.schemas.augment import AugmentJobCreate
+
+        return AugmentJobCreate.model_validate(spec)
+    if job_type == "quality":
+        from app.schemas.job import QualityJobCreate
+
+        return QualityJobCreate.model_validate(spec)
+    if job_type == "review":
+        from app.schemas.review import ReviewJobCreate
+
+        return ReviewJobCreate.model_validate(spec)
+    raise ValueError(f"不支持后台执行的任务类型:{job_type}")
+
+
+def spawn(job_id: str) -> None:
+    """起一个后台任务执行该任务(立即返回,不等跑完)。
+
+    入参 body 由 _run_job 从 ``job.spec`` 重建(按 job.type 分派),故此处只需 job_id ——
+    统一了新建 / 重跑 / 继续:它们都只负责把 Job 行落到正确状态,执行路径只有这一条。
+    """
+    task = asyncio.create_task(_run_job(job_id))
     _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+    _task_by_job[job_id] = task
+
+    def _done(t: asyncio.Task) -> None:
+        _tasks.discard(t)
+        _task_by_job.pop(job_id, None)
+
+    task.add_done_callback(_done)
 
 
 async def drain() -> None:
@@ -91,9 +144,7 @@ async def drain() -> None:
 async def reconcile_orphans(session: AsyncSession) -> int:
     """启动回收:把残留 pending/running 的任务标记失败(重启已中断其子进程)。返回条数。
 
-    全部执行路径里只有加工任务异步后台跑;采集/质量/审核都是请求内同步跑完,正常不会
-    残留 running。进程一旦重启,内存里的后台任务与子进程注册表全失,故凡是 pending/
-    running 的都是孤儿,统一收口为 failed。
+    paused 不回收——那是用户主动暂停的意图,重启后应保持 paused 等用户继续。
     """
     result = await session.execute(
         update(Job)
@@ -104,31 +155,39 @@ async def reconcile_orphans(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
-async def _run_job(
-    job_id: str,
-    body: JobCreate,
-    *,
-    goal: DistillationGoal | None = None,
-    make_goal: MakeGoal | None = None,
-    augment_goal: AugmentGoal | None = None,
-    output_dataset_id: str | None = None,
-) -> None:
-    """后台执行:排队(信号量)→ running → 跑算子流水线 → 落终态。
+async def _run_job(job_id: str) -> None:
+    """后台执行:重建入参 → 排队(信号量)→ running → 按 type 跑 → 落终态。
 
     用独立会话(请求会话已关闭)。被 terminate_job 杀掉的子进程会非零退出 →
-    run_process_job 抛 EngineError,据 _cancelled 区分是「被停止(cancelled)」还是
-    「真失败(failed)」。
+    runner 抛 EngineError/QualityError/ReviewError,据 _cancelled/_paused 区分是
+    「被停止(cancelled)」「被暂停(paused)」还是「真失败(failed)」。
 
-    四类分支:goal → 蒸馏;make_goal → 合成;augment_goal → 增强;否则加工。
+    pause/resume 语义:dj-process 无原生暂停,暂停=杀子进程并置 paused、保留 spec;
+    继续(resume)= 复用同一 Job 行重置 pending 后再次 spawn,按 spec 从头重跑。
     """
     async with async_session_factory() as session:
         job = await session.get(Job, job_id)
         if job is None:
             _cancelled.discard(job_id)
+            _paused.discard(job_id)
             return
-        # 起跑前已被停止(stop 端点已把 DB 标 cancelled)→ 直接收尾,不再跑
+        # 起跑前已被停止/暂停(端点已把 DB 标记)→ 直接收尾,不再跑
         if job_id in _cancelled:
             _cancelled.discard(job_id)
+            _paused.discard(job_id)
+            return
+        if job_id in _paused:
+            _paused.discard(job_id)
+            return
+        try:
+            body = body_from_spec(job)
+        except (ValidationError, ValueError) as exc:
+            job.state = "failed"
+            job.error = f"任务配置已损坏:{exc}"
+            job.finished_at = _now()
+            await session.commit()
+            _cancelled.discard(job_id)
+            _paused.discard(job_id)
             return
         input_version = await session.get(DatasetVersion, body.dataset_version_id)
         if input_version is None:
@@ -137,63 +196,102 @@ async def _run_job(
             job.finished_at = _now()
             await session.commit()
             _cancelled.discard(job_id)
+            _paused.discard(job_id)
             return
 
+        yaml_text: str | None = None
+        log_path: str | None = None
         try:
-            # 并发信号量(engine 持有,跨模块按需取以便测试可整体重建)
+            # 并发信号量(engine 持有,跨模块按需取以便测试可整体重建)。
+            # 各 runner(含 quality/review)不再自行获取信号量,统一由此处持有,
+            # 避免同一协程二次获取 asyncio.Semaphore(非重入)导致死锁。
             async with engine._semaphore:
                 if job_id in _cancelled:  # 排队等信号量期间被停止
                     raise _Cancelled
+                if job_id in _paused:  # 排队等信号量期间被暂停
+                    raise _Paused
                 job.state = "running"
                 job.started_at = _now()
                 await session.commit()
-                if goal is not None:
-                    _version, yaml_text, log_path, _report = await run_distillation_job(
+                operators = [o.model_dump() for o in getattr(body, "operators", [])]
+                if job.type == "distillation":
+                    _v, yaml_text, log_path, _report = await run_distillation_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=[o.model_dump() for o in body.operators],
-                        goal=goal,
-                        output_dataset_id=output_dataset_id,
+                        operators=operators,
+                        goal=body.goal,
+                        output_dataset_id=body.output_dataset_id,
                     )
-                elif make_goal is not None:
-                    _version, yaml_text, log_path, _report = await run_make_job(
+                elif job.type == "synthesis":
+                    _v, yaml_text, log_path, _report = await run_make_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=[o.model_dump() for o in body.operators],
-                        goal=make_goal,
-                        output_dataset_id=output_dataset_id,
+                        operators=operators,
+                        goal=body.goal,
+                        output_dataset_id=body.output_dataset_id,
                     )
-                elif augment_goal is not None:
-                    _version, yaml_text, log_path, _report = await run_augment_job(
+                elif job.type == "augmentation":
+                    _v, yaml_text, log_path, _report = await run_augment_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=[o.model_dump() for o in body.operators],
-                        goal=augment_goal,
-                        output_dataset_id=output_dataset_id,
+                        operators=operators,
+                        goal=body.goal,
+                        output_dataset_id=body.output_dataset_id,
                     )
-                else:
-                    _version, yaml_text, log_path = await run_process_job(
+                elif job.type == "quality":
+                    yaml_text, log_path = await run_quality_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=[o.model_dump() for o in body.operators],
+                        operators=operators,
+                    )
+                elif job.type == "review":
+                    # review 无 yaml/日志产物;run_review 内部落命中 + 打标版本 + 回写报告
+                    await run_review(
+                        session,
+                        job=job,
+                        version=input_version,
+                        config=body.config.model_dump(by_alias=True),
+                    )
+                else:  # process / clean
+                    _v, yaml_text, log_path = await run_process_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        operators=operators,
                     )
             job.state = "success"
             job.progress = 100
-            job.config_yaml = yaml_text
-            job.logs_uri = log_path
+            if yaml_text is not None:
+                job.config_yaml = yaml_text
+            if log_path is not None:
+                job.logs_uri = log_path
+        except _Paused:
+            job.state = "paused"
         except _Cancelled:
             job.state = "cancelled"
-        except (EngineError, ExternalStoreError) as exc:
+        except asyncio.CancelledError:
+            # 无子进程的任务(review 等)被 cancel_running_task 取消:按意图落终态
             if job_id in _cancelled:
                 job.state = "cancelled"
+            elif job_id in _paused:
+                job.state = "paused"
+            else:
+                job.state = "failed"
+                job.error = "任务被取消"
+        except (EngineError, ExternalStoreError, QualityError, ReviewError) as exc:
+            if job_id in _cancelled:
+                job.state = "cancelled"
+            elif job_id in _paused:
+                job.state = "paused"
             else:
                 job.state = "failed"
                 job.error = str(exc)
         finally:
             _cancelled.discard(job_id)
+            _paused.discard(job_id)
         job.finished_at = _now()
         await session.commit()

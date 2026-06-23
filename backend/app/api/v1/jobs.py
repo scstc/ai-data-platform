@@ -257,7 +257,8 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
     await session.commit()
     await session.refresh(job)
     # 交后台执行:产物去向(含另存新数据集的构建)由 job_runner 在加工时处理
-    job_runner.spawn(job.id, body)
+    # spawn 只传 job_id——入参 body 由 _run_job 从 job.spec 重建,统一新建/重跑/继续
+    job_runner.spawn(job.id)
     return JSONResponse(content=_item(job))
 
 
@@ -303,10 +304,43 @@ async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
 
 @router.post("/jobs/{job_id}/stop", dependencies=[Depends(require_admin)])
 async def stop_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """停止运行中 / 排队中的加工任务:杀子进程并把任务标记为 cancelled。
+    """停止运行中/排队中/已暂停的任务:杀子进程(若有)并把任务标记为 cancelled。
 
-    仅 pending/running 可停;终态任务 → 409;未知 → 404。
-    停止不删产物,要重来用「重新运行」。
+    pending/running:登记停止意图(让排队中的后台任务起跑前放弃、被杀任务记
+    cancelled 而非 failed)+ 杀子进程 + 置 cancelled。paused:已无后台任务在跑,
+    直接置 cancelled。终态任务 → 409;未知 → 404。停止不删产物,要重来用「重新运行」。
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "任务不存在"},
+        )
+    if job.state not in ("pending", "running", "paused"):
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务已结束,无需停止"},
+        )
+    if job.state in ("pending", "running"):
+        was_running = job.state == "running"
+        job_runner.request_cancel(job_id)
+        # 有子进程(治理/quality)→ terminate_job 杀之;无子进程却在 running
+        # (review 纯计算/LLM)→ 取消后台协程。pending 靠起跑前意图检查,无需取消。
+        if not terminate_job(job_id) and was_running:
+            job_runner.cancel_running_task(job_id)
+    job.state = "cancelled"
+    job.finished_at = _now()
+    await session.commit()
+    return JSONResponse(content={"success": True})
+
+
+@router.post("/jobs/{job_id}/pause", dependencies=[Depends(require_admin)])
+async def pause_job(job_id: str, session: SessionDep) -> JSONResponse:
+    """暂停运行中/排队中的任务:杀子进程(若有)并标记为 paused(保留 spec)。
+
+    dj-process 无原生暂停,故暂停=终止当前运行;继续(resume)按 spec 从头重跑,
+    不保留已处理进度——这是诚实语义,前端需明示告知用户。仅 pending/running 可暂停;
+    paused/终态 → 409;未知 → 404。
     """
     job = await session.get(Job, job_id)
     if job is None:
@@ -317,16 +351,54 @@ async def stop_job(job_id: str, session: SessionDep) -> JSONResponse:
     if job.state not in ("pending", "running"):
         return JSONResponse(
             status_code=409,
-            content={"success": False, "message": "任务不在运行中,无法停止"},
+            content={"success": False, "message": "任务不在运行中,无法暂停"},
         )
-    # 先登记停止意图(让排队中的后台任务起跑前放弃、被杀任务记 cancelled 而非 failed),
-    # 再杀子进程;DB 立刻置 cancelled 给前端即时反馈。
-    job_runner.request_cancel(job_id)
-    terminate_job(job_id)
-    job.state = "cancelled"
+    # 先登记暂停意图(让排队中的后台任务起跑前放弃、被杀任务记 paused 而非 failed);
+    # 有子进程→terminate_job 杀之;无子进程却在 running(review)→ 取消后台协程。
+    was_running = job.state == "running"
+    job_runner.request_pause(job_id)
+    if not terminate_job(job_id) and was_running:
+        job_runner.cancel_running_task(job_id)
+    job.state = "paused"
     job.finished_at = _now()
     await session.commit()
     return JSONResponse(content={"success": True})
+
+
+@router.post("/jobs/{job_id}/resume", dependencies=[Depends(require_admin)])
+async def resume_job(job_id: str, session: SessionDep) -> JSONResponse:
+    """继续已暂停的任务:重置为 pending 并按原 spec 从头重跑(复用同一 Job 行,不新建)。
+
+    dj-process 无断点续跑,故继续即整任务重跑(语义同 rerun,但不另建记录、保留原
+    任务血缘与 id)。仅 paused 可继续;其余 → 409;spec 损坏 → 400;未知 → 404。
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "任务不存在"},
+        )
+    if job.state != "paused":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "仅已暂停的任务可继续"},
+        )
+    try:
+        job_runner.body_from_spec(job)  # 前置校验 spec 可重建为可执行 body
+    except (ValidationError, ValueError):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "任务配置已损坏,无法继续"},
+        )
+    job.state = "pending"
+    job.progress = 0
+    job.error = None
+    job.started_at = None
+    job.finished_at = None
+    await session.commit()
+    await session.refresh(job)
+    job_runner.spawn(job.id)
+    return JSONResponse(content=_item(job))
 
 
 @router.post("/jobs/preview")

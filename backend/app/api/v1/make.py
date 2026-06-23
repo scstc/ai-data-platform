@@ -116,12 +116,9 @@ async def _start_make(
     session.add(job)
     await session.commit()
     await session.refresh(job)
-    job_runner.spawn(
-        job.id,
-        body,  # type: ignore[arg-type]
-        make_goal=body.goal,
-        output_dataset_id=body.output_dataset_id,
-    )
+    # spawn 只传 job_id:make_goal/output_dataset_id 已随 body 落进 job.spec,
+    # job_runner._run_job 按 type=synthesis 从 spec 重建 body 并取出 goal 等
+    job_runner.spawn(job.id)
     return JSONResponse(content=_item(job))
 
 

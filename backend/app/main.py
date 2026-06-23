@@ -16,6 +16,7 @@ from app.api.v1 import (
     augment,
     categories,
     content_safety,
+    data_tasks,
     datasets,
     datasources,
     distillation,
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(datasources.router, prefix="/api/v1")
     app.include_router(datasets.router, prefix="/api/v1")
     app.include_router(jobs.router, prefix="/api/v1")
+    app.include_router(data_tasks.router, prefix="/api/v1")
     app.include_router(operators.router, prefix="/api/v1")
     app.include_router(quality.router, prefix="/api/v1")
     app.include_router(distillation.router, prefix="/api/v1")

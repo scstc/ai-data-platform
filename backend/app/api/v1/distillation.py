@@ -134,14 +134,9 @@ async def _start_distillation(
     session.add(job)
     await session.commit()
     await session.refresh(job)
-    # 适配 job_runner.spawn 的 JobCreate 形参:把 spec 里的算子序列重组成 JobCreate
-    # job_runner 会按 type=distillation 自动把 goal / output_dataset_id 传给 run_distillation_job
-    job_runner.spawn(
-        job.id,
-        body,  # type: ignore[arg-type]  # DistillationJobCreate 含 goal 字段,运行时按 isinstance 分支
-        goal=body.goal,
-        output_dataset_id=body.output_dataset_id,
-    )
+    # spawn 只传 job_id:goal/output_dataset_id 已随 body 落进 job.spec,
+    # job_runner._run_job 按 type=distillation 从 spec 重建 body 并取出 goal 等
+    job_runner.spawn(job.id)
     return JSONResponse(content=_item(job))
 
 

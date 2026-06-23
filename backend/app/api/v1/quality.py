@@ -21,18 +21,16 @@ from fastapi.responses import JSONResponse
 from app.api.v1.jobs import (
     SessionDep,
     _binary_block,
-    _build_input,
     _item,
     _new_job_id,
-    _now,
 )
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.schemas.job import QualityJobCreate
+from app.services import job_runner
 from app.services import operator_catalog as oc
 from app.services.llm_config import get_active_llm_config
-from app.services.quality import QualityError, run_quality_job
 
 router = APIRouter(tags=["quality"])
 
@@ -46,7 +44,11 @@ _NO_STATS_MSG = "该版本尚未进行质量评估"
 async def create_quality_job(
     body: QualityJobCreate, session: SessionDep
 ) -> JSONResponse:
-    """新建并执行质量评估任务:对版本逐条算 filter stats,不产新版本。"""
+    """新建质量评估任务并后台异步执行:对版本逐条算 filter stats,不产新版本。
+
+    异步(同治理类任务):立即返回 pending,不阻塞请求;进度经轮询 GET 反映,
+    可经 /jobs/{id}/stop|pause|resume 统一管控。stats 跑完回写输入版本 stats_uri。
+    """
     if not body.operators:
         return JSONResponse(
             status_code=400,
@@ -98,37 +100,18 @@ async def create_quality_job(
         id=_new_job_id(),
         name=body.name,
         type="quality",
-        state="running",
+        state="pending",
         progress=0,
         created_by="admin",
-        started_at=_now(),
+        # 存原始执行规格,供 job_runner 后台重建 body + 供重跑/继续
+        spec=body.model_dump(mode="json"),
     )
     session.add(job)
     await session.commit()
-
-    try:
-        yaml_text, log_path = await run_quality_job(
-            session,
-            job_id=job.id,
-            input_version=input_version,
-            operators=[o.model_dump() for o in body.operators],
-        )
-        job.state = "success"
-        job.progress = 100
-        job.config_yaml = yaml_text
-        job.logs_uri = log_path
-    except QualityError as exc:
-        job.state = "failed"
-        job.error = str(exc)
-    except Exception as exc:  # 未预期异常也不能让 job 卡死在 running
-        job.state = "failed"
-        job.error = f"未预期错误:{exc}"
-    job.finished_at = _now()
-    await session.commit()
     await session.refresh(job)
-
-    input_ = await _build_input(session, job.id)
-    return JSONResponse(content=_item(job, input_=input_))
+    # 交后台异步执行(与治理类任务同一执行路径 / 同一状态机)
+    job_runner.spawn(job.id)
+    return JSONResponse(content=_item(job))
 
 
 # ---------------------------------------------------------------------------

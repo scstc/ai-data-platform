@@ -26,7 +26,6 @@ from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.review_finding import ReviewFinding
 from app.services.ai import get_ai_provider
-from app.services.engine import _semaphore
 from app.services.external_store import materialized_version
 from app.services.review import scan_version
 
@@ -75,10 +74,8 @@ async def run_review(
         rows = _read_jsonl(src_path)
     provider = get_ai_provider(settings)
 
-    async with _semaphore:
-        findings, tagged_rows, report = await scan_version(
-            rows, config, provider=provider
-        )
+    # 并发信号量由调用方(job_runner._run_job)统一持有;此处只做扫描
+    findings, tagged_rows, report = await scan_version(rows, config, provider=provider)
 
     # 1) 批量写命中记录(rowIndex 即被审版本的绝对行号)
     for f in findings:

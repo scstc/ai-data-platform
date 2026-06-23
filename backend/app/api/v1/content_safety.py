@@ -26,7 +26,6 @@ from app.api.v1.jobs import (
     _build_output,
     _item,
     _new_job_id,
-    _now,
 )
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
@@ -34,8 +33,7 @@ from app.models.review_finding import ReviewFinding
 from app.schemas.common import PageResponse
 from app.schemas.job import JobRead
 from app.schemas.review import ReviewFindingRead, ReviewJobCreate
-from app.services.external_store import ExternalStoreError
-from app.services.review_runner import ReviewError, run_review
+from app.services import job_runner
 
 router = APIRouter(tags=["content-safety"])
 
@@ -44,7 +42,11 @@ router = APIRouter(tags=["content-safety"])
 async def create_review_job(
     body: ReviewJobCreate, session: SessionDep
 ) -> JSONResponse:
-    """新建并执行内容审核任务:扫描版本 → 落命中 → 产出打标版本 → 回写报告。"""
+    """新建内容审核任务并后台异步执行:扫描版本 → 落命中 → 产出打标版本 → 回写报告。
+
+    异步(同治理类任务):立即返回 pending,不阻塞请求;可经 /jobs/{id}/stop|pause|resume
+    统一管控。打标版本与报告在后台跑完后产出。
+    """
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:
         return JSONResponse(
@@ -58,41 +60,18 @@ async def create_review_job(
         id=_new_job_id(),
         name=body.name or "内容安全审核",
         type="review",
-        state="running",
+        state="pending",
         progress=0,
         created_by="admin",
-        started_at=_now(),
+        # 存原始执行规格,供 job_runner 后台重建 body(config)+ 供重跑/继续
+        spec=body.model_dump(mode="json"),
     )
     session.add(job)
     await session.commit()
-
-    try:
-        await run_review(
-            session,
-            job=job,
-            version=input_version,
-            # scan_version 按 camelCase 键读取(useLlm/sampleLimit 等),
-            # CamelModel 须 by_alias 导出,否则 snake_case 键全被忽略(降级+不限样本)
-            config=body.config.model_dump(by_alias=True),
-        )
-        job.state = "success"
-        job.progress = 100
-    except ReviewError as exc:
-        job.state = "failed"
-        job.error = str(exc)
-    except ExternalStoreError as exc:  # hosted 版本:S3 读取失败给明确文案
-        job.state = "failed"
-        job.error = f"读取 S3 对象失败:{exc}"
-    except Exception as exc:  # 未预期异常也不能让 job 卡死在 running
-        job.state = "failed"
-        job.error = f"未预期错误:{exc}"
-    job.finished_at = _now()
-    await session.commit()
     await session.refresh(job)
-
-    output = await _build_output(session, job.id)
-    input_ = await _build_input(session, job.id)
-    return JSONResponse(content=_item(job, output, input_))
+    # 交后台异步执行(与治理类任务同一执行路径 / 同一状态机)
+    job_runner.spawn(job.id)
+    return JSONResponse(content=_item(job))
 
 
 @router.get("/content-safety/jobs", response_model=PageResponse[JobRead])

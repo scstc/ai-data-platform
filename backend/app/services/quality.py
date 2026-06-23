@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
-from app.services.engine import _semaphore, build_config
+from app.services.engine import _kill_proc_tree, _running_procs, build_config
 from app.services.external_store import materialized_version
 
 
@@ -26,22 +26,35 @@ class QualityError(RuntimeError):
     """质量评估执行失败(dj-analyze 非零退出 / 无 stats 产物)。"""
 
 
-async def _run_dj_analyze(yaml_path: Path) -> tuple[int, str]:
-    """异步起 dj-analyze 子进程,返回 (退出码, 合并日志)。"""
+async def _run_dj_analyze(
+    yaml_path: Path, *, job_id: str | None = None
+) -> tuple[int, str]:
+    """异步起 dj-analyze 子进程,返回 (退出码, 合并日志)。
+
+    传 job_id 时把子进程登记进 engine._running_procs(供 terminate_job 停止/暂停),
+    与 engine._run_dj 一致;进程结束即注销。
+    """
     proc = await asyncio.create_subprocess_exec(
         settings.dj_analyze_bin,
         "--config",
         str(yaml_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        # 自成进程组:停止/暂停时可整组杀,与 engine._run_dj 一致
+        start_new_session=True,
     )
+    if job_id is not None:
+        _running_procs[job_id] = proc
     try:
         out, _ = await proc.communicate()
     except asyncio.CancelledError:
         # 请求被取消时别留下孤儿 dj-analyze 进程
-        proc.kill()
+        _kill_proc_tree(proc)
         await proc.wait()
         raise
+    finally:
+        if job_id is not None:
+            _running_procs.pop(job_id, None)
     # communicate() 返回后 returncode 必非 None;被信号杀死时为负数,不能 or 0
     assert proc.returncode is not None
     return proc.returncode, out.decode("utf-8", "replace")
@@ -88,8 +101,9 @@ async def run_quality_job(
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
 
-        async with _semaphore:
-            code, log = await _run_dj_analyze(yaml_path)
+        # 并发信号量由调用方(job_runner._run_job)统一持有;此处只负责跑子进程
+        # (可被 terminate_job 停止/暂停——子进程登记进 _running_procs)
+        code, log = await _run_dj_analyze(yaml_path, job_id=job_id)
     log_path.write_text(log, encoding="utf-8")
 
     if code != 0 or not stats_path.exists():
