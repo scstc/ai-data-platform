@@ -1,19 +1,37 @@
-import { InboxOutlined, RobotOutlined } from '@ant-design/icons';
+import {
+  CodeOutlined,
+  FileExcelOutlined,
+  FilePdfOutlined,
+  FilePptOutlined,
+  FileTextOutlined,
+  FileWordOutlined,
+  InboxOutlined,
+  RobotOutlined,
+  TableOutlined,
+} from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
 import type { UploadFile, UploadProps } from 'antd';
 import {
+  Alert,
   Button,
   Card,
+  Col,
   Input,
+  Modal,
   message,
-  Select,
+  Row,
   Space,
+  Statistic,
+  Switch,
+  Table,
+  Tag,
   TreeSelect,
   Typography,
+  theme,
   Upload,
 } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { CategoryManager } from '@/components';
 import {
   listCategories,
@@ -31,46 +49,128 @@ const { Text } = Typography;
 const { Dragger } = Upload;
 
 /** 单一格式可选项(对齐后端 landing.LANDABLE_FORMATS 的非二进制、可规范化格式)。
- *  媒体(图/音/视频)走「多模态」接入,不在此列。 */
+ *  媒体(图/音/视频)走「多模态」接入,不在此列。
+ *  icon 用文件类型图标 + 品牌色,卡片化展示一眼可辨。 */
 const FORMAT_GROUPS: {
   label: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; icon: ReactNode; color: string }[];
 }[] = [
   {
     label: '表格类',
     options: [
-      { value: 'csv', label: 'CSV (.csv)' },
-      { value: 'tsv', label: 'TSV (.tsv)' },
-      { value: 'xlsx', label: 'Excel (.xlsx)' },
-      { value: 'xls', label: 'Excel (.xls)' },
+      { value: 'csv', label: 'CSV', icon: <TableOutlined />, color: '#16A34A' },
+      { value: 'tsv', label: 'TSV', icon: <TableOutlined />, color: '#16A34A' },
+      {
+        value: 'xlsx',
+        label: 'Excel',
+        icon: <FileExcelOutlined />,
+        color: '#16A34A',
+      },
+      {
+        value: 'xls',
+        label: 'Excel',
+        icon: <FileExcelOutlined />,
+        color: '#16A34A',
+      },
     ],
   },
   {
     label: '文档类',
     options: [
-      { value: 'pdf', label: 'PDF (.pdf)' },
-      { value: 'doc', label: 'Word (.doc)' },
-      { value: 'docx', label: 'Word (.docx)' },
-      { value: 'ppt', label: 'PPT (.ppt)' },
-      { value: 'pptx', label: 'PPT (.pptx)' },
-      { value: 'html', label: 'HTML (.html)' },
+      {
+        value: 'pdf',
+        label: 'PDF',
+        icon: <FilePdfOutlined />,
+        color: '#E5484D',
+      },
+      {
+        value: 'doc',
+        label: 'Word',
+        icon: <FileWordOutlined />,
+        color: '#2D7FF9',
+      },
+      {
+        value: 'docx',
+        label: 'Word',
+        icon: <FileWordOutlined />,
+        color: '#2D7FF9',
+      },
+      {
+        value: 'ppt',
+        label: 'PPT',
+        icon: <FilePptOutlined />,
+        color: '#E5701A',
+      },
+      {
+        value: 'pptx',
+        label: 'PPT',
+        icon: <FilePptOutlined />,
+        color: '#E5701A',
+      },
+      {
+        value: 'html',
+        label: 'HTML',
+        icon: <CodeOutlined />,
+        color: '#6E56CF',
+      },
     ],
   },
   {
     label: '文本类',
     options: [
-      { value: 'txt', label: '纯文本 (.txt)' },
-      { value: 'log', label: '日志 (.log)' },
+      {
+        value: 'txt',
+        label: '纯文本',
+        icon: <FileTextOutlined />,
+        color: '#6B7280',
+      },
+      {
+        value: 'log',
+        label: '日志',
+        icon: <FileTextOutlined />,
+        color: '#6B7280',
+      },
     ],
   },
   {
     label: '结构化',
     options: [
-      { value: 'json', label: 'JSON (.json)' },
-      { value: 'jsonl', label: 'JSONL (.jsonl)' },
+      {
+        value: 'json',
+        label: 'JSON',
+        icon: <CodeOutlined />,
+        color: '#6E56CF',
+      },
+      {
+        value: 'jsonl',
+        label: 'JSONL',
+        icon: <CodeOutlined />,
+        color: '#6E56CF',
+      },
     ],
   },
 ];
+
+/** 内容安全:违规类别 / 严重度展示标签(与后端 review category/severity 对齐) */
+const CATEGORY_LABEL: Record<string, string> = {
+  porn: '黄',
+  gambling: '赌',
+  drugs: '毒',
+  politics: '政',
+  terrorism: '恐',
+  pii: '隐私',
+  other: '其他',
+};
+const SEVERITY_LABEL: Record<string, string> = {
+  high: '高危',
+  medium: '中危',
+  low: '低危',
+};
+const SEVERITY_TAG_COLOR: Record<string, string> = {
+  high: 'red',
+  medium: 'orange',
+  low: 'default',
+};
 
 /** 单文件体积上限,与后端 _MAX_MEDIA_FILE_BYTES(200MB)对齐 */
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
@@ -92,7 +192,16 @@ const SingleUploadPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [naming, setNaming] = useState(false);
   const [catMgrOpen, setCatMgrOpen] = useState(false);
+  const [safetyCheck, setSafetyCheck] = useState(true);
+  const [safetyUseLlm, setSafetyUseLlm] = useState(false);
+  const [blockReport, setBlockReport] = useState<{
+    report: DataPlatform.ReviewReportBody;
+    findings: DataPlatform.ReviewFinding[];
+    ratio: number;
+    highSeverity: number;
+  } | null>(null);
   const access = useAccess();
+  const { token } = theme.useToken();
 
   const loadCategories = useCallback(() => {
     listCategories()
@@ -163,11 +272,16 @@ const SingleUploadPage: React.FC = () => {
     fd.append('data_type', format);
     if (name.trim()) fd.append('name', name.trim());
     if (categoryId) fd.append('categoryId', categoryId);
+    fd.append('safety_check', String(safetyCheck));
+    fd.append('safety_use_llm', String(safetyUseLlm));
 
     setSubmitting(true);
-    const hide = message.loading('正在上传并生成数据集…', 0);
+    const hide = message.loading(
+      safetyCheck ? '正在上传并审核内容安全…' : '正在上传并生成数据集…',
+      0,
+    );
     try {
-      const res = await uploadBatchDataset(fd);
+      const res = await uploadBatchDataset(fd, { skipErrorHandler: true });
       hide();
       message.success(
         `已生成数据集「${res.data?.name ?? name}」,原件与 jsonl 已存入 MinIO`,
@@ -177,7 +291,17 @@ const SingleUploadPage: React.FC = () => {
       history.push('/datasets/list');
     } catch (e: any) {
       hide();
-      message.error(e?.data?.message ?? e?.message ?? '上传失败,请重试');
+      const body = e?.response?.data ?? e?.data;
+      if (body?.reviewReport) {
+        setBlockReport({
+          report: body.reviewReport,
+          findings: body.findings ?? [],
+          ratio: body.ratio ?? 0,
+          highSeverity: body.highSeverity ?? 0,
+        });
+      } else {
+        message.error(body?.message ?? e?.message ?? '上传失败,请重试');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -198,15 +322,70 @@ const SingleUploadPage: React.FC = () => {
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <div>
             <Text strong>数据格式</Text>
-            <Select
-              style={{ width: '100%', marginTop: 8 }}
-              placeholder="选择单一格式(同一批文件须为同一格式)"
-              value={format}
-              onChange={onFormatChange}
-              options={FORMAT_GROUPS}
-              showSearch
-              optionFilterProp="label"
-            />
+            <div style={{ marginTop: 8 }}>
+              {FORMAT_GROUPS.map((group) => (
+                <div key={group.label} style={{ marginBottom: 14 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {group.label}
+                  </Text>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 8,
+                      marginTop: 6,
+                    }}
+                  >
+                    {group.options.map((opt) => {
+                      const selected = format === opt.value;
+                      return (
+                        <div
+                          key={opt.value}
+                          onClick={() => onFormatChange(opt.value)}
+                          style={{
+                            width: 84,
+                            padding: '10px 8px',
+                            textAlign: 'center',
+                            cursor: 'pointer',
+                            borderRadius: 8,
+                            border: `1px solid ${
+                              selected
+                                ? token.colorPrimary
+                                : token.colorBorderSecondary
+                            }`,
+                            background: selected
+                              ? token.colorPrimaryBg
+                              : token.colorBgContainer,
+                            transition: 'all 0.2s',
+                          }}
+                        >
+                          <span style={{ fontSize: 22, color: opt.color }}>
+                            {opt.icon}
+                          </span>
+                          <div
+                            style={{
+                              marginTop: 4,
+                              fontSize: 13,
+                              fontWeight: 500,
+                            }}
+                          >
+                            {opt.label}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: token.colorTextTertiary,
+                            }}
+                          >
+                            .{opt.value}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
           <div>
             <Text strong>数据集名称</Text>
@@ -268,6 +447,37 @@ const SingleUploadPage: React.FC = () => {
               支持多文件批量上传,合并为一个数据集;单文件最大 200MB。
             </p>
           </Dragger>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 8,
+            }}
+          >
+            <Space align="center">
+              <Switch checked={safetyCheck} onChange={setSafetyCheck} />
+              <Text strong>内容安全预检</Text>
+            </Space>
+            {safetyCheck && (
+              <Space align="center" size={6}>
+                <Switch
+                  size="small"
+                  checked={safetyUseLlm}
+                  onChange={setSafetyUseLlm}
+                />
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  LLM 深度审核(较慢)
+                </Text>
+              </Space>
+            )}
+          </div>
+          {safetyCheck && (
+            <Text type="secondary" style={{ fontSize: 12, marginTop: -8 }}>
+              高危内容或违规占比 ≥10% 将拦截创建数据集
+            </Text>
+          )}
           <Button
             type="primary"
             onClick={onSubmit}
@@ -278,6 +488,98 @@ const SingleUploadPage: React.FC = () => {
           </Button>
         </Space>
       </Card>
+      <Modal
+        open={!!blockReport}
+        title="内容安全预检未通过"
+        width={640}
+        onCancel={() => setBlockReport(null)}
+        footer={[
+          <Button key="ok" type="primary" onClick={() => setBlockReport(null)}>
+            知道了
+          </Button>,
+        ]}
+      >
+        {blockReport && (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Alert
+              type="error"
+              showIcon
+              message="数据集未创建,原始文件已回收"
+              description={`扫描 ${blockReport.report.scannedRows} 行,命中违规 ${blockReport.report.flaggedRows} 行(占比 ${(blockReport.ratio * 100).toFixed(1)}%),其中高危 ${blockReport.highSeverity} 条。请清理后重新上传。`}
+            />
+            <Row gutter={16}>
+              <Col span={8}>
+                <Statistic
+                  title="违规行数"
+                  value={blockReport.report.flaggedRows}
+                />
+              </Col>
+              <Col span={8}>
+                <Statistic
+                  title="违规占比"
+                  value={`${(blockReport.ratio * 100).toFixed(1)}%`}
+                  valueStyle={{ color: '#cf1322' }}
+                />
+              </Col>
+              <Col span={8}>
+                <Statistic
+                  title="高危命中"
+                  value={blockReport.highSeverity}
+                  valueStyle={{ color: '#cf1322' }}
+                />
+              </Col>
+            </Row>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                违规类别
+              </Text>
+              <div style={{ marginTop: 4 }}>
+                {Object.entries(blockReport.report.byCategory || {}).map(
+                  ([k, v]) => (
+                    <Tag key={k} color="red" style={{ marginBottom: 4 }}>
+                      {CATEGORY_LABEL[k] ?? k}: {v}
+                    </Tag>
+                  ),
+                )}
+              </div>
+            </div>
+            {blockReport.findings.length > 0 && (
+              <div>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  命中样例(前 {blockReport.findings.length} 条)
+                </Text>
+                <Table<DataPlatform.ReviewFinding>
+                  size="small"
+                  rowKey={(r) => `${r.rowIndex}-${r.source}`}
+                  pagination={false}
+                  dataSource={blockReport.findings}
+                  style={{ marginTop: 4 }}
+                  columns={[
+                    { title: '行', dataIndex: 'rowIndex', width: 60 },
+                    {
+                      title: '类别',
+                      dataIndex: 'category',
+                      width: 90,
+                      render: (c: string) => CATEGORY_LABEL[c] ?? c,
+                    },
+                    {
+                      title: '严重度',
+                      dataIndex: 'severity',
+                      width: 80,
+                      render: (s: string) => (
+                        <Tag color={SEVERITY_TAG_COLOR[s]}>
+                          {SEVERITY_LABEL[s] ?? s}
+                        </Tag>
+                      ),
+                    },
+                    { title: '片段', dataIndex: 'snippet', ellipsis: true },
+                  ]}
+                />
+              </div>
+            )}
+          </Space>
+        )}
+      </Modal>
       <CategoryManager
         open={catMgrOpen}
         canAdmin={!!access.canAdmin}

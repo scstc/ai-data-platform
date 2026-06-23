@@ -634,7 +634,7 @@ export async function batchDeleteDatasets(
 /** 版本数据预览 GET /api/v1/dataset-versions/{versionId}/preview */
 export async function previewDatasetVersion(
   versionId: string,
-  params?: { limit?: number; offset?: number },
+  params?: { limit?: number; offset?: number; key?: string },
   options?: { [key: string]: any },
 ) {
   return request<DataPlatform.DatasetPreview>(

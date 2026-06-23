@@ -458,7 +458,7 @@ const ContentSafety: React.FC = () => {
             <Space direction="vertical" size={8}>
               <Space>
                 <Switch checked={useLlm} onChange={setUseLlm} />
-                <Text>LLM 审核(DeepSeek 分类 黄/赌/毒/政/恐)</Text>
+                <Text>LLM 审核(大模型分类 黄/赌/毒/政/恐)</Text>
               </Space>
               <Space>
                 <Switch

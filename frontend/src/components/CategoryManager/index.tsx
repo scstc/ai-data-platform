@@ -75,30 +75,30 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
   };
 
   const columns: ProColumns<DataPlatform.Category>[] = [
-    { title: '名称', dataIndex: 'name', ellipsis: true },
+    { title: '名称', dataIndex: 'name', ellipsis: true, width: 200 },
     {
       title: '备注',
       dataIndex: 'note',
       ellipsis: true,
       render: (_, r) => r.note || '-',
     },
-    { title: '创建人', dataIndex: 'creator', width: 100 },
+    { title: '创建人', dataIndex: 'creator', width: 88 },
     {
       title: '创建时间',
       dataIndex: 'createdAt',
-      width: 180,
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      width: 168,
+      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm'),
     },
     {
       title: '用量',
       dataIndex: 'usageCount',
-      width: 80,
+      width: 72,
       render: (_, r) => `${r.usageCount} 处`,
     },
     {
       title: '操作',
       valueType: 'option',
-      width: 120,
+      width: 130,
       // 新增/编辑/删除仅 admin（后端 require_admin 双层防护）；非 admin 此列为空
       render: (_, record) =>
         canAdmin
@@ -229,7 +229,7 @@ const CategoryManager: FC<CategoryManagerProps> = ({
   canAdmin,
   onChanged,
 }) => (
-  <Drawer width={720} open={open} title="分类管理" onClose={onClose}>
+  <Drawer width={920} open={open} title="分类管理" onClose={onClose}>
     <CategoryPanel canAdmin={canAdmin} onChanged={onChanged} />
   </Drawer>
 );

@@ -33,7 +33,9 @@ import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import {
   getDataset,
+  getDatasetMemberUrl,
   listCategories,
+  listDatasetMembers,
   listTags,
   previewDatasetVersion,
   publishVersion,
@@ -73,6 +75,20 @@ const fmtSize = (n?: number) => {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 };
 
+/** 预览格式分流:结构化走表格;其余统一走 kkFileView(onlinePreview?url=base64(presigned))。 */
+const PREVIEW_STRUCTURAL = new Set([
+  'csv',
+  'tsv',
+  'xlsx',
+  'xls',
+  'json',
+  'jsonl',
+  'txt',
+  'log',
+]);
+/** kkFileView 服务地址(60 上 docker compose 部署,KK_PORT 默认 8012)。 */
+const KK_FILEVIEW_BASE = 'http://10.60.1.60:8012';
+
 const SCAN_VERDICT_TAG: Record<string, { color: string; text: string }> = {
   unscanned: { color: 'default', text: '未扫描' },
   passed: { color: 'green', text: '通过' },
@@ -93,8 +109,14 @@ const DatasetDetail: React.FC = () => {
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
   const [loading, setLoading] = useState(true);
   const [activeVersion, setActiveVersion] = useState<string>();
-  const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
-  const [previewLoading, setPreviewLoading] = useState(false);
+  const [members, setMembers] = useState<DataPlatform.DatasetMember[]>([]);
+  const [previewMember, setPreviewMember] =
+    useState<DataPlatform.DatasetMember>();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalLoading, setModalLoading] = useState(false);
+  const [modalPreview, setModalPreview] =
+    useState<DataPlatform.DatasetPreview>();
+  const [modalUrl, setModalUrl] = useState<string>();
   const [editOpen, setEditOpen] = useState(false);
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
@@ -107,14 +129,47 @@ const DatasetDetail: React.FC = () => {
 
   const loadPreview = useCallback(async (versionId: string) => {
     setActiveVersion(versionId);
-    setPreviewLoading(true);
+    setMembers([]);
+    // 只拉成员清单;预览改为点「预览」按钮弹框(不再内联自动预览)
     try {
-      const res = await previewDatasetVersion(versionId, { limit: 50 });
-      setPreview(res);
-    } finally {
-      setPreviewLoading(false);
+      const mres = await listDatasetMembers(versionId);
+      setMembers(mres.data ?? []);
+    } catch {
+      /* 成员拉取失败:留空列表 */
     }
   }, []);
+
+  // 点「预览」按钮:弹框按格式原样预览
+  // 结构化(csv/tsv/xlsx/json/...) → preview?key= 表格;其余 → presigned URL 原样
+  // (pdf/html→iframe / video→video / audio→audio / image→img / office→下载)
+  const openPreview = useCallback(
+    async (m: DataPlatform.DatasetMember) => {
+      if (!activeVersion) return;
+      setPreviewMember(m);
+      setModalOpen(true);
+      setModalPreview(undefined);
+      setModalUrl(undefined);
+      setModalLoading(true);
+      const fmt = (m.format || '').toLowerCase();
+      try {
+        if (PREVIEW_STRUCTURAL.has(fmt)) {
+          const res = await previewDatasetVersion(activeVersion, {
+            key: m.key,
+            limit: 50,
+          });
+          setModalPreview(res);
+          setModalLoading(false); // 结构化:数据到即结束
+        } else {
+          const res = await getDatasetMemberUrl(activeVersion, m.key);
+          setModalUrl(res.data?.url);
+          // 非结构化:modalLoading 保持,等 iframe onLoad(kkFileView 页面就绪)再结束
+        }
+      } catch {
+        setModalLoading(false);
+      }
+    },
+    [activeVersion],
+  );
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -346,8 +401,33 @@ const DatasetDetail: React.FC = () => {
 
   // 当前预览的版本标签(供数据预览标题展示「正在看哪个版本」)
   const activeVer = detail?.versions.find((v) => v.id === activeVersion);
-  const activeVerLabel =
-    activeVer?.versionLabel ?? (activeVer ? `v${activeVer.versionNo}` : '');
+
+  /** 弹框内按格式分流:结构化→表格;其余→kkFileView(支持 pdf/office/媒体/图片/...)。 */
+  const renderPreviewContent = (m: DataPlatform.DatasetMember) => {
+    const fmt = (m.format || '').toLowerCase();
+    if (PREVIEW_STRUCTURAL.has(fmt)) {
+      return (
+        <DatasetDataView
+          semanticType={detail?.semanticType}
+          preview={modalPreview}
+        />
+      );
+    }
+    if (!modalUrl) return null;
+    // 非结构化统一走 kkFileView:onlinePreview?url={base64(presigned)},
+    // kkFileView 从 MinIO 拉原件转换渲染(Office 转 PDF、媒体原生播放等)。
+    const kkUrl = `${KK_FILEVIEW_BASE}/onlinePreview?url=${encodeURIComponent(
+      btoa(modalUrl),
+    )}`;
+    return (
+      <iframe
+        src={kkUrl}
+        title={m.name}
+        onLoad={() => setModalLoading(false)}
+        style={{ width: '100%', height: '80vh', border: 0 }}
+      />
+    );
+  };
 
   return (
     <PageContainer
@@ -543,15 +623,37 @@ const DatasetDetail: React.FC = () => {
 
             <Typography.Title level={5} style={{ marginTop: 16 }}>
               数据预览
-              {activeVerLabel ? ` · ${activeVerLabel}` : ''}
-              {preview ? `（共 ${preview.total} 行，前 50 行）` : ''}
             </Typography.Title>
-            <Spin spinning={previewLoading}>
-              <DatasetDataView
-                semanticType={detail.semanticType}
-                preview={preview}
+            {members.length > 0 ? (
+              <List
+                size="small"
+                bordered
+                dataSource={members}
+                rowKey="key"
+                renderItem={(m) => (
+                  <List.Item
+                    actions={[
+                      <Button
+                        key="preview"
+                        size="small"
+                        onClick={() => openPreview(m)}
+                      >
+                        预览
+                      </Button>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={m.name}
+                      description={`${(m.format || '').toUpperCase()} · ${fmtSize(
+                        m.size,
+                      )}`}
+                    />
+                  </List.Item>
+                )}
               />
-            </Spin>
+            ) : (
+              <Empty description="无文件" />
+            )}
           </>
         )}
       </Spin>
@@ -671,6 +773,19 @@ const DatasetDetail: React.FC = () => {
           value={verdictNote}
           onChange={(e) => setVerdictNote(e.target.value)}
         />
+      </Modal>
+
+      <Modal
+        open={modalOpen}
+        title={previewMember?.name ?? '预览'}
+        width={960}
+        footer={null}
+        destroyOnHidden
+        onCancel={() => setModalOpen(false)}
+      >
+        <Spin spinning={modalLoading}>
+          {previewMember && renderPreviewContent(previewMember)}
+        </Spin>
       </Modal>
     </PageContainer>
   );
