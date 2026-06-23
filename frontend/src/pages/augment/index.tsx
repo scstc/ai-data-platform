@@ -1,3 +1,4 @@
+// 数据增强任务列表页:复用 distillation 的 ProTable + 报告缓存模式
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import {
   PageContainer,
@@ -8,30 +9,61 @@ import { history } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Tag, Typography } from 'antd';
 import { useRef, useState } from 'react';
 import {
-  batchDeleteJobs,
-  deleteJob,
-  listJobs,
-  rerunJob,
-  stopJob,
+  batchDeleteAugmentJobs,
+  deleteAugmentJob,
+  getAugmentReport,
+  listAugmentJobs,
+  rerunAugmentJob,
+  stopAugmentJob,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { renderOutput, renderState } from '@/utils/jobState';
+import AugmentReportModal from './AugmentReportModal';
 
-const Processing: React.FC = () => {
+const Augment: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Job[]>([]);
-  // 有任务在跑/排队时自动轮询刷新状态(后台执行,进度异步推进)
+  const [reportJobId, setReportJobId] = useState<string>();
+  const [reportCache, setReportCache] = useState<
+    Record<string, DataPlatform.AugmentReport>
+  >({});
   const [polling, setPolling] = useState<number | undefined>(undefined);
 
-  /** 重跑:用原配置对原输入版本再跑一次,产出新版本(同步执行,完成后刷新列表) */
+  const openReport = async (jobId: string) => {
+    if (reportCache[jobId]) {
+      setReportJobId(jobId);
+      return;
+    }
+    try {
+      const res = await getAugmentReport(jobId);
+      if (res.data) {
+        setReportCache((prev) => ({ ...prev, [jobId]: res.data }));
+        setReportJobId(jobId);
+      }
+    } catch (e: any) {
+      const msg = e?.info?.errorMessage || e?.data?.message || '读取报告失败';
+      message.error(msg);
+    }
+  };
+
+  const reloadReport = async (jobId: string) => {
+    const res = await getAugmentReport(jobId).catch(() => undefined);
+    if (res?.data) setReportCache((prev) => ({ ...prev, [jobId]: res.data }));
+  };
+
   const handleRerun = async (id: string) => {
     const hide = message.loading('正在重新运行…', 0);
     try {
-      await rerunJob(id);
+      await rerunAugmentJob(id);
       hide();
       message.success('已重新运行，产出新版本');
+      setReportCache((prev) => {
+        const n = { ...prev };
+        delete n[id];
+        return n;
+      });
       actionRef.current?.reload();
     } catch {
       hide();
@@ -39,11 +71,10 @@ const Processing: React.FC = () => {
     }
   };
 
-  /** 删除:只删任务记录,产出的数据集版本保留(有独立删除入口) */
   const handleDelete = async (id: string) => {
     const hide = message.loading('正在删除…', 0);
     try {
-      await deleteJob(id);
+      await deleteAugmentJob(id);
       hide();
       message.success('任务已删除');
       actionRef.current?.reload();
@@ -53,28 +84,26 @@ const Processing: React.FC = () => {
     }
   };
 
-  /** 停止:杀子进程并把任务标记为 cancelled(已产出的不受影响) */
   const handleStop = async (id: string) => {
     const hide = message.loading('正在停止…', 0);
     try {
-      await stopJob(id);
+      await stopAugmentJob(id);
       hide();
       message.success('任务已停止');
       actionRef.current?.reload();
     } catch (e: any) {
       hide();
       message.error(
-        e?.response?.data?.message || e?.data?.message || '停止失败，请重试',
+        e?.info?.errorMessage || e?.data?.message || '停止失败，请重试',
       );
     }
   };
 
-  /** 批量删除:运行中/不存在的由后端跳过,产物版本保留 */
   const handleBatchDelete = async () => {
     const ids = selectedRows.map((r) => r.id);
     const hide = message.loading('正在批量删除…', 0);
     try {
-      const res = await batchDeleteJobs(ids);
+      const res = await batchDeleteAugmentJobs(ids);
       hide();
       message.success(`已删除 ${res?.data?.deleted ?? ids.length} 个任务`);
       setSelectedRows([]);
@@ -102,31 +131,57 @@ const Processing: React.FC = () => {
       ),
     },
     {
-      title: '类型',
-      dataIndex: 'type',
-      render: (_, r) => <Tag>{r.type}</Tag>,
+      title: '输入版本',
+      dataIndex: 'input',
+      width: 240,
+      ellipsis: true,
+      render: (_, r) =>
+        r.input
+          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
+          : '-',
     },
     {
-      title: '状态',
-      dataIndex: 'state',
-      render: (_, r) => renderState(r.state),
-    },
-    {
-      title: '产物数据集',
+      title: '产出版本',
       dataIndex: 'output',
       render: (_, r) => renderOutput(r.output),
+    },
+    { title: '状态', dataIndex: 'state', width: 90, render: (_, r) => renderState(r.state) },
+    {
+      title: '扩增比',
+      dataIndex: 'progress',
+      width: 160,
+      render: (_, r) => {
+        if (r.state === 'success') {
+          const report = reportCache[r.id];
+          if (report?.expansionRatio != null) {
+            const ratio = report.expansionRatio.toFixed(2);
+            return (
+              <span>
+                <Tag color="cyan">{ratio}x</Tag>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {report.outputCount}/{report.inputCount}
+                </Typography.Text>
+              </span>
+            );
+          }
+          return <a onClick={() => openReport(r.id)}>查看报告</a>;
+        }
+        if (r.state === 'running') return <Tag color="processing">进行中</Tag>;
+        return '-';
+      },
     },
     {
       title: '创建时间',
       dataIndex: 'createdAt',
+      width: 170,
       render: (_, r) => formatDateTime(r.createdAt),
     },
     {
       title: '操作',
       valueType: 'option',
       key: 'option',
+      width: 220,
       render: (_, r) => {
-        // 运行中/排队中:只给「停止」(删除会被后端 409,重跑无意义)
         if (r.state === 'running' || r.state === 'pending') {
           return [
             <Popconfirm
@@ -140,13 +195,19 @@ const Processing: React.FC = () => {
             </Popconfirm>,
           ];
         }
-        // 终态:可重跑 + 可删除
-        const actions = [];
+        const actions: React.ReactNode[] = [];
+        if (r.state === 'success') {
+          actions.push(
+            <a key="report" onClick={() => openReport(r.id)}>
+              查看报告
+            </a>,
+          );
+        }
         if (r.canRerun) {
           actions.push(
             <Popconfirm
               key="rerun"
-              title="用原配置对原输入版本重新运行，产出新版本？"
+              title="用原配置重新运行，产出新版本？"
               onConfirm={() => handleRerun(r.id)}
             >
               <a>重新运行</a>
@@ -172,7 +233,7 @@ const Processing: React.FC = () => {
   return (
     <PageContainer>
       <ProTable<DataPlatform.Job>
-        headerTitle="数据加工任务"
+        headerTitle="数据增强任务"
         actionRef={actionRef}
         rowKey="id"
         search={false}
@@ -197,15 +258,18 @@ const Processing: React.FC = () => {
         )}
         polling={polling}
         request={async (params) => {
-          const res = await listJobs({
+          const res = await listAugmentJobs({
             current: params.current,
             pageSize: params.pageSize,
           });
-          // 有任务在跑/排队 → 每 3s 轮询;全部终态 → 停止轮询
           const active = res.data?.some(
             (j) => j.state === 'running' || j.state === 'pending',
           );
           setPolling(active ? 3000 : undefined);
+          const successIds = (res.data ?? [])
+            .filter((j) => j.state === 'success')
+            .map((j) => j.id);
+          void Promise.all(successIds.map((id) => reloadReport(id)));
           return { data: res.data, total: res.total, success: res.success };
         }}
         columns={columns}
@@ -213,9 +277,9 @@ const Processing: React.FC = () => {
           <Button
             type="primary"
             key="new"
-            onClick={() => history.push('/governance/processing/editor')}
+            onClick={() => history.push('/governance/augment/editor')}
           >
-            新建任务
+            新建增强
           </Button>,
         ]}
       />
@@ -230,65 +294,53 @@ const Processing: React.FC = () => {
         }}
       >
         {currentJob && (
-          <>
-            <ProDescriptions<DataPlatform.Job>
-              column={1}
-              dataSource={currentJob}
-              columns={[
-                { title: '任务名', dataIndex: 'name' },
-                { title: '类型', dataIndex: 'type' },
-                {
-                  title: '状态',
-                  dataIndex: 'state',
-                  render: (_, r) => renderState(r.state),
-                },
-                {
-                  title: '产物数据集',
-                  dataIndex: 'output',
-                  render: (_, r) => renderOutput(r.output),
-                },
-                {
-                  title: '创建时间',
-                  dataIndex: 'createdAt',
-                  render: (_, r) => formatDateTime(r.createdAt),
-                },
-                {
-                  title: '错误',
-                  dataIndex: 'error',
-                  render: (_, r) =>
-                    r.error ? (
-                      <Typography.Text type="danger">{r.error}</Typography.Text>
-                    ) : (
-                      '-'
-                    ),
-                },
-              ]}
-            />
-            {currentJob.configYaml && (
-              <>
-                <Typography.Title level={5} style={{ marginTop: 16 }}>
-                  算子配置（生成的 data-juicer YAML）
-                </Typography.Title>
-                <Typography.Paragraph>
-                  <pre
-                    style={{
-                      background: 'var(--ant-color-fill-quaternary, #f5f5f5)',
-                      padding: 12,
-                      borderRadius: 6,
-                      overflow: 'auto',
-                      fontSize: 12,
-                    }}
-                  >
-                    {currentJob.configYaml}
-                  </pre>
-                </Typography.Paragraph>
-              </>
-            )}
-          </>
+          <ProDescriptions<DataPlatform.Job>
+            column={1}
+            dataSource={currentJob}
+            columns={[
+              { title: '任务名', dataIndex: 'name' },
+              { title: '状态', dataIndex: 'state', render: (_, r) => renderState(r.state) },
+              {
+                title: '输入版本',
+                dataIndex: 'input',
+                render: (_, r) =>
+                  r.input
+                    ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
+                    : '-',
+              },
+              {
+                title: '产出版本',
+                dataIndex: 'output',
+                render: (_, r) => renderOutput(r.output),
+              },
+              {
+                title: '创建时间',
+                dataIndex: 'createdAt',
+                render: (_, r) => formatDateTime(r.createdAt),
+              },
+              {
+                title: '错误',
+                dataIndex: 'error',
+                render: (_, r) =>
+                  r.error ? (
+                    <Typography.Text type="danger">{r.error}</Typography.Text>
+                  ) : (
+                    '-'
+                  ),
+              },
+            ]}
+          />
         )}
       </Drawer>
+
+      <AugmentReportModal
+        open={!!reportJobId}
+        jobId={reportJobId}
+        report={reportJobId ? reportCache[reportJobId] : undefined}
+        onClose={() => setReportJobId(undefined)}
+      />
     </PageContainer>
   );
 };
 
-export default Processing;
+export default Augment;

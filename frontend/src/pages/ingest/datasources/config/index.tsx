@@ -23,6 +23,7 @@ import {
   Select,
   Space,
   Switch,
+  TreeSelect,
   Typography,
 } from 'antd';
 import { type FC, useEffect, useMemo, useState } from 'react';
@@ -32,6 +33,10 @@ import {
   testDataSource,
 } from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
+import {
+  type CategoryTreeNode,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import {
   CONFIG_TITLE,
   DB_KIND_LABEL,
@@ -152,17 +157,13 @@ const DataSourceConfigPage: FC = () => {
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] =
     useState<DataPlatform.TestConnectionResult | null>(null);
-  const [categoryOptions, setCategoryOptions] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
 
   useEffect(() => {
     listCategories()
-      .then((res) =>
-        setCategoryOptions(
-          res.data.map((c) => ({ label: c.name, value: c.id })),
-        ),
-      )
+      .then((res) => setCategoryTreeData(toCategoryTreeData(res.data)))
       .catch(() => undefined);
   }, []);
 
@@ -468,12 +469,13 @@ const DataSourceConfigPage: FC = () => {
               )}
 
               <Form.Item name="categoryId" label="分类(可选)">
-                <Select
+                <TreeSelect
                   allowClear
                   showSearch
-                  optionFilterProp="label"
+                  treeNodeFilterProp="title"
+                  treeDefaultExpandAll
                   placeholder="选择分类"
-                  options={categoryOptions}
+                  treeData={categoryTreeData}
                 />
               </Form.Item>
               <Form.Item name="description" label="描述(可选)">

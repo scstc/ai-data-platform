@@ -10,6 +10,10 @@ import {
   listCategories,
   listDataSources,
 } from '@/services/data-platform';
+import {
+  type CategoryTreeNode,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
 import DataSourceFormDrawer from './components/DataSourceFormDrawer';
@@ -20,14 +24,14 @@ const DataSourcesPage: FC = () => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<DataPlatform.DataSource>();
   const [categoryOpen, setCategoryOpen] = useState(false);
-  const [categoryOptions, setCategoryOptions] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
 
   const loadCategories = useCallback(async () => {
     try {
       const res = await listCategories();
-      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+      setCategoryTreeData(toCategoryTreeData(res.data));
     } catch {
       // 静默：分类筛选不可用不应阻断列表
     }
@@ -96,8 +100,14 @@ const DataSourcesPage: FC = () => {
     {
       title: '分类',
       dataIndex: 'categoryId',
-      valueType: 'select',
-      fieldProps: { options: categoryOptions, allowClear: true },
+      valueType: 'treeSelect',
+      fieldProps: {
+        treeData: categoryTreeData,
+        allowClear: true,
+        showSearch: true,
+        treeNodeFilterProp: 'title',
+        treeDefaultExpandAll: true,
+      },
       render: (_, record) => record.categoryName || '-',
     },
     {
@@ -181,7 +191,7 @@ const DataSourcesPage: FC = () => {
       <DataSourceFormDrawer
         open={drawerOpen}
         record={editingRecord}
-        categoryOptions={categoryOptions}
+        categoryTreeData={categoryTreeData}
         onClose={() => setDrawerOpen(false)}
         onSuccess={() => actionRef.current?.reload()}
       />

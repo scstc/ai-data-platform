@@ -10,6 +10,14 @@ export async function listCategories(options?: { [key: string]: any }) {
   );
 }
 
+/** 全部标签（自由输入联想）GET /api/v1/tags */
+export async function listTags(options?: { [key: string]: any }) {
+  return request<{ data: { id: string; name: string }[]; success: boolean }>(
+    '/api/v1/tags',
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
 /** 新建分类（仅 admin；重名 409）POST /api/v1/categories（#15） */
 export async function createCategory(
   body: DataPlatform.CategoryCreate,
@@ -742,6 +750,324 @@ export async function createQualityJob(
     data: body,
     ...(options || {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// 数据蒸馏
+// ---------------------------------------------------------------------------
+/** 新建并执行蒸馏任务 POST /api/v1/distillation/jobs */
+export async function createDistillationJob(
+  body: DataPlatform.DistillationJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/distillation/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出蒸馏任务 GET /api/v1/distillation/jobs */
+export async function listDistillationJobs(
+  params: { current?: number; pageSize?: number } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.Job[];
+    total: number;
+    success: boolean;
+  }>('/api/v1/distillation/jobs', {
+    method: 'GET',
+    params: { current: 1, pageSize: 10, ...params },
+    ...(options || {}),
+  });
+}
+
+/** 蒸馏任务详情 GET /api/v1/distillation/jobs/{id} */
+export async function getDistillationJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/distillation/jobs/${jobId}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 重跑蒸馏任务 POST /api/v1/distillation/jobs/{id}/rerun */
+export async function rerunDistillationJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/distillation/jobs/${jobId}/rerun`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 停止蒸馏任务 POST /api/v1/distillation/jobs/{id}/stop */
+export async function stopDistillationJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/distillation/jobs/${jobId}/stop`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 删除蒸馏任务 DELETE /api/v1/distillation/jobs/{id} */
+export async function deleteDistillationJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/distillation/jobs/${jobId}`,
+    { method: 'DELETE', ...(options || {}) },
+  );
+}
+
+/** 批量删除蒸馏任务 POST /api/v1/distillation/jobs/batch-delete */
+export async function batchDeleteDistillationJobs(
+  ids: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/distillation/jobs/batch-delete',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: { ids },
+      ...(options || {}),
+    },
+  );
+}
+
+/** 读取蒸馏报告 GET /api/v1/distillation/jobs/{id}/report */
+export async function getDistillationReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DistillationReport; success: boolean }>(
+    `/api/v1/distillation/jobs/${jobId}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 数据合成(make)——LLM 造新数据
+// ---------------------------------------------------------------------------
+/** 新建合成任务 POST /api/v1/synthesis/jobs */
+export async function createMakeJob(
+  body: DataPlatform.MakeJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/synthesis/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出合成任务 GET /api/v1/synthesis/jobs */
+export async function listMakeJobs(
+  params: { current?: number; pageSize?: number } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.Job[];
+    total: number;
+    success: boolean;
+  }>('/api/v1/synthesis/jobs', {
+    method: 'GET',
+    params: { current: 1, pageSize: 10, ...params },
+    ...(options || {}),
+  });
+}
+
+/** 合成任务详情 GET /api/v1/synthesis/jobs/{id} */
+export async function getMakeJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/synthesis/jobs/${jobId}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 重跑合成任务 POST /api/v1/synthesis/jobs/{id}/rerun */
+export async function rerunMakeJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/synthesis/jobs/${jobId}/rerun`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 停止合成任务 POST /api/v1/synthesis/jobs/{id}/stop */
+export async function stopMakeJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/synthesis/jobs/${jobId}/stop`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 删除合成任务 DELETE /api/v1/synthesis/jobs/{id} */
+export async function deleteMakeJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/synthesis/jobs/${jobId}`,
+    { method: 'DELETE', ...(options || {}) },
+  );
+}
+
+/** 批量删除合成任务 POST /api/v1/synthesis/jobs/batch-delete */
+export async function batchDeleteMakeJobs(
+  ids: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/synthesis/jobs/batch-delete',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: { ids },
+      ...(options || {}),
+    },
+  );
+}
+
+/** 读取合成报告 GET /api/v1/synthesis/jobs/{id}/report */
+export async function getMakeReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.MakeReport; success: boolean }>(
+    `/api/v1/synthesis/jobs/${jobId}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 数据增强(augment)——LLM 改写已有数据
+// ---------------------------------------------------------------------------
+/** 新建增强任务 POST /api/v1/augmentation/jobs */
+export async function createAugmentJob(
+  body: DataPlatform.AugmentJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/augmentation/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出增强任务 GET /api/v1/augmentation/jobs */
+export async function listAugmentJobs(
+  params: { current?: number; pageSize?: number } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.Job[];
+    total: number;
+    success: boolean;
+  }>('/api/v1/augmentation/jobs', {
+    method: 'GET',
+    params: { current: 1, pageSize: 10, ...params },
+    ...(options || {}),
+  });
+}
+
+/** 增强任务详情 GET /api/v1/augmentation/jobs/{id} */
+export async function getAugmentJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/augmentation/jobs/${jobId}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 重跑增强任务 POST /api/v1/augmentation/jobs/{id}/rerun */
+export async function rerunAugmentJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/augmentation/jobs/${jobId}/rerun`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 停止增强任务 POST /api/v1/augmentation/jobs/{id}/stop */
+export async function stopAugmentJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/augmentation/jobs/${jobId}/stop`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 删除增强任务 DELETE /api/v1/augmentation/jobs/{id} */
+export async function deleteAugmentJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/augmentation/jobs/${jobId}`,
+    { method: 'DELETE', ...(options || {}) },
+  );
+}
+
+/** 批量删除增强任务 POST /api/v1/augmentation/jobs/batch-delete */
+export async function batchDeleteAugmentJobs(
+  ids: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/augmentation/jobs/batch-delete',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: { ids },
+      ...(options || {}),
+    },
+  );
+}
+
+/** 读取增强报告 GET /api/v1/augmentation/jobs/{id}/report */
+export async function getAugmentReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.AugmentReport; success: boolean }>(
+    `/api/v1/augmentation/jobs/${jobId}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
 }
 
 /** 逐条质量得分 GET /api/v1/dataset-versions/{versionId}/stats */

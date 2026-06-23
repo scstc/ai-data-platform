@@ -12,11 +12,11 @@ import {
   Menu,
   message,
   Popconfirm,
-  Select,
   Space,
   Spin,
   Table,
   Tag,
+  TreeSelect,
 } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import CategoryManager from '@/components/CategoryManager';
@@ -27,6 +27,10 @@ import {
   listDatasets,
   previewDatasetVersion,
 } from '@/services/data-platform';
+import {
+  type CategoryTreeNode,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import { ACCESS_TYPES, acceptOf } from './constants';
 import MediaMembersDrawer from './MediaMembersDrawer';
@@ -48,9 +52,9 @@ const AccessPage: React.FC = () => {
   const [typeKey, setTypeKey] = useState<string>(ACCESS_TYPES[0].key);
   const [keyword, setKeyword] = useState<string>();
   const [categoryId, setCategoryId] = useState<string>();
-  const [categoryOptions, setCategoryOptions] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
   const [uploadOpen, setUploadOpen] = useState(false);
   const [catOpen, setCatOpen] = useState(false);
   // 预览抽屉
@@ -72,7 +76,7 @@ const AccessPage: React.FC = () => {
   const loadCategories = useCallback(async () => {
     try {
       const res = await listCategories();
-      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+      setCategoryTreeData(toCategoryTreeData(res.data));
     } catch {
       // 分类为可选筛选项,加载失败不阻断接入主流程(静默降级)
     }
@@ -272,13 +276,16 @@ const AccessPage: React.FC = () => {
             }}
             toolBarRender={() => [
               <Space key="filters">
-                <Select
+                <TreeSelect
                   allowClear
                   placeholder="选择分类"
                   style={{ width: 180 }}
-                  options={categoryOptions}
+                  treeData={categoryTreeData}
                   value={categoryId}
                   onChange={setCategoryId}
+                  showSearch
+                  treeNodeFilterProp="title"
+                  treeDefaultExpandAll
                 />
                 <Input.Search
                   allowClear

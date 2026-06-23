@@ -2,26 +2,31 @@
 /* eslint-disable */
 
 declare namespace DataPlatform {
-  /** 受控分类（扁平单层，跨实体共享，#15） */
+  /** 受控分类（多级树，邻接表 parentId，根为 null；跨实体共享，#15） */
   type Category = {
     id: string;
     name: string;
+    parentId?: string | null;
     note?: string | null;
     creator: string;
     createdAt: string;
     /** 三实体引用该分类的总数（供删除守卫与管理页展示） */
     usageCount: number;
+    /** 直接子分类（GET /categories 返回嵌套树时填充） */
+    children?: Category[];
   };
 
-  /** 新建分类入参 */
+  /** 新建分类入参（parentId 省略/为 null → 根分类） */
   type CategoryCreate = {
     name: string;
+    parentId?: string | null;
     note?: string;
   };
 
   /** 更新分类入参 */
   type CategoryUpdate = {
     name?: string;
+    parentId?: string | null;
     note?: string;
   };
 
@@ -289,6 +294,99 @@ declare namespace DataPlatform {
     operators: { name: string; params?: Record<string, any> }[];
   };
 
+  /** 数据蒸馏目标(任务级参数) */
+  type DistillationGoal = {
+    keepRatio?: number;
+    keepNum?: number;
+    scoreField?: string;
+    fallbackRandom?: boolean;
+    enableDedup?: boolean;
+    enableScoreFilter?: boolean;
+  };
+  /** 新建数据蒸馏任务入参 */
+  type DistillationJobCreate = {
+    name: string;
+    datasetVersionId: string;
+    operators: { name: string; params?: Record<string, any> }[];
+    goal: DistillationGoal;
+    outputDatasetId?: string;
+  };
+  /** 蒸馏报告(任务跑完后) */
+  type DistillationReport = {
+    jobId: string;
+    inputVersionId: string;
+    outputVersionId?: string;
+    inputCount: number;
+    outputCount?: number;
+    keepRatioActual?: number;
+    dedupRemoved?: number;
+    filterRemoved?: number;
+    elapsedSeconds?: number;
+    operatorChain: string[];
+    warnings: string[];
+    raw?: Record<string, any>;
+  };
+
+  /** 数据合成(make)目标(任务级参数) */
+  type MakeGoal = {
+    mode?: 'synthesize' | 'make';
+    targetPerSample?: number;
+    targetTotal?: number;
+    note?: string;
+  };
+  /** 新建合成任务入参 */
+  type MakeJobCreate = {
+    name: string;
+    datasetVersionId: string;
+    operators: { name: string; params?: Record<string, any> }[];
+    goal: MakeGoal;
+    outputDatasetId?: string;
+  };
+  /** 合成报告 */
+  type MakeReport = {
+    jobId: string;
+    inputVersionId: string;
+    outputVersionId?: string;
+    mode: string;
+    inputCount: number;
+    outputCount?: number;
+    expansionRatio?: number;
+    elapsedSeconds?: number;
+    operatorChain: string[];
+    warnings: string[];
+    raw?: Record<string, any>;
+  };
+
+  /** 数据增强(augment)目标 */
+  type AugmentGoal = {
+    mode?: 'augment';
+    targetPerSample?: number;
+    targetTotal?: number;
+    note?: string;
+  };
+  /** 新建增强任务入参 */
+  type AugmentJobCreate = {
+    name: string;
+    datasetVersionId: string;
+    operators: { name: string; params?: Record<string, any> }[];
+    goal: AugmentGoal;
+    outputDatasetId?: string;
+  };
+  /** 增强报告 */
+  type AugmentReport = {
+    jobId: string;
+    inputVersionId: string;
+    outputVersionId?: string;
+    mode: string;
+    inputCount: number;
+    outputCount?: number;
+    expansionRatio?: number;
+    elapsedSeconds?: number;
+    operatorChain: string[];
+    warnings: string[];
+    raw?: Record<string, any>;
+  };
+
   /** 逐条质量得分行 */
   type VersionStatsRow = {
     index: number;
@@ -388,6 +486,8 @@ declare namespace DataPlatform {
     latestVersionLabel?: string | null;
     createdAt: string;
     updatedAt: string;
+    /** 标签（多对多，自由输入） */
+    tags?: string[];
   };
 
   /** 外部 S3 桶内对象（列对象接口返回项，#18） */
@@ -440,6 +540,8 @@ declare namespace DataPlatform {
     // 受控分类:显式传 null 才能清空(后端 exclude_unset)
     categoryId?: string | null;
     validUntil?: string | null;
+    /** 标签（多对多）；传入即全量替换，不传不动 */
+    tags?: string[];
   };
 
   /** 数据集列表查询参数 */
@@ -452,10 +554,14 @@ declare namespace DataPlatform {
     sourceKind?: string;
     creator?: string;
     categoryId?: string;
+    /** 选父含子筛选:逗号分隔的分类 id 列表(选中分类的全部后代 id),后端 IN 查询。*/
+    categoryIds?: string;
     createdStart?: string;
     createdEnd?: string;
     /** 发布状态过滤：publishStatus=published 只返回含已发布版本的数据集（算法工程师消费视图） */
     publishStatus?: 'draft' | 'published' | 'unpublished';
+    /** 标签过滤（逗号分隔，OR：含任一即命中） */
+    tags?: string;
   };
 
   /** 版本数据预览 */

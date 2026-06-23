@@ -5,10 +5,22 @@ import {
   ProFormDependency,
   ProFormSelect,
   ProFormText,
+  ProFormTreeSelect,
   ProTable,
 } from '@ant-design/pro-components';
 import { Access, history, useAccess, useLocation } from '@umijs/max';
-import { Button, message, Popconfirm, Tag, Typography } from 'antd';
+import {
+  Button,
+  Dropdown,
+  type MenuProps,
+  message,
+  Popconfirm,
+  Popover,
+  Select,
+  Tag,
+  TreeSelect,
+  Typography,
+} from 'antd';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
@@ -21,11 +33,25 @@ import {
   listDataSources,
   listDatasets,
   listObjects,
+  listTags,
   unhostDataset,
+  updateDataset,
 } from '@/services/data-platform';
+import {
+  type CategoryTreeNode,
+  collectSubtreeIds,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
+import {
+  SENSITIVITY_LEVEL_COLOR,
+  SENSITIVITY_LEVEL_ENUM,
+  sensitivityLevelLabel,
+  sensitivityLevelTag,
+} from '@/utils/sensitivityLevel';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
+import { tagColor } from '@/utils/tags';
 
 /** 数据集类型枚举（列表搜索 + 托管表单复用） */
 const DATA_TYPE_ENUM = {
@@ -46,20 +72,71 @@ const fmtSize = (n?: number) => {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 };
 
+/** 行内快速编辑标签(admin):标签是多值,暂存本地、点「保存」才提交(不逐字 PATCH)。*/
+const QuickTagEditor: React.FC<{
+  datasetId: string;
+  initialTags?: string[];
+  options: { label: string; value: string }[];
+  onSaved: () => void;
+}> = ({ datasetId, initialTags, options, onSaved }) => {
+  const [val, setVal] = useState<string[]>(initialTags ?? []);
+  const [saving, setSaving] = useState(false);
+  const onSave = async () => {
+    setSaving(true);
+    try {
+      await updateDataset(datasetId, { tags: val });
+      message.success('已更新标签');
+      onSaved();
+    } catch {
+      message.error('保存失败，请重试');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div style={{ width: 260 }}>
+      <Select
+        mode="tags"
+        style={{ width: '100%' }}
+        value={val}
+        onChange={setVal}
+        options={options}
+        allowClear
+        showSearch
+        optionFilterProp="label"
+        placeholder="输入标签，回车添加（可多选）"
+      />
+      <div style={{ marginTop: 8, textAlign: 'right' }}>
+        <Button size="small" type="primary" loading={saving} onClick={onSave}>
+          保存
+        </Button>
+      </div>
+    </div>
+  );
+};
+
 const DatasetsList: React.FC = () => {
   const access = useAccess();
   const actionRef = useRef<ActionType | null>(null);
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Dataset[]>([]);
   const [hostOpen, setHostOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
-  const [categoryOptions, setCategoryOptions] = useState<
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
+  // 行内快速设置分类的 Popover 受控:记录当前展开的行(数据集 id),选完即关。
+  const [quickCatId, setQuickCatId] = useState<string | null>(null);
+  // 全部标签(标签筛选项的 options 联想)。
+  const [tagOptions, setTagOptions] = useState<
     { label: string; value: string }[]
   >([]);
+  // 行内快速编辑标签的 Popover 受控:记录当前展开的行(数据集 id)。
+  const [quickTagId, setQuickTagId] = useState<string | null>(null);
 
   const loadCategories = useCallback(async () => {
     try {
       const res = await listCategories();
-      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+      setCategoryTreeData(toCategoryTreeData(res.data));
     } catch {
       // 静默：分类筛选不可用不应阻断列表
     }
@@ -68,6 +145,16 @@ const DatasetsList: React.FC = () => {
   useEffect(() => {
     loadCategories();
   }, [loadCategories]);
+
+  useEffect(() => {
+    listTags()
+      .then((res) =>
+        setTagOptions(
+          (res.data ?? []).map((t) => ({ label: t.name, value: t.name })),
+        ),
+      )
+      .catch(() => undefined);
+  }, []);
 
   // 兼容旧的 ?highlight=<datasetId> 跳转(来自低质过滤等):改为直接进详情页
   const location = useLocation();
@@ -125,6 +212,37 @@ const DatasetsList: React.FC = () => {
     }
   };
 
+  // 行内快速设置分级(admin):点分级 Tag 弹菜单即选即存,免进详情。
+  const handleQuickSetSensitivity = async (
+    id: string,
+    level: string | null,
+  ) => {
+    try {
+      await updateDataset(id, { sensitivityLevel: level });
+      message.success(
+        level ? `已设为${sensitivityLevelLabel(level)}` : '已清除分级',
+      );
+      actionRef.current?.reload();
+    } catch {
+      message.error('设置失败，请重试');
+    }
+  };
+
+  // 行内快速设置分类(admin):点分类单元格弹 TreeSelect,选完即存并关 Popover。
+  const handleQuickSetCategory = async (
+    id: string,
+    categoryId: string | null,
+  ) => {
+    try {
+      await updateDataset(id, { categoryId });
+      message.success(categoryId ? '已设置分类' : '已清除分类');
+      setQuickCatId(null);
+      actionRef.current?.reload();
+    } catch {
+      message.error('设置失败，请重试');
+    }
+  };
+
   const goDetail = (id: string) => history.push(`/datasets/${id}`);
 
   const columns: ProColumns<DataPlatform.Dataset>[] = [
@@ -178,9 +296,138 @@ const DatasetsList: React.FC = () => {
     {
       title: '分类',
       dataIndex: 'categoryId',
+      valueType: 'treeSelect',
+      fieldProps: {
+        treeData: categoryTreeData,
+        allowClear: true,
+        treeDefaultExpandAll: true,
+        showSearch: true,
+        treeNodeFilterProp: 'title',
+      },
+      render: (_, r) => {
+        const inner = r.categoryName || <Tag bordered={false}>未设置</Tag>;
+        if (!access.canAdmin) return inner;
+        return (
+          <Popover
+            open={quickCatId === r.id}
+            onOpenChange={(o) => setQuickCatId(o ? r.id : null)}
+            trigger="click"
+            placement="bottomLeft"
+            content={
+              <div style={{ width: 240 }}>
+                <TreeSelect
+                  style={{ width: '100%' }}
+                  treeData={categoryTreeData}
+                  defaultValue={r.categoryId ?? undefined}
+                  allowClear
+                  showSearch
+                  treeNodeFilterProp="title"
+                  treeDefaultExpandAll
+                  placeholder="选择分类"
+                  onChange={(val) => handleQuickSetCategory(r.id, val ?? null)}
+                />
+              </div>
+            }
+          >
+            <span style={{ cursor: 'pointer' }}>{inner}</span>
+          </Popover>
+        );
+      },
+    },
+    {
+      title: '分级',
+      dataIndex: 'sensitivityLevel',
+      search: false,
+      width: 96,
+      render: (_, r) => {
+        const tag = sensitivityLevelTag(r.sensitivityLevel);
+        const inner = tag ? (
+          <Tag color={tag.color}>{tag.label}</Tag>
+        ) : (
+          <Tag bordered={false}>未设置</Tag>
+        );
+        if (!access.canAdmin) return inner;
+        const items: MenuProps['items'] = [
+          ...(['public', 'internal', 'confidential'] as const).map((k) => ({
+            key: k,
+            label: (
+              <Tag
+                color={SENSITIVITY_LEVEL_COLOR[k]}
+                style={{ marginInlineEnd: 0 }}
+              >
+                {SENSITIVITY_LEVEL_ENUM[k].text}
+              </Tag>
+            ),
+          })),
+          { type: 'divider' },
+          { key: '__clear', label: '清除分级' },
+        ];
+        return (
+          <Dropdown
+            menu={{
+              items,
+              onClick: (e) =>
+                handleQuickSetSensitivity(
+                  r.id,
+                  e.key === '__clear' ? null : e.key,
+                ),
+            }}
+            trigger={['click']}
+          >
+            <span style={{ cursor: 'pointer' }}>{inner}</span>
+          </Dropdown>
+        );
+      },
+    },
+    {
+      title: '标签',
+      dataIndex: 'tags',
+      search: false,
+      render: (_, r) => {
+        const inner = r.tags?.length
+          ? r.tags.map((t) => (
+              <Tag key={t} color={tagColor(t)}>
+                {t}
+              </Tag>
+            ))
+          : <Tag bordered={false}>未设置</Tag>;
+        if (!access.canAdmin) return inner;
+        return (
+          <Popover
+            open={quickTagId === r.id}
+            onOpenChange={(o) => setQuickTagId(o ? r.id : null)}
+            trigger="click"
+            placement="bottomLeft"
+            content={
+              <QuickTagEditor
+                datasetId={r.id}
+                initialTags={r.tags}
+                options={tagOptions}
+                onSaved={() => {
+                  setQuickTagId(null);
+                  actionRef.current?.reload();
+                }}
+              />
+            }
+          >
+            <span style={{ cursor: 'pointer' }}>{inner}</span>
+          </Popover>
+        );
+      },
+    },
+    {
+      title: '标签',
+      dataIndex: 'tags',
+      key: 'tagsFilter',
       valueType: 'select',
-      fieldProps: { options: categoryOptions, allowClear: true },
-      render: (_, r) => r.categoryName || '-',
+      hideInTable: true,
+      fieldProps: {
+        mode: 'multiple',
+        options: tagOptions,
+        allowClear: true,
+        showSearch: true,
+        optionFilterProp: 'label',
+      },
     },
     { title: '描述', dataIndex: 'description', search: false, ellipsis: true },
     { title: '创建人', dataIndex: 'creator' },
@@ -241,7 +488,7 @@ const DatasetsList: React.FC = () => {
         headerTitle="数据集仓库"
         actionRef={actionRef}
         rowKey="id"
-        search={{ labelWidth: 'auto' }}
+        search={{ labelWidth: 'auto', defaultCollapsed: false }}
         options={{ reload: true }}
         rowSelection={{
           selectedRowKeys,
@@ -291,6 +538,15 @@ const DatasetsList: React.FC = () => {
         ]}
         request={async (params) => {
           const range = params.createdAt as [string, string] | undefined;
+          // 选父含子:把选中的 categoryId 展开成其全部后代 id(逗号 join),后端 IN 查询。
+          const selectedCat = (params.categoryId as string) || undefined;
+          const categoryIds = selectedCat
+            ? collectSubtreeIds(categoryTreeData, selectedCat).join(',') ||
+              undefined
+            : undefined;
+          // 标签筛选(多选 OR):数组 join 逗号,后端 IN 查询。
+          const tagsArr = params.tagsFilter as string[] | undefined;
+          const tagsParam = tagsArr?.length ? tagsArr.join(',') : undefined;
           const res = await listDatasets({
             current: params.current,
             pageSize: params.pageSize,
@@ -298,7 +554,8 @@ const DatasetsList: React.FC = () => {
             semanticType: params.semanticType || undefined,
             sourceKind: params.sourceKind || undefined,
             creator: params.creator || undefined,
-            categoryId: (params.categoryId as string) || undefined,
+            categoryIds,
+            tags: tagsParam,
             // dateRange 给的是纯日期:起取当日 0 点、止取当日 23:59:59,
             // 否则 created_at <= 当日0点 会漏掉当天创建的记录
             createdStart: range?.[0]
@@ -415,12 +672,17 @@ const DatasetsList: React.FC = () => {
           placeholder="可选"
           fieldProps={{ allowClear: true }}
         />
-        <ProFormSelect
+        <ProFormTreeSelect
           name="categoryId"
           label="分类"
           placeholder="可选"
-          options={categoryOptions}
-          fieldProps={{ allowClear: true, showSearch: true }}
+          fieldProps={{
+            treeData: categoryTreeData,
+            allowClear: true,
+            showSearch: true,
+            treeNodeFilterProp: 'title',
+            treeDefaultExpandAll: true,
+          }}
         />
       </ModalForm>
 

@@ -1,3 +1,6 @@
+// 数据蒸馏新建/编辑:复用 processing/editor 的三件套(OperatorLibrary / PipelineSteps
+// / StepParamsForm);本页面用本地 state(蒸馏是一次性任务,不走 opCart)。
+// 布局对齐 quality/editor:扁平 Space 顶部 + Goal 面板 + 7/10/7 三栏。
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useLocation } from '@umijs/max';
 import {
@@ -5,43 +8,70 @@ import {
   Card,
   Col,
   Input,
-  Modal,
+  message,
   Row,
   Select,
   Space,
   Typography,
-  message,
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
+import { isBinaryFormat } from '@/pages/ingest/access/constants';
+import { suggestTaskName } from '@/utils/taskName';
 import {
-  createQualityJob,
-  generateQuality,
+  createDistillationJob,
   getDataset,
   listDatasets,
   listOperatorCatalog,
 } from '@/services/data-platform';
-import { isBinaryFormat } from '@/pages/ingest/access/constants';
-import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
+import DistillationGoalPanel from './DistillationGoalPanel';
 
 const { Text } = Typography;
 
-const QualityEditor: React.FC = () => {
-  // 页面内本地 state 管理已选算子(质量评估不走全局 opCart)
+const DEFAULT_GOAL: DataPlatform.DistillationGoal = {
+  keepRatio: 0.3,
+  scoreField: 'meta.score',
+  fallbackRandom: true,
+  enableDedup: true,
+  enableScoreFilter: true,
+};
+
+const DistillationEditor: React.FC = () => {
+  // 页面内本地 state(一次性任务,不走 opCart)
+  const [name, setName] = useState('');
+  const [nameDirty, setNameDirty] = useState(false);
+  const [datasetId, setDatasetId] = useState<string>();
+  const [versionId, setVersionId] = useState<string>();
+  const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
+  const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
+  const [opMap, setOpMap] = useState<
+    Record<string, DataPlatform.CatalogOperator>
+  >({});
   const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [goal, setGoal] = useState<DataPlatform.DistillationGoal>(DEFAULT_GOAL);
+  const [outputDatasetId, setOutputDatasetId] = useState<string>();
+  const [submitting, setSubmitting] = useState(false);
+
   const add = useCallback(
-    (name: string) => setSteps((prev) => [...prev, { name, params: {} }]),
+    (op: string) => setSteps((prev) => [...prev, { name: op, params: {} }]),
     [],
   );
   const remove = useCallback(
-    (idx: number) => setSteps((prev) => prev.filter((_, i) => i !== idx)),
+    (idx: number) =>
+      setSteps((prev) => {
+        const next = prev.filter((_, i) => i !== idx);
+        return next;
+      }),
     [],
   );
   const updateParams = useCallback(
     (idx: number, params: Record<string, unknown>) =>
-      setSteps((prev) => prev.map((s, i) => (i === idx ? { ...s, params } : s))),
+      setSteps((prev) =>
+        prev.map((s, i) => (i === idx ? { ...s, params } : s)),
+      ),
     [],
   );
   const replaceAll = useCallback(
@@ -59,18 +89,6 @@ const QualityEditor: React.FC = () => {
     [],
   );
 
-  const [name, setName] = useState('');
-  const [nameDirty, setNameDirty] = useState(false);
-  const [datasetId, setDatasetId] = useState<string>();
-  const [versionId, setVersionId] = useState<string>();
-  const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
-  const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  const [opMap, setOpMap] = useState<Record<string, DataPlatform.CatalogOperator>>(
-    {},
-  );
-  const [activeIdx, setActiveIdx] = useState(0);
-  const [submitting, setSubmitting] = useState(false);
-
   // 算子元信息(供 label/params 渲染):pageSize ≤ 后端 le=500 上限
   useEffect(() => {
     listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
@@ -79,7 +97,9 @@ const QualityEditor: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 500 }).then((r) => setDatasets(r.data));
+    listDatasets({ current: 1, pageSize: 500 }).then((r) =>
+      setDatasets(r.data),
+    );
   }, []);
 
   useEffect(() => {
@@ -91,7 +111,7 @@ const QualityEditor: React.FC = () => {
     getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
   }, [datasetId]);
 
-  // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本;不带参则维持原交互
+  // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本
   const location = useLocation();
   useEffect(() => {
     const dsId = new URLSearchParams(location.search).get('datasetId');
@@ -102,51 +122,19 @@ const QualityEditor: React.FC = () => {
     if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
   }, [versions]);
 
-  const labelOf = (n: string) => opMap[n]?.zhLabel || n;
+  const activeStep = steps[activeIdx];
+  const activeOp = activeStep ? opMap[activeStep.name] : undefined;
+
   // 自动任务名:数据集/算子变化时重算,用户改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
   const suggestedName = suggestTaskName(
     selectedDatasetName,
-    '质量评估',
+    '数据蒸馏',
     steps.map((s) => s.name),
   );
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);
   }, [suggestedName, nameDirty]);
-
-  const activeStep = steps[activeIdx];
-  const activeOp = activeStep ? opMap[activeStep.name] : undefined;
-
-  const onGenerate = () => {
-    let goal = '';
-    Modal.confirm({
-      title: 'AI 生成质量评估算子',
-      content: (
-        <Input.TextArea
-          placeholder="描述评估目标,如:评估中文语料的文本质量与重复度"
-          onChange={(e) => {
-            goal = e.target.value;
-          }}
-        />
-      ),
-      onOk: async () => {
-        if (!goal.trim()) {
-          message.warning('请填写评估目标');
-          return Promise.reject();
-        }
-        const r = await generateQuality({ goal, datasetVersionId: versionId });
-        const ops = r.data.operators;
-        if (!ops.length) {
-          // 空结果不覆盖已选算子,提示而非伪装成功
-          message.warning(r.data.explanation || '未生成可用算子,请调整目标后重试');
-          return Promise.reject();
-        }
-        replaceAll(ops);
-        setActiveIdx(0);
-        message.success(r.data.explanation || '已生成质量评估算子');
-      },
-    });
-  };
 
   const onSubmit = async () => {
     if (!name.trim()) {
@@ -161,15 +149,27 @@ const QualityEditor: React.FC = () => {
       message.warning('至少添加一个算子');
       return;
     }
+    // 至少 1 个 selector(蒸馏必须按某字段取子集)
+    const hasSelector = steps.some(
+      (s) => (opMap[s.name] as any)?.category === 'selector',
+    );
+    if (!hasSelector) {
+      message.warning(
+        '蒸馏算子链必须包含至少 1 个 selector(如 topk_specified_field_selector)',
+      );
+      return;
+    }
     setSubmitting(true);
     try {
-      await createQualityJob({
+      await createDistillationJob({
         name,
         datasetVersionId: versionId,
         operators: steps,
+        goal,
+        outputDatasetId,
       });
-      message.success('质量评估任务已创建');
-      history.push('/assessment/quality');
+      message.success('蒸馏任务已创建，正在后台运行');
+      history.push('/governance/distillation');
     } finally {
       setSubmitting(false);
     }
@@ -177,13 +177,15 @@ const QualityEditor: React.FC = () => {
 
   return (
     <PageContainer
-      header={{ title: '新建质量评估' }}
+      header={{ title: '新建数据蒸馏' }}
       extra={[
-        <Button key="ai" onClick={onGenerate}>
-          ✨ AI 生成
-        </Button>,
-        <Button key="submit" type="primary" loading={submitting} onClick={onSubmit}>
-          创建评估
+        <Button
+          key="submit"
+          type="primary"
+          loading={submitting}
+          onClick={onSubmit}
+        >
+          创建蒸馏
         </Button>,
       ]}
     >
@@ -206,14 +208,14 @@ const QualityEditor: React.FC = () => {
         />
         <Select
           placeholder="选择版本"
-          style={{ width: 220 }}
+          style={{ width: 240 }}
           value={versionId}
           onChange={setVersionId}
           options={versions.map((v) => {
             const isBinary = isBinaryFormat(v.format);
             return {
               label: isBinary
-                ? `${v.versionLabel}（${v.format}·二进制不可评估）`
+                ? `${v.versionLabel}（${v.format}·二进制不可蒸馏）`
                 : `${v.versionLabel}（${v.format}）`,
               value: v.id,
               disabled: isBinary,
@@ -222,21 +224,36 @@ const QualityEditor: React.FC = () => {
         />
       </Space>
 
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <DistillationGoalPanel
+          value={goal}
+          onChange={setGoal}
+          datasets={datasets}
+          defaultDatasetId={datasetId}
+          outputDatasetId={outputDatasetId}
+          onOutputDatasetChange={setOutputDatasetId}
+        />
+      </Card>
+
       <Row gutter={16}>
         <Col span={7}>
-          <Card title="算子库" size="small" styles={{ body: { height: 460, padding: 12 } }}>
-            <OperatorLibrary category="filter" onAdd={add} />
+          <Card
+            title="算子库"
+            size="small"
+            styles={{ body: { height: 460, padding: 12 } }}
+          >
+            <OperatorLibrary onAdd={add} />
           </Card>
         </Col>
         <Col span={10}>
           <Card
-            title="已选质量算子"
+            title="已选蒸馏算子"
             size="small"
             styles={{ body: { height: 460, overflow: 'auto' } }}
           >
             <PipelineSteps
               steps={steps}
-              labelOf={labelOf}
+              labelOf={(n) => opMap[n]?.zhLabel || n}
               activeIdx={activeIdx}
               onSelect={setActiveIdx}
               onRemove={(i) => {
@@ -248,7 +265,11 @@ const QualityEditor: React.FC = () => {
           </Card>
         </Col>
         <Col span={7}>
-          <Card title="参数" size="small" styles={{ body: { height: 460, overflow: 'auto' } }}>
+          <Card
+            title="参数"
+            size="small"
+            styles={{ body: { height: 460, overflow: 'auto' } }}
+          >
             <StepParamsForm
               op={activeOp}
               params={activeStep?.params ?? {}}
@@ -260,11 +281,14 @@ const QualityEditor: React.FC = () => {
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          质量评估对每条数据计算质量指标(不删除数据),结果写入该版本的 stats,可在评估任务详情查看报告。
+          蒸馏对所选数据集版本按"过滤 + 去重 +
+          打分截断"产出子集,落到原数据集新版本(可改输出数据集); 算子链需至少含 1
+          个
+          selector,且必须在算子市场"蒸馏场景"内选择。后台异步执行,完成后可在列表查看报告。
         </Text>
       </Card>
     </PageContainer>
   );
 };
 
-export default QualityEditor;
+export default DistillationEditor;

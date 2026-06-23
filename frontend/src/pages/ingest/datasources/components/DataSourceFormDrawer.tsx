@@ -5,6 +5,7 @@ import {
   ProFormSwitch,
   ProFormText,
   ProFormTextArea,
+  ProFormTreeSelect,
   StepsForm,
 } from '@ant-design/pro-components';
 import type { FormInstance } from 'antd';
@@ -16,6 +17,7 @@ import {
   testDataSource,
   updateDataSource,
 } from '@/services/data-platform';
+import type { CategoryTreeNode } from '@/utils/categoryTree';
 import { DB_KIND_OPTIONS, TYPE_CARDS } from './constants';
 
 type FormValues = {
@@ -29,7 +31,7 @@ interface DataSourceFormDrawerProps {
   /** 有值即编辑模式，无值为新建 */
   record?: DataPlatform.DataSource;
   /** 受控分类下拉选项（来自宿主页 listCategories） */
-  categoryOptions?: { label: string; value: string }[];
+  categoryTreeData?: CategoryTreeNode[];
   onClose: () => void;
   /** 保存成功后回调（刷新列表） */
   onSuccess: () => void;
@@ -75,7 +77,7 @@ function pickConfig(
 const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
   open,
   record,
-  categoryOptions,
+  categoryTreeData,
   onClose,
   onSuccess,
 }) => {
@@ -108,7 +110,11 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
 
   // 配置步骤初值（编辑回填）
   const configInitialValues: Record<string, any> = record
-    ? { ...record.config, dbKind: record.dbKind, categoryId: record.categoryId ?? undefined }
+    ? {
+        ...record.config,
+        dbKind: record.dbKind,
+        categoryId: record.categoryId ?? undefined,
+      }
     : {};
 
   /** 读取配置步骤当前填写的全部值 */
@@ -364,7 +370,9 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
                         const res = await rotatePushToken(record!.id);
                         if (res.success) {
                           setPushUrl(res.data.url);
-                          message.success('推送 token 已轮换，旧 token 立即失效');
+                          message.success(
+                            '推送 token 已轮换，旧 token 立即失效',
+                          );
                         }
                       } catch {
                         message.error('轮换失败，请重试');
@@ -376,8 +384,9 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
                     轮换 Token
                   </Button>
                   <Paragraph type="secondary" style={{ margin: 0 }}>
-                    外部系统向上方地址 POST 数据（JSON 数组或 jsonl）即可接入。Token
-                    即鉴权凭证，泄露后点「轮换 Token」立即失效旧 token。
+                    外部系统向上方地址 POST 数据（JSON 数组或
+                    jsonl）即可接入。Token 即鉴权凭证，泄露后点「轮换
+                    Token」立即失效旧 token。
                   </Paragraph>
                 </Space>
               </ProForm.Item>
@@ -391,12 +400,17 @@ const DataSourceFormDrawer: FC<DataSourceFormDrawerProps> = ({
           </>
         )}
 
-        <ProFormSelect
+        <ProFormTreeSelect
           name="categoryId"
           label="分类（可选）"
           placeholder="请选择分类"
-          options={categoryOptions}
-          fieldProps={{ allowClear: true, showSearch: true }}
+          fieldProps={{
+            treeData: categoryTreeData,
+            allowClear: true,
+            showSearch: true,
+            treeNodeFilterProp: 'title',
+            treeDefaultExpandAll: true,
+          }}
         />
 
         <ProFormTextArea

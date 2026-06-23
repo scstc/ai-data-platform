@@ -165,6 +165,11 @@ export const layout: RunTimeLayoutConfig = ({
     // so chunk load errors show friendly messages instead of "Something went wrong."
     ErrorBoundary,
     menuHeaderRender: undefined,
+    // 左侧菜单:默认全部展开,切换路由时不自动收起其它分组
+    menu: {
+      defaultOpenAll: true,
+      autoClose: false,
+    },
     // 自定义 403 页面
     // unAccessible: <div>unAccessible</div>,
     // 增加一个 loading 的状态

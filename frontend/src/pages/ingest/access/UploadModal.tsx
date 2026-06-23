@@ -7,8 +7,8 @@ import {
   Modal,
   message,
   Radio,
-  Select,
   Space,
+  TreeSelect,
   Upload,
 } from 'antd';
 import { useEffect, useState } from 'react';
@@ -18,6 +18,10 @@ import {
   uploadDataset,
   uploadMediaDataset,
 } from '@/services/data-platform';
+import {
+  type CategoryTreeNode,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import type { AccessType } from './constants';
 import { acceptOf, isExtAllowed } from './constants';
 import FileManagerPicker, { type PlatformSelection } from './FileManagerPicker';
@@ -47,9 +51,9 @@ const UploadModal: React.FC<Props> = ({
 }) => {
   const [messageApi, contextHolder] = message.useMessage();
   const [categoryId, setCategoryId] = useState<string>();
-  const [categoryOptions, setCategoryOptions] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
   const [mode, setMode] = useState<'local' | 'platform'>('local');
   const [sel, setSel] = useState<PlatformSelection>({ bucket: '', keys: [] });
   const [submitting, setSubmitting] = useState(false);
@@ -66,11 +70,7 @@ const UploadModal: React.FC<Props> = ({
     setMediaName('');
     setFileList([]);
     listCategories()
-      .then((res) =>
-        setCategoryOptions(
-          res.data.map((c) => ({ label: c.name, value: c.id })),
-        ),
-      )
+      .then((res) => setCategoryTreeData(toCategoryTreeData(res.data)))
       .catch(() => undefined);
   }, [open]);
 
@@ -167,7 +167,9 @@ const UploadModal: React.FC<Props> = ({
   };
 
   // 暂存校验:扩展名/大小不符直接忽略;合法则 return false(只暂存不自动上传)
-  const stageBeforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
+  const stageBeforeUpload: NonNullable<UploadProps['beforeUpload']> = (
+    file,
+  ) => {
     if (!isExtAllowed(file.name, accessType)) {
       messageApi.error(
         `不支持的文件格式:${file.name},「${accessType.label}」仅支持 ${accessType.extensions.join('、')}`,
@@ -229,12 +231,14 @@ const UploadModal: React.FC<Props> = ({
       <Space orientation="vertical" style={{ width: '100%' }} size="middle">
         <Space>
           <span>选择分类:</span>
-          <Select
+          <TreeSelect
             allowClear
-            showSearch={{ optionFilterProp: 'label' }}
+            showSearch
+            treeNodeFilterProp="title"
+            treeDefaultExpandAll
             placeholder="请选择分类(可选)"
             style={{ width: 320 }}
-            options={categoryOptions}
+            treeData={categoryTreeData}
             value={categoryId}
             onChange={setCategoryId}
           />

@@ -8,6 +8,7 @@ import {
   ProFormSelect,
   ProFormText,
   ProFormTextArea,
+  ProFormTreeSelect,
   ProTable,
 } from '@ant-design/pro-components';
 import { Access, useAccess } from '@umijs/max';
@@ -39,6 +40,10 @@ import {
   stopIngestTask,
   updateIngestTask,
 } from '@/services/data-platform';
+import {
+  type CategoryTreeNode,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import FilterOperatorPicker from './components/FilterOperatorPicker';
 
@@ -73,14 +78,14 @@ const IngestTasksPage: React.FC = () => {
   const [runs, setRuns] = useState<DataPlatform.IngestRun[]>([]);
   const [editRow, setEditRow] = useState<DataPlatform.IngestTask>();
   const [categoryOpen, setCategoryOpen] = useState(false);
-  const [categoryOptions, setCategoryOptions] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
 
   const loadCategories = useCallback(async () => {
     try {
       const res = await listCategories();
-      setCategoryOptions(res.data.map((c) => ({ label: c.name, value: c.id })));
+      setCategoryTreeData(toCategoryTreeData(res.data));
     } catch {
       // 静默：分类筛选不可用不应阻断列表
     }
@@ -185,12 +190,17 @@ const IngestTasksPage: React.FC = () => {
           }));
         }}
       />
-      <ProFormSelect
+      <ProFormTreeSelect
         name="categoryId"
         label="分类"
         placeholder="请选择分类（可选）"
-        options={categoryOptions}
-        fieldProps={{ allowClear: true, showSearch: true }}
+        fieldProps={{
+          treeData: categoryTreeData,
+          allowClear: true,
+          showSearch: true,
+          treeNodeFilterProp: 'title',
+          treeDefaultExpandAll: true,
+        }}
       />
       <ProFormRadio.Group
         name={['schedule', 'mode']}
@@ -343,8 +353,14 @@ const IngestTasksPage: React.FC = () => {
     {
       title: '分类',
       dataIndex: 'categoryId',
-      valueType: 'select',
-      fieldProps: { options: categoryOptions, allowClear: true },
+      valueType: 'treeSelect',
+      fieldProps: {
+        treeData: categoryTreeData,
+        allowClear: true,
+        showSearch: true,
+        treeNodeFilterProp: 'title',
+        treeDefaultExpandAll: true,
+      },
       render: (_, record) => record.categoryName || '-',
     },
     {

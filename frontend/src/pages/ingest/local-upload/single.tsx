@@ -9,6 +9,7 @@ import {
   message,
   Select,
   Space,
+  TreeSelect,
   Typography,
   Upload,
 } from 'antd';
@@ -20,6 +21,11 @@ import {
   uploadBatchDataset,
 } from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
+import {
+  type CategoryTreeNode,
+  findCategoryPath,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 
 const { Text } = Typography;
 const { Dragger } = Upload;
@@ -79,9 +85,9 @@ const SingleUploadPage: React.FC = () => {
   const [format, setFormat] = useState<string>();
   const [name, setName] = useState('');
   const [categoryId, setCategoryId] = useState<string>();
-  const [categories, setCategories] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [naming, setNaming] = useState(false);
@@ -90,9 +96,7 @@ const SingleUploadPage: React.FC = () => {
 
   const loadCategories = useCallback(() => {
     listCategories()
-      .then((res) =>
-        setCategories(res.data.map((c) => ({ label: c.name, value: c.id }))),
-      )
+      .then((res) => setCategoryTreeData(toCategoryTreeData(res.data)))
       .catch(() => {
         /* 分类拉取失败不阻断上传 */
       });
@@ -130,11 +134,10 @@ const SingleUploadPage: React.FC = () => {
     if (fileList.length === 0) return;
     setNaming(true);
     try {
-      const category = categories.find((c) => c.value === categoryId)?.label;
       const res = await suggestDatasetName({
         filenames: fileList.map((f) => f.name),
         dataType: format ?? '',
-        category,
+        category: findCategoryPath(categoryTreeData, categoryId),
       });
       if (res.success && res.data.name) setName(res.data.name);
     } catch (e: any) {
@@ -235,15 +238,16 @@ const SingleUploadPage: React.FC = () => {
               <Text strong>分类</Text>
               <a onClick={() => setCatMgrOpen(true)}>管理分类</a>
             </div>
-            <Select
+            <TreeSelect
               style={{ width: '100%', marginTop: 8 }}
               placeholder="可选"
               value={categoryId}
               onChange={setCategoryId}
-              options={categories}
+              treeData={categoryTreeData}
               allowClear
               showSearch
-              optionFilterProp="label"
+              treeNodeFilterProp="title"
+              treeDefaultExpandAll
             />
           </div>
           <Dragger

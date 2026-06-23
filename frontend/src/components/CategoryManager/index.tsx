@@ -3,6 +3,7 @@ import {
   ModalForm,
   ProFormText,
   ProFormTextArea,
+  ProFormTreeSelect,
   ProTable,
 } from '@ant-design/pro-components';
 import { Button, Drawer, message, Popconfirm } from 'antd';
@@ -14,6 +15,7 @@ import {
   listCategories,
   updateCategory,
 } from '@/services/data-platform';
+import { toCategoryTreeData } from '@/utils/categoryTree';
 
 interface CategoryPanelProps {
   /** 当前用户是否为管理员：决定新增/编辑/删除是否可用 */
@@ -34,9 +36,8 @@ const pickErrMsg = (err: unknown, fallback: string): string => {
 };
 
 /**
- * 分类 CRUD 面板（无外壳，可嵌入抽屉或独立页面，#15）。
- * 列表所有登录用户可见；新增/编辑/删除仅 admin（canAdmin）。
- * 删除被引用项时按后端 409 message 提示用量。
+ * 分类 CRUD 面板（多级树，#15）。列表所有登录用户可见;新增/编辑/删除仅 admin(canAdmin)。
+ * 列表以嵌套树呈现(ProTable childrenColumnName);删除被引用/有子分类时按后端 409 message 提示。
  */
 export const CategoryPanel: FC<CategoryPanelProps> = ({
   canAdmin,
@@ -45,6 +46,8 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
   const actionRef = useRef<ActionType | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<DataPlatform.Category>();
+  // 缓存最新嵌套树,供编辑表单"上级分类"TreeSelect 复用
+  const [categories, setCategories] = useState<DataPlatform.Category[]>([]);
 
   const reload = () => {
     actionRef.current?.reload();
@@ -118,6 +121,9 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
     },
   ];
 
+  // 编辑表单"上级分类"TreeData:排除自身子树(防把自身挂到自己之下成环)
+  const parentTreeData = toCategoryTreeData(categories, editing?.id);
+
   return (
     <>
       <ProTable<DataPlatform.Category>
@@ -126,6 +132,7 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
         search={false}
         options={{ reload: true, density: false, setting: false }}
         pagination={false}
+        childrenColumnName="children"
         toolBarRender={() =>
           canAdmin
             ? [
@@ -137,6 +144,7 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
         }
         request={async () => {
           const res = await listCategories();
+          setCategories(res.data);
           return { data: res.data, success: res.success };
         }}
         columns={columns}
@@ -150,16 +158,25 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
         onOpenChange={setEditOpen}
         initialValues={
           editing
-            ? { name: editing.name, note: editing.note ?? undefined }
+            ? {
+                name: editing.name,
+                parentId: editing.parentId ?? undefined,
+                note: editing.note ?? undefined,
+              }
             : undefined
         }
         onFinish={async (values) => {
+          const payload = {
+            name: values.name,
+            parentId: values.parentId ?? null,
+            note: values.note,
+          };
           try {
             if (editing) {
-              await updateCategory(editing.id, values);
+              await updateCategory(editing.id, payload);
               message.success('已保存');
             } else {
-              await createCategory(values);
+              await createCategory(payload);
               message.success('分类已创建');
             }
             setEditOpen(false);
@@ -182,6 +199,18 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
           placeholder="如 金融风控 / 营销活动"
           rules={[{ required: true, message: '请输入分类名称' }]}
         />
+        <ProFormTreeSelect
+          name="parentId"
+          label="上级分类"
+          placeholder="不选则为根分类"
+          fieldProps={{
+            treeData: parentTreeData,
+            treeDefaultExpandAll: true,
+            allowClear: true,
+            showSearch: true,
+            treeNodeFilterProp: 'title',
+          }}
+        />
         <ProFormTextArea
           name="note"
           label="备注"
@@ -193,7 +222,7 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
   );
 };
 
-/** 分类管理抽屉（受控词表 CRUD，#15）。内容复用 CategoryPanel，外壳为抽屉。 */
+/** 分类管理抽屉（受控词表 CRUD，多级树，#15）。内容复用 CategoryPanel，外壳为抽屉。 */
 const CategoryManager: FC<CategoryManagerProps> = ({
   open,
   onClose,

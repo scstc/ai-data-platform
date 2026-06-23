@@ -6,6 +6,7 @@ import {
   ProFormSelect,
   ProFormText,
   ProFormTextArea,
+  ProFormTreeSelect,
 } from '@ant-design/pro-components';
 import { history, useAccess, useParams } from '@umijs/max';
 import {
@@ -33,15 +34,25 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   getDataset,
   listCategories,
+  listTags,
   previewDatasetVersion,
   publishVersion,
   setVersionVerdict,
   unpublishVersion,
   updateDataset,
 } from '@/services/data-platform';
+import {
+  type CategoryTreeNode,
+  toCategoryTreeData,
+} from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import { SemanticTypeTag } from '@/utils/semanticType';
+import {
+  SENSITIVITY_LEVEL_ENUM,
+  sensitivityLevelLabel,
+} from '@/utils/sensitivityLevel';
 import { SourceKindTag } from '@/utils/sourceKind';
+import { tagColor } from '@/utils/tags';
 import DatasetDataView from './views/DataView';
 
 /** 数据类型枚举（编辑表单复用） */
@@ -85,9 +96,9 @@ const DatasetDetail: React.FC = () => {
   const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
   const [previewLoading, setPreviewLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [categoryOptions, setCategoryOptions] = useState<
-    { label: string; value: string }[]
-  >([]);
+  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
+    [],
+  );
   const [verdictModal, setVerdictModal] = useState<{
     versionId: string;
     verdict: 'passed' | 'failed';
@@ -126,11 +137,7 @@ const DatasetDetail: React.FC = () => {
 
   useEffect(() => {
     listCategories()
-      .then((res) =>
-        setCategoryOptions(
-          res.data.map((c) => ({ label: c.name, value: c.id })),
-        ),
-      )
+      .then((res) => setCategoryTreeData(toCategoryTreeData(res.data)))
       .catch(() => undefined);
   }, []);
 
@@ -207,7 +214,7 @@ const DatasetDetail: React.FC = () => {
       <a
         onClick={() =>
           history.push(
-            `/governance/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+            `/assessment/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
           )
         }
       >
@@ -406,7 +413,8 @@ const DatasetDetail: React.FC = () => {
                 {
                   title: '分级',
                   dataIndex: 'sensitivityLevel',
-                  render: (_, r) => r.sensitivityLevel ?? '-',
+                  render: (_, r) =>
+                    sensitivityLevelLabel(r.sensitivityLevel) ?? '-',
                 },
                 {
                   title: '分类',
@@ -426,11 +434,28 @@ const DatasetDetail: React.FC = () => {
                   render: (_, r) => formatDateTime(r.updatedAt),
                 },
                 {
+                  title: '最后变更人',
+                  dataIndex: 'lastModifier',
+                  render: (_, r) => r.lastModifier ?? '-',
+                },
+                {
                   title: '有效期',
                   dataIndex: 'validUntil',
                   render: (_, r) =>
                     r.validUntil
                       ? dayjs(r.validUntil).format('YYYY-MM-DD')
+                      : '-',
+                },
+                {
+                  title: '标签',
+                  dataIndex: 'tags',
+                  render: (_, r) =>
+                    r.tags?.length
+                      ? r.tags.map((t) => (
+                          <Tag key={t} color={tagColor(t)}>
+                            {t}
+                          </Tag>
+                        ))
                       : '-',
                 },
                 {
@@ -546,6 +571,7 @@ const DatasetDetail: React.FC = () => {
                 sensitivityLevel: detail.sensitivityLevel,
                 categoryId: detail.categoryId ?? undefined,
                 validUntil: detail.validUntil,
+                tags: detail.tags,
               }
             : undefined
         }
@@ -561,6 +587,7 @@ const DatasetDetail: React.FC = () => {
               validUntil: values.validUntil
                 ? dayjs(values.validUntil).format('YYYY-MM-DD')
                 : null,
+              tags: values.tags,
             });
             message.success('已保存');
             setDetail(res.data);
@@ -592,20 +619,35 @@ const DatasetDetail: React.FC = () => {
           name="sensitivityLevel"
           label="分级"
           fieldProps={{ allowClear: true }}
-          valueEnum={{
-            public: { text: 'public' },
-            internal: { text: 'internal' },
-            confidential: { text: 'confidential' },
-          }}
+          valueEnum={SENSITIVITY_LEVEL_ENUM}
         />
-        <ProFormSelect
+        <ProFormTreeSelect
           name="categoryId"
           label="分类"
           placeholder="请选择分类（可选）"
-          options={categoryOptions}
-          fieldProps={{ allowClear: true, showSearch: true }}
+          fieldProps={{
+            treeData: categoryTreeData,
+            allowClear: true,
+            showSearch: true,
+            treeNodeFilterProp: 'title',
+            treeDefaultExpandAll: true,
+          }}
         />
         <ProFormDatePicker name="validUntil" label="有效期" />
+        <ProFormSelect
+          name="tags"
+          label="标签"
+          mode="tags"
+          placeholder="输入标签，回车添加（可多选）"
+          request={async () => {
+            const res = await listTags();
+            return (res.data ?? []).map((t) => ({
+              label: t.name,
+              value: t.name,
+            }));
+          }}
+          fieldProps={{ allowClear: true }}
+        />
       </ModalForm>
 
       <Modal

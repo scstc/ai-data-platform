@@ -19,8 +19,11 @@ export default [
   { path: '/files', redirect: '/ingest/files' },
   { path: '/ingest/upload', redirect: '/ingest/access' },
   { path: '/content-safety', redirect: '/governance/content-safety' },
-  { path: '/quality', redirect: '/governance/quality' },
-  { path: '/quality/editor', redirect: '/governance/quality/editor' },
+  // 质量评估已迁到 /assessment(只读评估,与治理分离);旧路径保留重定向
+  { path: '/quality', redirect: '/assessment/quality' },
+  { path: '/quality/editor', redirect: '/assessment/quality/editor' },
+  { path: '/governance/quality', redirect: '/assessment/quality' },
+  { path: '/governance/quality/editor', redirect: '/assessment/quality/editor' },
   { path: '/processing', redirect: '/governance/processing' },
   { path: '/processing/jobs', redirect: '/governance/processing' },
   { path: '/processing/editor', redirect: '/governance/processing/editor' },
@@ -63,7 +66,7 @@ export default [
         component: './ingest/datasources/config',
       },
       { path: '/ingest/tasks', name: 'tasks', component: './ingest/tasks' },
-      { path: '/ingest/access', name: 'access', component: './ingest/access' },
+      { path: '/ingest/access', name: 'access', hideInMenu: true, component: './ingest/access' },
       {
         path: '/ingest/local-upload',
         name: 'local-upload',
@@ -146,7 +149,24 @@ export default [
       },
     ],
   },
-  // ③ 数据治理(安全扫描 / 质量评估 / 数据加工 / 数据标注)
+  // ③ 数据评估(只读侧:不产新版本,只对原版本打分/打标)
+  // 区别于 /governance 的"动数据/产新版本"语义,顶级菜单独立
+  {
+    path: '/assessment',
+    name: 'assessment',
+    icon: 'audit',
+    routes: [
+      { path: '/assessment', redirect: '/assessment/quality' },
+      { path: '/assessment/quality', name: 'quality', component: './quality' },
+      {
+        path: '/assessment/quality/editor',
+        name: 'quality-editor',
+        component: './quality/editor',
+        hideInMenu: true,
+      },
+    ],
+  },
+  // ④ 数据治理(动数据侧:内容安全 / 加工 / 蒸馏 / 合成 / 增强 / 标注)
   {
     path: '/governance',
     name: 'governance',
@@ -158,13 +178,6 @@ export default [
         name: 'contentSafety',
         component: './content-safety',
       },
-      { path: '/governance/quality', name: 'quality', component: './quality' },
-      {
-        path: '/governance/quality/editor',
-        name: 'quality-editor',
-        component: './quality/editor',
-        hideInMenu: true,
-      },
       {
         path: '/governance/processing',
         name: 'processing',
@@ -174,6 +187,39 @@ export default [
         path: '/governance/processing/editor',
         name: 'processing-editor',
         component: './processing/editor',
+        hideInMenu: true,
+      },
+      {
+        path: '/governance/distillation',
+        name: 'distillation',
+        component: './distillation',
+      },
+      {
+        path: '/governance/distillation/editor',
+        name: 'distillation-editor',
+        component: './distillation/editor',
+        hideInMenu: true,
+      },
+      {
+        path: '/governance/make',
+        name: 'make',
+        component: './make',
+      },
+      {
+        path: '/governance/make/editor',
+        name: 'make-editor',
+        component: './make/editor',
+        hideInMenu: true,
+      },
+      {
+        path: '/governance/augment',
+        name: 'augment',
+        component: './augment',
+      },
+      {
+        path: '/governance/augment/editor',
+        name: 'augment-editor',
+        component: './augment/editor',
         hideInMenu: true,
       },
       {
