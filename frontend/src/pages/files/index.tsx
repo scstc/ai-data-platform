@@ -32,6 +32,7 @@ import {
   deleteFolder,
   getFileDownloadUrl,
   hostPlatformFiles,
+  listDatasets,
   listFiles,
   listPlatformBuckets,
   previewFile,
@@ -87,6 +88,9 @@ const FilesPage: React.FC = () => {
   const [previewName, setPreviewName] = useState<string>();
   // 上传进度（null = 空闲；0~100 = 上传中），用于大文件可见反馈
   const [uploadPercent, setUploadPercent] = useState<number | null>(null);
+  // 数据集 id→名称映射:uploads 桶的顶层文件夹是数据集 id(dset-xxx),
+  // 用名称关联让用户看懂文件夹对应哪个数据集
+  const [datasetNames, setDatasetNames] = useState<Record<string, string>>({});
 
   const loadBuckets = useCallback(async () => {
     try {
@@ -102,6 +106,17 @@ const FilesPage: React.FC = () => {
   useEffect(() => {
     loadBuckets();
   }, [loadBuckets]);
+
+  // 拉数据集列表建 id→名称映射(uploads 桶文件夹名是数据集 id,需关联出名称)
+  useEffect(() => {
+    listDatasets({ pageSize: 500 })
+      .then((res) =>
+        setDatasetNames(
+          Object.fromEntries((res.data ?? []).map((d) => [d.id, d.name])),
+        ),
+      )
+      .catch(() => undefined);
+  }, []);
 
   const goPrefix = (next: string) => {
     setPrefix(next);
@@ -257,7 +272,22 @@ const FilesPage: React.FC = () => {
         row.kind === 'folder' ? (
           <a onClick={() => goPrefix(`${prefix}${row.name}/`)}>
             <FolderOutlined style={{ marginRight: 6 }} />
-            {row.name}
+            {datasetNames[row.name] ? (
+              <>
+                {row.name}
+                <span
+                  style={{
+                    marginLeft: 8,
+                    color: 'var(--ant-color-text-secondary)',
+                    fontSize: 12,
+                  }}
+                >
+                  ({datasetNames[row.name]})
+                </span>
+              </>
+            ) : (
+              row.name
+            )}
           </a>
         ) : (
           <span>{row.entry.name}</span>

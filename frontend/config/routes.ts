@@ -190,6 +190,7 @@ export default [
         path: '/governance/processing',
         name: 'processing',
         component: './processing',
+        hideInMenu: true,
       },
       {
         path: '/governance/processing/editor',
