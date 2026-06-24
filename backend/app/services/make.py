@@ -21,6 +21,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
 from app.schemas.make import MakeGoal, MakeReport
+from app.services.external_store import upload_file_to_uploads
 from app.services.engine import (
     EngineError,
     _new_version_id,
@@ -83,11 +84,13 @@ async def run_make_job(
         raise EngineError(f"dj-process 退出码 {code}\n{tail}")
 
     rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
+    # 产出上传 MinIO(治理产出持久化到对象存储;读路径已按 s3:// 走)
+    storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
         version_no=new_vno,
-        storage_uri=str(out_path),
+        storage_uri=storage_uri,
         format="jsonl",
         rows=rows,
         size=out_path.stat().st_size,

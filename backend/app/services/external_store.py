@@ -641,6 +641,27 @@ async def upload_jsonl_to_uploads(
     return f"s3://{bucket}/{key}"
 
 
+async def upload_file_to_uploads(
+    dataset_id: str, version_no: int, path: Path
+) -> str:
+    """把本地 jsonl 文件**流式**上传到平台 MinIO uploads 桶(键同 upload_jsonl_to_uploads)。
+
+    供治理任务产出持久化:DJ 写本地文件后调此上传,storage_uri 指向 s3://,
+    产出不在本地停留(读路径 preview/download/materialize 已按 s3:// scheme 走)。
+    流式上传(不全量入内存),适合大体量产出。平台未配置 → ExternalStoreError。
+    """
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/data.jsonl"
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        await upload_object(
+            cfg, bucket, key, f, size,
+            content_type="application/x-ndjson",
+        )
+    return f"s3://{bucket}/{key}"
+
+
 def _list_dir_sync(
     client: Minio, bucket: str, prefix: str
 ) -> dict[str, list[Any]]:

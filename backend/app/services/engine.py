@@ -27,6 +27,7 @@ from app.services import operator_catalog as oc
 from app.services.external_store import (
     materialized_version,
     persist_manifest_output,
+    upload_file_to_uploads,
 )
 from app.services.landing import MANIFEST_FORMAT
 from app.services.llm_config import get_active_llm_config
@@ -466,11 +467,14 @@ async def run_process_job(
     else:
         rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
         stats_path = out_dir / "data_stats.jsonl"
+        # 产出文件上传 MinIO(治理产出必须持久化到对象存储,不能只在本地;
+        # 读路径 preview/download/materialize 已按 s3:// scheme 走,无需改动)
+        storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
         version = DatasetVersion(
             id=_new_version_id(),
             dataset_id=dataset_id,
             version_no=new_vno,
-            storage_uri=str(out_path),
+            storage_uri=storage_uri,
             stats_uri=str(stats_path) if stats_path.exists() else None,
             format="jsonl",
             rows=rows,
