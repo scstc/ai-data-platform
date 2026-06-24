@@ -4,54 +4,51 @@ import {
   ProFormCheckbox,
   ProFormText,
 } from '@ant-design/pro-components';
-import {
-  FormattedMessage,
-  Helmet,
-  SelectLang,
-  useIntl,
-  useModel,
-} from '@umijs/max';
+import { FormattedMessage, Helmet, useIntl, useModel } from '@umijs/max';
 import { Alert, App } from 'antd';
 import { createStyles } from 'antd-style';
 import React, { startTransition, useState } from 'react';
-import { Footer } from '@/components';
 import { login } from '@/services/ant-design-pro/api';
 import Settings from '../../../../config/defaultSettings';
 
-const useStyles = createStyles(({ token }) => {
+const useStyles = createStyles(() => {
   return {
-    lang: {
-      width: 42,
-      height: 42,
-      lineHeight: '42px',
-      position: 'fixed',
-      right: 16,
-      borderRadius: token.borderRadius,
-      ':hover': {
-        backgroundColor: token.colorBgTextHover,
-      },
-    },
     container: {
+      position: 'relative',
       display: 'flex',
       flexDirection: 'column',
-      height: '100vh',
-      overflow: 'auto',
-      backgroundImage:
-        "url('https://mdn.alipayobjects.com/yuyan_qk0oxh/afts/img/V-_oS6r-i7wAAAAAAAAAAAAAFl94AQBr')",
-      backgroundSize: '100% 100%',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: '100dvh',
+      overflow: 'hidden',
+      padding: '24px 16px',
+      background:
+        'linear-gradient(150deg, #0b1220 0%, #0f172a 45%, #111827 100%)',
+    },
+    glow: {
+      position: 'absolute',
+      top: '-160px',
+      right: '-120px',
+      width: 520,
+      height: 520,
+      borderRadius: '50%',
+      background:
+        'radial-gradient(circle, rgba(59,130,246,0.18) 0%, rgba(59,130,246,0) 70%)',
+      filter: 'blur(8px)',
+      pointerEvents: 'none',
+    },
+    card: {
+      position: 'relative',
+      zIndex: 1,
+      width: '100%',
+      maxWidth: 416,
+      padding: '40px 36px 32px',
+      background: 'rgba(255,255,255,0.98)',
+      borderRadius: 16,
+      boxShadow: '0 24px 64px rgba(2,6,23,0.45)',
     },
   };
 });
-
-const Lang = () => {
-  const { styles } = useStyles();
-
-  return (
-    <div className={styles.lang} data-lang>
-      {SelectLang && <SelectLang />}
-    </div>
-  );
-};
 
 const LoginMessage: React.FC<{
   content: string;
@@ -150,13 +147,8 @@ const Login: React.FC = () => {
           {Settings.title && ` - ${Settings.title}`}
         </title>
       </Helmet>
-      <Lang />
-      <div
-        style={{
-          flex: '1',
-          padding: '32px 0',
-        }}
-      >
+      <div className={styles.glow} />
+      <div className={styles.card}>
         <LoginForm
           contentStyle={{
             minWidth: 280,
@@ -256,7 +248,6 @@ const Login: React.FC = () => {
           </div>
         </LoginForm>
       </div>
-      <Footer />
     </div>
   );
 };
