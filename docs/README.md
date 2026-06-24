@@ -14,5 +14,12 @@
 | `specs/2026-06-04-backend-design.md` | 后端项目设计文档(FastAPI+PostgreSQL,实现前端契约,已批准) |
 | `plan/` | 实现规划:从现状到满足 20 项需求的任务清单(todolist)与里程碑建议 |
 | `research/bcc-数据接入调研.md` | BCC PaaS「数据接入」功能实探报告:8 种数据源、字段级 UI 细节、兄弟页面概览及对本项目的参考意义(2026-06-11) |
+| `research/data-juicer-文件格式支持调研.md` | data-juicer 文件格式支持调研:输入格式全表、Word/Excel/PDF 支持情况(docx/pdf✅、excel❌)、产物导出格式(默认 jsonl)、对照 LAS 需求、归一化算子落地建议(2026-06-24) |
+
+## 项目级文档(根目录)
+
+| 文件 | 说明 |
+|------|------|
+| [根 `README.md`](../README.md) → 「数据库操作(统一使用 dbx)」 | 约定本项目所有 DB 操作走 dbx MCP;含 `PostgreSQL_adp` 连接信息(10.60.1.60:55433/adp)、常用工具对照、安全提示(2026-06-24) |
 
 > 新增文档时,请在上表登记,保持索引最新。

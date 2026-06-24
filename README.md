@@ -44,6 +44,40 @@
 - **数据集与版本**:不可变版本快照,支持本地受管(jsonl)与对象存储托管(`s3://…`)两类;提供预览、加工、质量评分、内容审核与发布门控。
 - **大模型配置中心**:多供应商配置 + 一键获取模型列表 + 连接测试 + 用量统计。
 
+## 数据库操作(统一使用 dbx)
+
+**约定:本项目所有数据库操作(看表、查结构、跑查询)**统一通过 [DBX](https://github.com/BurningXFlame/dbx-mcp-server) MCP 工具进行**,不直接 `psql` / 手敲连接串——连接信息由 dbx 集中托管,避免凭据散落在命令行历史里。
+
+### 连接信息
+
+| 项 | 值 |
+|---|---|
+| dbx 连接名 | `PostgreSQL_adp` |
+| 类型 | PostgreSQL |
+| Host | `10.60.1.60` |
+| 端口 | `55433` |
+| 数据库 | `adp` |
+| 用户 | `adp` |
+| 来源 | `backend/.env` 的 `DATABASE_URL`(以该文件为准) |
+
+> 在 Claude Code / 其他支持 MCP 的客户端里,dbx 已在用户级配置(`~/.claude.json` → `mcpServers.dbx`)注册,所有项目通用。
+
+### 常用操作(通过 dbx MCP 工具)
+
+| 目的 | 工具 / 示例 |
+|------|------------|
+| 列出所有连接 | `dbx_list_connections` |
+| 列出 `adp` 的表 | `dbx_list_tables(connection_name="PostgreSQL_adp", database="adp")` |
+| 看表结构 | `dbx_describe_table(connection_name="PostgreSQL_adp", database="adp", table="datasets")` |
+| 跑只读查询(≤100 行) | `dbx_execute_query(connection_name="PostgreSQL_adp", database="adp", sql="SELECT count(*) FROM datasets")` |
+| 取写 SQL 的表/列上下文 | `dbx_get_schema_context(connection_name="PostgreSQL_adp", database="adp", tables=["datasets","jobs"])` |
+| 在 DBX 桌面端执行并展示 | `dbx_execute_and_show(...)`(需 DBX 桌面端运行) |
+
+### 安全提示
+
+- 默认按只读使用 `dbx_execute_query`;写操作(INSERT/UPDATE/DELETE/DDL)仅在明确需要时执行,并先确认目标表与 WHERE 条件。
+- dbx 已开启 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`,**不会拦截危险语句**——改库前务必自查影响范围(尤其 `audit_logs`、`datasets`、`dataset_versions` 等核心表)。
+
 ## Data-Juicer 简介
 
 Data-Juicer 是阿里巴巴开源的一个面向大模型(LLM)的数据处理系统,主要用于多模态数据的清洗、处理和分析。
