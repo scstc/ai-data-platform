@@ -20,7 +20,7 @@ class JobCreate(CamelModel):
     """新建加工任务入参:对某个数据集版本跑一串算子。"""
 
     name: str
-    type: str = "clean"
+    type: str = "process"
     dataset_version_id: str
     operators: list[OperatorSpec]
 
