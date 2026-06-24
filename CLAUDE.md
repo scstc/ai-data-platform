@@ -36,6 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `/adp-init` | 首次初始化工作区：clone data-juicer（dev 分支）到 `data-juicer/` |
 | `/adp-dashboard` | 同步最新图谱数据到 `dashboard/` 并后台启动 `python3 -m http.server 8765` |
 | `/adp-start` | **一键本地启动数据平台**（后端 :18003 + 前端 :8001 真实后端）——日常"把项目跑起来"首选 |
+| `/adp-deploy` | **部署最新版到 10.60.1.60**（git archive 同步源码 + docker compose 重建）——生产部署 |
 | `/adp-web` | 启动数据平台前端（Ant Design Pro v6，`:8001`，登录 admin/ant.design） |
 | `/adp-server` | 启动数据平台后端（FastAPI+PG，`:18003`，Swagger 在 `/docs`；PG 容器 `:55433`） |
 | `/dj-demo` | 安装 data-juicer 环境（`uv sync --python 3.11`）并跑通最简 CLI 示例 |
