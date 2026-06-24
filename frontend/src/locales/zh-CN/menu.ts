@@ -65,6 +65,8 @@ export default {
   'menu.governance.contentSafety': '内容安全',
   'menu.governance.processing': '数据加工',
   'menu.governance.processing-editor': '新建加工任务',
+  'menu.governance.cleaning': '数据清洗',
+  'menu.governance.cleaning-editor': '新建清洗任务',
   'menu.governance.distillation': '数据蒸馏',
   'menu.governance.distillation-editor': '新建数据蒸馏',
   'menu.governance.make': '数据合成',

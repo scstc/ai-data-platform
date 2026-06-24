@@ -35,7 +35,19 @@ import { stepsToYaml } from './yaml';
 
 const { Text, Paragraph } = Typography;
 
-const Editor: React.FC = () => {
+/** 加工/清洗任务编辑器(同构,按 jobType 建任务)。数据加工=process / 数据清洗=clean。
+ *  参数化复用:cleaning/editor 渲染 <Editor jobType="clean" ... /> 即成清洗编辑器。 */
+const Editor: React.FC<{
+  jobType?: string;
+  title?: string;
+  noun?: string;
+  redirectHref?: string;
+}> = ({
+  jobType = 'process',
+  title = '新建加工任务',
+  noun = '加工',
+  redirectHref = '/governance/processing',
+}) => {
   const { steps, add, remove, reorder, updateParams, replaceAll, clear } =
     useModel('opCart');
   const [name, setName] = useState('');
@@ -185,10 +197,11 @@ const Editor: React.FC = () => {
         datasetVersionId: versionId,
         operators: steps,
         outputMode: 'version',
+        type: jobType,
       });
-      message.success('加工任务已创建，正在后台运行');
+      message.success(`${noun}任务已创建，正在后台运行`);
       clear();
-      history.push('/governance/processing');
+      history.push(redirectHref);
     } finally {
       setSubmitting(false);
     }
@@ -196,7 +209,7 @@ const Editor: React.FC = () => {
 
   return (
     <PageContainer
-      header={{ title: '新建加工任务' }}
+      header={{ title }}
       extra={[
         <Button key="ai" onClick={onGenerate}>
           ✨ AI 生成

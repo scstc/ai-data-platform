@@ -190,6 +190,17 @@ export default [
         hideInMenu: true,
       },
       {
+        path: '/governance/cleaning',
+        name: 'cleaning',
+        component: './cleaning',
+      },
+      {
+        path: '/governance/cleaning/editor',
+        name: 'cleaning-editor',
+        component: './cleaning/editor',
+        hideInMenu: true,
+      },
+      {
         path: '/governance/distillation',
         name: 'distillation',
         component: './distillation',

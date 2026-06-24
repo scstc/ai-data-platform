@@ -17,7 +17,17 @@ import {
 import { formatDateTime } from '@/utils/format';
 import { renderOutput, renderState } from '@/utils/jobState';
 
-const Processing: React.FC = () => {
+/** 加工/清洗任务列表(同构,按 jobType 过滤)。数据加工=process / 数据清洗=clean。
+ *  参数化复用:cleaning/index.tsx 传 jobType="clean" 即成清洗列表。 */
+const Processing: React.FC<{
+  jobType?: string;
+  title?: string;
+  createHref?: string;
+}> = ({
+  jobType = 'process',
+  title = '数据加工任务',
+  createHref = '/governance/processing/editor',
+}) => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
@@ -172,7 +182,7 @@ const Processing: React.FC = () => {
   return (
     <PageContainer>
       <ProTable<DataPlatform.Job>
-        headerTitle="数据加工任务"
+        headerTitle={title}
         actionRef={actionRef}
         rowKey="id"
         search={false}
@@ -200,6 +210,7 @@ const Processing: React.FC = () => {
           const res = await listJobs({
             current: params.current,
             pageSize: params.pageSize,
+            type: jobType,
           });
           // 有任务在跑/排队 → 每 3s 轮询;全部终态 → 停止轮询
           const active = res.data?.some(
@@ -213,7 +224,7 @@ const Processing: React.FC = () => {
           <Button
             type="primary"
             key="new"
-            onClick={() => history.push('/governance/processing/editor')}
+            onClick={() => history.push(createHref)}
           >
             新建任务
           </Button>,
