@@ -23,7 +23,10 @@ export default [
   { path: '/quality', redirect: '/assessment/quality' },
   { path: '/quality/editor', redirect: '/assessment/quality/editor' },
   { path: '/governance/quality', redirect: '/assessment/quality' },
-  { path: '/governance/quality/editor', redirect: '/assessment/quality/editor' },
+  {
+    path: '/governance/quality/editor',
+    redirect: '/assessment/quality/editor',
+  },
   { path: '/processing', redirect: '/governance/processing' },
   { path: '/processing/jobs', redirect: '/governance/processing' },
   { path: '/processing/editor', redirect: '/governance/processing/editor' },
@@ -66,7 +69,12 @@ export default [
         component: './ingest/datasources/config',
       },
       { path: '/ingest/tasks', name: 'tasks', component: './ingest/tasks' },
-      { path: '/ingest/access', name: 'access', hideInMenu: true, component: './ingest/access' },
+      {
+        path: '/ingest/access',
+        name: 'access',
+        hideInMenu: true,
+        component: './ingest/access',
+      },
       {
         path: '/ingest/local-upload',
         name: 'local-upload',

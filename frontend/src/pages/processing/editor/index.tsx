@@ -8,6 +8,7 @@ import {
   Drawer,
   Input,
   Modal,
+  message,
   Row,
   Select,
   Space,
@@ -15,18 +16,17 @@ import {
   Table,
   Tooltip,
   Typography,
-  message,
 } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
+import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createJob,
   generatePipeline,
-  listDatasets,
   getDataset,
+  listDatasets,
   listOperatorCatalog,
   previewJob,
 } from '@/services/data-platform';
-import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from './OperatorLibrary';
 import PipelineSteps from './PipelineSteps';
@@ -56,7 +56,9 @@ const Editor: React.FC<{
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  const [opMap, setOpMap] = useState<Record<string, DataPlatform.CatalogOperator>>({});
+  const [opMap, setOpMap] = useState<
+    Record<string, DataPlatform.CatalogOperator>
+  >({});
   const [activeIdx, setActiveIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -71,7 +73,9 @@ const Editor: React.FC<{
   }, []);
 
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 1000 }).then((r) => setDatasets(r.data));
+    listDatasets({ current: 1, pageSize: 1000 }).then((r) =>
+      setDatasets(r.data),
+    );
   }, []);
 
   useEffect(() => {
@@ -136,7 +140,9 @@ const Editor: React.FC<{
         const ops = r.data.operators;
         if (!ops.length) {
           // 后端 sanitize 可能裁掉全部算子(返回空):不要清空已编排步骤,提示而非伪装成功
-          message.warning(r.data.explanation || '未生成可用算子,请调整目标后重试');
+          message.warning(
+            r.data.explanation || '未生成可用算子,请调整目标后重试',
+          );
           return Promise.reject();
         }
         replaceAll(ops);
@@ -168,9 +174,7 @@ const Editor: React.FC<{
       // umi request 失败抛错:BizError 走 e.info.errorMessage;
       // 后端 400 非业务包则走 axios e.response.data.message
       const msg =
-        e?.info?.errorMessage ||
-        e?.response?.data?.message ||
-        e?.data?.message;
+        e?.info?.errorMessage || e?.response?.data?.message || e?.data?.message;
       message.error(`试跑失败:${msg || '请查看算子与数据是否匹配'}`);
     } finally {
       setPreviewing(false);
@@ -217,7 +221,12 @@ const Editor: React.FC<{
         <Button key="preview" loading={previewing} onClick={onPreview}>
           🔍 试跑样例
         </Button>,
-        <Button key="submit" type="primary" loading={submitting} onClick={onSubmit}>
+        <Button
+          key="submit"
+          type="primary"
+          loading={submitting}
+          onClick={onSubmit}
+        >
           创建任务
         </Button>,
       ]}
@@ -259,12 +268,20 @@ const Editor: React.FC<{
 
       <Row gutter={16}>
         <Col span={7}>
-          <Card title="算子库" size="small" styles={{ body: { height: 460, padding: 12 } }}>
+          <Card
+            title="算子库"
+            size="small"
+            styles={{ body: { height: 460, padding: 12 } }}
+          >
             <OperatorLibrary onAdd={add} />
           </Card>
         </Col>
         <Col span={10}>
-          <Card title="流水线" size="small" styles={{ body: { height: 460, overflow: 'auto' } }}>
+          <Card
+            title="流水线"
+            size="small"
+            styles={{ body: { height: 460, overflow: 'auto' } }}
+          >
             <PipelineSteps
               steps={steps}
               labelOf={labelOf}
@@ -279,7 +296,11 @@ const Editor: React.FC<{
           </Card>
         </Col>
         <Col span={7}>
-          <Card title="参数" size="small" styles={{ body: { height: 460, overflow: 'auto' } }}>
+          <Card
+            title="参数"
+            size="small"
+            styles={{ body: { height: 460, overflow: 'auto' } }}
+          >
             <StepParamsForm
               op={activeOp}
               params={activeStep?.params ?? {}}
@@ -291,7 +312,8 @@ const Editor: React.FC<{
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          加工产物将作为所选数据集的新版本，可通过历史版本对比追溯加工效果。下方 YAML 仅为本机编排预览；真实配置在创建时由后端生成。
+          加工产物将作为所选数据集的新版本，可通过历史版本对比追溯加工效果。下方
+          YAML 仅为本机编排预览；真实配置在创建时由后端生成。
         </Text>
       </Card>
 
@@ -307,120 +329,132 @@ const Editor: React.FC<{
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
       >
-        {preview && (() => {
-          const { before, after, beforeCount, afterCount } = preview;
-          const mainText = (row: Record<string, any>) =>
-            typeof row.text === 'string' ? row.text : JSON.stringify(row);
-          const ellCell = (v: string) => (
-            <Tooltip title={v}>
-              <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {v}
-              </span>
-            </Tooltip>
-          );
-          const unchanged = afterCount === beforeCount;
-          const delta = beforeCount - afterCount;
-          let trend = '';
-          if (unchanged) {
-            trend = '(行数不变·纯清洗)';
-          } else if (delta > 0) {
-            trend = `(删除 ${delta} 行)`;
-          } else {
-            trend = `(新增 ${-delta} 行)`;
-          }
-          return (
-            <>
-              <Statistic
-                title="样例行数"
-                value={`${beforeCount} 行 → 加工后 ${afterCount} 行 ${trend}`}
-                valueStyle={{ fontSize: 16 }}
-              />
-              <div style={{ marginTop: 16 }}>
-                {unchanged ? (
-                  <Table
-                    size="small"
-                    pagination={false}
-                    rowKey="key"
-                    dataSource={before.map((b, i) => ({
-                      key: i,
-                      idx: i + 1,
-                      before: mainText(b),
-                      after: mainText(after[i] ?? {}),
-                    }))}
-                    columns={[
-                      { title: '序号', dataIndex: 'idx', width: 60 },
-                      {
-                        title: '加工前',
-                        dataIndex: 'before',
-                        ellipsis: true,
-                        render: (v: string) => ellCell(v),
-                      },
-                      {
-                        title: '加工后',
-                        dataIndex: 'after',
-                        ellipsis: true,
-                        render: (v: string) => ellCell(v),
-                      },
-                    ]}
-                  />
-                ) : (
-                  <>
-                    <Typography.Title level={5}>加工后结果</Typography.Title>
+        {preview &&
+          (() => {
+            const { before, after, beforeCount, afterCount } = preview;
+            const mainText = (row: Record<string, any>) =>
+              typeof row.text === 'string' ? row.text : JSON.stringify(row);
+            const ellCell = (v: string) => (
+              <Tooltip title={v}>
+                <span
+                  style={{
+                    display: 'block',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {v}
+                </span>
+              </Tooltip>
+            );
+            const unchanged = afterCount === beforeCount;
+            const delta = beforeCount - afterCount;
+            let trend = '';
+            if (unchanged) {
+              trend = '(行数不变·纯清洗)';
+            } else if (delta > 0) {
+              trend = `(删除 ${delta} 行)`;
+            } else {
+              trend = `(新增 ${-delta} 行)`;
+            }
+            return (
+              <>
+                <Statistic
+                  title="样例行数"
+                  value={`${beforeCount} 行 → 加工后 ${afterCount} 行 ${trend}`}
+                  valueStyle={{ fontSize: 16 }}
+                />
+                <div style={{ marginTop: 16 }}>
+                  {unchanged ? (
                     <Table
                       size="small"
                       pagination={false}
                       rowKey="key"
-                      dataSource={after.map((a, i) => ({
+                      dataSource={before.map((b, i) => ({
                         key: i,
                         idx: i + 1,
-                        text: mainText(a),
+                        before: mainText(b),
+                        after: mainText(after[i] ?? {}),
                       }))}
                       columns={[
                         { title: '序号', dataIndex: 'idx', width: 60 },
                         {
-                          title: '文本',
-                          dataIndex: 'text',
+                          title: '加工前',
+                          dataIndex: 'before',
+                          ellipsis: true,
+                          render: (v: string) => ellCell(v),
+                        },
+                        {
+                          title: '加工后',
+                          dataIndex: 'after',
                           ellipsis: true,
                           render: (v: string) => ellCell(v),
                         },
                       ]}
                     />
-                    <Collapse
-                      style={{ marginTop: 16 }}
-                      items={[
-                        {
-                          key: 'before',
-                          label: '查看加工前样例',
-                          children: (
-                            <Table
-                              size="small"
-                              pagination={false}
-                              rowKey="key"
-                              dataSource={before.map((b, i) => ({
-                                key: i,
-                                idx: i + 1,
-                                text: mainText(b),
-                              }))}
-                              columns={[
-                                { title: '序号', dataIndex: 'idx', width: 60 },
-                                {
-                                  title: '文本',
-                                  dataIndex: 'text',
-                                  ellipsis: true,
-                                  render: (v: string) => ellCell(v),
-                                },
-                              ]}
-                            />
-                          ),
-                        },
-                      ]}
-                    />
-                  </>
-                )}
-              </div>
-            </>
-          );
-        })()}
+                  ) : (
+                    <>
+                      <Typography.Title level={5}>加工后结果</Typography.Title>
+                      <Table
+                        size="small"
+                        pagination={false}
+                        rowKey="key"
+                        dataSource={after.map((a, i) => ({
+                          key: i,
+                          idx: i + 1,
+                          text: mainText(a),
+                        }))}
+                        columns={[
+                          { title: '序号', dataIndex: 'idx', width: 60 },
+                          {
+                            title: '文本',
+                            dataIndex: 'text',
+                            ellipsis: true,
+                            render: (v: string) => ellCell(v),
+                          },
+                        ]}
+                      />
+                      <Collapse
+                        style={{ marginTop: 16 }}
+                        items={[
+                          {
+                            key: 'before',
+                            label: '查看加工前样例',
+                            children: (
+                              <Table
+                                size="small"
+                                pagination={false}
+                                rowKey="key"
+                                dataSource={before.map((b, i) => ({
+                                  key: i,
+                                  idx: i + 1,
+                                  text: mainText(b),
+                                }))}
+                                columns={[
+                                  {
+                                    title: '序号',
+                                    dataIndex: 'idx',
+                                    width: 60,
+                                  },
+                                  {
+                                    title: '文本',
+                                    dataIndex: 'text',
+                                    ellipsis: true,
+                                    render: (v: string) => ellCell(v),
+                                  },
+                                ]}
+                              />
+                            ),
+                          },
+                        ]}
+                      />
+                    </>
+                  )}
+                </div>
+              </>
+            );
+          })()}
       </Drawer>
     </PageContainer>
   );
