@@ -1,8 +1,21 @@
-// 数据血缘:数据集版本管理(左)+ 血缘关系图(右,版本↔任务 DAG,左→右分层)。
-// 血缘端点 GET /api/v1/datasets/{id}/lineage 返回 nodes+edges;前端用最长路径分层 +
-// 固定网格坐标渲染节点卡片 + SVG 贝塞尔边(自研,不引图库——血缘通常是小图)。
+// 数据血缘:数据集版本管理(左)+ 血缘关系图(右,版本↔任务 DAG)。
+// 血缘端点 GET /api/v1/datasets/{id}/lineage 返回 nodes+edges;用 ReactFlow(@xyflow/react)
+// 渲染 + dagre 算上→下树形布局(rankdir=TB),节点复用 antd 版本/任务卡片,自带平移/缩放/自适应。
 import { PageContainer } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
+import {
+  Background,
+  Controls,
+  type Edge,
+  Handle,
+  MarkerType,
+  type Node,
+  type NodeProps,
+  Position,
+  ReactFlow,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import dagre from '@dagrejs/dagre';
 import {
   Card,
   Col,
@@ -15,7 +28,7 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   getDataset,
   getDatasetLineage,
@@ -44,10 +57,10 @@ const STATE_TEXT: Record<string, { t: string; c: string }> = {
   cancelled: { t: '已取消', c: 'warning' },
 };
 
-// 固定网格:每个节点占一格;坐标可算,无需 DOM 测量
-const CELL_W = 320;
-const CELL_H = 150;
-const PAD = 10;
+// dagre 布局用的节点尺寸。每次须返回**新对象**——dagre layout 会往传入的 label 对象上
+// 写 x/y,若共享单例,同类型节点会共用同一个位置对象 → 全部叠到同一坐标。
+const sizeOf = (n: DataPlatform.LineageNode) =>
+  n.kind === 'job' ? { width: 250, height: 178 } : { width: 250, height: 132 };
 
 const scanTag = (v?: string) =>
   v === 'passed'
@@ -111,6 +124,7 @@ const JobNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
         flexDirection: 'column',
         gap: 4,
         justifyContent: 'center',
+        overflow: 'hidden',
       }}
     >
       <Tag color="purple" style={{ margin: 0, width: 'fit-content' }}>
@@ -150,6 +164,7 @@ const VersionNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
         display: 'flex',
         flexDirection: 'column',
         gap: 4,
+        overflow: 'hidden',
       }}
     >
       <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
@@ -178,122 +193,87 @@ const VersionNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
   );
 };
 
-/** 血缘图:最长路径分层 + 固定网格坐标 + SVG 贝塞尔边 */
+/** 自定义 ReactFlow 节点:复用 antd 版本/任务卡片 + 隐藏 Handle(顶 target/底 source)
+ *  没有 Handle ReactFlow 建不出边(error #008);隐藏(opacity:0)保持卡片整洁。 */
+const HANDLE_STYLE = { opacity: 0 } as const;
+const RFVersionNode = ({ data }: NodeProps) => (
+  <>
+    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+    <VersionNode n={data as DataPlatform.LineageNode} />
+    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+  </>
+);
+const RFJobNode = ({ data }: NodeProps) => (
+  <>
+    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+    <JobNode n={data as DataPlatform.LineageNode} />
+    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+  </>
+);
+
+/** 血缘图:ReactFlow + dagre(上→下树形布局 rankdir=TB),节点为 antd 卡片,自带平移/缩放/自适应 */
 const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
   graph,
 }) => {
+  const nodeTypes = useMemo(
+    () => ({ version: RFVersionNode, job: RFJobNode }),
+    [],
+  );
   if (!graph || graph.nodes.length === 0) {
     return <Empty description="无血缘数据（该数据集无版本或无加工任务）" />;
   }
-  const { nodes, edges } = graph;
 
-  const incoming = new Map<string, string[]>();
-  nodes.forEach((n) => incoming.set(n.id, []));
-  edges.forEach((e) => incoming.get(e.to)?.push(e.from));
-
-  // 最长路径分层:入度 0 → 0;其余 = max(前驱层)+1;迭代到稳定
-  const layer = new Map<string, number>();
-  nodes.forEach((n) => {
-    if ((incoming.get(n.id) ?? []).length === 0) layer.set(n.id, 0);
+  // dagre 算上→下布局,产出 ReactFlow 节点(含 position)。dagre 的 x/y 是节点中心,
+  // ReactFlow 要左上角,故各减半尺寸。
+  const g = new dagre.graphlib.Graph();
+  g.setDefaultEdgeLabel(() => ({}));
+  g.setGraph({
+    rankdir: 'TB',
+    nodesep: 32,
+    ranksep: 72,
+    marginx: 16,
+    marginy: 16,
   });
-  let changed = true;
-  let guard = nodes.length + 5;
-  while (changed && guard-- > 0) {
-    changed = false;
-    nodes.forEach((n) => {
-      const preds = incoming.get(n.id) ?? [];
-      if (preds.length === 0) return;
-      const pl = Math.max(...preds.map((p) => layer.get(p) ?? -1));
-      if ((layer.get(n.id) ?? -1) < pl + 1) {
-        layer.set(n.id, pl + 1);
-        changed = true;
-      }
-    });
-  }
-  nodes.forEach((n) => {
-    if (!layer.has(n.id)) layer.set(n.id, 0);
-  });
+  graph.nodes.forEach((n) => g.setNode(n.id, sizeOf(n)));
+  graph.edges.forEach((e) => g.setEdge(e.from, e.to));
+  dagre.layout(g);
 
-  // 每层排序(focus 版本靠上,再按 createdAt)分配行号
-  const byLayer = new Map<number, DataPlatform.LineageNode[]>();
-  layer.forEach((l, id) => {
-    const node = nodes.find((n) => n.id === id)!;
-    (byLayer.get(l) ?? byLayer.set(l, []).get(l)!).push(node);
+  const rfNodes: Node[] = graph.nodes.map((n) => {
+    const p = g.node(n.id);
+    const s = sizeOf(n);
+    return {
+      id: n.id,
+      type: n.kind,
+      position: { x: p.x - s.width / 2, y: p.y - s.height / 2 },
+      data: n as unknown as Record<string, unknown>,
+      style: { width: s.width, height: s.height },
+    };
   });
-  const rowOf = new Map<string, number>();
-  byLayer.forEach((list) => {
-    list.sort((a, b) => {
-      const fa = a.kind === 'version' && a.isFocus ? 0 : 1;
-      const fb = b.kind === 'version' && b.isFocus ? 0 : 1;
-      if (fa !== fb) return fa - fb;
-      return (a.createdAt || '').localeCompare(b.createdAt || '');
-    });
-    list.forEach((n, i) => rowOf.set(n.id, i));
-  });
-
-  const maxLayer = Math.max(...Array.from(layer.values()));
-  const maxRow = Math.max(...Array.from(rowOf.values()), 0);
-  const width = (maxLayer + 1) * CELL_W;
-  const height = (maxRow + 1) * CELL_H;
-
-  const edgePath = (e: DataPlatform.LineageEdge) => {
-    const sx = (layer.get(e.from) ?? 0) * CELL_W + CELL_W - PAD;
-    const sy = (rowOf.get(e.from) ?? 0) * CELL_H + CELL_H / 2;
-    const tx = (layer.get(e.to) ?? 0) * CELL_W + PAD;
-    const ty = (rowOf.get(e.to) ?? 0) * CELL_H + CELL_H / 2;
-    const dx = Math.max(40, (tx - sx) / 2);
-    return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`;
-  };
+  const rfEdges: Edge[] = graph.edges.map((e) => ({
+    id: `${e.from}->${e.to}`,
+    source: e.from,
+    target: e.to,
+    type: 'smoothstep',
+    // ReactFlow 边默认无箭头,显式加箭头标记
+    markerEnd: { type: MarkerType.ArrowClosed },
+  }));
 
   return (
-    <div style={{ position: 'relative', width, height, minWidth: '100%' }}>
-      <svg
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          width,
-          height,
-          pointerEvents: 'none',
-        }}
+    <div style={{ width: '100%', height: '72vh' }}>
+      <ReactFlow
+        nodes={rfNodes}
+        edges={rfEdges}
+        nodeTypes={nodeTypes}
+        fitView
+        minZoom={0.3}
+        fitViewOptions={{ padding: 0.12, minZoom: 0.3 }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
       >
-        <defs>
-          <marker
-            id="lin-arrow"
-            markerWidth="8"
-            markerHeight="8"
-            refX="6"
-            refY="3"
-            orient="auto"
-          >
-            <path d="M0,0 L6,3 L0,6 Z" fill="var(--ant-color-border)" />
-          </marker>
-        </defs>
-        {edges.map((e, i) => (
-          <path
-            key={i}
-            d={edgePath(e)}
-            fill="none"
-            stroke="var(--ant-color-border)"
-            strokeWidth={1.5}
-            markerEnd="url(#lin-arrow)"
-          />
-        ))}
-      </svg>
-      {nodes.map((n) => (
-        <div
-          key={n.id}
-          style={{
-            position: 'absolute',
-            left: (layer.get(n.id) ?? 0) * CELL_W + PAD,
-            top: (rowOf.get(n.id) ?? 0) * CELL_H + PAD,
-            width: CELL_W - 2 * PAD,
-            height: CELL_H - 2 * PAD,
-          }}
-        >
-          {n.kind === 'version' ? <VersionNode n={n} /> : <JobNode n={n} />}
-        </div>
-      ))}
+        <Background gap={16} />
+        <Controls showInteractive={false} />
+      </ReactFlow>
     </div>
   );
 };
@@ -449,7 +429,7 @@ const Lineage: React.FC = () => {
         <Col xs={24} md={18}>
           <Card
             size="small"
-            title="血缘关系图（左 → 右：上游版本 → 任务 → 产出版本）"
+            title="血缘关系图（上 → 下：上游版本 → 任务 → 产出版本）"
             styles={{ body: { maxHeight: '70vh', overflow: 'auto' } }}
           >
             <Spin spinning={loading}>
