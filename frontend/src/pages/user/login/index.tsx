@@ -64,19 +64,30 @@ const useStyles = createStyles(() => ({
     position: 'relative',
     zIndex: 1,
     '& h1': {
-      fontSize: 40,
-      lineHeight: 1.2,
-      margin: '0 0 16px',
+      fontSize: 30,
+      lineHeight: 1.25,
+      margin: '0 0 12px',
       fontWeight: 700,
       letterSpacing: '-0.02em',
     },
     '& p': {
-      fontSize: 15,
+      fontSize: 13,
       lineHeight: 1.7,
-      opacity: 0.8,
+      opacity: 0.75,
       margin: 0,
-      maxWidth: 360,
+      maxWidth: 320,
     },
+  },
+  // 数据工程流水线动态 SVG:嵌在 hero 文案上方,放大展示
+  // 宽度按左栏百分比走(左栏有 48px 内边距,取容器 84% ≈ 面板宽 ~80%),随面板缩放
+  flow: {
+    position: 'relative',
+    zIndex: 1,
+    display: 'block',
+    width: '85%',
+    maxWidth: 1440,
+    marginBottom: 32,
+    overflow: 'visible',
   },
   brandFoot: { position: 'relative', zIndex: 1, fontSize: 13, opacity: 0.6 },
   // 右侧表单区:白底居中
@@ -89,7 +100,13 @@ const useStyles = createStyles(() => ({
     padding: '32px 24px',
     '@media (max-width: 768px)': { flex: '1 1 100%' },
   },
-  formWrap: { width: '100%', maxWidth: 360 },
+  formWrap: {
+    width: '100%',
+    maxWidth: 360,
+    // ProComponents 默认给 .ant-pro-form-login-container 加了左右各 32px padding,
+    // 但其子元素左缘被拉到 0,右侧因此凭空溢出 32px,产生一条横向滚动条;清零横向 padding 即消除。
+    '& .ant-pro-form-login-container': { paddingInline: 0 },
+  },
 }));
 
 const LoginMessage: React.FC<{
@@ -114,19 +131,132 @@ const Login: React.FC = () => {
   const { styles } = useStyles();
   const { message } = App.useApp();
   const intl = useIntl();
-  const cardRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
-  // 入场动效:右侧表单淡入上移(GSAP);尊重 prefers-reduced-motion
+  // 入场动效(GSAP):光晕→品牌文案→表单卡片→字段逐项,一条时间线编排;
+  // 光晕另起一条持续漂浮的氛围动画。尊重 prefers-reduced-motion。
   useLayoutEffect(() => {
-    const ctx = gsap.context(() => {
+    const ctx = gsap.context((self) => {
       if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      gsap.from(cardRef.current, {
-        y: 24,
-        opacity: 0,
-        duration: 0.6,
-        ease: 'power3.out',
+      const q = self.selector as (s: string) => Element[];
+
+      gsap
+        .timeline({ defaults: { ease: 'power3.out' } })
+        .from(q('[data-anim="glow"]'), { scale: 0.6, opacity: 0, duration: 1 })
+        .from(
+          q('[data-anim="brand-top"]'),
+          { y: -20, opacity: 0, duration: 0.5 },
+          '-=0.7',
+        )
+        .from(
+          q('[data-anim="hero-svg"]'),
+          { y: 20, opacity: 0, duration: 0.6 },
+          '-=0.3',
+        )
+        .from(
+          q('[data-anim="hero-title"]'),
+          { y: 30, opacity: 0, duration: 0.6 },
+          '-=0.3',
+        )
+        .from(
+          q('[data-anim="hero-sub"]'),
+          { y: 20, opacity: 0, duration: 0.5 },
+          '-=0.4',
+        )
+        .from(q('[data-anim="foot"]'), { opacity: 0, duration: 0.4 }, '-=0.2')
+        .from(
+          q('[data-anim="card"]'),
+          { y: 24, opacity: 0, duration: 0.6 },
+          '-=0.6',
+        )
+        .from(
+          q('[data-anim="card"] .ant-form-item'),
+          { y: 16, opacity: 0, duration: 0.4, stagger: 0.08 },
+          '-=0.3',
+        );
+
+      // 光晕氛围漂浮(入场后接管,只动位移不动 scale,避免与入场冲突)
+      gsap.to(q('[data-anim="glow"]'), {
+        x: -24,
+        y: 32,
+        duration: 6,
+        ease: 'sine.inOut',
+        repeat: -1,
+        yoyo: true,
+        delay: 1.1,
       });
-    }, cardRef);
+
+      // 数据工程流水线循环动效
+      // 1) 所有虚线(传送带分段 / 算子喂入 / 运维轨道)流动
+      gsap.to(q('[data-flow="line"]'), {
+        strokeDashoffset: -20,
+        duration: 1,
+        ease: 'none',
+        repeat: -1,
+      });
+      // 2) 运维监控扫描点左右巡检
+      gsap.to(q('[data-flow="scan"]'), {
+        attr: { cx: 452 },
+        duration: 2.6,
+        ease: 'sine.inOut',
+        repeat: -1,
+        yoyo: true,
+      });
+      // 3) 治理 hub 算子逐个明灭(并行处理)
+      gsap.fromTo(
+        q('[data-flow="op"]'),
+        { opacity: 0.3 },
+        {
+          opacity: 1,
+          duration: 0.7,
+          ease: 'sine.inOut',
+          stagger: { each: 0.12, repeat: -1, yoyo: true },
+        },
+      );
+      // 4) 数据评估仪表盘进度环来回填充
+      gsap.to(q('[data-flow="gauge"]'), {
+        strokeDashoffset: 60,
+        duration: 1.8,
+        ease: 'sine.inOut',
+        repeat: -1,
+        yoyo: true,
+      });
+      // 5) 智能助手 chip 轻脉冲
+      gsap.to(q('[data-flow="assistant"]'), {
+        opacity: 0.5,
+        duration: 1.4,
+        ease: 'sine.inOut',
+        repeat: -1,
+        yoyo: true,
+      });
+      // 6) 数据粒子沿主传送带 60→396 流动,首尾淡入淡出,五颗错峰
+      q('[data-flow="particle"]').forEach((p, i) => {
+        gsap.to(p, {
+          ease: 'none',
+          repeat: -1,
+          delay: i * 0.5,
+          keyframes: [
+            { attr: { cx: 60 }, opacity: 0, duration: 0.01 },
+            { opacity: 1, duration: 0.25 },
+            { attr: { cx: 396 }, duration: 2.2 },
+            { opacity: 0, duration: 0.25 },
+          ],
+        });
+      });
+      // 7) 训练就绪网格逐点明灭,表现"数据填充"
+      gsap.fromTo(
+        q('[data-flow="grid"] circle'),
+        { opacity: 0.25 },
+        {
+          opacity: 1,
+          duration: 1,
+          ease: 'sine.inOut',
+          stagger: 0.12,
+          repeat: -1,
+          yoyo: true,
+        },
+      );
+    }, rootRef);
     return () => ctx.revert();
   }, []);
 
@@ -194,7 +324,7 @@ const Login: React.FC = () => {
   const { status, type: loginType } = userLoginState;
 
   return (
-    <div className={styles.container}>
+    <div ref={rootRef} className={styles.container}>
       <Helmet>
         <title>
           {intl.formatMessage({
@@ -205,19 +335,350 @@ const Login: React.FC = () => {
         </title>
       </Helmet>
       <div className={styles.left}>
-        <div className={styles.leftGlow} />
-        <div className={styles.brandTop}>
+        <div data-anim="glow" className={styles.leftGlow} />
+        <div data-anim="brand-top" className={styles.brandTop}>
           <img alt="logo" src="/logo.svg" />
           <span>AI 数据平台</span>
         </div>
         <div className={styles.brandHero}>
-          <h1>从原始数据到训练就绪</h1>
-          <p>端到端 LLM 数据处理、清洗与数据集管理平台。</p>
+          {/* 数据工程流水线:映射平台菜单 —— 算子市场 → 数据接入 → 数据治理 → 数据评估 → 数据集 → 训练就绪,
+              横切层为运维监控(任务/血缘/审计)与智能助手(GSAP 驱动) */}
+          <svg
+            data-anim="hero-svg"
+            className={styles.flow}
+            viewBox="0 0 480 158"
+            fill="none"
+            role="img"
+            aria-label="数据平台流程:数据接入经数据治理(内容安全/清洗/加工/蒸馏/合成/增强/标注)、数据评估、入数据集仓库,产出训练就绪数据集;运维监控与智能助手贯穿其中"
+          >
+            <title>从数据接入到训练就绪的数据工程流水线</title>
+
+            {/* ── 运维监控:顶部贯穿的监控轨道 + 扫描点 ── */}
+            <text x="20" y="20" fontSize="9" fill="rgba(255,255,255,0.5)">
+              运维监控
+            </text>
+            <path
+              data-flow="line"
+              d="M86 16 H452"
+              stroke="rgba(96,165,250,0.25)"
+              strokeWidth="1"
+              strokeDasharray="2 6"
+            />
+            <circle cx="150" cy="16" r="2.2" fill="rgba(96,165,250,0.55)" />
+            <circle cx="264" cy="16" r="2.2" fill="rgba(96,165,250,0.55)" />
+            <circle cx="380" cy="16" r="2.2" fill="rgba(96,165,250,0.55)" />
+            <circle data-flow="scan" cx="86" cy="16" r="3" fill="#93c5fd" />
+
+            {/* ── 智能助手:右上浮动机器人 chip ── */}
+            <g data-flow="assistant">
+              <rect
+                x="398"
+                y="28"
+                width="64"
+                height="18"
+                rx="6"
+                fill="rgba(96,165,250,0.1)"
+                stroke="rgba(96,165,250,0.45)"
+                strokeWidth="0.8"
+              />
+              <circle cx="408" cy="37" r="1.6" fill="#93c5fd" />
+              <circle cx="414" cy="37" r="1.6" fill="#93c5fd" />
+              <text
+                x="440"
+                y="40"
+                textAnchor="middle"
+                fontSize="7.5"
+                fill="rgba(255,255,255,0.7)"
+              >
+                智能助手
+              </text>
+            </g>
+
+            {/* ── 连接线(主传送带分段,虚线流动) ── */}
+            <path
+              data-flow="line"
+              d="M58 96 H112"
+              stroke="rgba(96,165,250,0.45)"
+              strokeWidth="1.4"
+              strokeDasharray="4 6"
+            />
+            <path
+              data-flow="line"
+              d="M220 96 H249"
+              stroke="rgba(96,165,250,0.45)"
+              strokeWidth="1.4"
+              strokeDasharray="4 6"
+            />
+            <path
+              data-flow="line"
+              d="M283 96 H314"
+              stroke="rgba(96,165,250,0.45)"
+              strokeWidth="1.4"
+              strokeDasharray="4 6"
+            />
+            <path
+              data-flow="line"
+              d="M372 96 H400"
+              stroke="rgba(96,165,250,0.45)"
+              strokeWidth="1.4"
+              strokeDasharray="4 6"
+            />
+
+            {/* ── ① 数据接入:三类异构数据源 chip ── */}
+            <g>
+              <rect
+                x="14"
+                y="72"
+                width="42"
+                height="14"
+                rx="4"
+                fill="rgba(251,191,36,0.12)"
+                stroke="rgba(251,191,36,0.5)"
+                strokeWidth="0.8"
+              />
+              <circle cx="23" cy="79" r="2.4" fill="#fbbf24" />
+              <rect
+                x="14"
+                y="90"
+                width="42"
+                height="14"
+                rx="4"
+                fill="rgba(52,211,153,0.12)"
+                stroke="rgba(52,211,153,0.5)"
+                strokeWidth="0.8"
+              />
+              <circle cx="23" cy="97" r="2.4" fill="#34d399" />
+              <rect
+                x="14"
+                y="108"
+                width="42"
+                height="14"
+                rx="4"
+                fill="rgba(167,139,250,0.12)"
+                stroke="rgba(167,139,250,0.5)"
+                strokeWidth="0.8"
+              />
+              <circle cx="23" cy="115" r="2.4" fill="#a78bfa" />
+            </g>
+            <text
+              x="35"
+              y="142"
+              textAnchor="middle"
+              fontSize="9"
+              fill="rgba(255,255,255,0.55)"
+            >
+              数据接入
+            </text>
+
+            {/* ── 算子市场:从上方喂入治理 hub ── */}
+            <rect
+              x="140"
+              y="40"
+              width="52"
+              height="16"
+              rx="5"
+              fill="rgba(96,165,250,0.1)"
+              stroke="rgba(96,165,250,0.5)"
+              strokeWidth="0.8"
+            />
+            <text
+              x="166"
+              y="51"
+              textAnchor="middle"
+              fontSize="7.5"
+              fill="rgba(255,255,255,0.7)"
+            >
+              算子市场
+            </text>
+            <path
+              data-flow="line"
+              d="M166 56 V66"
+              stroke="rgba(96,165,250,0.45)"
+              strokeWidth="1.2"
+              strokeDasharray="3 5"
+            />
+
+            {/* ── ② 数据治理 hub:7+ 算子并行(内容安全/清洗/加工/蒸馏/合成/增强/标注) ── */}
+            <rect
+              x="112"
+              y="66"
+              width="108"
+              height="60"
+              rx="10"
+              fill="rgba(255,255,255,0.04)"
+              stroke="rgba(96,165,250,0.4)"
+              strokeWidth="1"
+            />
+            <g data-flow="op-group">
+              <circle data-flow="op" cx="132" cy="86" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="154" cy="86" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="176" cy="86" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="198" cy="86" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="132" cy="106" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="154" cy="106" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="176" cy="106" r="3.6" fill="#60a5fa" />
+              <circle data-flow="op" cx="198" cy="106" r="3.6" fill="#60a5fa" />
+            </g>
+            <text
+              x="166"
+              y="142"
+              textAnchor="middle"
+              fontSize="9"
+              fill="rgba(255,255,255,0.55)"
+            >
+              数据治理
+            </text>
+
+            {/* ── ③ 数据评估:质量评分仪表盘 ── */}
+            <circle
+              cx="266"
+              cy="96"
+              r="17"
+              fill="rgba(56,189,248,0.06)"
+              stroke="rgba(56,189,248,0.4)"
+              strokeWidth="1"
+            />
+            <circle
+              data-flow="gauge"
+              cx="266"
+              cy="96"
+              r="12"
+              fill="none"
+              stroke="#38bdf8"
+              strokeWidth="2.6"
+              strokeLinecap="round"
+              strokeDasharray="75.4"
+              strokeDashoffset="22"
+              transform="rotate(-90 266 96)"
+            />
+            <path
+              d="M260 96 l4 4 l8 -9"
+              stroke="#38bdf8"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <text
+              x="266"
+              y="142"
+              textAnchor="middle"
+              fontSize="9"
+              fill="rgba(255,255,255,0.55)"
+            >
+              数据评估
+            </text>
+
+            {/* ── ④ 数据集仓库:版本化堆叠 ── */}
+            <rect
+              x="314"
+              y="82"
+              width="46"
+              height="14"
+              rx="3"
+              fill="rgba(56,189,248,0.08)"
+              stroke="rgba(56,189,248,0.4)"
+              strokeWidth="0.8"
+            />
+            <rect
+              x="319"
+              y="92"
+              width="46"
+              height="14"
+              rx="3"
+              fill="rgba(56,189,248,0.1)"
+              stroke="rgba(56,189,248,0.45)"
+              strokeWidth="0.8"
+            />
+            <rect
+              x="324"
+              y="102"
+              width="46"
+              height="14"
+              rx="3"
+              fill="rgba(56,189,248,0.14)"
+              stroke="rgba(56,189,248,0.5)"
+              strokeWidth="0.8"
+            />
+            <text
+              x="345"
+              y="142"
+              textAnchor="middle"
+              fontSize="9"
+              fill="rgba(255,255,255,0.55)"
+            >
+              数据集
+            </text>
+
+            {/* ── ⑤ 训练就绪:整齐对齐网格 ── */}
+            <g data-flow="grid">
+              <circle cx="404" cy="83" r="3.4" fill="#38bdf8" />
+              <circle cx="420" cy="83" r="3.4" fill="#38bdf8" />
+              <circle cx="436" cy="83" r="3.4" fill="#38bdf8" />
+              <circle cx="404" cy="96" r="3.4" fill="#38bdf8" />
+              <circle cx="420" cy="96" r="3.4" fill="#38bdf8" />
+              <circle cx="436" cy="96" r="3.4" fill="#38bdf8" />
+              <circle cx="404" cy="109" r="3.4" fill="#38bdf8" />
+              <circle cx="420" cy="109" r="3.4" fill="#38bdf8" />
+              <circle cx="436" cy="109" r="3.4" fill="#38bdf8" />
+            </g>
+            <text
+              x="420"
+              y="142"
+              textAnchor="middle"
+              fontSize="9"
+              fill="rgba(255,255,255,0.55)"
+            >
+              训练就绪
+            </text>
+
+            {/* ── 沿主传送带流动的数据粒子 ── */}
+            <circle
+              data-flow="particle"
+              cy="96"
+              r="2.6"
+              fill="#7dd3fc"
+              opacity="0"
+            />
+            <circle
+              data-flow="particle"
+              cy="96"
+              r="2.6"
+              fill="#7dd3fc"
+              opacity="0"
+            />
+            <circle
+              data-flow="particle"
+              cy="96"
+              r="2.6"
+              fill="#7dd3fc"
+              opacity="0"
+            />
+            <circle
+              data-flow="particle"
+              cy="96"
+              r="2.6"
+              fill="#7dd3fc"
+              opacity="0"
+            />
+            <circle
+              data-flow="particle"
+              cy="96"
+              r="2.6"
+              fill="#7dd3fc"
+              opacity="0"
+            />
+          </svg>
+          <h1 data-anim="hero-title">从原始数据到训练就绪</h1>
+          <p data-anim="hero-sub">
+            端到端 LLM 数据处理、清洗与数据集管理平台。
+          </p>
         </div>
-        <div className={styles.brandFoot}>© 2026 AI 数据平台</div>
+        <div data-anim="foot" className={styles.brandFoot}>
+          © 2026 AI 数据平台
+        </div>
       </div>
       <div className={styles.right}>
-        <div ref={cardRef} className={styles.formWrap}>
+        <div data-anim="card" className={styles.formWrap}>
           <LoginForm
             contentStyle={{
               minWidth: 280,
