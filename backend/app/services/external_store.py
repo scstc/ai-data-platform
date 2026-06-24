@@ -118,6 +118,37 @@ def client_for(config: dict[str, Any] | None, *, fast_fail: bool = False) -> Min
     )
 
 
+def s3_settings_for_duckdb(
+    config: dict[str, Any] | None,
+) -> tuple[str, bool, str, str]:
+    """从 S3 cfg(``datasource.config`` 或 ``platform_config()``)解析 DuckDB httpfs 所需设置。
+
+    返回 ``(endpoint, use_ssl, access_key, secret_key)``。endpoint 剥 scheme、
+    只留 ``host[:port]``(DuckDB 的 ``s3_endpoint`` 不带 scheme),与 ``client_for``
+    的 http/https 判定一致:http → use_ssl=False(平台 MinIO),https/无 scheme → True。
+    缺 endpoint 或凭证 → ``ExternalStoreError``(调用方转 4xx/503)。
+    """
+    config = config or {}
+    raw = str(config.get("endpoint") or "").strip()
+    if not raw:
+        raise ExternalStoreError("S3 配置缺少 endpoint")
+    use_ssl = True
+    if raw.startswith("http://"):
+        use_ssl = False
+        endpoint = raw[len("http://") :]
+    elif raw.startswith("https://"):
+        use_ssl = True
+        endpoint = raw[len("https://") :]
+    else:
+        endpoint = raw
+    endpoint = endpoint.rstrip("/")
+    access_key = str(config.get("accessKey") or "")
+    secret_key = str(config.get("secretKey") or "")
+    if not (access_key and secret_key):
+        raise ExternalStoreError("S3 配置缺少凭证")
+    return endpoint, use_ssl, access_key, secret_key
+
+
 async def test_connection(
     config: dict[str, Any] | None,
 ) -> tuple[bool, int, str]:

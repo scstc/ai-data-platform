@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+# 注意:external_store 反向 import 本模块的 BINARY_FORMATS,故此处用函数内延迟
+# import(见 land_records / land_upload_raw),避免模块加载期循环导入。
 from app.services.semantic_registry import (
     apply_semantic_spec,
     coerce_semantic_type,
@@ -274,21 +276,29 @@ async def land_records(
     )
     session.add(dataset)
 
-    out_dir = Path(settings.datasets_dir) / dataset.id / "v1"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "data.jsonl"
-    with out_path.open("w", encoding="utf-8") as fp:
-        for rec in records:
-            fp.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    # 产物统一上平台 MinIO(storage_uri=s3://):供 preview/加工/DuckDB 直查、
+    # download 预签名给训练平台。复用 records_to_jsonl_bytes(与原本地写盘同编码)。
+    # 平台未配置 → ExternalStoreError(回滚 pending dataset,不留脏对象)。
+    from app.services.external_store import (  # 延迟 import 避免与 external_store 循环
+        ExternalStoreError,
+        upload_jsonl_to_uploads,
+    )
+
+    jsonl_bytes = records_to_jsonl_bytes(records)
+    try:
+        storage_uri = await upload_jsonl_to_uploads(dataset.id, 1, jsonl_bytes)
+    except ExternalStoreError:
+        await session.rollback()
+        raise
 
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
         version_no=1,
-        storage_uri=str(out_path),
+        storage_uri=storage_uri,
         format="jsonl",
         rows=len(records),
-        size=out_path.stat().st_size,
+        size=len(jsonl_bytes),
         origin="managed",
         semantic_type=effective_semantic,
         produced_by_job_id=produced_by_job_id,
@@ -368,23 +378,35 @@ async def land_upload_raw(
     )
     session.add(dataset)
 
-    out_dir = Path(settings.datasets_dir) / dataset.id / "v1"
-    out_path = out_dir / (Path(filename).name or f"data.{source_format}")
-    # 磁盘写失败(空间/权限)→ 清理半成品 + 回滚 pending dataset,抛 LandingError,
-    # 绝不留下没有对应文件的孤立 Dataset 行
+    # 二进制原样上平台 MinIO(storage_uri=s3://),不解析;key=<id>/v1/<filename>。
+    # 上传失败 → 回滚 pending dataset + 抛 LandingError,绝不留孤立 Dataset 行。
+    from app.services.external_store import (  # 延迟 import 避免与 external_store 循环
+        ExternalStoreError,
+        platform_config,
+        upload_object,
+    )
+
+    fname = Path(filename).name or f"data.{source_format}"
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset.id}/v1/{fname}"
     try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(content)
-    except OSError as exc:
-        out_path.unlink(missing_ok=True)
+        await upload_object(
+            platform_config(),
+            bucket,
+            key,
+            io.BytesIO(content),
+            len(content),
+        )
+    except ExternalStoreError as exc:
         await session.rollback()
         raise LandingError(f"原样存储失败:{exc}") from exc
+    storage_uri = f"s3://{bucket}/{key}"
 
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
         version_no=1,
-        storage_uri=str(out_path),
+        storage_uri=storage_uri,
         format=source_format.lower(),
         rows=None,
         size=len(content),

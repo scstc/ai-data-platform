@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+import re
 import secrets
 import shutil
 import tempfile
@@ -13,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
+import duckdb
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import delete, func, select
@@ -54,6 +57,7 @@ from app.services.external_store import (
     presigned_get_url,
     remove_object,
     remove_prefix,
+    s3_settings_for_duckdb,
     stat_object,
     upload_jsonl_to_uploads,
     upload_object,
@@ -1677,6 +1681,179 @@ async def preview_version(
     )
 
 
+# ===== DuckDB SQL 查询(只读):对标竞品 LAS 的数据集 SQL 查询能力 =====
+# 用户 SQL 跑在只读 view `t` 上(对版本数据 jsonl/parquet/csv 的封装);
+# httpfs 直查 MinIO(s3://) 或读本地文件,与 preview 同 storage_uri 形态路由。
+
+# DuckDB 读函数 → 格式映射(txt/log 当 jsonl 一行一对象)
+_DUCK_READERS = {
+    "jsonl": "read_json_auto",
+    "json": "read_json_auto",
+    "txt": "read_json_auto",
+    "log": "read_json_auto",
+    "csv": "read_csv_auto",
+    "tsv": "read_csv_auto",
+    "parquet": "read_parquet",
+}
+
+# 仅允许只读查询:拦截写/结构变更/副作用关键字(大小写不敏感,词边界)
+_SQL_FORBIDDEN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|MERGE|PRAGMA|COPY|ATTACH|"
+    r"DETACH|EXPORT|INSTALL|LOAD|CALL|VACUUM|REPLACE)\b",
+    re.IGNORECASE,
+)
+
+
+def _duck_reader_sql(fmt: str, path: str) -> str:
+    """拼 DuckDB 读表表达式;tsv 指定制表符分隔。"""
+    fn = _DUCK_READERS.get((fmt or "jsonl").lower(), "read_json_auto")
+    if (fmt or "").lower() == "tsv":
+        return f"read_csv_auto('{path}', delim='\\t', header=true)"
+    return f"{fn}('{path}')"
+
+
+def _duck_safe(v: object) -> object:
+    """把 DuckDB 返回值归一为 JSON 可序列化(Decimal/datetime/bytes → str)。"""
+    if v is None or isinstance(v, (bool, int, float, str, list, dict)):
+        return v
+    return str(v)
+
+
+def _duck_query(
+    path: str,
+    fmt: str,
+    sql: str,
+    limit: int,
+    offset: int,
+    s3: tuple[str, bool, str, str] | None,
+) -> tuple[list[dict], list[str], int]:
+    """同步执行 DuckDB 只读查询(供 asyncio.to_thread,避免阻塞事件循环)。
+
+    s3 非 None 时配 httpfs 直查对象存储(MinIO/S3,免下载);否则读本地路径。
+    用户 SQL 作为子查询包裹、强制 LIMIT/OFFSET 兜底,跑在 view `t` 上。
+    """
+    con = duckdb.connect()
+    try:
+        if s3 is not None:
+            endpoint, use_ssl, ak, sk = s3
+            con.execute("INSTALL httpfs; LOAD httpfs;")
+            con.execute(f"SET s3_endpoint='{endpoint}';")
+            con.execute("SET s3_url_style='path';")
+            con.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'};")
+            con.execute(f"SET s3_access_key_id='{ak}';")
+            con.execute(f"SET s3_secret_access_key='{sk}';")
+        con.execute(f"CREATE VIEW t AS SELECT * FROM {_duck_reader_sql(fmt, path)}")
+        wrapped = f"SELECT * FROM ({sql}) AS _q LIMIT {limit} OFFSET {offset}"
+        cur = con.execute(wrapped)
+        columns = [d[0] for d in cur.description]
+        rows = [
+            {columns[i]: _duck_safe(r[i]) for i in range(len(columns))}
+            for r in cur.fetchall()
+        ]
+        return rows, columns, len(rows)
+    finally:
+        con.close()
+
+
+@router.post("/dataset-versions/{version_id}/query", response_model=None)
+async def query_version(
+    version_id: str,
+    payload: dict,
+    session: SessionDep,
+) -> JSONResponse:
+    """对某版本数据跑 DuckDB 只读 SQL,返回 {columns,data,total,success,message?}(形状同 preview)。
+
+    - 仅允许 SELECT(关键字黑名单拦截写/结构变更/副作用)。
+    - storage_uri 形态路由同 preview:s3:// → httpfs 直查 MinIO;本地路径 → read_json_auto。
+    - manifest / 二进制不支持(同 preview 拒绝策略)。
+    - 重计算下沉 asyncio.to_thread(仿 quality._scan_stats),不阻塞事件循环。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    if version.format == MANIFEST_FORMAT:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "manifest 媒体集不支持 SQL 查询,请用表格预览",
+            },
+        )
+    if version.format in BINARY_FORMATS:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "二进制文件不支持 SQL 查询"},
+        )
+
+    sql_raw = str(payload.get("sql") or "").strip().rstrip(";").strip()
+    if not sql_raw:
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "SQL 不能为空"}
+        )
+    if _SQL_FORBIDDEN.search(sql_raw):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "仅支持只读 SELECT 查询"},
+        )
+    try:
+        limit = max(1, min(int(payload.get("limit") or 50), 500))
+        offset = max(0, int(payload.get("offset") or 0))
+    except (TypeError, ValueError):
+        limit, offset = 50, 0
+
+    storage_uri = str(version.storage_uri)
+    try:
+        if storage_uri.startswith("s3://"):
+            cfg = await _version_storage_cfg(version, session)
+            if cfg is None:
+                return JSONResponse(
+                    status_code=503,
+                    content={"success": False, "message": "平台存储(MinIO)未配置"},
+                )
+            bucket, key = parse_s3_uri(storage_uri)
+            s3 = s3_settings_for_duckdb(cfg)
+            rows, columns, total = await asyncio.to_thread(
+                _duck_query,
+                f"s3://{bucket}/{key}",
+                version.format,
+                sql_raw,
+                limit,
+                offset,
+                s3,
+            )
+        else:
+            p = Path(storage_uri)
+            if not p.exists():
+                return JSONResponse(
+                    content={
+                        "data": [],
+                        "columns": [],
+                        "total": 0,
+                        "success": True,
+                        "message": "产物文件缺失",
+                    }
+                )
+            rows, columns, total = await asyncio.to_thread(
+                _duck_query, str(p), version.format, sql_raw, limit, offset, None
+            )
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": f"读取存储失败:{exc}"},
+        )
+    except Exception as exc:  # noqa: BLE001 DuckDB SQL/连接错误统一上报
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": f"查询失败:{exc}"},
+        )
+    return JSONResponse(
+        content={"data": rows, "columns": columns, "total": total, "success": True}
+    )
+
+
 # ---------------------------------------------------------------------------
 # 外部 S3 数据托管:登记 / 取消(#18)
 # ---------------------------------------------------------------------------
@@ -2156,4 +2333,21 @@ async def download_version(
             status_code=503,
             content={"success": False, "message": f"读取成员失败:{exc}"},
         )
+    # 单成员 s3 版本:直接预签名 302,让训练平台/浏览器直连 MinIO 拉文件
+    # (免后端中转打包,跨机器通用,S3 协议)。多成员/本地版本仍走 zip 打包。
+    if len(members) == 1 and members[0].bucket:
+        cfg = await _version_storage_cfg(version, session)
+        if cfg is None:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "平台存储(MinIO)未配置"},
+            )
+        try:
+            url = await presigned_get_url(cfg, members[0].bucket, members[0].key)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": f"生成下载链接失败:{exc}"},
+            )
+        return RedirectResponse(url, status_code=302)
     return await _download_zip(version, members, session)

@@ -1,11 +1,27 @@
-import { Button, Empty, List, Modal, Spin } from 'antd';
+import {
+  Button,
+  Collapse,
+  Empty,
+  Input,
+  List,
+  Modal,
+  Space,
+  Spin,
+  Tabs,
+  Typography,
+} from 'antd';
+import hljs from 'highlight.js/lib/core';
+import jsonLang from 'highlight.js/lib/languages/json';
 import { useEffect, useState } from 'react';
 import DatasetDataView from '@/pages/datasets/detail/views/DataView';
 import {
   getDatasetMemberUrl,
   listDatasetMembers,
   previewDatasetVersion,
+  queryDatasetVersion,
 } from '@/services/data-platform';
+
+hljs.registerLanguage('json', jsonLang);
 
 /** 预览格式分流:结构化走表格;其余统一走 kkFileView(onlinePreview?url=base64(presigned))。
  *  与 datasets/detail 原内联逻辑一致——抽到这里供「数据集详情」与「数据任务详情抽屉」共用。 */
@@ -47,6 +63,103 @@ export interface VersionFilePreviewProps {
  *
  * 抽自 datasets/detail,数据任务详情抽屉的「输入版本/产出版本」面板各用一个实例。
  */
+/** 结构化预览的多视图:表格 / JSON(可折叠高亮) / SQL 查询(整个版本,只读)。
+ *  解决"jsonl 只能显示成表格"——表格复用 DatasetDataView;JSON 用 highlight.js
+ *  高亮 + Collapse 折叠(每行一面板);SQL 调 queryDatasetVersion,结果复用 DatasetDataView。 */
+const StructuralViews: React.FC<{
+  versionId?: string;
+  semanticType?: DataPlatform.SemanticType;
+  preview?: DataPlatform.DatasetPreview;
+}> = ({ versionId, semanticType, preview }) => {
+  const [sql, setSql] = useState('SELECT * FROM t LIMIT 50');
+  const [sqlResult, setSqlResult] = useState<DataPlatform.DatasetPreview>();
+  const [sqlLoading, setSqlLoading] = useState(false);
+  const [sqlError, setSqlError] = useState<string>();
+
+  const runSql = async () => {
+    if (!versionId) return;
+    setSqlLoading(true);
+    setSqlError(undefined);
+    try {
+      const res = await queryDatasetVersion(versionId, { sql, limit: 100 });
+      setSqlResult(res);
+    } catch (e: any) {
+      setSqlError(
+        e?.info?.errorMessage || e?.response?.data?.message || '查询失败',
+      );
+    } finally {
+      setSqlLoading(false);
+    }
+  };
+
+  const jsonPanels = (preview?.data ?? []).map((row, i) => ({
+    key: String(i),
+    label: `第 ${i + 1} 行`,
+    children: (
+      <pre
+        style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: hljs 已对输入 HTML 转义,仅注入高亮 <span>,源数据经 JSON.stringify 安全
+        dangerouslySetInnerHTML={{
+          __html: hljs.highlight(JSON.stringify(row, null, 2), {
+            language: 'json',
+          }).value,
+        }}
+      />
+    ),
+  }));
+
+  return (
+    <Tabs
+      defaultActiveKey="table"
+      items={[
+        {
+          key: 'table',
+          label: '表格',
+          children: (
+            <DatasetDataView semanticType={semanticType} preview={preview} />
+          ),
+        },
+        {
+          key: 'json',
+          label: 'JSON',
+          children: jsonPanels.length ? (
+            <Collapse
+              items={jsonPanels}
+              style={{ maxHeight: '70vh', overflow: 'auto' }}
+            />
+          ) : (
+            <Empty description="无数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ),
+        },
+        {
+          key: 'sql',
+          label: 'SQL 查询',
+          children: (
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Typography.Text type="secondary">
+                对整个版本数据跑只读 SQL(表名 t,仅 SELECT)。例:SELECT count(*)
+                FROM t
+              </Typography.Text>
+              <Input.TextArea
+                value={sql}
+                onChange={(e) => setSql(e.target.value)}
+                autoSize={{ minRows: 2, maxRows: 6 }}
+              />
+              <Button loading={sqlLoading} onClick={runSql}>
+                执行
+              </Button>
+              {sqlError && (
+                <Typography.Text type="danger">{sqlError}</Typography.Text>
+              )}
+              <DatasetDataView preview={sqlResult} />
+            </Space>
+          ),
+        },
+      ]}
+    />
+  );
+};
+
 const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
   versionId,
   semanticType,
@@ -115,7 +228,11 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
     const fmt = (m.format || '').toLowerCase();
     if (PREVIEW_STRUCTURAL.has(fmt)) {
       return (
-        <DatasetDataView semanticType={semanticType} preview={modalPreview} />
+        <StructuralViews
+          versionId={versionId}
+          semanticType={semanticType}
+          preview={modalPreview}
+        />
       );
     }
     if (!modalUrl) return null;

@@ -654,6 +654,19 @@ export async function previewDatasetVersion(
   );
 }
 
+/** 版本数据 DuckDB 只读 SQL 查询 POST /api/v1/dataset-versions/{versionId}/query
+ *  body: { sql, limit?, offset? } → 形状同 preview(DatasetPreview)。 */
+export async function queryDatasetVersion(
+  versionId: string,
+  body: { sql: string; limit?: number; offset?: number },
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.DatasetPreview>(
+    `/api/v1/dataset-versions/${versionId}/query`,
+    { method: 'POST', data: { ...body }, ...(options || {}) },
+  );
+}
+
 /** dj-analyze 分析报告(overall.csv 聚合表 + analysis/ PNG 清单)
  *  GET /api/v1/dataset-versions/{versionId}/analysis-report
  *  无报告时 data 为 null(前端回退到手算聚合)。 */
