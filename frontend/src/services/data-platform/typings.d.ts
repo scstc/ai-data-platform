@@ -522,6 +522,39 @@ declare namespace DataPlatform {
     updatedAt: string;
     /** 标签（多对多，自由输入） */
     tags?: string[];
+    /** 当前用户对该数据集的 ACL 级别(详情 GET 回填);null/缺失=无权限。
+     *  仅 'admin' 时展示「权限管理」入口。后端补齐前可能 undefined,故可选。 */
+    myLevel?: AclLevel | null;
+  };
+
+  /** 数据集 ACL 授权级别 */
+  type AclLevel = 'view' | 'edit' | 'admin';
+
+  /** 数据集 ACL 授权主体类型;'all' 表示组织内所有人 */
+  type AclSubjectType = 'user' | 'role' | 'all';
+
+  /** 数据集 ACL 授权条目 */
+  type DatasetAcl = {
+    id: string;
+    datasetId: string;
+    subjectType: AclSubjectType;
+    subjectId: string;
+    level: AclLevel;
+    createdAt: string;
+  };
+
+  /** ACL 授权对象候选(模糊搜索结果) */
+  type AclCandidate = {
+    id: string;
+    name: string;
+    type: 'user' | 'role';
+  };
+
+  /** 新增 ACL 授权入参 */
+  type AclCreate = {
+    subjectType: AclSubjectType;
+    subjectId: string;
+    level: AclLevel;
   };
 
   /** 血缘图节点:版本 或 任务 */

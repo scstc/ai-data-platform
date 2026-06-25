@@ -679,6 +679,66 @@ export async function deleteDataset(id: string, options?: { [key: string]: any }
   });
 }
 
+/** 数据集 ACL 授权列表(需 admin 级)GET /api/v1/datasets/{id}/acl */
+export async function listAcl(
+  datasetId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetAcl[]; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/acl`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 新增 ACL 授权条目(subjectType='all' 时 subjectId 传 "*")POST /api/v1/datasets/{id}/acl */
+export async function addAcl(
+  datasetId: string,
+  body: DataPlatform.AclCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetAcl; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/acl`,
+    { method: 'POST', data: body, ...(options || {}) },
+  );
+}
+
+/** 修改 ACL 授权级别 PUT /api/v1/datasets/{id}/acl/{aclId} */
+export async function updateAcl(
+  datasetId: string,
+  aclId: string,
+  level: DataPlatform.AclLevel,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetAcl; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/acl/${aclId}`,
+    { method: 'PUT', data: { level }, ...(options || {}) },
+  );
+}
+
+/** 删除 ACL 授权条目 DELETE /api/v1/datasets/{id}/acl/{aclId} */
+export async function deleteAcl(
+  datasetId: string,
+  aclId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/datasets/${datasetId}/acl/${aclId}`,
+    { method: 'DELETE', ...(options || {}) },
+  );
+}
+
+/** 模糊搜索授权对象(用户/角色,需 admin 级)GET /api/v1/datasets/{id}/acl/candidates */
+export async function searchAclCandidates(
+  datasetId: string,
+  params: { q?: string; type: 'user' | 'role' },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.AclCandidate[]; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/acl/candidates`,
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
 /** 批量删除数据集 POST /api/v1/datasets/batch-delete */
 export async function batchDeleteDatasets(
   ids: string[],

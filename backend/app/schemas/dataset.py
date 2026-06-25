@@ -111,6 +111,8 @@ class DatasetDetailRead(DatasetRead):
     """数据集详情:元信息 + 版本列表。"""
 
     versions: list[DatasetVersionRead] = []
+    # 当前用户对该数据集的生效级别(view/edit/admin/None),供前端按钮门控
+    my_level: str | None = None
 
 
 class DatasetUpdate(CamelModel):

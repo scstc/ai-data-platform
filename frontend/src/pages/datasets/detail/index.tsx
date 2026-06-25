@@ -53,6 +53,7 @@ import {
 } from '@/utils/sensitivityLevel';
 import { SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
+import AclDrawer from './components/AclDrawer';
 
 /** 数据类型枚举（编辑表单复用） */
 const DATA_TYPE_ENUM = {
@@ -94,6 +95,7 @@ const DatasetDetail: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [activeVersion, setActiveVersion] = useState<string>();
   const [editOpen, setEditOpen] = useState(false);
+  const [aclOpen, setAclOpen] = useState(false);
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
   );
@@ -374,16 +376,23 @@ const DatasetDetail: React.FC = () => {
         ],
       }}
       extra={
-        detail && access.canAdmin
+        detail
           ? [
-              <Button
-                key="edit"
-                type="primary"
-                onClick={() => setEditOpen(true)}
-              >
-                编辑
-              </Button>,
-            ]
+              detail.myLevel === 'admin' ? (
+                <Button key="acl" onClick={() => setAclOpen(true)}>
+                  权限管理
+                </Button>
+              ) : null,
+              access.canAdmin ? (
+                <Button
+                  key="edit"
+                  type="primary"
+                  onClick={() => setEditOpen(true)}
+                >
+                  编辑
+                </Button>
+              ) : null,
+            ].filter(Boolean)
           : undefined
       }
     >
@@ -671,6 +680,15 @@ const DatasetDetail: React.FC = () => {
           onChange={(e) => setVerdictNote(e.target.value)}
         />
       </Modal>
+
+      {detail && (
+        <AclDrawer
+          open={aclOpen}
+          onClose={() => setAclOpen(false)}
+          datasetId={detail.id}
+          owner={detail.owner}
+        />
+      )}
     </PageContainer>
   );
 };

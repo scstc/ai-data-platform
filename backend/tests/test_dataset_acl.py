@@ -294,3 +294,130 @@ async def test_api_delete_owner_only(client, session_factory, seed_rbac) -> None
 
     client.cookies.set("adp_session", sign_token("u-mgr"))
     assert (await client.delete("/api/v1/datasets/dset-del")).status_code == 200
+
+
+async def test_all_subject_grants_visibility_and_level(
+    session_factory, seed_rbac
+) -> None:
+    """subject_type='all' 授权后:任何登录用户(非 owner)在可见集里都能看到该数据集,
+    且 get_acl_level 把该 all 行纳入级别计算。"""
+    from sqlalchemy import select
+
+    from app.models.dataset import Dataset
+    from app.models.dataset_acl import DatasetAcl
+    from app.models.user import User
+    from app.services import dataset_acl
+
+    await _make_datasets(session_factory)
+    async with session_factory() as s:
+        s.add(
+            DatasetAcl(
+                id="dac-all1",
+                dataset_id="dset-mgr",
+                subject_type="all",
+                subject_id=dataset_acl.ALL_SUBJECT_ID,
+                level="view",
+            )
+        )
+        await s.commit()
+
+    async with session_factory() as s:
+        staff = (await s.scalars(select(User).where(User.id == "u-staff"))).first()
+        stmt = await dataset_acl.visible_dataset_filter(select(Dataset), s, staff)
+        ids = {d.id for d in (await s.scalars(stmt)).all()}
+        assert ids == {"dset-staff", "dset-mgr"}
+        assert await dataset_acl.get_acl_level(s, staff, "dset-mgr") == "view"
+
+
+async def test_api_acl_all_subject_via_post(client, session_factory, seed_rbac) -> None:
+    """POST subjectType=all:subjectId 被强制归一为 "*";非法 subjectType → 400。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-allpost", name="ap", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+
+    # 非法 subject_type → 400
+    bad = await client.post(
+        "/api/v1/datasets/dset-allpost/acl",
+        json={"subjectType": "foo", "subjectId": "whatever", "level": "view"},
+    )
+    assert bad.status_code == 400, bad.text
+
+    # subjectType=all:传入的 subjectId 被忽略,归一为 "*"
+    add = await client.post(
+        "/api/v1/datasets/dset-allpost/acl",
+        json={"subjectType": "all", "subjectId": "ignored", "level": "view"},
+    )
+    assert add.status_code == 200, add.text
+    assert add.json()["data"]["subjectId"] == "*"
+
+    # u-staff(非 owner)经 all 授权可见
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    lst = await client.get("/api/v1/datasets?current=1&pageSize=50")
+    assert any(d["id"] == "dset-allpost" for d in lst.json()["data"])
+
+
+async def test_acl_candidates_requires_admin_and_searches(
+    client, session_factory, seed_rbac
+) -> None:
+    """candidates 端点:非 acl-admin → 403;admin 能按关键字搜到匹配用户/角色。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-cand", name="c", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    # 非 admin(u-staff 对该数据集无授权)→ 403
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    denied = await client.get(
+        "/api/v1/datasets/dset-cand/acl/candidates?q=staff&type=user"
+    )
+    assert denied.status_code == 403, denied.text
+
+    # owner 搜用户:u-staff 命中
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    users = await client.get(
+        "/api/v1/datasets/dset-cand/acl/candidates?q=staff&type=user"
+    )
+    assert users.status_code == 200, users.text
+    assert any(u["id"] == "u-staff" for u in users.json()["data"])
+
+    # owner 搜角色:r-dc(名称"部门及子")命中
+    roles = await client.get(
+        "/api/v1/datasets/dset-cand/acl/candidates?q=部门&type=role"
+    )
+    assert roles.status_code == 200, roles.text
+    assert any(r["id"] == "r-dc" for r in roles.json()["data"])
+
+
+async def test_api_detail_my_level(client, session_factory, seed_rbac) -> None:
+    """详情接口下发 myLevel:owner→admin;有 view 授权的非 owner→view;无授权→None。"""
+    from app.models.dataset import Dataset
+    from app.models.dataset_acl import DatasetAcl
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-mylevel", name="m", owner="u-mgr", creator="u-mgr"))
+        s.add(
+            DatasetAcl(
+                id="dac-mylevel1",
+                dataset_id="dset-mylevel",
+                subject_type="user",
+                subject_id="u-staff",
+                level="view",
+            )
+        )
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    owner_resp = await client.get("/api/v1/datasets/dset-mylevel")
+    assert owner_resp.json()["data"]["myLevel"] == "admin"
+
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    staff_resp = await client.get("/api/v1/datasets/dset-mylevel")
+    assert staff_resp.json()["data"]["myLevel"] == "view"

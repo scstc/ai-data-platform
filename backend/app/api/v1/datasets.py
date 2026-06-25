@@ -18,7 +18,7 @@ from typing import Annotated
 import duckdb
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
@@ -32,6 +32,7 @@ from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.role import Role
 from app.models.tag import DatasetTag, Tag
 from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse, format_version_label
@@ -1334,6 +1335,8 @@ async def get_dataset(
     detail.tags = (await _dataset_tags_map(session, [dataset_id])).get(
         dataset_id, []
     )
+    # 当前用户对该数据集的生效级别,供前端按钮门控(如「权限管理」仅 admin 显示)
+    detail.my_level = await dataset_acl.get_acl_level(session, user, dataset_id)
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
@@ -2447,6 +2450,50 @@ async def list_dataset_acl(
     )
 
 
+@router.get("/datasets/{dataset_id}/acl/candidates")
+async def search_acl_candidates(
+    dataset_id: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+    q: str = "",
+    type: str = "user",  # noqa: A002 - 与查询参数名一致
+) -> JSONResponse:
+    """模糊搜索可授权主体(用户/角色),供 ACL 抽屉的"指定主体"选择;需 admin 级,避免泄露全员目录。"""
+    denied = await _require_acl_admin(session, dataset_id, user)
+    if denied is not None:
+        return denied
+    if type not in ("user", "role"):
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "type 非法"}
+        )
+    if type == "user":
+        rows = (
+            await session.scalars(
+                select(User)
+                .where(
+                    or_(
+                        User.username.ilike(f"%{q}%"),
+                        User.display_name.ilike(f"%{q}%"),
+                    )
+                )
+                .order_by(User.username)
+                .limit(20)
+            )
+        ).all()
+        data = [
+            {"id": r.id, "name": r.display_name or r.username, "type": "user"}
+            for r in rows
+        ]
+    else:
+        rows = (
+            await session.scalars(
+                select(Role).where(Role.name.ilike(f"%{q}%")).order_by(Role.name).limit(20)
+            )
+        ).all()
+        data = [{"id": r.id, "name": r.name, "type": "role"} for r in rows]
+    return JSONResponse({"data": data, "success": True})
+
+
 @router.post("/datasets/{dataset_id}/acl")
 async def add_dataset_acl(
     dataset_id: str,
@@ -2458,7 +2505,7 @@ async def add_dataset_acl(
     denied = await _require_acl_admin(session, dataset_id, user)
     if denied is not None:
         return denied
-    if body.subject_type not in ("user", "role") or body.level not in (
+    if body.subject_type not in ("user", "role", "all") or body.level not in (
         "view",
         "edit",
         "admin",
@@ -2467,11 +2514,15 @@ async def add_dataset_acl(
             status_code=400,
             content={"success": False, "message": "subject_type/level 非法"},
         )
+    # "组织内所有人" 整表只此一行,subject_id 固定,忽略传入值
+    subject_id = (
+        dataset_acl.ALL_SUBJECT_ID if body.subject_type == "all" else body.subject_id
+    )
     exists = await session.scalar(
         select(DatasetAcl.id).where(
             DatasetAcl.dataset_id == dataset_id,
             DatasetAcl.subject_type == body.subject_type,
-            DatasetAcl.subject_id == body.subject_id,
+            DatasetAcl.subject_id == subject_id,
         )
     )
     if exists is not None:
@@ -2483,7 +2534,7 @@ async def add_dataset_acl(
         id=_new_acl_id(),
         dataset_id=dataset_id,
         subject_type=body.subject_type,
-        subject_id=body.subject_id,
+        subject_id=subject_id,
         level=body.level,
     )
     session.add(row)
