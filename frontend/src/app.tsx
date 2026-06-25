@@ -118,6 +118,7 @@ export const layout: RunTimeLayoutConfig = ({
           .map((n) => ({
             path: n.path as string,
             name: n.name,
+            locale: false,
             icon: resolveIcon(n.icon),
             children: n.children?.length ? toMenu(n.children) : undefined,
           }));

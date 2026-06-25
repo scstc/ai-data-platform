@@ -28,6 +28,22 @@ async def test_get_routers_scoped_by_role(
     assert data[0]["children"][0]["path"] == "/system/user"
 
 
+async def test_get_routers_excludes_hidden(
+    client: AsyncClient, seed_rbac
+) -> None:
+    """visible=1 的菜单不进侧边栏(菜单管理「显示」开关须生效);visible=0 的照常返回。"""
+    from app.services.auth import sign_token
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    resp = await client.get("/api/v1/system/menus/routers")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    sys_node = next(n for n in data if n["path"] == "/system")
+    child_paths = [c["path"] for c in sys_node["children"]]
+    assert "/system/hidden" not in child_paths  # visible=1 被过滤
+    assert "/system/user" in child_paths  # visible=0 保留
+
+
 async def test_current_user_carries_roles_and_perms(
     client: AsyncClient, seed_users
 ) -> None:

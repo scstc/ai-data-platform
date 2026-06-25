@@ -137,7 +137,11 @@ async def build_router_tree(session: AsyncSession, user: User) -> list[dict]:
     """当前用户可见的 M/C 菜单树(去 F 按钮)。admin 全量,否则按授权。"""
     base = (
         select(Menu)
-        .where(Menu.menu_type.in_(["M", "C"]), Menu.status == "0")
+        .where(
+            Menu.menu_type.in_(["M", "C"]),
+            Menu.status == "0",
+            Menu.visible == "0",  # 隐藏(visible=1)的菜单不进侧边栏(菜单管理「显示」开关)
+        )
         .order_by(Menu.sort)
     )
     if user.role == "admin":
