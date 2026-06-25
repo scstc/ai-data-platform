@@ -141,3 +141,57 @@ async def delete_tag(tag_id: str, session: SessionDep) -> JSONResponse:
     await session.delete(tag)
     await session.commit()
     return JSONResponse(content={"success": True})
+
+
+@router.delete("/tags", dependencies=[Depends(require_admin)])
+async def delete_tags(
+    body: TagBatchDelete, session: SessionDep
+) -> JSONResponse:
+    """批量删除标签 + 级联解绑 dataset_tags。"""
+    ids = body.ids or []
+    if ids:
+        await session.execute(
+            delete(DatasetTag).where(DatasetTag.tag_id.in_(ids))
+        )
+        await session.execute(delete(Tag).where(Tag.id.in_(ids)))
+        await session.commit()
+    return JSONResponse(content={"success": True})
+
+
+@router.post("/tags/merge", dependencies=[Depends(require_admin)])
+async def merge_tags(body: TagMerge, session: SessionDep) -> JSONResponse:
+    """合并 {sourceId→targetId}:把 source 的 dataset_tags 重指到 target
+    (同时含两标签的数据集由复合 PK ON CONFLICT DO NOTHING 去重),再删 source 关联与标签。
+    """
+    if body.source_id == body.target_id:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "源标签与目标标签不能相同"},
+        )
+    source = await session.get(Tag, body.source_id)
+    target = await session.get(Tag, body.target_id)
+    if source is None or target is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "源或目标标签不存在"},
+        )
+    # 1. source 关联重指到 target(已存 target 的由 PK 去重)
+    await session.execute(
+        pg_insert(DatasetTag)
+        .from_select(
+            [DatasetTag.dataset_id, DatasetTag.tag_id],
+            select(DatasetTag.dataset_id, literal(body.target_id)).where(
+                DatasetTag.tag_id == body.source_id
+            ),
+        )
+        .on_conflict_do_nothing(
+            index_elements=[DatasetTag.dataset_id, DatasetTag.tag_id]
+        )
+    )
+    # 2. 删 source 残留关联 + 3. 删 source 标签
+    await session.execute(
+        delete(DatasetTag).where(DatasetTag.tag_id == body.source_id)
+    )
+    await session.delete(source)
+    await session.commit()
+    return JSONResponse(content={"success": True})

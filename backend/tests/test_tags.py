@@ -120,3 +120,115 @@ async def test_delete_cascades_dataset_tags(
         assert (await session.get(Dataset, "dset-del01")) is not None  # 数据集仍在
     # 再删 → 404
     assert (await client.delete(f"/api/v1/tags/{tag['id']}")).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 批量删除 + 合并
+# ---------------------------------------------------------------------------
+async def test_batch_delete_cascades(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    a = await _create(client, "甲")
+    b = await _create(client, "乙")
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-bd01", name="ds", owner="admin", creator="admin"))
+        session.add_all(
+            [DatasetTag(dataset_id="dset-bd01", tag_id=a["id"]),
+             DatasetTag(dataset_id="dset-bd01", tag_id=b["id"])]
+        )
+        await session.commit()
+
+    resp = await client.request("DELETE", "/api/v1/tags", json={"ids": [a["id"], b["id"]]})
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        assert (await session.get(Tag, a["id"])) is None
+        assert (await session.get(Tag, b["id"])) is None
+        left = (await session.scalars(select(DatasetTag))).all()
+        assert left == []
+
+
+async def test_merge_reassigns_and_dedups(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """合并:source 的数据集全部重指到 target;同时含两标签的数据集去重;source 删除。"""
+    source = await _create(client, "源")
+    target = await _create(client, "目标")
+    # ds_only_src: 只挂 source;ds_both: 同时挂 source+target;ds_only_tgt: 只挂 target
+    async with session_factory() as session:
+        session.add_all(
+            [Dataset(id="d-only-src", name="a", owner="admin", creator="admin"),
+             Dataset(id="d-both", name="b", owner="admin", creator="admin"),
+             Dataset(id="d-only-tgt", name="c", owner="admin", creator="admin")]
+        )
+        session.add_all(
+            [DatasetTag(dataset_id="d-only-src", tag_id=source["id"]),
+             DatasetTag(dataset_id="d-both", tag_id=source["id"]),
+             DatasetTag(dataset_id="d-both", tag_id=target["id"]),
+             DatasetTag(dataset_id="d-only-tgt", tag_id=target["id"])]
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/tags/merge",
+        json={"sourceId": source["id"], "targetId": target["id"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with session_factory() as session:
+        assert (await session.get(Tag, source["id"])) is None  # 源已删
+        # 目标标签现在挂 3 个数据集(only-src 重指 + both 去重保留 1 + only-tgt)
+        tgt_links = (await session.scalars(
+            select(DatasetTag).where(DatasetTag.tag_id == target["id"])
+        )).all()
+        assert {r.dataset_id for r in tgt_links} == {"d-only-src", "d-both", "d-only-tgt"}
+        assert len(tgt_links) == 3  # 无重复
+
+
+async def test_merge_same_id_400(client: AsyncClient) -> None:
+    t = await _create(client, "自合")
+    resp = await client.post(
+        "/api/v1/tags/merge", json={"sourceId": t["id"], "targetId": t["id"]}
+    )
+    assert resp.status_code == 400
+
+
+async def test_merge_missing_404(client: AsyncClient) -> None:
+    t = await _create(client, "存在")
+    resp = await client.post(
+        "/api/v1/tags/merge",
+        json={"sourceId": "tag-nope0", "targetId": t["id"]},
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# require_admin 门控
+# ---------------------------------------------------------------------------
+async def test_non_admin_write_forbidden(
+    client: AsyncClient, seed_users: None
+) -> None:
+    """user 角调写端点 → 403。"""
+    from app.services.auth import sign_token
+
+    client.cookies.set("adp_session", sign_token("user"))
+    assert (await client.post("/api/v1/tags", json={"name": "x"})).status_code == 403
+    assert (await client.patch("/api/v1/tags/tag-x0", json={"name": "y"})).status_code == 403
+    assert (await client.delete("/api/v1/tags/tag-x0")).status_code == 403
+    assert (
+        await client.request("DELETE", "/api/v1/tags", json={"ids": ["tag-x0"]})
+    ).status_code == 403
+    assert (
+        await client.post("/api/v1/tags/merge", json={"sourceId": "a", "targetId": "b"})
+    ).status_code == 403
+
+
+async def test_list_visible_to_non_admin(
+    client: AsyncClient, seed_users: None
+) -> None:
+    """普通登录用户可浏览(GET 不门控)。"""
+    from app.services.auth import sign_token
+
+    await _create(client, "公共")
+    client.cookies.set("adp_session", sign_token("user"))
+    resp = await client.get("/api/v1/tags")
+    assert resp.status_code == 200
