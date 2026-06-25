@@ -113,4 +113,14 @@ declare namespace System {
     roles: { id: string; name: string; roleKey: string; perms: string[] }[];
     allPerms: string[];
   };
+
+  // 动态菜单:getRouters 下发的菜单树节点
+  type RouterNode = {
+    id: string;
+    name: string;
+    path?: string;
+    component?: string;
+    icon?: string;
+    children?: RouterNode[];
+  };
 }

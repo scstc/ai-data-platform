@@ -20,11 +20,21 @@ import {
   ThemeSwitch,
 } from '@/components';
 import { currentUser as queryCurrentUser } from '@/services/ant-design-pro/api';
+import { getRouters } from '@/services/system';
+import { resolveIcon } from '@/utils/menuIcons';
 import defaultSettings from '../config/defaultSettings';
 import { errorConfig } from './requestErrorConfig';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loginPath = '/user/login';
+
+// 动态菜单项(后端 RouterNode → ProLayout MenuDataItem 的中间形态)
+type DynamicMenuItem = {
+  path: string;
+  name: string;
+  icon?: React.ReactNode;
+  children?: DynamicMenuItem[];
+};
 
 /** 在默认设置上合并持久化的明暗主题（ThemeSwitch 写入 localStorage） */
 const loadSettings = (): Partial<LayoutSettings> => {
@@ -41,6 +51,7 @@ const loadSettings = (): Partial<LayoutSettings> => {
 export async function getInitialState(): Promise<{
   settings?: Partial<LayoutSettings>;
   currentUser?: API.CurrentUser;
+  routers?: System.RouterNode[];
   loading?: boolean;
   fetchUserInfo?: () => Promise<API.CurrentUser | undefined>;
   settingDrawerOpen?: boolean;
@@ -59,6 +70,15 @@ export async function getInitialState(): Promise<{
     }
     return undefined;
   };
+  // 动态菜单:拉当前用户可见菜单树(失败回退空,侧边栏为空但仍可按 URL 路由)
+  const fetchRouters = async () => {
+    try {
+      const res = await getRouters({ skipErrorHandler: true });
+      return res.data ?? [];
+    } catch (_error) {
+      return [];
+    }
+  };
   // 如果不是登录页面，执行
   const { location } = history;
   if (
@@ -67,9 +87,11 @@ export async function getInitialState(): Promise<{
     )
   ) {
     const currentUser = await fetchUserInfo();
+    const routers = currentUser ? await fetchRouters() : [];
     return {
       fetchUserInfo,
       currentUser,
+      routers,
       settings: loadSettings(),
       settingDrawerOpen: false,
     };
@@ -87,6 +109,20 @@ export const layout: RunTimeLayoutConfig = ({
   setInitialState,
 }) => {
   return {
+    // 动态菜单:侧边栏由后端 getRouters 下发的菜单树驱动(按角色授权裁剪)。
+    // routes.ts 仍提供路由;此处替换默认菜单数据为后端树。
+    menuDataRender: () => {
+      const toMenu = (nodes: System.RouterNode[]): DynamicMenuItem[] =>
+        nodes
+          .filter((n) => n.path)
+          .map((n) => ({
+            path: n.path as string,
+            name: n.name,
+            icon: resolveIcon(n.icon),
+            children: n.children?.length ? toMenu(n.children) : undefined,
+          }));
+      return toMenu(initialState?.routers ?? []);
+    },
     menuItemRender: (item, dom) => {
       if (item.path) {
         // 算子市场:置顶 + 琥珀色特殊标注,突出显示(图标与文字一并变色)

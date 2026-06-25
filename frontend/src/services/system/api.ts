@@ -127,6 +127,14 @@ export async function listMenus(options?: { [key: string]: any }) {
   });
 }
 
+/** 当前用户可见的菜单树(M/C,按角色授权裁剪),供侧边栏动态渲染 GET /api/v1/system/menus/routers */
+export async function getRouters(options?: { [key: string]: any }) {
+  return request<{ data: System.RouterNode[]; success: boolean }>(
+    '/api/v1/system/menus/routers',
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
 export async function createMenu(body: System.MenuCreate, options?: { [key: string]: any }) {
   return request<{ data: System.Menu; success: boolean }>('/api/v1/system/menus', {
     method: 'POST',
