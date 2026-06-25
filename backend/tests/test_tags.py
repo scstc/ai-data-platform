@@ -100,51 +100,75 @@ async def test_patch_rename_clash_409(client: AsyncClient) -> None:
     assert resp.json()["message"] == "标签名已存在"
 
 
-async def test_delete_cascades_dataset_tags(
+async def test_delete_in_use_409(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
-    """删标签 → dataset_tags 中对应关联消失,数据集仍在。"""
-    tag = await _create(client, "待删")
+    """删被引用的标签 → 409(带引用数),标签与关联均保留。"""
+    tag = await _create(client, "在用")
     async with session_factory() as session:
         session.add(Dataset(id="dset-del01", name="ds", owner="admin", creator="admin"))
         session.add(DatasetTag(dataset_id="dset-del01", tag_id=tag["id"]))
         await session.commit()
 
     resp = await client.delete(f"/api/v1/tags/{tag['id']}")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["message"] == "标签正被 1 个数据集引用,无法删除"
+    # 守卫生效:标签与关联都在
+    async with session_factory() as session:
+        assert (await session.get(Tag, tag["id"])) is not None
+        assert (await session.scalars(
+            select(DatasetTag).where(DatasetTag.tag_id == tag["id"])
+        )).all() != []
+
+
+async def test_delete_unused_success(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """删未被引用的标签 → 200,标签消失。"""
+    tag = await _create(client, "孤标签")
+    resp = await client.delete(f"/api/v1/tags/{tag['id']}")
     assert resp.status_code == 200
     async with session_factory() as session:
-        left = (await session.scalars(
-            select(DatasetTag).where(DatasetTag.tag_id == tag["id"])
-        )).all()
-        assert left == []
-        assert (await session.get(Dataset, "dset-del01")) is not None  # 数据集仍在
-    # 再删 → 404
-    assert (await client.delete(f"/api/v1/tags/{tag['id']}")).status_code == 404
+        assert (await session.get(Tag, tag["id"])) is None
+
+
+async def test_delete_missing_404(client: AsyncClient) -> None:
+    """删不存在的标签 → 404。"""
+    assert (await client.delete("/api/v1/tags/tag-nope0")).status_code == 404
 
 
 # ---------------------------------------------------------------------------
 # 批量删除 + 合并
 # ---------------------------------------------------------------------------
-async def test_batch_delete_cascades(
+async def test_batch_delete_blocked_when_in_use(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
+    """批量删:任一被引用 → 整批 409,所有标签保留。"""
     a = await _create(client, "甲")
     b = await _create(client, "乙")
     async with session_factory() as session:
         session.add(Dataset(id="dset-bd01", name="ds", owner="admin", creator="admin"))
-        session.add_all(
-            [DatasetTag(dataset_id="dset-bd01", tag_id=a["id"]),
-             DatasetTag(dataset_id="dset-bd01", tag_id=b["id"])]
-        )
+        session.add(DatasetTag(dataset_id="dset-bd01", tag_id=a["id"]))  # 甲被引用
         await session.commit()
 
+    resp = await client.request("DELETE", "/api/v1/tags", json={"ids": [a["id"], b["id"]]})
+    assert resp.status_code == 409, resp.text
+    async with session_factory() as session:
+        assert (await session.get(Tag, a["id"])) is not None  # 甲保留
+        assert (await session.get(Tag, b["id"])) is not None  # 乙也保留(整批拒)
+
+
+async def test_batch_delete_unused_success(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """批量删未被引用的标签 → 200,全部消失。"""
+    a = await _create(client, "甲")
+    b = await _create(client, "乙")
     resp = await client.request("DELETE", "/api/v1/tags", json={"ids": [a["id"], b["id"]]})
     assert resp.status_code == 200
     async with session_factory() as session:
         assert (await session.get(Tag, a["id"])) is None
         assert (await session.get(Tag, b["id"])) is None
-        left = (await session.scalars(select(DatasetTag))).all()
-        assert left == []
 
 
 async def test_merge_reassigns_and_dedups(

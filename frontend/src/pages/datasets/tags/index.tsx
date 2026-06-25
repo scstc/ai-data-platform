@@ -93,7 +93,7 @@ const TagsPage: FC = () => {
               </ModalForm>,
               <Popconfirm
                 key="delete"
-                title={`删除「${record.name}」?将自动从所有数据集解绑`}
+                title={`确认删除「${record.name}」?(被数据集引用时将拒绝删除)`}
                 okText="删除"
                 cancelText="取消"
                 okButtonProps={{ danger: true }}
@@ -147,7 +147,7 @@ const TagsPage: FC = () => {
               btns.push(
                 <Popconfirm
                   key="batch"
-                  title={`删除选中的 ${selected.length} 个标签?将自动从所有数据集解绑`}
+                  title={`删除选中的 ${selected.length} 个标签?(任一被引用将拒绝删除)`}
                   okText="删除"
                   cancelText="取消"
                   okButtonProps={{ danger: true }}

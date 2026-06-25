@@ -130,14 +130,22 @@ async def update_tag(
 
 @router.delete("/tags/{tag_id}", dependencies=[Depends(require_admin)])
 async def delete_tag(tag_id: str, session: SessionDep) -> JSONResponse:
-    """删除标签 + 级联解绑所有 dataset_tags。404 缺失。"""
+    """删除标签;被引用(有 dataset_tags)则拒删 409(带引用数);404 缺失。"""
     tag = await session.get(Tag, tag_id)
     if tag is None:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "标签不存在"},
         )
-    await session.execute(delete(DatasetTag).where(DatasetTag.tag_id == tag_id))
+    usage = await _usage_count_of(session, tag_id)
+    if usage > 0:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": f"标签正被 {usage} 个数据集引用,无法删除",
+            },
+        )
     await session.delete(tag)
     await session.commit()
     return JSONResponse(content={"success": True})
@@ -147,12 +155,25 @@ async def delete_tag(tag_id: str, session: SessionDep) -> JSONResponse:
 async def delete_tags(
     body: TagBatchDelete, session: SessionDep
 ) -> JSONResponse:
-    """批量删除标签 + 级联解绑 dataset_tags。"""
+    """批量删除标签;任一被引用则整批拒删 409(报引用总数),无引用才删。"""
     ids = body.ids or []
     if ids:
-        await session.execute(
-            delete(DatasetTag).where(DatasetTag.tag_id.in_(ids))
-        )
+        rows = (
+            await session.execute(
+                select(DatasetTag.tag_id, func.count())
+                .where(DatasetTag.tag_id.in_(ids))
+                .group_by(DatasetTag.tag_id)
+            )
+        ).all()
+        total_use = sum(n for _, n in rows)
+        if total_use > 0:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": f"选中标签共被 {total_use} 个数据集引用,无法删除,请先解绑或合并",
+                },
+            )
         await session.execute(delete(Tag).where(Tag.id.in_(ids)))
         await session.commit()
     return JSONResponse(content={"success": True})
