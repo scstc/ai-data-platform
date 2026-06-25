@@ -131,17 +131,46 @@ export const STORAGE_CARDS: {
   },
 ];
 
-/** 数据库连接 — 网格小卡片(ready=true 的实测可真连,卡片右上角亮绿点) */
+/** 数据库连接 — 网格小卡片(覆盖需求全部品牌,不隐藏)
+ *  ready=true 实测可连 → 亮绿点、可点进配置;ready=false → 灰显「暂未就绪」、不可点(hover 显原因)。 */
 export const DB_KIND_CARDS: {
   kind: DataPlatform.DbKind;
   title: string;
   ready: boolean;
+  /** ready=false 时的未就绪原因(hover 展示) */
+  reason?: string;
 }[] = [
+  // ── 已实测可连 ──────────────────────────────────────────────────────────
   { kind: 'postgresql', title: 'PostgreSQL', ready: true },
   { kind: 'goldendb', title: 'GoldenDB', ready: true },
   { kind: 'kingbase', title: 'Kingbase(金仓)', ready: true },
   { kind: 'doris', title: 'Doris', ready: true },
   { kind: 'dameng', title: 'DM(达梦)', ready: true },
+  // ── 暂未就绪(驱动/服务器/认证未就位,不隐藏、仅灰显)─────────────────────
+  {
+    kind: 'gaussdb',
+    title: 'GaussDB',
+    ready: false,
+    reason: 'openGauss SASL 认证,asyncpg 暂不支持',
+  },
+  {
+    kind: 'sequoiadb',
+    title: 'SequoiaDB(巨杉)',
+    ready: false,
+    reason: '驱动 pysequoiadb 非 PyPI,需厂商 client 库',
+  },
+  {
+    kind: 'hive',
+    title: 'Hive',
+    ready: false,
+    reason: '需 Hadoop/Hive 集群,本环境未部署',
+  },
+  {
+    kind: 'hologres',
+    title: 'Hologres',
+    ready: false,
+    reason: '阿里云专用,本地无实例',
+  },
 ];
 
 /** 配置页标题(按类型) */

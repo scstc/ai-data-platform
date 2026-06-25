@@ -107,13 +107,19 @@ const NewDataSourcePage: FC = () => {
         {DB_KIND_CARDS.map((c) => (
           <Card
             key={c.kind}
-            hoverable
+            hoverable={c.ready}
             size="small"
             data-testid={`method-db-${c.kind}`}
-            onClick={() =>
-              go(`/ingest/datasources/new/database?dbKind=${c.kind}`)
+            onClick={
+              c.ready
+                ? () =>
+                    go(`/ingest/datasources/new/database?dbKind=${c.kind}`)
+                : undefined
             }
             styles={{ body: { padding: 16 } }}
+            style={
+              c.ready ? undefined : { opacity: 0.5, cursor: 'not-allowed' }
+            }
           >
             <div
               style={{
@@ -127,9 +133,13 @@ const NewDataSourcePage: FC = () => {
                 <DatabaseOutlined style={{ fontSize: 18, color: '#1677ff' }} />
                 <Text strong>{c.title}</Text>
               </div>
-              {c.ready && (
+              {c.ready ? (
                 <Tooltip title="已实测可连">
                   <Badge status="success" />
+                </Tooltip>
+              ) : (
+                <Tooltip title={c.reason ?? '暂未就绪'}>
+                  <Tag style={{ margin: 0, fontSize: 11 }}>暂未就绪</Tag>
                 </Tooltip>
               )}
             </div>
