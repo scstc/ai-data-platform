@@ -12,7 +12,7 @@ const CategoriesPage: React.FC = () => {
   return (
     <PageContainer
       breadcrumb={buildBreadcrumb([
-        { title: '数据接入', path: '/ingest/datasources' },
+        { title: '数据集仓库', path: '/datasets/list' },
         { title: '分类管理' },
       ])}
       title="分类管理"

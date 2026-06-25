@@ -129,11 +129,6 @@ export default [
         component: './ingest/local-upload/multimodal',
       },
       { path: '/ingest/files', name: 'files', component: './files' },
-      {
-        path: '/ingest/categories',
-        name: 'categories',
-        component: './ingest/categories',
-      },
     ],
   },
   // ② 数据集仓库(原始数据湖 · 草稿版本 + 发布门 + 算法工程师消费)
@@ -150,11 +145,18 @@ export default [
         component: './datasets/presets',
       },
       {
+        path: '/datasets/categories',
+        name: 'categories',
+        component: './datasets/categories',
+      },
+      { path: '/datasets/tags', name: 'tags', component: './datasets/tags' },
+      {
         path: '/datasets/:id',
         name: 'dataset-detail',
         hideInMenu: true,
         component: './datasets/detail',
       },
+      { path: '/ingest/categories', redirect: '/datasets/categories' },
     ],
   },
   // ③ 数据评估(只读侧:不产新版本,只对原版本打分/打标)
