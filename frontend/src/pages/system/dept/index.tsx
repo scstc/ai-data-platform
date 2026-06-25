@@ -5,17 +5,19 @@ import {
   type ProColumns,
   ProForm,
   ProFormDigit,
+  ProFormSelect,
   ProFormText,
   ProFormTreeSelect,
   ProTable,
 } from '@ant-design/pro-components';
 import { useAccess } from '@umijs/max';
 import { Button, Card, message, Popconfirm, Tag } from 'antd';
-import { type FC, useRef, useState } from 'react';
+import { type FC, useEffect, useRef, useState } from 'react';
 import {
   createDept,
   deleteDept,
   listDepts,
+  listUsers,
   updateDept,
 } from '@/services/system';
 
@@ -52,12 +54,46 @@ const DeptPage: FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<System.Department | null>(null);
   const [tree, setTree] = useState<System.Department[]>([]);
+  const [userOptions, setUserOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+  const [userMap, setUserMap] = useState<Record<string, string>>({});
 
   const reload = () => actionRef.current?.reload();
 
+  // 加载平台用户,供「负责人」选择 + 列表把 leader(userId) 显示成名字
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await listUsers({ current: 1, pageSize: 500 });
+        const users = res.data ?? [];
+        setUserOptions(
+          users.map((u) => ({
+            value: u.id,
+            label: u.displayName
+              ? `${u.displayName}(${u.username})`
+              : u.username,
+          })),
+        );
+        setUserMap(
+          Object.fromEntries(
+            users.map((u) => [u.id, u.displayName ?? u.username]),
+          ),
+        );
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
   const columns: ProColumns<System.Department>[] = [
     { title: '部门', dataIndex: 'name', width: 200 },
-    { title: '负责人', dataIndex: 'leader', width: 120 },
+    {
+      title: '负责人',
+      dataIndex: 'leader',
+      width: 140,
+      render: (_, r) => (r.leader ? (userMap[r.leader] ?? r.leader) : '-'),
+    },
     {
       title: '用户数',
       dataIndex: 'userCount',
@@ -198,7 +234,14 @@ const DeptPage: FC = () => {
             initialValue={0}
             fieldProps={{ step: 1 }}
           />
-          <ProFormText name="leader" label="负责人" />
+          <ProFormSelect
+            name="leader"
+            label="负责人"
+            options={userOptions}
+            allowClear
+            showSearch
+            fieldProps={{ optionFilterProp: 'label' }}
+          />
         </ProForm.Group>
       </ModalForm>
 
@@ -270,7 +313,14 @@ const DeptPage: FC = () => {
         />
         <ProForm.Group>
           <ProFormDigit name="sort" label="排序" fieldProps={{ step: 1 }} />
-          <ProFormText name="leader" label="负责人" />
+          <ProFormSelect
+            name="leader"
+            label="负责人"
+            options={userOptions}
+            allowClear
+            showSearch
+            fieldProps={{ optionFilterProp: 'label' }}
+          />
         </ProForm.Group>
       </ModalForm>
     </PageContainer>
