@@ -2479,7 +2479,7 @@ async def list_dataset_acl(
 
 
 def _like_q(q: str) -> str:
-    """转义 ILIKE 通配符(%/_/\),防止 q 被当成通配符导致全员目录枚举。"""
+    r"""转义 ILIKE 通配符(%/_/\),防止 q 被当成通配符导致全员目录枚举。"""
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
