@@ -56,7 +56,7 @@ type Props = {
 const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState<DataPlatform.DatasetAcl[]>([]);
-  // subjectId -> 显示名缓存:add 时由 candidate 写入,解决 list 只回 subjectId 的显示问题
+  // subjectId -> 显示名缓存:add 后、refresh 完成前这段窗口用候选名即时显示(list 已回填 subjectName)
   const [nameCache, setNameCache] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
@@ -92,6 +92,16 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
       level: DataPlatform.AclLevel,
       candidate: DataPlatform.AclCandidate,
     ) => {
+      // 去重:同主体已在列表则提示并跳过,避免触发后端 409 误报"授权失败"
+      if (
+        rows.some(
+          (r) =>
+            r.subjectType === candidate.type && r.subjectId === candidate.id,
+        )
+      ) {
+        message.warning(`${candidate.name} 已在授权列表中,可在列表内调整级别`);
+        return;
+      }
       try {
         await addAcl(datasetId, {
           subjectType: candidate.type,
@@ -105,7 +115,7 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
         message.error('授权失败,请重试');
       }
     },
-    [datasetId, refresh],
+    [datasetId, refresh, rows],
   );
 
   const handleToggleAll = useCallback(
@@ -158,19 +168,19 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
     [datasetId, refresh],
   );
 
-  /** 主体显示名:all→固定文案;指定→缓存命中用名,否则降级显示 id(历史条目无缓存时) */
+  /** 主体显示名:优先用后端回填的 subjectName,再降级缓存(即时添加窗口),最后降级 id */
   const subjectName = useCallback(
     (row: DataPlatform.DatasetAcl) =>
       row.subjectType === 'all'
         ? '组织内所有人'
-        : (nameCache[row.subjectId] ?? row.subjectId),
+        : (row.subjectName ?? nameCache[row.subjectId] ?? row.subjectId),
     [nameCache],
   );
 
   return (
     <Drawer
       title="数据集权限"
-      width={520}
+      width={768}
       open={open}
       onClose={onClose}
       destroyOnHidden
@@ -294,6 +304,14 @@ const LevelSection: React.FC<{
     },
     [doSearch],
   );
+
+  // 卸载时清掉待触发定时器,并让在途请求的 seq 校验失效(防对已卸载组件 setState)
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      fetchRef.current += 1;
+    };
+  }, []);
 
   // 切换 user/role 时清空旧候选,避免串档
   useEffect(() => {

@@ -539,6 +539,8 @@ declare namespace DataPlatform {
     datasetId: string;
     subjectType: AclSubjectType;
     subjectId: string;
+    /** 显示名:list 端点批量解析回填;all→"组织内所有人",缺失时前端降级用缓存/subjectId */
+    subjectName?: string;
     level: AclLevel;
     createdAt: string;
   };

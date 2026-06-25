@@ -1267,7 +1267,10 @@ async def list_datasets(
                 )
             ).all()
         )
-    # 一次查出本页各数据集的最新版本(version_no 最大者),格式化成展示标签,避免 N+1
+    # 一次查出本页各数据集的「当前展示版本」标签,避免 N+1。优先取已发布版本
+    # (publish_version 不变量保证同数据集至多一个 published——算法侧消费的唯一当前
+    # 发布版);无已发布版本时回退最新版本(version_no 最大者,供纯草稿数据集展示)。
+    # 否则会把更新的草稿版本号当成"已发布版本号"显示,与详情页对不上。
     latest_label: dict[str, str] = {}
     if page_ids:
         ver_rows = (
@@ -1276,18 +1279,24 @@ async def list_datasets(
                     DatasetVersion.dataset_id,
                     DatasetVersion.version_no,
                     DatasetVersion.created_at,
+                    DatasetVersion.publish_status,
                 ).where(DatasetVersion.dataset_id.in_(page_ids))
             )
         ).all()
-        best: dict[str, tuple[int, object]] = {}
-        for ds_id, vno, created in ver_rows:
-            cur = best.get(ds_id)
+        published: dict[str, tuple[int, object]] = {}
+        latest: dict[str, tuple[int, object]] = {}
+        for ds_id, vno, created, status in ver_rows:
+            if status == "published":
+                published[ds_id] = (vno, created)
+            cur = latest.get(ds_id)
             if cur is None or vno > cur[0]:
-                best[ds_id] = (vno, created)
-        latest_label = {
-            ds_id: format_version_label(vno, created)  # type: ignore[arg-type]
-            for ds_id, (vno, created) in best.items()
-        }
+                latest[ds_id] = (vno, created)
+        for ds_id, (vno, created) in latest.items():
+            # 已发布版本优先;无则用最新版本
+            pick_vno, pick_created = published.get(ds_id, (vno, created))
+            latest_label[ds_id] = format_version_label(
+                pick_vno, pick_created  # type: ignore[arg-type]
+            )
     # 批量取本页分类名(避免 N+1),回填 categoryName
     cat_names = await build_category_name_map(
         session, [r.category_id for r in rows]
@@ -2434,7 +2443,7 @@ async def list_dataset_acl(
     session: SessionDep,
     user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
-    """列出数据集的授权条目(需 admin 级)。"""
+    """列出数据集的授权条目(需 admin 级);subjectName 批量解析显示名,避免前端只拿到 subjectId(UUID)。"""
     denied = await _require_acl_admin(session, dataset_id, user)
     if denied is not None:
         return denied
@@ -2445,9 +2454,33 @@ async def list_dataset_acl(
             .order_by(DatasetAcl.created_at)
         )
     ).all()
+    # 批量解析主体显示名:user→display_name/username,role→name,all→固定文案
+    name_map: dict[tuple[str, str], str] = {}
+    user_ids = [r.subject_id for r in rows if r.subject_type == "user"]
+    role_ids = [r.subject_id for r in rows if r.subject_type == "role"]
+    if user_ids:
+        for u in (await session.scalars(select(User).where(User.id.in_(user_ids)))).all():
+            name_map[("user", u.id)] = u.display_name or u.username
+    if role_ids:
+        for rl in (await session.scalars(select(Role).where(Role.id.in_(role_ids)))).all():
+            name_map[("role", rl.id)] = rl.name
+
+    def name_of(r: DatasetAcl) -> str:
+        if r.subject_type == "all":
+            return "组织内所有人"
+        return name_map.get((r.subject_type, r.subject_id), r.subject_id)
+
     return JSONResponse(
-        {"data": [_acl_payload(r) for r in rows], "success": True}
+        {
+            "data": [{**_acl_payload(r), "subjectName": name_of(r)} for r in rows],
+            "success": True,
+        }
     )
+
+
+def _like_q(q: str) -> str:
+    """转义 ILIKE 通配符(%/_/\),防止 q 被当成通配符导致全员目录枚举。"""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @router.get("/datasets/{dataset_id}/acl/candidates")
@@ -2472,8 +2505,8 @@ async def search_acl_candidates(
                 select(User)
                 .where(
                     or_(
-                        User.username.ilike(f"%{q}%"),
-                        User.display_name.ilike(f"%{q}%"),
+                        User.username.ilike(f"%{_like_q(q)}%", escape="\\"),
+                        User.display_name.ilike(f"%{_like_q(q)}%", escape="\\"),
                     )
                 )
                 .order_by(User.username)
@@ -2487,7 +2520,7 @@ async def search_acl_candidates(
     else:
         rows = (
             await session.scalars(
-                select(Role).where(Role.name.ilike(f"%{q}%")).order_by(Role.name).limit(20)
+                select(Role).where(Role.name.ilike(f"%{_like_q(q)}%", escape="\\")).order_by(Role.name).limit(20)
             )
         ).all()
         data = [{"id": r.id, "name": r.name, "type": "role"} for r in rows]
@@ -2513,6 +2546,12 @@ async def add_dataset_acl(
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": "subject_type/level 非法"},
+        )
+    # user/role 必须带真实主体 id(all 的 subjectId 由下面归一为 "*",不受此约束)
+    if body.subject_type in ("user", "role") and not body.subject_id.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "subject_id 不能为空"},
         )
     # "组织内所有人" 整表只此一行,subject_id 固定,忽略传入值
     subject_id = (

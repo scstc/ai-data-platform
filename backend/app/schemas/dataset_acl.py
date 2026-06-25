@@ -18,7 +18,8 @@ class AclUpdate(CamelModel):
 class AclRead(CamelModel):
     id: str
     dataset_id: str
-    subject_type: str
+    subject_type: str  # user | role | all
     subject_id: str
-    level: str
+    subject_name: str | None = None  # 显示名:list 端点批量解析(user→display/username, role→name, all→固定文案)
+    level: str  # view | edit | admin
     created_at: UtcDateTime

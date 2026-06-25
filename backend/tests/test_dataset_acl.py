@@ -361,6 +361,34 @@ async def test_api_acl_all_subject_via_post(client, session_factory, seed_rbac) 
     assert any(d["id"] == "dset-allpost" for d in lst.json()["data"])
 
 
+async def test_api_acl_list_resolves_subject_names(
+    client, session_factory, seed_rbac
+) -> None:
+    """list 端点回填 subjectName:user→display_name/username,role→name,all→固定文案。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-name", name="n", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    for body in (
+        {"subjectType": "user", "subjectId": "u-staff", "level": "view"},
+        {"subjectType": "role", "subjectId": "r-dc", "level": "edit"},
+        {"subjectType": "all", "subjectId": "ignored", "level": "view"},
+    ):
+        resp = await client.post("/api/v1/datasets/dset-name/acl", json=body)
+        assert resp.status_code == 200, resp.text
+
+    lst = await client.get("/api/v1/datasets/dset-name/acl")
+    assert lst.status_code == 200, lst.text
+    by_type = {d["subjectType"]: d["subjectName"] for d in lst.json()["data"]}
+    assert by_type["user"] == "u-staff"  # u-staff 无 display_name → 降级 username
+    assert by_type["role"] == "部门及子"  # r-dc 的 Role.name
+    assert by_type["all"] == "组织内所有人"
+
+
 async def test_acl_candidates_requires_admin_and_searches(
     client, session_factory, seed_rbac
 ) -> None:
@@ -393,6 +421,43 @@ async def test_acl_candidates_requires_admin_and_searches(
     )
     assert roles.status_code == 200, roles.text
     assert any(r["id"] == "r-dc" for r in roles.json()["data"])
+
+
+async def test_acl_candidates_escapes_like_wildcards(
+    client, session_factory, seed_rbac
+) -> None:
+    """candidates 的 q 会转义 %/_,q="%" 不应返回所有用户(只匹配字面 %)。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-cand2", name="c", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    resp = await client.get("/api/v1/datasets/dset-cand2/acl/candidates?q=%&type=user")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"] == [], "q='%' 不应匹配所有用户"
+
+
+async def test_api_acl_rejects_empty_subject_id(
+    client, session_factory, seed_rbac
+) -> None:
+    """POST /acl:user/role 类型 subjectId 为空 → 400(避免死授权)。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-empty", name="e", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    for sid in ("", "   "):
+        resp = await client.post(
+            "/api/v1/datasets/dset-empty/acl",
+            json={"subjectType": "user", "subjectId": sid, "level": "view"},
+        )
+        assert resp.status_code == 400, resp.text
 
 
 async def test_api_detail_my_level(client, session_factory, seed_rbac) -> None:
