@@ -6,13 +6,17 @@ from app.models.category import Category
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
+from app.models.department import Department
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.llm_model import LlmModel
 from app.models.llm_provider import LlmProvider
 from app.models.llm_usage import LlmUsage
+from app.models.menu import Menu
+from app.models.rbac_links import RoleDept, RoleMenu, UserRole
 from app.models.review_finding import ReviewFinding
+from app.models.role import Role
 from app.models.upload import UploadRecord
 from app.models.user import User
 
@@ -23,13 +27,18 @@ __all__ = [
     "DataSource",
     "Dataset",
     "DatasetVersion",
+    "Department",
     "IngestTask",
     "Job",
     "JobInput",
     "LlmModel",
     "LlmProvider",
     "LlmUsage",
+    "Menu",
     "ReviewFinding",
+    "Role",
+    "RoleDept",
+    "RoleMenu",
     "UploadRecord",
     "User",
 ]
