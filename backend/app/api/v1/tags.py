@@ -79,3 +79,65 @@ async def list_tags(session: SessionDep) -> JSONResponse:
     counts = await _usage_counts(session)
     data = [_read(r, counts) for r in rows]
     return JSONResponse(content={"data": data, "success": True})
+
+
+@router.post("/tags", dependencies=[Depends(require_admin)])
+async def create_tag(body: TagCreate, session: SessionDep) -> JSONResponse:
+    """新建标签(find-or-create):同名直接返回已存在项。新建 usageCount 恒 0。"""
+    name = body.name.strip()
+    existing = await session.scalar(select(Tag).where(Tag.name == name))
+    if existing is not None:
+        counts = await _usage_counts(session)
+        return JSONResponse(
+            content={"data": _read(existing, counts), "success": True}
+        )
+    tag = Tag(id=_new_id(), name=name)
+    session.add(tag)
+    await session.commit()
+    await session.refresh(tag)
+    return JSONResponse(content={"data": _read(tag, {}), "success": True})
+
+
+@router.patch("/tags/{tag_id}", dependencies=[Depends(require_admin)])
+async def update_tag(
+    tag_id: str, body: TagUpdate, session: SessionDep
+) -> JSONResponse:
+    """重命名;404 缺失/409 重名。"""
+    tag = await session.get(Tag, tag_id)
+    if tag is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "标签不存在"},
+        )
+    name = body.name.strip()
+    if name != tag.name:
+        clash = await session.scalar(
+            select(Tag.id).where(Tag.name == name).where(Tag.id != tag_id)
+        )
+        if clash is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"success": False, "message": "标签名已存在"},
+            )
+        tag.name = name
+        await session.commit()
+        await session.refresh(tag)
+    usage = await _usage_count_of(session, tag_id)
+    return JSONResponse(
+        content={"data": _read(tag, {tag_id: usage}), "success": True}
+    )
+
+
+@router.delete("/tags/{tag_id}", dependencies=[Depends(require_admin)])
+async def delete_tag(tag_id: str, session: SessionDep) -> JSONResponse:
+    """删除标签 + 级联解绑所有 dataset_tags。404 缺失。"""
+    tag = await session.get(Tag, tag_id)
+    if tag is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "标签不存在"},
+        )
+    await session.execute(delete(DatasetTag).where(DatasetTag.tag_id == tag_id))
+    await session.delete(tag)
+    await session.commit()
+    return JSONResponse(content={"success": True})
