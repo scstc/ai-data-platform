@@ -22,7 +22,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from app.api.deps import require_admin
+from app.api.deps import current_user, require_admin
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
@@ -32,7 +32,9 @@ from app.models.datasource import DataSource
 from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.tag import DatasetTag, Tag
+from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse, format_version_label
+from app.services import dataset_acl
 from app.schemas.dataset import (
     DatasetDetailRead,
     DatasetMemberRead,
@@ -194,6 +196,7 @@ async def _sync_dataset_tags(
 async def upload_as_dataset(
     file: UploadFileDep,
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
     name: NameForm = None,
     data_type: DataTypeForm = None,
     semantic_type: SemanticTypeForm = None,
@@ -217,6 +220,8 @@ async def upload_as_dataset(
     filename = file.filename or ""
     fmt = _file_ext(filename)
     content = await file.read()
+    # 归属:登录用户固化为其 id(数据集默认私有),匿名落 'admin'(兼容现状)
+    actor = user.id if user else "admin"
     # 二进制类原样存(land_upload_raw),其余规范化落地(land_upload);
     # 两条路径的落地失败都收敛为 LandingError → 400(磁盘写失败/解析失败均不冒 500)
     try:
@@ -230,6 +235,7 @@ async def upload_as_dataset(
                 data_type=data_type,
                 semantic_type=semantic_type,
                 description=description,
+                creator=actor,
             )
         else:
             dataset, version = await land_upload(
@@ -242,6 +248,7 @@ async def upload_as_dataset(
                 semantic_type=semantic_type,
                 description=description,
                 strict_semantic=strict,
+                creator=actor,
             )
     except SemanticValidationError as exc:
         return JSONResponse(
@@ -351,6 +358,7 @@ async def _manifest_version_of(
 async def upload_media_as_dataset(
     files: MediaFilesDep,
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
     name: NameForm = None,
     data_type: DataTypeForm = None,
     category_id: CategoryIdForm = None,
@@ -402,6 +410,7 @@ async def upload_media_as_dataset(
 
     bucket = settings.storage_minio_upload_bucket
     dataset_id = _new_dataset_id()
+    actor = user.id if user else "admin"
     # 任一步失败(对象写入/落库)都回收本数据集前缀,绝不留孤儿对象
     try:
         manifest_rows: list[dict] = []
@@ -453,8 +462,8 @@ async def upload_media_as_dataset(
             name=name or (Path(files[0].filename or "媒体数据集").name),
             data_type=data_type,
             category_id=category_id,
-            owner="admin",
-            creator="admin",
+            owner=actor,
+            creator=actor,
         )
         session.add(dataset)
         version = DatasetVersion(
@@ -501,6 +510,7 @@ async def upload_media_as_dataset(
 async def upload_batch_as_dataset(
     files: MediaFilesDep,
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
     name: NameForm = None,
     data_type: DataTypeForm = None,
     semantic_type: SemanticTypeForm = None,
@@ -574,6 +584,7 @@ async def upload_batch_as_dataset(
     bucket = settings.storage_minio_upload_bucket
     dataset_id = _new_dataset_id()
     prefix = f"{dataset_id}/"
+    actor = user.id if user else "admin"
     # 任一步失败(体积/解析/对象写入/落库)都回收本数据集前缀,绝不留孤儿对象
     try:
         all_records: list[dict] = []
@@ -644,8 +655,8 @@ async def upload_batch_as_dataset(
             data_type=data_type,
             semantic_type=effective_semantic,
             category_id=category_id,
-            owner="admin",
-            creator="admin",
+            owner=actor,
+            creator=actor,
         )
         session.add(dataset)
         version = DatasetVersion(
@@ -1166,6 +1177,7 @@ async def delete_dataset_member(
 @router.get("/datasets", response_model=PageResponse[DatasetRead])
 async def list_datasets(
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
     current: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, alias="pageSize"),
     name: str | None = Query(None),
@@ -1227,17 +1239,15 @@ async def list_datasets(
             )
         ).all()
         conds.append(Dataset.id.in_(published_ds_ids))
-    total = await session.scalar(
-        select(func.count()).select_from(Dataset).where(*conds)
+    # 数据集 ACL:匿名沿用现状(不过滤)、登录用户按 owner+超管+授权过滤
+    base = await dataset_acl.visible_dataset_filter(
+        select(Dataset).where(*conds), session, user
     )
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
     offset = (current - 1) * page_size
     rows = (
         await session.scalars(
-            select(Dataset)
-            .where(*conds)
-            .order_by(Dataset.created_at.desc())
-            .offset(offset)
-            .limit(page_size)
+            base.order_by(Dataset.created_at.desc()).offset(offset).limit(page_size)
         )
     ).all()
     # 一次查出本页中含 hosted 版本的数据集 id,供前端徽标/删除门控(#18)
@@ -1294,10 +1304,16 @@ async def list_datasets(
 
 
 @router.get("/datasets/{dataset_id}")
-async def get_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
-    """数据集详情:元信息 + 版本列表(按版本号升序)。"""
+async def get_dataset(
+    dataset_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """数据集详情:元信息 + 版本列表(按版本号升序)。登录用户受 ACL 约束,匿名放行。"""
     dataset = await session.get(Dataset, dataset_id)
-    if dataset is None:
+    if dataset is None or not await dataset_acl.can_access(
+        session, user, dataset_id, "view"
+    ):
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集不存在"},

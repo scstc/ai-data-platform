@@ -59,6 +59,10 @@ async def _create_test_database() -> AsyncGenerator[None, None]:
 @pytest_asyncio.fixture
 async def engine(_create_test_database: None):
     """函数级 engine：建表 → 用例 → 清表。"""
+    # 先导入 app.main,确保所有路由引用的模型(如 tag/dataset_tags,仅在 datasets.py
+    # 等路由模块内导入)注册进 Base.metadata,否则 create_all 会漏建表。
+    import app.main  # noqa: F401
+
     from app.models import Base
 
     eng = create_async_engine(TEST_DATABASE_URL, future=True)

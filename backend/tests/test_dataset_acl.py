@@ -187,3 +187,37 @@ async def test_can_access_level_ranking(session_factory, seed_rbac) -> None:
         assert await dataset_acl.can_access(s, u, "dset-mgr", "view") is True
         assert await dataset_acl.can_access(s, u, "dset-mgr", "edit") is False
         assert await dataset_acl.can_access(s, u, "dset-mgr", "admin") is False
+
+
+async def test_api_list_detail_visibility(client, session_factory, seed_rbac) -> None:
+    """API 层:u-mgr 私有集对 u-staff 在列表不可见、直取 404;owner/超管可见;匿名兼容。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    # 经 session_factory 造一份 u-mgr 所有的私有数据集(client 共用同一测试库)
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-apimgr", name="api mgr", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    # u-staff:列表不含、直取 404
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    lst = await client.get("/api/v1/datasets?current=1&pageSize=50")
+    assert lst.status_code == 200
+    assert all(d["id"] != "dset-apimgr" for d in lst.json()["data"]), "u-staff 不应看到 u-mgr 私有集"
+    miss = await client.get("/api/v1/datasets/dset-apimgr")
+    assert miss.status_code == 404
+
+    # owner u-mgr:可见
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    hit = await client.get("/api/v1/datasets/dset-apimgr")
+    assert hit.status_code == 200
+
+    # 超管:可见
+    client.cookies.set("adp_session", sign_token("u-super"))
+    assert (await client.get("/api/v1/datasets/dset-apimgr")).status_code == 200
+
+    # 匿名:列表仍含(兼容现状)
+    client.cookies.delete("adp_session")
+    anon = await client.get("/api/v1/datasets?current=1&pageSize=50")
+    assert anon.status_code == 200
+    assert any(d["id"] == "dset-apimgr" for d in anon.json()["data"])
