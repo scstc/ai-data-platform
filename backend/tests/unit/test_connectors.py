@@ -41,6 +41,7 @@ from app.services.connectors.mysql import MysqlConnector
 from app.services.connectors.objectstore import (
     S3Connector,
     _ext,
+    _keys_from_extract,
     _media_manifest_row,
 )
 from app.services.connectors.pg import PgConnector
@@ -485,3 +486,76 @@ def test_ext_partitions_media_from_data():
     assert _ext("data.csv") not in BINARY_FORMATS
     assert _ext("notes.jsonl") not in BINARY_FORMATS
     assert _ext("noext") == ""  # 无扩展名 → 非媒体,走 data 路(可能被诚实跳过)
+
+
+# ===========================================================================
+# S3 _keys_from_extract —— 由 extract spec + 桶内对象列表计算采集 key 列表
+# ---------------------------------------------------------------------------
+# 锁的核心意图:
+# 1. **glob 前导 / 必须被剥掉**:S3 对象键永不含前导 /,用户按 HDFS/POSIX 习惯
+#    写了 ``/*.*`` 期望匹配全量,不剥则 fnmatch 要求 key 以 / 开头 → 匹配为空
+#    → 误报「采集对象为空」(本测试即回归该线上问题)。
+# 2. **诚实且可诊断的失败**:填了 glob 却没命中,报「未匹配 + 桶内对象数」,
+#    而非误导性的「请填写通配符」(Rule 12)。
+# 3. paths 与 glob 合并去重保序;裸 key / 带前导 / / s3:// URI 都归一为桶内键。
+# ===========================================================================
+def _obj(key: str, size: int = 1) -> dict:
+    """造一个 list_objects 形态的对象条目。"""
+    return {"key": key, "size": size, "lastModified": None}
+
+
+def test_keys_from_extract_glob_leading_slash_stripped():
+    """glob 前导 / 被剥掉 → 等价于不带 / 的同一通配(线上回归点)。"""
+    objects = [
+        _obj("train.csv"),
+        _obj("raw/2026/data.jsonl"),
+        _obj("pic.png"),
+    ]
+    # 带前导 / —— 修复前命中 0 个(误报采集对象为空),修复后等价于 *.*
+    keys = _keys_from_extract({"mode": "path", "glob": "/*.*"}, objects)
+    assert set(keys) == {"train.csv", "raw/2026/data.jsonl", "pic.png"}
+
+
+def test_keys_from_extract_paths_and_glob_merge_dedup_normalized():
+    """paths(显式键)+ glob(通配)合并去重保序;裸 key / 前导 / / s3:// URI 都归一。"""
+    objects = [
+        _obj("a.csv"),
+        _obj("b.csv"),
+        _obj("c.txt"),
+        _obj("pic.png"),
+    ]
+    keys = _keys_from_extract(
+        {
+            "mode": "path",
+            "paths": ["a.csv", "s3://bucket/b.csv", "/c.txt"],
+            "glob": "*.png",
+        },
+        objects,
+    )
+    # paths → a.csv、b.csv(s3 URI 归一)、c.txt(去前导 /);glob *.png 追加 pic.png
+    assert keys == ["a.csv", "b.csv", "c.txt", "pic.png"]
+
+
+def test_keys_from_extract_both_empty_raises_clear_message():
+    """既无 paths 也无 glob → 诚实失败,提示「请填写」(此场景下该提示正确)。"""
+    with pytest.raises(IngestError) as exc:
+        _keys_from_extract({"mode": "path"}, [_obj("a.csv")])
+    assert "采集对象为空" in str(exc.value)
+
+
+def test_keys_from_extract_glob_no_match_reports_count_not_fillin():
+    """填了 glob 但没命中 → 报「未匹配 + 桶内对象数」,不是误导性的「请填写」。"""
+    with pytest.raises(IngestError) as exc:
+        _keys_from_extract(
+            {"mode": "path", "glob": "*.nomatch"},
+            [_obj("a.csv"), _obj("b.txt")],
+        )
+    msg = str(exc.value)
+    assert "未匹配" in msg
+    assert "2" in msg  # 桶内对象数,便于定位
+
+
+def test_keys_from_extract_rejects_non_path_mode():
+    """S3 连接器只吃 mode=path;table/sql 走数据库连接器,这里防御性拒绝。"""
+    with pytest.raises(IngestError):
+        _keys_from_extract({"mode": "table"}, [])

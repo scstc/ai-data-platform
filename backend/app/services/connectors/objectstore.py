@@ -116,6 +116,10 @@ def _keys_from_extract(
     - extract.paths : 显式键(可含 s3://bucket/key 或裸 key / s3:///key 等)。
     - extract.glob  : fnmatch 通配(与 all_objects 中每个 obj["key"] 匹配)。
     两者均可为空;都为空时抛 IngestError(未配置采集对象)。
+
+    S3 对象键不含前导 /:paths 与 glob 中的前导 / 都会被剥掉,与 paths 分支
+    lstrip("/") 一致——避免用户按 HDFS/POSIX 习惯写了 /raw/*.csv 或 /*.*
+    却匹配为空(线上回归:glob /*.* 在非空桶里命中 0,误报「采集对象为空」)。
     """
     extract = extract or {}
     mode = extract.get("mode")
@@ -131,10 +135,12 @@ def _keys_from_extract(
 
     # --- paths 列表 ---
     raw_paths: list[str] = extract.get("paths") or []
+    paths_typed = False  # 是否有非空白 path 输入(供失败诊断区分「没配」vs「配了没命中」)
     for raw in raw_paths:
         raw = raw.strip()
         if not raw:
             continue
+        paths_typed = True
         # 支持 s3://bucket/key 或 s3:///key(key 含前导 /) 或裸 key
         if raw.startswith("s3://"):
             # 去掉 scheme + netloc(bucket),取 path 部分
@@ -150,7 +156,9 @@ def _keys_from_extract(
             seen[key] = None
 
     # --- glob 通配 ---
-    glob_pattern: str = str(extract.get("glob") or "").strip()
+    glob_typed: str = str(extract.get("glob") or "").strip()
+    # 剥前导 /:S3 键不含前导 /,与 paths 分支行为一致(见函数 docstring)。
+    glob_pattern: str = glob_typed.lstrip("/")
     if glob_pattern:
         for obj in all_objects:
             obj_key: str = obj.get("key") or ""
@@ -158,9 +166,18 @@ def _keys_from_extract(
                 seen[obj_key] = None
 
     if not seen:
+        if not paths_typed and not glob_typed:
+            raise IngestError(
+                "S3 采集对象为空:"
+                "请在 extract.paths 填写对象键列表,或在 extract.glob 填写通配符"
+            )
+        # 配了采集对象却没命中——给可定位的诊断(显式 glob 值 + 桶内对象数 +
+        # 前导 / 提示),而非笼统的「请填写通配符」(Rule 12:诚实、可调试)。
         raise IngestError(
-            "S3 采集对象为空:"
-            "请在 extract.paths 填写对象键列表,或在 extract.glob 填写通配符"
+            "S3 采集未匹配到任何对象:"
+            f"glob={glob_typed!r}(去前导 / 后={glob_pattern!r}),"
+            f"桶内共 {len(all_objects)} 个对象;"
+            "S3 对象键不含前导 /,匹配全量请用 *.* 或 *"
         )
 
     return list(seen)
