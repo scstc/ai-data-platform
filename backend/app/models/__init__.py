@@ -4,6 +4,7 @@ from app.core.db import Base
 from app.models.audit_log import AuditLog
 from app.models.category import Category
 from app.models.dataset import Dataset
+from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.department import Department
@@ -26,6 +27,7 @@ __all__ = [
     "Category",
     "DataSource",
     "Dataset",
+    "DatasetAcl",
     "DatasetVersion",
     "Department",
     "IngestTask",
