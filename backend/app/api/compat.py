@@ -140,9 +140,15 @@ async def current_user(
                 "success": True,
             },
         )
-    return JSONResponse(
-        {"success": True, "data": _current_user_payload(user)}
-    )
+    payload = _current_user_payload(user)
+    # RBAC:下发角色 role_key 与聚合权限码,供前端 access.hasPerm 与菜单门控
+    from app.services import rbac
+
+    payload["roles"] = [
+        r.role_key for r in await rbac.get_user_roles(session, user)
+    ]
+    payload["permissions"] = sorted(await rbac.get_user_perms(session, user))
+    return JSONResponse({"success": True, "data": payload})
 
 
 @router.post("/login/outLogin")
