@@ -38,6 +38,12 @@ class IngestTask(Base):
     # 「生成 CSV 数据集」绑定的数据集 id(datasets.id,无 FK,可空)。
     # 首次生成时落定,后续生成在同一数据集追加新版本(v1/v2/... 各落不同文件夹)。
     dataset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 创建人(RBAC self 数据范围依据);存量回填 "admin"
+    creator: Mapped[str] = mapped_column(
+        String, nullable=False, default="admin", server_default="admin"
+    )
+    # 所属部门(RBAC 数据权限快照);存量回填为根部门
+    dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

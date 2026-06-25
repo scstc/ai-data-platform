@@ -39,3 +39,34 @@ async def test_rbac_models_roundtrip(session_factory) -> None:
         assert row is not None
         assert row.data_scope == "self"
         assert row.name == "测试角色"
+
+
+async def test_user_and_business_have_dept_id(session_factory) -> None:
+    """User 与各业务模型都具备 dept_id 列(create_all 后可写读)。"""
+    from sqlalchemy import select
+
+    from app.models.dataset import Dataset
+    from app.models.user import User
+
+    async with session_factory() as s:
+        s.add(
+            User(
+                id="usr-deptck",
+                username="deptck",
+                password_hash="x",
+                role="user",
+                dept_id="dept-000000",
+            )
+        )
+        s.add(Dataset(id="dset-deptck", name="d", dept_id="dept-000000"))
+        await s.commit()
+
+    async with session_factory() as s:
+        u = (
+            await s.scalars(select(User).where(User.id == "usr-deptck"))
+        ).first()
+        d = (
+            await s.scalars(select(Dataset).where(Dataset.id == "dset-deptck"))
+        ).first()
+        assert u.dept_id == "dept-000000"
+        assert d.dept_id == "dept-000000"

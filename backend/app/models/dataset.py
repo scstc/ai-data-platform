@@ -48,6 +48,8 @@ class Dataset(Base):
     last_modifier: Mapped[str | None] = mapped_column(String, nullable=True)
     # 有效期(#19 生命周期):到期清理
     valid_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    # 所属部门(RBAC 数据权限快照,创建时取创建人部门);存量回填为根部门
+    dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

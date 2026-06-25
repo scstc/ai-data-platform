@@ -31,6 +31,8 @@ class DataSource(Base):
     # 分类(#15):受控分类库引用 categories.id(无 FK,可空,单选)
     category_id: Mapped[str | None] = mapped_column(String, nullable=True)
     creator: Mapped[str] = mapped_column(String, nullable=False, default="admin")
+    # 所属部门(RBAC 数据权限快照);存量回填为根部门
+    dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

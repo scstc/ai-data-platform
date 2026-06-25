@@ -32,6 +32,8 @@ class User(Base):
     disabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    # 所属部门(RBAC 数据权限维度);存量/未分配为空
+    dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

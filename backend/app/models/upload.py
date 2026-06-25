@@ -23,6 +23,12 @@ class UploadRecord(Base):
     format: Mapped[str] = mapped_column(String, nullable=False)
     # 状态：done | error
     status: Mapped[str] = mapped_column(String, nullable=False)
+    # 创建人(RBAC self 数据范围依据);存量回填 "admin"
+    creator: Mapped[str] = mapped_column(
+        String, nullable=False, default="admin", server_default="admin"
+    )
+    # 所属部门(RBAC 数据权限快照);存量回填为根部门
+    dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     uploaded_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

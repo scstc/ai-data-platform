@@ -51,6 +51,8 @@ class Job(Base):
     # POST /jobs/{id}/rerun 据此对原输入版本再跑一次。早于本特性的任务为空。
     spec: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_by: Mapped[str] = mapped_column(String, nullable=False, default="admin")
+    # 所属部门(RBAC 数据权限快照);存量回填为根部门
+    dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )
