@@ -70,3 +70,33 @@ async def test_user_and_business_have_dept_id(session_factory) -> None:
         ).first()
         assert u.dept_id == "dept-000000"
         assert d.dept_id == "dept-000000"
+
+
+async def test_get_user_perms_admin_is_wildcard(session_factory, seed_rbac) -> None:
+    """role 列为 admin 的用户 ⇒ 通配权限(桥接遗留超管)。"""
+    from sqlalchemy import select
+
+    from app.models.user import User
+    from app.services import rbac
+
+    async with session_factory() as s:
+        u = (await s.scalars(select(User).where(User.id == "u-super"))).first()
+        perms = await rbac.get_user_perms(s, u)
+        assert perms == {"*:*:*"}
+        assert rbac.has_perm(perms, "system:user:add") is True
+
+
+async def test_get_user_perms_aggregates_granted_menus(
+    session_factory, seed_rbac
+) -> None:
+    """u-mgr(角色 r-dc 授 m-add)聚合得 system:user:add;无关 perm 为假。"""
+    from sqlalchemy import select
+
+    from app.models.user import User
+    from app.services import rbac
+
+    async with session_factory() as s:
+        u = (await s.scalars(select(User).where(User.id == "u-mgr"))).first()
+        perms = await rbac.get_user_perms(s, u)
+        assert "system:user:add" in perms
+        assert rbac.has_perm(perms, "system:role:remove") is False

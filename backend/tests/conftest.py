@@ -148,3 +148,45 @@ async def seed_users(session_factory) -> None:
             ]
         )
         await session.commit()
+
+
+@pytest_asyncio.fixture
+async def seed_rbac(session_factory) -> None:
+    """RBAC 造数:部门树 + 四种 data_scope 角色 + 系统菜单 + 三个测试用户。
+
+    测试库走 create_all(无迁移种子),鉴权内核用例靠本 fixture 构造确定数据。
+    """
+    from app.models.department import Department
+    from app.models.menu import Menu
+    from app.models.rbac_links import RoleDept, RoleMenu, UserRole
+    from app.models.role import Role
+    from app.models.user import User
+
+    async with session_factory() as s:
+        s.add_all(
+            [
+                Department(id="d-root", parent_id=None, ancestors="0", name="根", status="0"),
+                Department(id="d-a", parent_id="d-root", ancestors="0,d-root,", name="甲", status="0"),
+                Department(id="d-b", parent_id="d-root", ancestors="0,d-root,", name="乙", status="0"),
+                Role(id="r-all", name="全部", role_key="r_all", data_scope="all", status="0"),
+                Role(id="r-dc", name="部门及子", role_key="r_dc", data_scope="dept_and_child", status="0"),
+                Role(id="r-self", name="仅本人", role_key="r_self", data_scope="self", status="0"),
+                Role(id="r-custom", name="自定义", role_key="r_custom", data_scope="custom", status="0"),
+                Menu(id="m-sys", parent_id=None, name="系统管理", menu_type="M",
+                     path="/system", icon="setting", sort=90, visible="0", status="0"),
+                Menu(id="m-user", parent_id="m-sys", name="用户管理", menu_type="C",
+                     path="/system/user", component="system/user", sort=1, visible="0", status="0"),
+                Menu(id="m-add", parent_id="m-user", name="用户新增", menu_type="F",
+                     perms="system:user:add", sort=1, visible="0", status="0"),
+                RoleDept(role_id="r-custom", dept_id="d-a"),
+                RoleMenu(role_id="r-dc", menu_id="m-sys"),
+                RoleMenu(role_id="r-dc", menu_id="m-user"),
+                RoleMenu(role_id="r-dc", menu_id="m-add"),
+                User(id="u-super", username="u-super", password_hash="x", role="admin", dept_id="d-root"),
+                User(id="u-mgr", username="u-mgr", password_hash="x", role="user", dept_id="d-root"),
+                User(id="u-staff", username="u-staff", password_hash="x", role="user", dept_id="d-a"),
+                UserRole(user_id="u-mgr", role_id="r-dc"),
+                UserRole(user_id="u-staff", role_id="r-self"),
+            ]
+        )
+        await s.commit()
