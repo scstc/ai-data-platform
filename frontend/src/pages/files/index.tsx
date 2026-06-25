@@ -1,6 +1,7 @@
 import {
   FolderAddOutlined,
   FolderOutlined,
+  SearchOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
@@ -39,6 +40,9 @@ import {
   uploadPlatformFile,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+
+/** 文件管理默认桶:平台自有数据桶,固定为 uploads(对应后端 storage_minio_upload_bucket)。 */
+const DEFAULT_BUCKET = 'uploads';
 
 /** 字节数转人类可读（与数据集列表保持一致） */
 const fmtSize = (n?: number) => {
@@ -91,13 +95,19 @@ const FilesPage: React.FC = () => {
   // 数据集 id→名称映射:uploads 桶的顶层文件夹是数据集 id(dset-xxx),
   // 用名称关联让用户看懂文件夹对应哪个数据集
   const [datasetNames, setDatasetNames] = useState<Record<string, string>>({});
+  // 当前目录关键字过滤(纯前端,按文件夹/文件名 + 数据集名匹配)
+  const [keyword, setKeyword] = useState('');
 
   const loadBuckets = useCallback(async () => {
     try {
       const res = await listPlatformBuckets();
       const list = res.data ?? [];
       setBuckets(list);
-      setBucket((cur) => cur ?? list[0]);
+      // 默认锁定 uploads 桶(平台自有数据桶);该桶不存在时回退首个
+      setBucket(
+        (cur) =>
+          cur ?? (list.includes(DEFAULT_BUCKET) ? DEFAULT_BUCKET : list[0]),
+      );
     } catch {
       // 静默：未配置平台存储时整体不可用，由列表区给出提示
     }
@@ -107,19 +117,35 @@ const FilesPage: React.FC = () => {
     loadBuckets();
   }, [loadBuckets]);
 
-  // 拉数据集列表建 id→名称映射(uploads 桶文件夹名是数据集 id,需关联出名称)
+  // 拉数据集列表建 id→名称映射(uploads 桶文件夹名是数据集 id,需关联出名称)。
+  // 不限 500:文件管理根目录每个文件夹是一个数据集,数量大时不能截断,分页拉全量。
   useEffect(() => {
-    listDatasets({ pageSize: 500 })
-      .then((res) =>
-        setDatasetNames(
-          Object.fromEntries((res.data ?? []).map((d) => [d.id, d.name])),
-        ),
-      )
-      .catch(() => undefined);
+    let cancelled = false;
+    const PAGE = 500;
+    const MAX_PAGES = 40; // 安全上限(2 万),防异常 total 死循环
+    (async () => {
+      try {
+        const map: Record<string, string> = {};
+        for (let current = 1; current <= MAX_PAGES; current += 1) {
+          const res = await listDatasets({ current, pageSize: PAGE });
+          for (const d of res.data ?? []) map[d.id] = d.name;
+          const got = res.data?.length ?? 0;
+          if (got < PAGE || Object.keys(map).length >= (res.total ?? Infinity))
+            break;
+        }
+        if (!cancelled) setDatasetNames(map);
+      } catch {
+        // 静默:名称映射失败不影响浏览
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const goPrefix = (next: string) => {
     setPrefix(next);
+    setKeyword('');
     actionRef.current?.reload();
   };
 
@@ -391,6 +417,14 @@ const FilesPage: React.FC = () => {
           }}
         />
         <Breadcrumb items={breadcrumbItems} />
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="过滤当前目录"
+          style={{ width: 220 }}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+        />
       </Space>
 
       <ProTable<Row>
@@ -403,6 +437,18 @@ const FilesPage: React.FC = () => {
         pagination={false}
         options={{ reload: true, setting: false, density: false }}
         params={{ bucket, prefix }}
+        postData={(data: Row[]) => {
+          // 纯前端过滤:文件夹按 id + 数据集名匹配,文件按文件名;空关键字原样返回
+          const k = keyword.trim().toLowerCase();
+          if (!k) return data;
+          return data.filter((row: Row) => {
+            const hay =
+              row.kind === 'folder'
+                ? `${row.name} ${datasetNames[row.name] ?? ''}`.toLowerCase()
+                : row.entry.name.toLowerCase();
+            return hay.includes(k);
+          });
+        }}
         toolBarRender={() => [
           <Access key="upload" accessible={!!access.canAdmin}>
             <Space>
