@@ -1,4 +1,3 @@
-import { StarFilled } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useModel } from '@umijs/max';
 import {
@@ -17,7 +16,6 @@ import {
   Segmented,
   Space,
   Spin,
-  Switch,
   Table,
   Tag,
   Typography,
@@ -38,17 +36,33 @@ const RUNNABLE_TAG: Record<
   ready: { label: '可直接执行', color: 'green' },
   needs_api: { label: '需要 AI', color: 'geekblue' },
   needs_media: { label: '需要媒体', color: 'orange' },
-  needs_compute: { label: '需要 GPU', color: 'volcano' },
+  needs_compute: { label: '需要算力', color: 'volcano' },
 };
 
-/** 类别筛选项:全部 + 四类执行要求(value 对应 runnable;'all' 不过滤) */
+/** 类别筛选项:全部 + 执行要求(value 对应 runnable;'all' 不过滤)。
+ *  市场只看环境能力(ready/needs_api/needs_compute);数据集格式适配在提交期校验,故无"需要媒体"。 */
 const RUNNABLE_FILTER_OPTIONS = [
   { label: '全部', value: 'all' },
   { label: '可直接执行', value: 'ready' },
   { label: '需要 AI', value: 'needs_api' },
-  { label: '需要媒体', value: 'needs_media' },
-  { label: '需要 GPU', value: 'needs_compute' },
+  { label: '需要算力', value: 'needs_compute' },
 ];
+
+/** 算子执行要求 → 彩色标签。needs_compute 拆细:Ray 算子要 Ray 集群、vllm 要 vLLM 服务、
+ * 其余(gpu/hf_model)要 GPU——避免顶部 GPU✓ 时徽标仍笼统写"需要算力"造成矛盾。 */
+function runnableTag(op: DataPlatform.CatalogOperator): {
+  label: string;
+  color: string;
+} {
+  if (op.runnable === 'needs_compute') {
+    if (op.name.startsWith('ray_'))
+      return { label: '需要 Ray 集群', color: 'volcano' };
+    if (op.resourceClass === 'vllm')
+      return { label: '需要 vLLM 服务', color: 'volcano' };
+    return { label: '需要 GPU', color: 'volcano' };
+  }
+  return RUNNABLE_TAG[op.runnable];
+}
 
 const RESOURCE_LABEL: Record<string, string> = {
   cpu: 'CPU',
@@ -66,8 +80,19 @@ const PARAM_COLUMNS = [
 ];
 
 /** 一行 muted 元信息:资源类 + 模态 */
+const MODALITY_LABEL: Record<string, string> = {
+  text: '文本',
+  image: '图像',
+  video: '视频',
+  audio: '音频',
+  multimodal: '多模态',
+};
+
 const metaLine = (op: DataPlatform.CatalogOperator) =>
-  [RESOURCE_LABEL[op.resourceClass] ?? op.resourceClass, ...(op.modality ?? [])]
+  [
+    RESOURCE_LABEL[op.resourceClass] ?? op.resourceClass,
+    ...(op.modality ?? []).map((m) => MODALITY_LABEL[m] ?? m),
+  ]
     .filter(Boolean)
     .join(' · ');
 
@@ -88,7 +113,6 @@ const Market: React.FC = () => {
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
   const [runnableFilter, setRunnableFilter] = useState('all');
-  const [onlyRecommend, setOnlyRecommend] = useState(true);
 
   // 分页
   const [current, setCurrent] = useState(1);
@@ -131,7 +155,6 @@ const Market: React.FC = () => {
     return allOps.filter((op) => {
       if (runnableFilter !== 'all' && op.runnable !== runnableFilter)
         return false;
-      if (onlyRecommend && !op.recommend) return false;
       if (keyword) {
         const kw = keyword.toLowerCase();
         if (
@@ -143,7 +166,7 @@ const Market: React.FC = () => {
       }
       return true;
     });
-  }, [allOps, runnableFilter, onlyRecommend, keyword]);
+  }, [allOps, runnableFilter, keyword]);
 
   // 分面计数:在 switchFiltered 上按场景分组
   const scenarioCounts = useMemo(() => {
@@ -198,8 +221,7 @@ const Market: React.FC = () => {
   const headerStats = useMemo(() => {
     if (allOps.length === 0) return null;
     const readyCount = allOps.filter((op) => op.runnable === 'ready').length;
-    const recCount = allOps.filter((op) => op.recommend).length;
-    return `共 ${allOps.length} 个算子 · ${readyCount} 个现在可运行 · ${recCount} 个推荐`;
+    return `共 ${allOps.length} 个算子 · ${readyCount} 个现在可运行`;
   }, [allOps]);
 
   const onAdd = (op: DataPlatform.CatalogOperator) => {
@@ -299,17 +321,6 @@ const Market: React.FC = () => {
                     setCurrent(1);
                   }}
                 />
-                <Space size={6}>
-                  <Switch
-                    size="small"
-                    checked={onlyRecommend}
-                    onChange={(v) => {
-                      setOnlyRecommend(v);
-                      setCurrent(1);
-                    }}
-                  />
-                  <Text type="secondary">仅推荐</Text>
-                </Space>
               </Space>
             </Space>
 
@@ -329,7 +340,7 @@ const Market: React.FC = () => {
               <Empty
                 description={
                   scenario && (scenarioCounts[scenario] ?? 0) === 0
-                    ? '当前筛选下无算子,可关闭「仅推荐」查看全部'
+                    ? '该场景在当前筛选下无算子,可调整筛选条件'
                     : '没有符合条件的算子'
                 }
                 style={{ padding: '48px 0' }}
@@ -345,7 +356,7 @@ const Market: React.FC = () => {
                   }}
                 >
                   {pageData.map((op) => {
-                    const tag = RUNNABLE_TAG[op.runnable];
+                    const tag = runnableTag(op);
                     return (
                       <Card
                         key={op.name}
@@ -373,11 +384,6 @@ const Market: React.FC = () => {
                           <Text strong ellipsis style={{ flex: 1 }}>
                             {op.zhLabel}
                           </Text>
-                          {op.recommend && (
-                            <StarFilled
-                              style={{ color: '#faad14', fontSize: 12 }}
-                            />
-                          )}
                         </div>
                         <Text
                           type="secondary"
@@ -416,10 +422,12 @@ const Market: React.FC = () => {
                           <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
                             {tag.label}
                           </Tag>
+                          {/* 加入不做运行时门控:能否执行取决于所选数据集 / 环境配置,
+                              提交时(jobs._operator_block)按数据集类型 + 能力精确校验并报错;
+                              市场无数据集上下文,这里只展示可运行状态徽标,不预禁用 */}
                           <Button
                             size="small"
                             type="primary"
-                            disabled={op.runnable !== 'ready'}
                             onClick={(e) => {
                               e.stopPropagation();
                               onAdd(op);
@@ -455,8 +463,7 @@ const Market: React.FC = () => {
         title={detail && `${detail.zhLabel} · ${detail.name}`}
         onClose={() => setDetail(undefined)}
         extra={
-          detail &&
-          detail.runnable === 'ready' && (
+          detail && (
             <Button type="primary" onClick={() => onAdd(detail)}>
               加入加工任务
             </Button>
@@ -473,8 +480,8 @@ const Market: React.FC = () => {
               <Tag>
                 {RESOURCE_LABEL[detail.resourceClass] ?? detail.resourceClass}
               </Tag>
-              <Tag color={RUNNABLE_TAG[detail.runnable].color}>
-                {RUNNABLE_TAG[detail.runnable].label}
+              <Tag color={runnableTag(detail).color}>
+                {runnableTag(detail).label}
               </Tag>
             </Space>
             {detail.zhUsageTip && (
@@ -533,8 +540,8 @@ const Market: React.FC = () => {
                   detail.runnable === 'needs_api'
                     ? '该算子需要 LLM API:在后端 .env 配置 OPENAI_* 后可用。'
                     : detail.runnable === 'needs_compute'
-                      ? '该算子需要 GPU / HuggingFace 模型 / vLLM,当前环境暂不可执行。'
-                      : '该算子处理图像/音视频,当前受管数据集为文本,暂不适用。'
+                      ? '该算子需要 Ray 集群 / GPU 算力,当前环境暂不可执行(可加入,提交时按环境精确校验)。'
+                      : '该算子处理图像/音视频,仅适用于多模态(媒体)数据集;请先接入多模态数据集后再使用。'
                 }
               />
             )}
