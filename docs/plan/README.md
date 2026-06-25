@@ -24,6 +24,8 @@
 | [`14-数据接入重构设计.md`](14-数据接入重构设计.md) | 数据接入(接入方式/数据类型/数据格式)四层重构,目标完全满足需求三行(24 项)。核心:**新增正交维度 `semantic_type`(10 枚举,绝不动 `data_type` 功能键)**承载 LLM 数据类型 + 每类型标准 schema 校验/别名归一(纯单测);语义由 `DatasetVersion.semantic_type` 版本列承载(零行内污染、零下游改动,**不写逐行 `__adp`**);连接器注册表按 `(type,db_kind)` 派发(postgresql 真连真测 / PG 族 hologres·kingbase·gaussdb 代码路径可测·品牌承诺级 / goldendb 一驱动 / 达梦·巨杉·hive·doris 结构就绪 / HDFS WebHDFS URL·解析可单测·端到端承诺级 / API 推送入站真做且归并自洽 / S3 采集真做)。迁移 `0012` 仅增两列。格式 11/11 与 `data_type` 契约保留不破坏。**评审已修正 v1 的四处隐性回归 + 「唯一防御点」事实错误。** 覆盖:本地可真测 23 项 / 品牌承诺级 3 项 / 结构就绪 8 项 / 无 missing。分 A→E 五阶段实施 |
 | [`15-数据集接入原理.md`](15-数据集接入原理.md) | **现状原理文档(非设计稿)**:记录 14 号重构 + 类型三轴拆分(`0012`/`0016`)落地后,数据"从外部进入系统、落地为不可变 `DatasetVersion`"的**实际运作方式**(对照 14 号前瞻设计)。三层管道(连接器协议→注册表→`landing` 枢纽);归一化三态(jsonl/manifest/原样二进制);**四条接入路径**(本地上传 3 端点 / DB 采集 `generate-dataset` vs `rerun` **双分叉** / API 推送唯一"追加版本"语义 / 三方 S3 零拷贝托管);`origin` managed↔hosted 分界线 + 删除门;三轴(`source_kind`/`source_format`/`semantic_type`)赋值总矩阵;存储双轨(本地磁盘 vs 平台 MinIO)+ 版本号语义。**核验发现三处真实问题**(fail-loud):① DB `generate-dataset` 误标 `origin=hosted` → 采集数据集**无法删除**(删除门未跟上预览/物化的 scheme 化改造);② proprietary `run_ingest` 调 `land_records` 签名不匹配(潜伏 TypeError);③ id 生成三处重复/单进程内存限流等小项。基线 dev `11ab830`(迁移 HEAD `0016`) |
 
+| [`16-标签管理设计.md`](16-标签管理设计.md) | **标签管理 + 菜单合并**:为已有 `tags`/`dataset_tags`(迁移 `0018`)补管理 API+页(列表含使用数 / 新建 find-or-create / 重命名 / 删除级联 / 批量删 / 合并去重),并把「分类管理」从「数据接入」迁到「数据集仓库」与「标签管理」并列。无 DB 迁移(表已存在),后端新增 `/api/v1/tags`(对齐 categories),前端新增 `./datasets/tags`。标签保持扁平 + 仅挂数据集(YAGNI)。 |
+
 > 任务清单以代码实测为准(2026-06-08),需求或代码大幅变动后需同步刷新。
 >
 > 另:`datahub_arch.png` 为智算数据中台(DataHub)总体架构参考图(外部参考资料,非本规划产物)。
