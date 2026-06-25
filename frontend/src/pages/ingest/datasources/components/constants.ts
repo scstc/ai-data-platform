@@ -12,17 +12,20 @@ export const TYPE_META: Record<
 };
 
 /**
- * 数据库品牌 → 中文名(仅保留可真连品牌;承诺级/结构就绪档已下线,不再对外开列)
+ * 数据库品牌 → 中文名(仅保留已实测可真连的品牌)
  *
- * 旧档位(对应后端连接器,见 docs/plan/14 §4.1):
- *   可真连:postgresql(asyncpg 真测)、goldendb(asyncmy,有本地 MySQL 可测)
- *   承诺级/结构就绪:hologres/kingbase/gaussdb/dameng/sequoiadb/hive/doris
- *     —— PG 线协议承诺或驱动懒加载,实测连不上/无驱动,已从入口移除(后端连接器暂留)。
+ * 实测可连(10.60.1.63):postgresql(asyncpg)、kingbase(PG 线协议)、dameng(dmPython)、
+ *   doris(asyncmy,MySQL 协议)、goldendb(asyncmy,需自有 MySQL/GoldenDB 实例)。
+ * 暂不开放:gaussdb(openGauss SASL,asyncpg 不支持)、sequoiadb(驱动 pysequoiadb 非
+ *   PyPI,需厂商 client 库)、hive(服务器未部署)、hologres(阿里云专用)。
  * Partial<Record>:旧数据源记录仍可显示,缺映射时调用方 fallback 到 dbKind 原值。
  */
 export const DB_KIND_LABEL: Partial<Record<DataPlatform.DbKind, string>> = {
   postgresql: 'PostgreSQL',
   goldendb: 'GoldenDB（MySQL 兼容）',
+  kingbase: '人大金仓 KingbaseES',
+  doris: 'Apache Doris',
+  dameng: '达梦 DM8',
 };
 
 /** 数据库品牌下拉选项(仅可真连品牌) */
@@ -128,10 +131,13 @@ export const STORAGE_CARDS: {
   },
 ];
 
-/** 数据库连接 — 网格小卡片(仅可真连品牌) */
+/** 数据库连接 — 网格小卡片(仅已实测可真连品牌) */
 export const DB_KIND_CARDS: { kind: DataPlatform.DbKind; title: string }[] = [
   { kind: 'postgresql', title: 'PostgreSQL' },
-  { kind: 'goldendb', title: 'GoldenDB（MySQL 兼容）' },
+  { kind: 'goldendb', title: 'GoldenDB' },
+  { kind: 'kingbase', title: 'Kingbase(金仓)' },
+  { kind: 'doris', title: 'Doris' },
+  { kind: 'dameng', title: 'DM(达梦)' },
 ];
 
 /** 配置页标题(按类型) */

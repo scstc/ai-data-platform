@@ -96,6 +96,9 @@ const TYPE_ICON: Record<DataPlatform.DataSourceType, React.ReactNode> = {
 const DB_BRAND_TOKEN: Partial<Record<DataPlatform.DbKind, string>> = {
   postgresql: 'Postgres',
   goldendb: 'GoldenDB',
+  kingbase: 'Kingbase',
+  doris: 'Doris',
+  dameng: 'Dameng',
 };
 
 /** 编辑态标题用的中文短标识 */
