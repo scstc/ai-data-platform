@@ -68,7 +68,8 @@ class DatasetRead(CamelModel):
     # 数据集是否含 hosted 版本(供前端「S3 托管」徽标/删除门控,#18)。
     # 由路由按版本聚合填充,非 ORM 字段,默认 False。
     hosted: bool = False
-    # 最新版本展示标签(如 v2026.6.16 (#5));无版本时 None。
+    # 当前展示版本标签(如 v2026.6.16 (#5)):优先已发布版本(publish 不变量保证
+    # 同数据集至多一个 published),无已发布版本时回退最新版本;无版本时 None。
     # 非 ORM 字段,由路由批量聚合填充。
     latest_version_label: str | None = None
     # 标签名列表(多对多);非 ORM 字段,由路由批量聚合填充。
