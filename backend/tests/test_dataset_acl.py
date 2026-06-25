@@ -221,3 +221,76 @@ async def test_api_list_detail_visibility(client, session_factory, seed_rbac) ->
     anon = await client.get("/api/v1/datasets?current=1&pageSize=50")
     assert anon.status_code == 200
     assert any(d["id"] == "dset-apimgr" for d in anon.json()["data"])
+
+
+async def test_api_patch_gated_by_edit(client, session_factory, seed_rbac) -> None:
+    """PATCH:owner 可改(200);非 owner 非 admin → 403。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-patch", name="p", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    r = await client.patch("/api/v1/datasets/dset-patch", json={"description": "x"})
+    assert r.status_code == 403, r.text
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    r2 = await client.patch(
+        "/api/v1/datasets/dset-patch", json={"description": "changed"}
+    )
+    assert r2.status_code == 200, r2.text
+
+
+async def test_api_acl_share_grants_visibility(
+    client, session_factory, seed_rbac
+) -> None:
+    """owner 经 ACL 端点给 u-staff 授 view ⇒ u-staff 列表可见;非 admin 不能管 ACL。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-share", name="s", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    # u-staff 管不了 ACL(非 owner 非 admin)→ 403
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    bad = await client.post(
+        "/api/v1/datasets/dset-share/acl",
+        json={"subjectType": "user", "subjectId": "u-staff", "level": "view"},
+    )
+    assert bad.status_code == 403, bad.text
+
+    # 授权前:u-staff 看不到
+    lst0 = await client.get("/api/v1/datasets?current=1&pageSize=50")
+    assert all(d["id"] != "dset-share" for d in lst0.json()["data"])
+
+    # owner 授 u-staff view
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    add = await client.post(
+        "/api/v1/datasets/dset-share/acl",
+        json={"subjectType": "user", "subjectId": "u-staff", "level": "view"},
+    )
+    assert add.status_code == 200, add.text
+
+    # 授权后:u-staff 列表可见
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    lst1 = await client.get("/api/v1/datasets?current=1&pageSize=50")
+    assert any(d["id"] == "dset-share" for d in lst1.json()["data"])
+
+
+async def test_api_delete_owner_only(client, session_factory, seed_rbac) -> None:
+    """DELETE:非 owner 非 admin → 403;owner → 200。"""
+    from app.models.dataset import Dataset
+    from app.services.auth import sign_token
+
+    async with session_factory() as s:
+        s.add(Dataset(id="dset-del", name="d", owner="u-mgr", creator="u-mgr"))
+        await s.commit()
+
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    assert (await client.delete("/api/v1/datasets/dset-del")).status_code == 403
+
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    assert (await client.delete("/api/v1/datasets/dset-del")).status_code == 200

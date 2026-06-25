@@ -16,17 +16,18 @@ from pathlib import Path
 from typing import Annotated
 
 import duckdb
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from app.api.deps import current_user, require_admin
+from app.api.deps import current_user, require_admin, require_user
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
 from app.models.dataset import Dataset
+from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.job import Job
@@ -34,6 +35,7 @@ from app.models.job_input import JobInput
 from app.models.tag import DatasetTag, Tag
 from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse, format_version_label
+from app.schemas.dataset_acl import AclCreate, AclRead, AclUpdate
 from app.services import dataset_acl
 from app.schemas.dataset import (
     DatasetDetailRead,
@@ -1336,16 +1338,24 @@ async def get_dataset(
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
 
-@router.patch("/datasets/{dataset_id}", dependencies=[Depends(require_admin)])
+@router.patch("/datasets/{dataset_id}")
 async def update_dataset(
-    dataset_id: str, body: DatasetUpdate, session: SessionDep
+    dataset_id: str,
+    body: DatasetUpdate,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
-    """编辑数据集可变元数据:只更新传入字段,记录变更人。"""
+    """编辑数据集可变元数据:仅 owner/超管/ACL-edit+ 可改;记录变更人;匿名放行。"""
     dataset = await session.get(Dataset, dataset_id)
     if dataset is None:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无权限"},
         )
     updates = body.model_dump(exclude_unset=True)
     # tags 是多对多关联(非 Dataset 列),单独同步,不走 setattr。
@@ -1353,7 +1363,7 @@ async def update_dataset(
         await _sync_dataset_tags(session, dataset_id, updates.pop("tags") or [])
     for field, value in updates.items():
         setattr(dataset, field, value)
-    dataset.last_modifier = "admin"
+    dataset.last_modifier = user.id if user else "admin"
     await session.commit()
     await session.refresh(dataset)
     versions = (
@@ -1464,12 +1474,29 @@ class BatchDeleteRequest(CamelModel):
 _HOSTED_DELETE_MSG = "外部托管数据不支持删除,请用取消托管"
 
 
-@router.delete("/datasets/{dataset_id}", dependencies=[Depends(require_admin)])
-async def delete_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
+@router.delete("/datasets/{dataset_id}")
+async def delete_dataset(
+    dataset_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
     """删除数据集:级联删版本 + 清血缘边(job_inputs)+ 删磁盘产物。
 
+    仅 owner/超管可删(销毁性操作不给 ACL-admin);匿名放行(兼容现状)。
     含 hosted 版本 → 403 拒绝(#18:删源禁止,请走取消托管),绝不动 S3。
+    非管理员且非 owner → 403(数据集不存在也判 403,避免泄露存在性)。
     """
+    # 鉴权:匿名→401(销毁性操作必须登录);超管放行;其余必须是 owner。
+    # 用 HTTPException 抛 403 以保持原 require_admin 的 detail 包裹契约(test_rbac)。
+    if user is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+    if user.role != "admin":
+        ds = await session.get(Dataset, dataset_id)
+        if ds is None or (ds.owner != user.id and ds.creator != user.id):
+            raise HTTPException(
+                status_code=403,
+                detail={"success": False, "message": "无权限"},
+            )
     if await _has_hosted_version(session, dataset_id):
         return JSONResponse(
             status_code=403,
@@ -2367,3 +2394,147 @@ async def download_version(
             )
         return RedirectResponse(url, status_code=302)
     return await _download_zip(version, members, session)
+
+
+# ---- 数据集级 ACL(共享/成员权限)----------------------------------------------
+# 管理 (dataset × subject × level) 授权条目;需 admin 级(owner/超管/ACL-admin)。
+# 权限本体挂在菜单上(系统 perms),这里的 ACL 是数据集维度的共享控制。
+
+
+def _new_acl_id() -> str:
+    """生成形如 dac-<6位hex> 的 ACL 行主键。"""
+    return f"dac-{secrets.token_hex(3)}"
+
+
+def _acl_payload(row: DatasetAcl) -> dict:
+    return AclRead.model_validate(row).model_dump(by_alias=True, mode="json")
+
+
+async def _require_acl_admin(
+    session: SessionDep, dataset_id: str, user: Annotated[User, Depends(require_user)]
+) -> JSONResponse | None:
+    """校验当前用户对该数据集有 admin 级;返回 None 表示放行,否则返回 403/404 响应。"""
+    if await session.get(Dataset, dataset_id) is None:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "数据集不存在"}
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "admin"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无权限"}
+        )
+    return None
+
+
+@router.get("/datasets/{dataset_id}/acl")
+async def list_dataset_acl(
+    dataset_id: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """列出数据集的授权条目(需 admin 级)。"""
+    denied = await _require_acl_admin(session, dataset_id, user)
+    if denied is not None:
+        return denied
+    rows = (
+        await session.scalars(
+            select(DatasetAcl)
+            .where(DatasetAcl.dataset_id == dataset_id)
+            .order_by(DatasetAcl.created_at)
+        )
+    ).all()
+    return JSONResponse(
+        {"data": [_acl_payload(r) for r in rows], "success": True}
+    )
+
+
+@router.post("/datasets/{dataset_id}/acl")
+async def add_dataset_acl(
+    dataset_id: str,
+    body: AclCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """新增授权条目;重复授权 (dataset,subject) → 409。"""
+    denied = await _require_acl_admin(session, dataset_id, user)
+    if denied is not None:
+        return denied
+    if body.subject_type not in ("user", "role") or body.level not in (
+        "view",
+        "edit",
+        "admin",
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "subject_type/level 非法"},
+        )
+    exists = await session.scalar(
+        select(DatasetAcl.id).where(
+            DatasetAcl.dataset_id == dataset_id,
+            DatasetAcl.subject_type == body.subject_type,
+            DatasetAcl.subject_id == body.subject_id,
+        )
+    )
+    if exists is not None:
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "该主体已授权,请用修改"},
+        )
+    row = DatasetAcl(
+        id=_new_acl_id(),
+        dataset_id=dataset_id,
+        subject_type=body.subject_type,
+        subject_id=body.subject_id,
+        level=body.level,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return JSONResponse({"data": _acl_payload(row), "success": True})
+
+
+@router.put("/datasets/{dataset_id}/acl/{acl_id}")
+async def update_dataset_acl(
+    dataset_id: str,
+    acl_id: str,
+    body: AclUpdate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """修改某授权条目的级别(需 admin 级)。"""
+    denied = await _require_acl_admin(session, dataset_id, user)
+    if denied is not None:
+        return denied
+    if body.level not in ("view", "edit", "admin"):
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "level 非法"}
+        )
+    row = await session.get(DatasetAcl, acl_id)
+    if row is None or row.dataset_id != dataset_id:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "授权条目不存在"}
+        )
+    row.level = body.level
+    await session.commit()
+    await session.refresh(row)
+    return JSONResponse({"data": _acl_payload(row), "success": True})
+
+
+@router.delete("/datasets/{dataset_id}/acl/{acl_id}")
+async def delete_dataset_acl(
+    dataset_id: str,
+    acl_id: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """删除某授权条目(需 admin 级)。"""
+    denied = await _require_acl_admin(session, dataset_id, user)
+    if denied is not None:
+        return denied
+    row = await session.get(DatasetAcl, acl_id)
+    if row is None or row.dataset_id != dataset_id:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "授权条目不存在"}
+        )
+    await session.delete(row)
+    await session.commit()
+    return JSONResponse({"success": True})
