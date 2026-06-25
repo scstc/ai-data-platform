@@ -37,11 +37,24 @@ def _child_ancestors(parent: Department) -> str:
 
 @router.get("", dependencies=[Depends(require_perm("system:dept:list"))])
 async def list_depts(session: SessionDep) -> JSONResponse:
-    """全部部门组装为树(同层按 sort)。"""
+    """全部部门组装为树(同层按 sort),附每部门直属用户数(userCount)。"""
     rows = (
         await session.scalars(select(Department).order_by(Department.sort))
     ).all()
+    # 直属用户数:按 dept_id 分组计数(不含子部门,避免重复计)
+    counts: dict[str, int] = {}
+    if rows:
+        cnt_rows = (
+            await session.execute(
+                select(User.dept_id, func.count())
+                .where(User.dept_id.is_not(None))
+                .group_by(User.dept_id)
+            )
+        ).all()
+        counts = {did: c for did, c in cnt_rows if did is not None}
     by_id: dict[str, DeptRead] = {d.id: DeptRead.model_validate(d) for d in rows}
+    for d in rows:
+        by_id[d.id].user_count = counts.get(d.id, 0)
     roots: list[DeptRead] = []
     for d in rows:
         item = by_id[d.id]

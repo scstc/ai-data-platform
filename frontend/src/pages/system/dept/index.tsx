@@ -58,6 +58,12 @@ const DeptPage: FC = () => {
   const columns: ProColumns<System.Department>[] = [
     { title: '部门', dataIndex: 'name', width: 200 },
     { title: '负责人', dataIndex: 'leader', width: 120 },
+    {
+      title: '用户数',
+      dataIndex: 'userCount',
+      width: 90,
+      render: (_, r) => `${r.userCount ?? 0} 人`,
+    },
     { title: '排序', dataIndex: 'sort', width: 80 },
     {
       title: '状态',

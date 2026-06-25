@@ -67,6 +67,7 @@ class DeptRead(CamelModel):
     phone: str | None = None
     email: str | None = None
     status: str
+    user_count: int = 0
     children: list[DeptRead] = []
 
 

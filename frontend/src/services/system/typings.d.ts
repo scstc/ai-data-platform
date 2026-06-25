@@ -38,6 +38,7 @@ declare namespace System {
     phone?: string;
     email?: string;
     status: string;
+    userCount?: number;
     children?: Department[];
   };
   type DeptCreate = {

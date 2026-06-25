@@ -12,7 +12,7 @@ import {
 import { useAccess } from '@umijs/max';
 import { Button, Card, message, Popconfirm, Tag } from 'antd';
 import dayjs from 'dayjs';
-import { type FC, useRef, useState } from 'react';
+import { type FC, useEffect, useRef, useState } from 'react';
 import {
   createUser,
   deleteUser,
@@ -43,6 +43,18 @@ const toDeptTreeData = (
     children: n.children?.length ? toDeptTreeData(n.children) : undefined,
   }));
 
+/** 部门树展平为 {id: name},供用户列表把 deptId 渲染成部门名。 */
+const flattenDepts = (
+  nodes: System.Department[],
+  acc: Record<string, string> = {},
+): Record<string, string> => {
+  for (const n of nodes) {
+    acc[n.id] = n.name;
+    if (n.children?.length) flattenDepts(n.children, acc);
+  }
+  return acc;
+};
+
 /** 用户管理:CRUD + 分配角色 + 分配部门 + 重置密码 + 启停。
  *  按钮级权限:system:user:{add,edit,remove} / resetPwd 走 system:user:edit。 */
 const UserPage: FC = () => {
@@ -58,10 +70,35 @@ const UserPage: FC = () => {
   const [roleOptions, setRoleOptions] = useState<
     { label: string; value: string }[]
   >([]);
+  const [roleKeyMap, setRoleKeyMap] = useState<Record<string, string>>({});
 
   const reload = () => actionRef.current?.reload();
+  const deptMap = flattenDepts(deptTree);
 
-  // 进入/打开表单时加载部门树与角色选项(轻量,本地缓存)
+  // 进入页面即加载部门树与角色(供列表把 id/key 渲染成名字)
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await listDepts();
+        setDeptTree(d.data ?? []);
+      } catch {
+        /* ignore */
+      }
+      try {
+        const r = await listRoles({ current: 1, pageSize: 200 });
+        setRoleOptions(
+          (r.data ?? []).map((x) => ({ label: x.name, value: x.id })),
+        );
+        setRoleKeyMap(
+          Object.fromEntries((r.data ?? []).map((x) => [x.roleKey, x.name])),
+        );
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  // 打开表单时确保元数据已加载(轻量,本地缓存)
   const ensureMeta = async () => {
     if (deptTree.length === 0) {
       try {
@@ -90,13 +127,14 @@ const UserPage: FC = () => {
       title: '角色',
       dataIndex: 'roles',
       width: 160,
-      render: (_, r) => r.roles?.map((k) => <Tag key={k}>{k}</Tag>) ?? '-',
+      render: (_, r) =>
+        r.roles?.map((k) => <Tag key={k}>{roleKeyMap[k] ?? k}</Tag>) ?? '-',
     },
     {
       title: '部门',
       dataIndex: 'deptId',
       width: 120,
-      render: (_, r) => r.deptId ?? '-',
+      render: (_, r) => (r.deptId ? (deptMap[r.deptId] ?? r.deptId) : '-'),
     },
     {
       title: '状态',
