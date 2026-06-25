@@ -8,7 +8,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useParams, useSearchParams } from '@umijs/max';
+import { history, useLocation, useParams, useSearchParams } from '@umijs/max';
 import {
   Alert,
   Badge,
@@ -19,18 +19,26 @@ import {
   Form,
   Input,
   InputNumber,
+  List,
   message,
   Select,
   Space,
+  Spin,
   Switch,
+  Tag,
   TreeSelect,
   Typography,
 } from 'antd';
 import { type FC, useEffect, useMemo, useState } from 'react';
 import {
   createDataSource,
+  listBuckets,
   listCategories,
+  listDatasourceTables,
+  listObjects,
+  rotatePushToken,
   testDataSource,
+  updateDataSource,
 } from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
 import {
@@ -85,72 +93,224 @@ const TYPE_ICON: Record<DataPlatform.DataSourceType, React.ReactNode> = {
 };
 
 /** 数据库品牌 → 连接名示例用的英文短标识(连接名称占位符按所选品牌变化) */
-const DB_BRAND_TOKEN: Record<DataPlatform.DbKind, string> = {
+const DB_BRAND_TOKEN: Partial<Record<DataPlatform.DbKind, string>> = {
   postgresql: 'Postgres',
   goldendb: 'GoldenDB',
-  hologres: 'Hologres',
-  kingbase: 'Kingbase',
-  gaussdb: 'GaussDB',
-  dameng: 'Dameng',
-  sequoiadb: 'SequoiaDB',
-  hive: 'Hive',
-  doris: 'Doris',
 };
 
-/** 右侧浏览面板:保存前显示"需先连接"空态(浏览接口需已保存的数据源 id) */
-const BrowserPanel: FC<{ type: DataPlatform.DataSourceType }> = ({ type }) => {
-  const titleMap: Record<DataPlatform.DataSourceType, string> = {
-    s3: '存储桶浏览',
-    hdfs: 'HDFS 浏览',
-    database: '连接预览',
-    api: '推送端点',
-  };
-  const hint =
-    type === 'database'
-      ? '测试连接通过并保存后,可在编辑页浏览库表结构。'
-      : '测试连接凭证并保存后,可在编辑页浏览目录 / 文件结构。';
-  return (
-    <Card
-      title={
-        <Space>
-          <FolderOpenOutlined />
-          {titleMap[type]}
-        </Space>
-      }
-      style={{ position: 'sticky', top: 16 }}
-      styles={{
-        body: {
-          minHeight: 420,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        },
-      }}
-    >
+/** 编辑态标题用的中文短标识 */
+const TYPE_SUBJECT: Record<DataPlatform.DataSourceType, string> = {
+  s3: 'S3',
+  hdfs: 'HDFS',
+  database: '数据库',
+  api: 'API',
+};
+
+/** 字节数转人类可读(与 datasets/list 的 fmtSize 对齐) */
+const fmtSize = (n?: number) => {
+  if (!n && n !== 0) return '-';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+};
+
+/** 从请求错误里抠后端给的原因(浏览请求跳过全局 toast,改在面板内友好展示) */
+const extractMsg = (err: any): string =>
+  err?.data?.message ||
+  err?.response?.data?.message ||
+  err?.info?.errorMessage ||
+  err?.message ||
+  '加载失败,请稍后重试';
+
+const BROWSE_TITLE: Record<DataPlatform.DataSourceType, string> = {
+  s3: '存储桶浏览',
+  hdfs: 'HDFS 浏览',
+  database: '连接预览',
+  api: '推送端点',
+};
+
+/** 右侧浏览面板:create 态(无 id)显示空态;edit 态按类型拉真实目录/表
+ *  · s3:桶下拉 + 桶内对象列表 · database:表列表 · hdfs:后端无浏览接口,诚实告知 */
+const BrowserPanel: FC<{
+  type: DataPlatform.DataSourceType;
+  datasourceId?: string;
+}> = ({ type, datasourceId }) => {
+  // 有已保存 id 才发请求;首屏直接给 spinner,避免空数据闪一下
+  const [loading, setLoading] = useState(!!datasourceId);
+  const [error, setError] = useState<string | null>(null);
+  const [buckets, setBuckets] = useState<string[]>([]);
+  const [bucket, setBucket] = useState<string | undefined>(undefined);
+  const [objects, setObjects] = useState<DataPlatform.S3Object[]>([]);
+  const [tables, setTables] = useState<string[]>([]);
+
+  // s3:列桶(skipErrorHandler:连不上时不在全局弹 toast,面板内告知)
+  useEffect(() => {
+    if (!datasourceId || type !== 's3') return;
+    setLoading(true);
+    setError(null);
+    listBuckets(datasourceId, { skipErrorHandler: true })
+      .then((res) => setBuckets(res.data ?? []))
+      .catch((err) => setError(extractMsg(err)))
+      .finally(() => setLoading(false));
+  }, [datasourceId, type]);
+
+  // s3:选定桶后列对象
+  useEffect(() => {
+    if (!datasourceId || type !== 's3' || !bucket) return;
+    setLoading(true);
+    setError(null);
+    listObjects(datasourceId, { bucket }, { skipErrorHandler: true })
+      .then((res) => setObjects(res.data ?? []))
+      .catch((err) => setError(extractMsg(err)))
+      .finally(() => setLoading(false));
+  }, [datasourceId, type, bucket]);
+
+  // database:列表
+  useEffect(() => {
+    if (!datasourceId || type !== 'database') return;
+    setLoading(true);
+    setError(null);
+    listDatasourceTables(datasourceId, { skipErrorHandler: true })
+      .then((res) => setTables(res.data ?? []))
+      .catch((err) => setError(extractMsg(err)))
+      .finally(() => setLoading(false));
+  }, [datasourceId, type]);
+
+  let body: React.ReactNode;
+  if (!datasourceId) {
+    // create 态:尚未保存,浏览接口需已保存的数据源 id
+    body = (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
         description={
           <Space direction="vertical" size={4}>
             <Text strong>需先建立连接</Text>
             <Text type="secondary" style={{ fontSize: 13 }}>
-              {hint}
+              {type === 'database'
+                ? '测试连接通过并保存后,可在此浏览库表结构。'
+                : '测试连接凭证并保存后,可在此浏览目录 / 文件结构。'}
             </Text>
           </Space>
         }
       />
+    );
+  } else if (error) {
+    // 加载失败(驱动未装 / SASL 不支持 等):面板内友好告知,不弹全局 toast
+    body = (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description={
+          <Space direction="vertical" size={4}>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              该连接暂无法浏览
+            </Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {error}
+            </Text>
+          </Space>
+        }
+      />
+    );
+  } else if (type === 's3') {
+    body = (
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <Select
+          showSearch
+          placeholder="选择桶"
+          style={{ width: '100%' }}
+          value={bucket}
+          onChange={(v) => {
+            setBucket(v);
+            setObjects([]);
+          }}
+          options={buckets.map((b) => ({ label: b, value: b }))}
+        />
+        {bucket &&
+          (objects.length ? (
+            <div style={{ maxHeight: 340, overflow: 'auto' }}>
+              <List<DataPlatform.S3Object>
+                size="small"
+                dataSource={objects}
+                renderItem={(o) => (
+                  <List.Item>
+                    <Space
+                      style={{
+                        width: '100%',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <Text style={{ wordBreak: 'break-all' }}>{o.key}</Text>
+                      <Text type="secondary" style={{ flexShrink: 0 }}>
+                        {fmtSize(o.size)}
+                      </Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            </div>
+          ) : (
+            !loading && <Empty description="桶内暂无对象" />
+          ))}
+      </Space>
+    );
+  } else if (type === 'database') {
+    body = tables.length ? (
+      <div style={{ maxHeight: 380, overflow: 'auto' }}>
+        <Space wrap>
+          {tables.map((t) => (
+            <Tag key={t} color="blue">
+              {t}
+            </Tag>
+          ))}
+        </Space>
+      </div>
+    ) : (
+      !loading && <Empty description="未读到表" />
+    );
+  } else {
+    // hdfs:后端无浏览接口
+    body = (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="HDFS 暂不支持在线浏览"
+      />
+    );
+  }
+
+  return (
+    <Card
+      title={
+        <Space>
+          <FolderOpenOutlined />
+          {BROWSE_TITLE[type]}
+        </Space>
+      }
+      style={{ position: 'sticky', top: 16 }}
+      styles={{ body: { minHeight: 420 } }}
+    >
+      <Spin spinning={loading}>{body}</Spin>
     </Card>
   );
 };
 
-/** 数据源配置页:左侧凭证表单 + 测试连接,右侧浏览面板(两栏布局) */
+/** 数据源配置页:左侧凭证表单 + 测试连接,右侧浏览面板(两栏布局)。
+ *  新建走 query 模板(dbKind/provider);编辑走路由 state 传入的整条记录,回填后 PUT 更新。 */
 const DataSourceConfigPage: FC = () => {
   const params = useParams();
   const [search] = useSearchParams();
+  const location = useLocation();
   const type = (params.type ?? 's3') as DataPlatform.DataSourceType;
   const dbKindFromQuery = search.get('dbKind') as DataPlatform.DbKind | null;
   // S3 兼容厂商档(s3 / minio / oss / obs):仅影响标题与默认 Endpoint / AK-SK 标注
   const s3Provider = (search.get('provider') ?? 's3') as S3Provider;
   const s3Meta = S3_PROVIDERS[s3Provider] ?? S3_PROVIDERS.s3;
+
+  // 编辑模式:list 行已含 config,整条记录经路由 state 传入;?id= 仅作"编辑态"URL 信号(刷新丢 state 时提示)
+  const editRecord = (
+    location.state as { record?: DataPlatform.DataSource } | null
+  )?.record;
+  const editId = search.get('id');
+  const isEdit = !!editRecord;
 
   const [form] = Form.useForm();
   const [testing, setTesting] = useState(false);
@@ -160,6 +320,11 @@ const DataSourceConfigPage: FC = () => {
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
   );
+  // api 编辑:推送地址由后端生成,只读展示 + 可轮换 token
+  const [pushUrl, setPushUrl] = useState<string>(
+    (editRecord?.config?.url as string) || '',
+  );
+  const [rotating, setRotating] = useState(false);
 
   useEffect(() => {
     listCategories()
@@ -173,15 +338,34 @@ const DataSourceConfigPage: FC = () => {
     }
   }, [type, dbKindFromQuery, form]);
 
+  // 编辑回填:从记录还原 name/config/dbKind/categoryId(create 走 query 模板,不进这里)
+  useEffect(() => {
+    if (!editRecord) return;
+    form.setFieldsValue({
+      name: editRecord.name,
+      description: editRecord.description,
+      categoryId: editRecord.categoryId ?? undefined,
+      dbKind: editRecord.dbKind,
+      ...editRecord.config,
+    });
+  }, [editRecord, form]);
+
   const pageTitle = useMemo(() => {
+    if (isEdit) {
+      const subject =
+        type === 'database' && editRecord?.dbKind
+          ? (DB_KIND_LABEL[editRecord.dbKind] ?? TYPE_SUBJECT.database)
+          : TYPE_SUBJECT[type];
+      return `编辑 ${subject} 连接`;
+    }
     if (type === 's3') {
       return s3Meta.title;
     }
     if (type === 'database' && dbKindFromQuery) {
-      return `配置 ${DB_KIND_LABEL[dbKindFromQuery]} 连接`;
+      return `配置 ${DB_KIND_LABEL[dbKindFromQuery] ?? '数据库'} 连接`;
     }
     return CONFIG_TITLE[type] ?? '配置数据源连接';
-  }, [type, dbKindFromQuery, s3Meta]);
+  }, [isEdit, type, editRecord, dbKindFromQuery, s3Meta]);
 
   // 连接名称示例:按类型给不同提示(S3 按厂商档、数据库按所选品牌),避免千篇一律
   const watchedDbKind = Form.useWatch('dbKind', form) as
@@ -199,7 +383,7 @@ const DataSourceConfigPage: FC = () => {
     }
     if (type === 'database') {
       const kind = watchedDbKind ?? dbKindFromQuery ?? undefined;
-      const brand = kind ? DB_BRAND_TOKEN[kind] : 'Database';
+      const brand = (kind && DB_BRAND_TOKEN[kind]) || 'Database';
       return `${brand}_Orders_Prod`;
     }
     if (type === 'hdfs') return 'Hadoop_HDFS_RawZone';
@@ -217,17 +401,22 @@ const DataSourceConfigPage: FC = () => {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await testDataSource({
-        type,
-        dbKind: type === 'database' ? values.dbKind : undefined,
-        config: pickConfig(type, values),
-      });
+      const result = await testDataSource(
+        {
+          type,
+          dbKind: type === 'database' ? values.dbKind : undefined,
+          config: pickConfig(type, values),
+        },
+        { skipErrorHandler: true },
+      );
       setTestResult(result);
-      result.success
-        ? message.success(`连接成功,延迟 ${result.latencyMs}ms`)
-        : message.error(result.message);
-    } catch {
-      message.error('测试连接请求失败');
+      if (result.success) {
+        message.success(`连接成功,延迟 ${result.latencyMs}ms`);
+      }
+      // 失败:结果进 testResult,由下方 Alert 展示真实原因(不另弹 toast)
+    } catch (err) {
+      // success:false 被 errorThrower 抛出(已 skipErrorHandler,无全局 toast):还原真实原因进 Alert
+      setTestResult({ success: false, message: extractMsg(err), latencyMs: 0 });
     } finally {
       setTesting(false);
     }
@@ -242,20 +431,44 @@ const DataSourceConfigPage: FC = () => {
     }
     setSaving(true);
     try {
-      await createDataSource({
+      const payload = {
         name: values.name,
         type,
         dbKind: type === 'database' ? values.dbKind : undefined,
         config: pickConfig(type, values),
         description: values.description,
         categoryId: values.categoryId,
-      });
-      message.success('数据源已创建');
+      };
+      if (isEdit && editRecord) {
+        await updateDataSource(editRecord.id, payload);
+        message.success('数据源已更新');
+      } else {
+        await createDataSource(payload);
+        message.success('数据源已创建');
+      }
       history.push('/ingest/datasources');
     } catch {
-      message.error('创建失败,请重试');
+      message.error(isEdit ? '更新失败,请重试' : '创建失败,请重试');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRotateToken = async () => {
+    if (!editRecord) return;
+    setRotating(true);
+    try {
+      const res = await rotatePushToken(editRecord.id);
+      if (res.success) {
+        setPushUrl(res.data.url);
+        message.success('推送 token 已轮换,旧 token 立即失效');
+      } else {
+        message.error('轮换失败,请重试');
+      }
+    } catch {
+      message.error('轮换失败,请重试');
+    } finally {
+      setRotating(false);
     }
   };
 
@@ -264,13 +477,43 @@ const DataSourceConfigPage: FC = () => {
   const crumbLast =
     type === 's3' ? s3Provider.toUpperCase() : type.toUpperCase();
 
+  // 编辑态刷新(?id= 还在但 state 丢失):无 detail 接口无法回填,提示返回列表
+  if (editId && !editRecord) {
+    return (
+      <PageContainer>
+        <Alert
+          type="warning"
+          showIcon
+          message="编辑态已失效"
+          description="编辑数据源不支持直接刷新。请返回数据源列表,重新点击「编辑」进入。"
+          action={
+            <Button
+              size="small"
+              onClick={() => history.push('/ingest/datasources')}
+            >
+              返回列表
+            </Button>
+          }
+        />
+      </PageContainer>
+    );
+  }
+
   return (
     <PageContainer
-      breadcrumb={buildBreadcrumb([
-        { title: '数据源', path: '/ingest/datasources' },
-        { title: '新建连接', path: '/ingest/datasources/new' },
-        { title: crumbLast },
-      ])}
+      breadcrumb={buildBreadcrumb(
+        // 与菜单层级对齐:数据接入 › 数据源管理 › <被编辑名 / 新建连接+类型>
+        [
+          { title: '数据接入', path: '/ingest' },
+          { title: '数据源管理', path: '/ingest/datasources' },
+          ...(isEdit
+            ? [{ title: editRecord?.name || '编辑' }]
+            : [
+                { title: '新建连接', path: '/ingest/datasources/new' },
+                { title: crumbLast },
+              ]),
+        ],
+      )}
       title={
         <Space>
           {TYPE_ICON[type]}
@@ -291,7 +534,7 @@ const DataSourceConfigPage: FC = () => {
           loading={saving}
           onClick={handleSave}
         >
-          保存连接
+          {isEdit ? '保存修改' : '保存连接'}
         </Button>,
       ]}
     >
@@ -457,15 +700,46 @@ const DataSourceConfigPage: FC = () => {
                 </>
               )}
 
-              {isApi && (
-                <Alert
-                  type="info"
-                  showIcon
-                  icon={<ThunderboltOutlined />}
-                  style={{ marginBottom: 16 }}
-                  message="保存后自动生成推送地址与 token"
-                  description="外部系统向生成的地址 POST 数据(JSON 数组或 jsonl)即可接入;在数据源编辑页查看地址、token 并按需轮换。"
-                />
+              {isApi && isEdit && pushUrl ? (
+                <Form.Item label="推送地址">
+                  <Space
+                    direction="vertical"
+                    style={{ width: '100%' }}
+                    size={12}
+                  >
+                    <Text
+                      code
+                      copyable={{ text: pushUrl }}
+                      style={{ wordBreak: 'break-all' }}
+                    >
+                      {pushUrl}
+                    </Text>
+                    <Button
+                      size="small"
+                      loading={rotating}
+                      danger
+                      onClick={handleRotateToken}
+                    >
+                      轮换 Token
+                    </Button>
+                    <Paragraph type="secondary" style={{ margin: 0 }}>
+                      外部系统向推送地址 POST 数据(JSON 数组或
+                      jsonl)即可接入。Token 即鉴权凭证,泄露后点「轮换
+                      Token」立即失效旧 token。
+                    </Paragraph>
+                  </Space>
+                </Form.Item>
+              ) : (
+                isApi && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    icon={<ThunderboltOutlined />}
+                    style={{ marginBottom: 16 }}
+                    message="保存后自动生成推送地址与 token"
+                    description="外部系统向生成的地址 POST 数据(JSON 数组或 jsonl)即可接入;在数据源编辑页查看地址、token 并按需轮换。"
+                  />
+                )
               )}
 
               <Form.Item name="categoryId" label="分类(可选)">
@@ -559,7 +833,7 @@ const DataSourceConfigPage: FC = () => {
         </div>
 
         {/* 右:浏览面板(API 类型不显示) */}
-        {!isApi && <BrowserPanel type={type} />}
+        {!isApi && <BrowserPanel type={type} datasourceId={editRecord?.id} />}
       </div>
 
       {isApi && (

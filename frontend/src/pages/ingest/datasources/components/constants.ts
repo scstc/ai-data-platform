@@ -12,32 +12,23 @@ export const TYPE_META: Record<
 };
 
 /**
- * 数据库品牌 → 中文名
+ * 数据库品牌 → 中文名(仅保留可真连品牌;承诺级/结构就绪档已下线,不再对外开列)
  *
- * 分组说明（对应后端连接器档位，见 docs/plan/14 §4.1）：
- *   可真连：postgresql（asyncpg 真测）、goldendb（asyncmy，有本地 MySQL 可测）
- *   品牌承诺级：hologres / kingbase / gaussdb（PG 线协议，代码路径同 postgresql；需真库验证）
- *   结构就绪：dameng / sequoiadb / hive / doris（驱动懒加载，未装驱动时诚实返回 not-ready）
+ * 旧档位(对应后端连接器,见 docs/plan/14 §4.1):
+ *   可真连:postgresql(asyncpg 真测)、goldendb(asyncmy,有本地 MySQL 可测)
+ *   承诺级/结构就绪:hologres/kingbase/gaussdb/dameng/sequoiadb/hive/doris
+ *     —— PG 线协议承诺或驱动懒加载,实测连不上/无驱动,已从入口移除(后端连接器暂留)。
+ * Partial<Record>:旧数据源记录仍可显示,缺映射时调用方 fallback 到 dbKind 原值。
  */
-export const DB_KIND_LABEL: Record<DataPlatform.DbKind, string> = {
-  // ── 可真连 ──────────────────────────────────────────────────────────────
+export const DB_KIND_LABEL: Partial<Record<DataPlatform.DbKind, string>> = {
   postgresql: 'PostgreSQL',
   goldendb: 'GoldenDB（MySQL 兼容）',
-  // ── 品牌承诺级（PG 线协议，需真库验证）────────────────────────────────
-  hologres: '阿里 Hologres（承诺级）',
-  kingbase: '人大金仓 KingbaseES（承诺级）',
-  gaussdb: '华为 GaussDB（承诺级）',
-  // ── 结构就绪（驱动未装时返回明确提示，不伪造成功）────────────────────
-  dameng: '达梦 DM（结构就绪）',
-  sequoiadb: '巨杉 SequoiaDB（结构就绪）',
-  hive: 'Apache Hive（结构就绪）',
-  doris: 'Apache Doris（结构就绪）',
 };
 
-/** 数据库品牌下拉选项 */
+/** 数据库品牌下拉选项(仅可真连品牌) */
 export const DB_KIND_OPTIONS = (
   Object.keys(DB_KIND_LABEL) as DataPlatform.DbKind[]
-).map((value) => ({ value, label: DB_KIND_LABEL[value] }));
+).map((value) => ({ value, label: DB_KIND_LABEL[value] as string }));
 
 /** 状态 → Badge 文案与状态色 */
 export const STATUS_META: Record<
@@ -48,26 +39,6 @@ export const STATUS_META: Record<
   failed: { label: '失败', status: 'error' },
   pending: { label: '待验证', status: 'default' },
 };
-
-/** 新建向导四张类型卡片 */
-export const TYPE_CARDS: {
-  type: DataPlatform.DataSourceType;
-  title: string;
-  desc: string;
-}[] = [
-  {
-    type: 's3',
-    title: 'S3 兼容对象存储',
-    desc: '对接 AWS S3 / MinIO 等对象存储桶',
-  },
-  { type: 'hdfs', title: 'HDFS', desc: '对接 Hadoop 分布式文件系统' },
-  {
-    type: 'database',
-    title: '数据库直连',
-    desc: '达梦 / Hive / Doris 等 8 种数据库',
-  },
-  { type: 'api', title: 'API 推送', desc: '由外部系统主动推送数据到平台' },
-];
 
 // ---------------------------------------------------------------------------
 // 接入方式选择落地页(/ingest/datasources/new):按类目分组的卡片
@@ -157,17 +128,10 @@ export const STORAGE_CARDS: {
   },
 ];
 
-/** 数据库连接 — 网格小卡片(承接 DB_KIND_LABEL 全部品牌) */
+/** 数据库连接 — 网格小卡片(仅可真连品牌) */
 export const DB_KIND_CARDS: { kind: DataPlatform.DbKind; title: string }[] = [
-  { kind: 'dameng', title: 'DM(达梦)' },
-  { kind: 'goldendb', title: 'GoldenDB' },
-  { kind: 'kingbase', title: 'Kingbase(金仓)' },
-  { kind: 'gaussdb', title: 'GaussDB' },
-  { kind: 'hologres', title: 'Hologres' },
-  { kind: 'sequoiadb', title: 'SequoiaDB(巨杉)' },
-  { kind: 'hive', title: 'Hive' },
-  { kind: 'doris', title: 'Doris' },
   { kind: 'postgresql', title: 'PostgreSQL' },
+  { kind: 'goldendb', title: 'GoldenDB（MySQL 兼容）' },
 ];
 
 /** 配置页标题(按类型) */

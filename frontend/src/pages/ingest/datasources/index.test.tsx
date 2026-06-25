@@ -24,11 +24,6 @@ vi.mock('@ant-design/pro-components', () => ({
   },
 }));
 
-// 表单抽屉是独立单元，这里仅占位，避免 StepsForm 真实渲染干扰
-vi.mock('./components/DataSourceFormDrawer', () => ({
-  default: ({ open }: any) => (open ? <div data-testid="form-drawer" /> : null),
-}));
-
 // 分类管理抽屉是独立组件，这里占位，避免其内部 ProTable/ModalForm 真实渲染干扰
 vi.mock('@/components', () => ({
   CategoryManager: ({ open }: any) =>

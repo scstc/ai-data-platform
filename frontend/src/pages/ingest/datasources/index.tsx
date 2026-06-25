@@ -16,13 +16,10 @@ import {
 } from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
-import DataSourceFormDrawer from './components/DataSourceFormDrawer';
 
 const DataSourcesPage: FC = () => {
   const access = useAccess();
   const actionRef = useRef<ActionType | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [editingRecord, setEditingRecord] = useState<DataPlatform.DataSource>();
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
@@ -41,12 +38,14 @@ const DataSourcesPage: FC = () => {
     loadCategories();
   }, [loadCategories]);
 
-  // 新建走接入方式选择落地页(新模式);编辑仍用抽屉
+  // 新建/编辑都走分类型配置页(/new/:type):编辑把整条记录经路由 state 传入回填,?id= 标记编辑态
   const openCreate = () => history.push('/ingest/datasources/new');
 
   const openEdit = (record: DataPlatform.DataSource) => {
-    setEditingRecord(record);
-    setDrawerOpen(true);
+    history.push(
+      `/ingest/datasources/new/${record.type}?id=${encodeURIComponent(record.id)}`,
+      { record },
+    );
   };
 
   const handleDelete = async (id: string) => {
@@ -83,7 +82,7 @@ const DataSourcesPage: FC = () => {
         const meta = TYPE_META[record.type];
         const label =
           record.type === 'database' && record.dbKind
-            ? `数据库 · ${DB_KIND_LABEL[record.dbKind]}`
+            ? `数据库 · ${DB_KIND_LABEL[record.dbKind] ?? record.dbKind}`
             : meta.label;
         return <Tag color={meta.color}>{label}</Tag>;
       },
@@ -187,13 +186,6 @@ const DataSourcesPage: FC = () => {
           };
         }}
         columns={columns}
-      />
-      <DataSourceFormDrawer
-        open={drawerOpen}
-        record={editingRecord}
-        categoryTreeData={categoryTreeData}
-        onClose={() => setDrawerOpen(false)}
-        onSuccess={() => actionRef.current?.reload()}
       />
       <CategoryManager
         open={categoryOpen}

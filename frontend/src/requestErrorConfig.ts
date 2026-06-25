@@ -33,9 +33,11 @@ export const errorConfig: RequestConfig = {
       const { success, data, errorCode, errorMessage, showType } =
         res as unknown as ResponseStructure;
       if (!success) {
-        const error: any = new Error(errorMessage);
+        // 后端 bare 契约(datasources/test 等)用 message 而非 errorMessage,这里兜底取
+        const msg = errorMessage || (res as any).message;
+        const error: any = new Error(msg);
         error.name = 'BizError';
-        error.info = { errorCode, errorMessage, showType, data };
+        error.info = { errorCode, errorMessage: msg, showType, data };
         throw error; // 抛出自制的错误
       }
     },
