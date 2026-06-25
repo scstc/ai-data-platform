@@ -33,6 +33,7 @@ from app.api.v1 import (
 )
 from app.api.v1.system import menus as system_menus
 from app.api.v1.system import roles as system_roles
+from app.api.v1.system import users as system_users
 from app.core.audit import audit_middleware
 from app.core.config import settings
 from app.core.db import async_session_factory
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(llm_config.router, prefix="/api/v1")
     app.include_router(system_menus.router, prefix="/api/v1")
     app.include_router(system_roles.router, prefix="/api/v1")
+    app.include_router(system_users.router, prefix="/api/v1")
     app.include_router(compat.router, prefix="/api")
 
     @app.get("/healthz")
