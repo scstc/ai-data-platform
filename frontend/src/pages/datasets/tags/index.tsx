@@ -1,12 +1,12 @@
 import {
+  type ActionType,
   ModalForm,
   PageContainer,
+  type ProColumns,
   ProForm,
   ProFormSelect,
   ProFormText,
   ProTable,
-  type ActionType,
-  type ProColumns,
 } from '@ant-design/pro-components';
 import { useAccess } from '@umijs/max';
 import { Button, Card, message, Popconfirm, Tag } from 'antd';
@@ -20,8 +20,8 @@ import {
   mergeTags,
   updateTag,
 } from '@/services/data-platform';
-import { tagColor } from '@/utils/tags';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
+import { tagColor } from '@/utils/tags';
 
 const pickErrMsg = (err: unknown, fallback: string): string => {
   const e = err as { response?: { data?: { message?: string } } };
@@ -167,7 +167,11 @@ const TagsPage: FC = () => {
               );
             }
             btns.push(
-              <Button key="create" type="primary" onClick={() => setCreateOpen(true)}>
+              <Button
+                key="create"
+                type="primary"
+                onClick={() => setCreateOpen(true)}
+              >
                 新建标签
               </Button>,
             );
@@ -233,7 +237,10 @@ const TagsPage: FC = () => {
             return false;
           }
           try {
-            await mergeTags({ sourceId: values.sourceId, targetId: values.targetId });
+            await mergeTags({
+              sourceId: values.sourceId,
+              targetId: values.targetId,
+            });
             message.success('已合并');
             setMergeOpen(false);
             setSelected([]);

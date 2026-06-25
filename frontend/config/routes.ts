@@ -37,6 +37,7 @@ export default [
   { path: '/lineage', redirect: '/ops/lineage' },
   { path: '/security', redirect: '/ops/security' },
   { path: '/ingest/assistant', redirect: '/assistant' },
+  { path: '/ingest/categories', redirect: '/datasets/categories' },
   // 算子市场(置顶 · 独立顶级入口:data-juicer 算子目录,供加工任务编排选用)
   {
     path: '/operators',
@@ -156,7 +157,6 @@ export default [
         hideInMenu: true,
         component: './datasets/detail',
       },
-      { path: '/ingest/categories', redirect: '/datasets/categories' },
     ],
   },
   // ③ 数据评估(只读侧:不产新版本,只对原版本打分/打标)
