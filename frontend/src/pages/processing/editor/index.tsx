@@ -42,11 +42,14 @@ const Editor: React.FC<{
   title?: string;
   noun?: string;
   redirectHref?: string;
+  /** 业务桶:清洗页传 "cleansing" 锁定算子库;加工页不传 → 展示全部算子 */
+  bucket?: string;
 }> = ({
   jobType = 'process',
   title = '新建加工任务',
   noun = '加工',
   redirectHref = '/governance/processing',
+  bucket,
 }) => {
   const { steps, add, remove, reorder, updateParams, replaceAll, clear } =
     useModel('opCart');
@@ -273,7 +276,7 @@ const Editor: React.FC<{
             size="small"
             styles={{ body: { height: 460, padding: 12 } }}
           >
-            <OperatorLibrary onAdd={add} />
+            <OperatorLibrary onAdd={add} bucket={bucket} />
           </Card>
         </Col>
         <Col span={10}>

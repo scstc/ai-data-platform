@@ -7,5 +7,6 @@ export default () => (
     title="新建清洗任务"
     noun="清洗"
     redirectHref="/governance/cleaning"
+    bucket="cleansing"
   />
 );

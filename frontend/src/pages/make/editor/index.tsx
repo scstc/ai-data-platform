@@ -16,13 +16,13 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import LlmRequiredAlert from '@/components/LlmRequiredAlert';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
-import { suggestTaskName } from '@/utils/taskName';
 import {
   createMakeJob,
   getDataset,
   listDatasets,
   listOperatorCatalog,
 } from '@/services/data-platform';
+import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
@@ -84,7 +84,9 @@ const MakeEditor: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 500 }).then((r) => setDatasets(r.data));
+    listDatasets({ current: 1, pageSize: 500 }).then((r) =>
+      setDatasets(r.data),
+    );
   }, []);
 
   useEffect(() => {
@@ -218,7 +220,7 @@ const MakeEditor: React.FC = () => {
             size="small"
             styles={{ body: { height: 460, padding: 12 } }}
           >
-            <OperatorLibrary onAdd={add} />
+            <OperatorLibrary onAdd={add} bucket="make" />
           </Card>
         </Col>
         <Col span={10}>
@@ -257,9 +259,10 @@ const MakeEditor: React.FC = () => {
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          数据合成走 LLM 造新数据类算子(generate_qa_from_* 抽取 QA 对、optimize_prompt
-          上下文扩展等);产物 version 标记 origin=synthetic,可被前端按 origin
-          区分「原始数据 vs 合成数据」。需 LLM Key(见顶部提示)。
+          数据合成走 LLM 造新数据类算子(generate_qa_from_* 抽取 QA
+          对、optimize_prompt 上下文扩展等);产物 version 标记
+          origin=synthetic,可被前端按 origin 区分「原始数据 vs 合成数据」。需
+          LLM Key(见顶部提示)。
         </Text>
       </Card>
     </PageContainer>

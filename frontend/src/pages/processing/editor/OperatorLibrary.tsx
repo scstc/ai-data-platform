@@ -1,15 +1,30 @@
 import { PlusOutlined } from '@ant-design/icons';
-import { Button, Input, List, Select, Space, Switch, Tag, Typography } from 'antd';
+import {
+  Button,
+  Input,
+  List,
+  Select,
+  Space,
+  Switch,
+  Tag,
+  Typography,
+} from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { listOperatorCatalog, getOperatorCatalogMeta } from '@/services/data-platform';
+import {
+  getOperatorCatalogMeta,
+  listOperatorCatalog,
+} from '@/services/data-platform';
 
 const { Text } = Typography;
 
-/** 左栏:检索/场景/只看可运行,点 + 添加算子到流水线。 */
+/** 左栏:检索/场景/只看可运行,点 + 添加算子到流水线。
+ *  传 ``bucket``(cleansing/distillation/make/augment)时锁定为该业务桶:只展示对应任务算子,
+ *  并隐藏自由「场景」下拉(加工页不传 bucket → 展示全部算子)。 */
 const OperatorLibrary: React.FC<{
   onAdd: (name: string) => void;
   category?: string;
-}> = ({ onAdd, category }) => {
+  bucket?: string;
+}> = ({ onAdd, category, bucket }) => {
   const [scenarios, setScenarios] = useState<Record<string, number>>({});
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
@@ -25,6 +40,7 @@ const OperatorLibrary: React.FC<{
     setLoading(true);
     listOperatorCatalog({
       category,
+      bucket,
       scenario,
       keyword,
       runnable: onlyReady ? 'ready' : undefined,
@@ -33,7 +49,7 @@ const OperatorLibrary: React.FC<{
     })
       .then((r) => setData(r.data))
       .finally(() => setLoading(false));
-  }, [category, scenario, keyword, onlyReady]);
+  }, [category, bucket, scenario, keyword, onlyReady]);
 
   const scenarioOptions = useMemo(
     () =>
@@ -46,15 +62,21 @@ const OperatorLibrary: React.FC<{
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <Space direction="vertical" style={{ width: '100%', marginBottom: 8 }}>
-        <Input.Search allowClear placeholder="搜索算子" onSearch={(v) => setKeyword(v || undefined)} />
-        <Select
+        <Input.Search
           allowClear
-          placeholder="全部场景"
-          style={{ width: '100%' }}
-          options={scenarioOptions}
-          value={scenario}
-          onChange={setScenario}
+          placeholder="搜索算子"
+          onSearch={(v) => setKeyword(v || undefined)}
         />
+        {!bucket && (
+          <Select
+            allowClear
+            placeholder="全部场景"
+            style={{ width: '100%' }}
+            options={scenarioOptions}
+            value={scenario}
+            onChange={setScenario}
+          />
+        )}
         <Space size={6}>
           <Switch size="small" checked={onlyReady} onChange={setOnlyReady} />
           <Text type="secondary">只看可运行</Text>
@@ -73,7 +95,6 @@ const OperatorLibrary: React.FC<{
                   type="text"
                   size="small"
                   icon={<PlusOutlined />}
-                  disabled={op.runnable !== 'ready'}
                   onClick={() => onAdd(op.name)}
                 />,
               ]}
@@ -81,7 +102,10 @@ const OperatorLibrary: React.FC<{
               <List.Item.Meta
                 title={<Text style={{ fontSize: 13 }}>{op.zhLabel}</Text>}
                 description={
-                  <Text type="secondary" style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                  <Text
+                    type="secondary"
+                    style={{ fontSize: 11, fontFamily: 'monospace' }}
+                  >
                     {op.name}
                   </Text>
                 }

@@ -16,13 +16,13 @@ import {
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
-import { suggestTaskName } from '@/utils/taskName';
 import {
   createDistillationJob,
   getDataset,
   listDatasets,
   listOperatorCatalog,
 } from '@/services/data-platform';
+import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
@@ -242,7 +242,7 @@ const DistillationEditor: React.FC = () => {
             size="small"
             styles={{ body: { height: 460, padding: 12 } }}
           >
-            <OperatorLibrary onAdd={add} />
+            <OperatorLibrary onAdd={add} bucket="distillation" />
           </Card>
         </Col>
         <Col span={10}>

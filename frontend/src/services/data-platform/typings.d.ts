@@ -234,6 +234,8 @@ declare namespace DataPlatform {
   /** 算子市场:目录查询参数 */
   type OperatorCatalogParams = {
     scenario?: string;
+    /** 业务桶:cleansing/distillation/make/augment——任务编辑器按此只展示对应算子 */
+    bucket?: string;
     category?: string;
     modality?: string;
     resourceClass?: string;

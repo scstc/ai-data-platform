@@ -16,13 +16,13 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import LlmRequiredAlert from '@/components/LlmRequiredAlert';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
-import { suggestTaskName } from '@/utils/taskName';
 import {
   createAugmentJob,
   getDataset,
   listDatasets,
   listOperatorCatalog,
 } from '@/services/data-platform';
+import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
@@ -83,7 +83,9 @@ const AugmentEditor: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 500 }).then((r) => setDatasets(r.data));
+    listDatasets({ current: 1, pageSize: 500 }).then((r) =>
+      setDatasets(r.data),
+    );
   }, []);
 
   useEffect(() => {
@@ -217,7 +219,7 @@ const AugmentEditor: React.FC = () => {
             size="small"
             styles={{ body: { height: 460, padding: 12 } }}
           >
-            <OperatorLibrary onAdd={add} />
+            <OperatorLibrary onAdd={add} bucket="augment" />
           </Card>
         </Col>
         <Col span={10}>
@@ -256,9 +258,10 @@ const AugmentEditor: React.FC = () => {
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          数据增强走 LLM 改写类算子(optimize_qa/query/response 进化指令、sentence_augmentation
-          通用改写、calibrate 事实校准、llm_extract 结构化抽取、pair_preference
-          DPO 偏好构造等);产物 version 标记 origin=synthetic。需 LLM Key(见顶部提示)。
+          数据增强走 LLM 改写类算子(optimize_qa/query/response
+          进化指令、sentence_augmentation 通用改写、calibrate
+          事实校准、llm_extract 结构化抽取、pair_preference DPO 偏好构造等);产物
+          version 标记 origin=synthetic。需 LLM Key(见顶部提示)。
         </Text>
       </Card>
     </PageContainer>
