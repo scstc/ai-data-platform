@@ -100,3 +100,44 @@ async def test_get_user_perms_aggregates_granted_menus(
         perms = await rbac.get_user_perms(s, u)
         assert "system:user:add" in perms
         assert rbac.has_perm(perms, "system:role:remove") is False
+
+
+async def test_effective_scope_widest_and_subtree(
+    session_factory, seed_rbac
+) -> None:
+    """u-mgr 角色 r-dc=dept_and_child,dept=d-root ⇒ dept_ids 含 d-root 及子 d-a/d-b。"""
+    from sqlalchemy import select
+
+    from app.models.user import User
+    from app.services import rbac
+
+    async with session_factory() as s:
+        u = (await s.scalars(select(User).where(User.id == "u-mgr"))).first()
+        ctx = await rbac.get_effective_data_scope(s, u)
+        assert ctx.scope == "dept_and_child"
+        assert {"d-root", "d-a", "d-b"} <= ctx.dept_ids
+
+
+async def test_apply_data_scope_self_excludes_others(
+    session_factory, seed_rbac
+) -> None:
+    """self 范围:apply_data_scope 后只查得本人 creator 的数据集(越权红线)。"""
+    from sqlalchemy import select
+
+    from app.models.dataset import Dataset
+    from app.models.user import User
+    from app.services import rbac
+
+    async with session_factory() as s:
+        s.add_all(
+            [
+                Dataset(id="dset-mine", name="mine", creator="u-staff", dept_id="d-a"),
+                Dataset(id="dset-other", name="other", creator="u-mgr", dept_id="d-root"),
+            ]
+        )
+        await s.commit()
+        u = (await s.scalars(select(User).where(User.id == "u-staff"))).first()
+        ctx = await rbac.get_effective_data_scope(s, u)
+        stmt = rbac.apply_data_scope(select(Dataset), Dataset, "creator", ctx)
+        ids = {d.id for d in (await s.scalars(stmt)).all()}
+        assert ids == {"dset-mine"}  # 绝不含 dset-other
