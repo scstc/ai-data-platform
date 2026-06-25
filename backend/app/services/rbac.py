@@ -113,3 +113,41 @@ def apply_data_scope(stmt, model, creator_attr: str, ctx: ScopeContext):
     if not ctx.dept_ids:
         return stmt.where(model.dept_id.in_(["__none__"]))
     return stmt.where(model.dept_id.in_(ctx.dept_ids))
+
+
+def _build_tree(rows: list[Menu], parent: str | None) -> list[dict]:
+    """把扁平菜单按 parent_id 组装成树(已按 sort 排序)。"""
+    out = []
+    for m in rows:
+        if m.parent_id == parent:
+            out.append(
+                {
+                    "id": m.id,
+                    "name": m.name,
+                    "path": m.path,
+                    "component": m.component,
+                    "icon": m.icon,
+                    "children": _build_tree(rows, m.id),
+                }
+            )
+    return out
+
+
+async def build_router_tree(session: AsyncSession, user: User) -> list[dict]:
+    """当前用户可见的 M/C 菜单树(去 F 按钮)。admin 全量,否则按授权。"""
+    base = (
+        select(Menu)
+        .where(Menu.menu_type.in_(["M", "C"]), Menu.status == "0")
+        .order_by(Menu.sort)
+    )
+    if user.role == "admin":
+        rows = list((await session.scalars(base)).all())
+    else:
+        stmt = (
+            base.join(RoleMenu, RoleMenu.menu_id == Menu.id)
+            .join(UserRole, UserRole.role_id == RoleMenu.role_id)
+            .where(UserRole.user_id == user.id)
+            .distinct()
+        )
+        rows = list((await session.scalars(stmt)).all())
+    return _build_tree(rows, None)

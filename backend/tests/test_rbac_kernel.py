@@ -141,3 +141,43 @@ async def test_apply_data_scope_self_excludes_others(
         stmt = rbac.apply_data_scope(select(Dataset), Dataset, "creator", ctx)
         ids = {d.id for d in (await s.scalars(stmt)).all()}
         assert ids == {"dset-mine"}  # 绝不含 dset-other
+
+
+async def test_build_router_tree_filters_buttons_and_by_role(
+    session_factory, seed_rbac
+) -> None:
+    """u-mgr 授 m-sys/m-user(+按钮 m-add):路由树含 system 目录及 user 子项,
+
+    但**不含** F 按钮 m-add(按钮不进路由)。
+    """
+    from sqlalchemy import select
+
+    from app.models.user import User
+    from app.services import rbac
+
+    async with session_factory() as s:
+        u = (await s.scalars(select(User).where(User.id == "u-mgr"))).first()
+        tree = await rbac.build_router_tree(s, u)
+        assert len(tree) == 1 and tree[0]["path"] == "/system"
+        children = tree[0]["children"]
+        assert [c["path"] for c in children] == ["/system/user"]
+        assert children[0]["component"] == "system/user"
+        # 按钮不出现在任何层级
+        flat = [tree[0], *children, *[g for c in children for g in c["children"]]]
+        assert all(n["path"] is not None for n in flat)
+
+
+async def test_build_router_tree_admin_sees_all(
+    session_factory, seed_rbac
+) -> None:
+    """admin(u-super)无 role_menus 授权也应看到全部 M/C 菜单。"""
+    from sqlalchemy import select
+
+    from app.models.user import User
+    from app.services import rbac
+
+    async with session_factory() as s:
+        u = (await s.scalars(select(User).where(User.id == "u-super"))).first()
+        tree = await rbac.build_router_tree(s, u)
+        assert tree and tree[0]["path"] == "/system"
+        assert [c["path"] for c in tree[0]["children"]] == ["/system/user"]
