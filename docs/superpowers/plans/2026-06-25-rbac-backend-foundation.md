@@ -444,9 +444,10 @@ _ROOT_DEPT = "dept-000000"
 _ROLE_ADMIN = "role-000001"
 _ROLE_COMMON = "role-000002"
 
-# 业务表 → (是否需补 creator 列)。dataset 已有 creator、job 已有 created_by。
-_BIZ_ADD_DEPT = ["datasets", "datasources", "ingest_tasks", "jobs", "uploads"]
-_BIZ_ADD_CREATOR = ["datasources", "ingest_tasks", "uploads"]
+# 业务表名核对(已读模型):upload 表名为 upload_records;
+# dataset/datasource 已有 creator、job 已有 created_by ⇒ 仅 ingest_tasks/upload_records 补 creator。
+_BIZ_ADD_DEPT = ["datasets", "datasources", "ingest_tasks", "jobs", "upload_records"]
+_BIZ_ADD_CREATOR = ["ingest_tasks", "upload_records"]
 
 
 def upgrade() -> None:
