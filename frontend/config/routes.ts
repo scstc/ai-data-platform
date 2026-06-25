@@ -281,6 +281,42 @@ export default [
     icon: 'robot',
     component: './ingest/assistant',
   },
+  // 系统管理(RBAC:用户/角色/部门/菜单/权限)。access:'canSystem' ⇒
+  // 仅 admin 或持 system:* 权限的角色可见;按钮级权限由各页 hasPerm 门控。
+  {
+    path: '/system',
+    name: 'system',
+    icon: 'setting',
+    access: 'canSystem',
+    routes: [
+      { path: '/system', redirect: '/system/user' },
+      {
+        path: '/system/user',
+        name: 'systemUser',
+        component: './system/user',
+      },
+      {
+        path: '/system/role',
+        name: 'systemRole',
+        component: './system/role',
+      },
+      {
+        path: '/system/dept',
+        name: 'systemDept',
+        component: './system/dept',
+      },
+      {
+        path: '/system/menu',
+        name: 'systemMenu',
+        component: './system/menu',
+      },
+      {
+        path: '/system/permission',
+        name: 'systemPermission',
+        component: './system/permission',
+      },
+    ],
+  },
   {
     component: './exception/404',
     layout: false,

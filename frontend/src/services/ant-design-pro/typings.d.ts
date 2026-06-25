@@ -15,6 +15,9 @@ declare namespace API {
     unreadCount?: number;
     country?: string;
     access?: string;
+    // RBAC:角色 role_key 与权限码(/api/currentUser 由后端下发;admin ⇒ ['*:*:*'])
+    roles?: string[];
+    permissions?: string[];
     geographic?: {
       province?: { label?: string; key?: string };
       city?: { label?: string; key?: string };

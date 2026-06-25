@@ -85,4 +85,10 @@ export default {
   'menu.ops.security': '安全审计',
   'menu.ops.llmSettings': 'LLM 配置',
   'menu.assistant': '智能助手',
+  'menu.system': '系统管理',
+  'menu.systemUser': '用户管理',
+  'menu.systemRole': '角色管理',
+  'menu.systemDept': '部门管理',
+  'menu.systemMenu': '菜单管理',
+  'menu.systemPermission': '权限管理',
 };

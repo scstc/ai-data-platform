@@ -83,4 +83,10 @@ export default {
   'menu.ops.security': 'Security Audit',
   'menu.ops.llmSettings': 'LLM Settings',
   'menu.assistant': 'AI Assistant',
+  'menu.system': 'System',
+  'menu.systemUser': 'Users',
+  'menu.systemRole': 'Roles',
+  'menu.systemDept': 'Departments',
+  'menu.systemMenu': 'Menus',
+  'menu.systemPermission': 'Permissions',
 };
