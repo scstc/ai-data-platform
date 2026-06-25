@@ -112,8 +112,7 @@ const NewDataSourcePage: FC = () => {
             data-testid={`method-db-${c.kind}`}
             onClick={
               c.ready
-                ? () =>
-                    go(`/ingest/datasources/new/database?dbKind=${c.kind}`)
+                ? () => go(`/ingest/datasources/new/database?dbKind=${c.kind}`)
                 : undefined
             }
             styles={{ body: { padding: 16 } }}
