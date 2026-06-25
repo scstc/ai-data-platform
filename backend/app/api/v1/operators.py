@@ -49,6 +49,7 @@ async def catalog_meta() -> JSONResponse:
 @router.get("/operators/catalog")
 async def catalog(
     scenario: Annotated[str | None, Query()] = None,
+    bucket: Annotated[str | None, Query()] = None,
     category: Annotated[str | None, Query()] = None,
     modality: Annotated[str | None, Query()] = None,
     resource_class: Annotated[str | None, Query(alias="resourceClass")] = None,
@@ -58,9 +59,13 @@ async def catalog(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=500, alias="pageSize")] = 24,
 ) -> JSONResponse:
-    """算子市场主接口:多维分面过滤 + 分页。"""
+    """算子市场主接口:多维分面过滤 + 分页。
+
+    ``bucket`` 业务桶(cleansing/distillation/make/augment):任务编辑器按此只拉对应算子。
+    """
     result = oc.query_catalog(
         scenario=scenario,
+        bucket=bucket,
         category=category,
         modality=modality,
         resource_class=resource_class,

@@ -23,31 +23,51 @@ _CATALOG_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "operators_catalog.json"
 )
 
-# 蒸馏场景白名单:平台侧硬编码,data-juicer 仓无 PR
-# 限定"第一期只暴露轻量 CPU 算子":文本规则 filter + 文本去重 + 5 类 selector
-# (不含 LLM 评分、embedding 相似度、image/video 多模态算子)
+# 蒸馏桶:filter + deduplicator + selector。蒸馏 = 过滤 + 去重 + 选择,把数据集减量成高质量子集。
+# 由 data-juicer 全量算子业务归类生成(primary/secondary=蒸馏 且为 filter/dedup/selector、非多模态)。
+# 含 LLM/GPU 评分类 filter——运行时按算力门 gating(UI「只看可运行」隐藏不可用项)。
+# 归类见 docs/ 算子业务归纳;平台侧硬编码,data-juicer 仓无 PR。
 DISTILLATION_OPS: frozenset[str] = frozenset(
     {
-        # text filters
-        "text_length_filter",
-        "token_num_filter",
-        "word_repetition_filter",
-        "character_repetition_filter",
-        "language_id_score_filter",
-        "perplexity_filter",
-        "flagged_words_filter",
-        "stopwords_filter",
         "alphanumeric_filter",
-        "special_characters_filter",
-        # deduplicators (轻量,无 GPU/embedding)
+        "average_line_length_filter",
+        "character_repetition_filter",
+        "document_deduplicator",
+        "document_line_deduplicator",
         "document_minhash_deduplicator",
         "document_simhash_deduplicator",
-        # selectors
-        "topk_specified_field_selector",
-        "range_specified_field_selector",
+        "flagged_words_filter",
         "frequency_specified_field_selector",
-        "tags_specified_field_selector",
+        "general_field_filter",
+        "in_context_influence_filter",
+        "instruction_following_difficulty_filter",
+        "language_id_score_filter",
+        "llm_condition_filter",
+        "llm_difficulty_score_filter",
+        "llm_perplexity_filter",
+        "llm_quality_score_filter",
+        "llm_task_relevance_filter",
+        "maximum_line_length_filter",
+        "perplexity_filter",
         "random_selector",
+        "range_specified_field_selector",
+        "ray_bts_minhash_deduplicator",
+        "ray_document_deduplicator",
+        "special_characters_filter",
+        "specified_field_filter",
+        "specified_numeric_field_filter",
+        "stopwords_filter",
+        "suffix_filter",
+        "tags_specified_field_selector",
+        "text_action_filter",
+        "text_embd_similarity_filter",
+        "text_entity_dependency_filter",
+        "text_length_filter",
+        "text_pair_similarity_filter",
+        "token_num_filter",
+        "topk_specified_field_selector",
+        "word_repetition_filter",
+        "words_num_filter",
     }
 )
 
@@ -57,55 +77,70 @@ def is_distillation_operator(name: str) -> bool:
     return name in DISTILLATION_OPS
 
 
-# 清洗场景白名单:数据清洗(需求 #7)的"清洗算子"——规则类 mapper + 繁简 / 标点 / 表情等
-# 与加工页通用 mapper 列表重叠但更聚焦,前端在加工页顶部 Select 选「清洗」时只显示这些
+# 清洗桶:规则类 mapper(字符/格式/繁简/标点/空白/HTML/链接/版权/页眉/参考文献/脱敏 等),1→1 去噪规范化。
+# 由 data-juicer 全量算子业务归类生成(primary/secondary=清洗 的 mapper);另保留 2 个清洗场景常用 filter。
+# 归类见 docs/ 算子业务归纳;平台侧硬编码,data-juicer 仓无 PR。
 CLEANSING_OPS: frozenset[str] = frozenset(
     {
-        # 字符级 / 格式规范化
-        "remove_specific_chars_mapper",
-        "remove_repeat_sentences_mapper",
-        "remove_long_duplicate_sentences_mapper",
-        "remove_text_to_remove_mapper",
+        # 规则 mapper:去噪 / 规范化
+        "agent_dialog_normalize_mapper",
+        "chinese_convert_mapper",
+        "clean_copyright_mapper",
         "clean_email_mapper",
+        "clean_html_mapper",
         "clean_ip_mapper",
         "clean_links_mapper",
-        "clean_html_mapper",
-        "chinese_convert_mapper",
+        "expand_macro_mapper",
+        "fix_unicode_mapper",
+        "latex_merge_tex_mapper",
+        "pii_redaction_mapper",
         "punctuation_normalization_mapper",
-        "whitespace_normalization_mapper",
-        "unicode_normalization_mapper",
+        "remove_bibliography_mapper",
+        "remove_comments_mapper",
+        "remove_header_mapper",
+        "remove_long_words_mapper",
+        "remove_non_chinese_character_mapper",
+        "remove_repeat_sentences_mapper",
+        "remove_specific_chars_mapper",
+        "remove_table_text_mapper",
+        "remove_words_with_incorrect_substrings_mapper",
         "replace_content_mapper",
-        # 语言识别(虽属 filter,但在清洗场景里常用)
+        "sentence_split_mapper",
+        "whitespace_normalization_mapper",
+        # 清洗场景常用 filter(语言识别 / 敏感词)
         "language_id_score_filter",
         "flagged_words_filter",
     }
 )
 
 
-# 合成与增强白名单:全部 LLM-based mapper(需求 #8)
-# 需求文档 #8 关键能力:LLM 造数据 + LLM 改写 + 蒸馏 + 区分原始/合成
-# 全部依赖 LLM,未配 OPENAI_API_KEY 时 _operator_block 走 needs_api 拦截
-# 拆为两个独立白名单:合成(make)=造新数据;增强(augment)=改写已有数据
+# 合成 / 增强桶:LLM-based mapper(需求 #8:LLM 造数据 + 改写 + 区分原始/合成)。
+# 由 data-juicer 全量算子业务归类生成(make/augment 桶的 mapper)。多数依赖 LLM,
+# 未配 OPENAI_API_KEY 时按 needs_api 拦截。合成(make)=造新数据(1→N);增强(augment)=改写已有(1→1)。
+# optimize_prompt / pair_preference 双用,同时在两桶。归类见 docs/;平台侧硬编码,DJ 仓无 PR。
 MAKE_OPS: frozenset[str] = frozenset(
     {
-        # 合成:从无结构 / 种子 / 上下文生成新数据
-        "generate_qa_from_text_mapper",  # 1→N,无结构文本→QA 对
         "generate_qa_from_examples_mapper",  # Self-Instruct:从种子示例生成新 QA
-        "optimize_prompt_mapper",  # 上下文扩展:few-shot 合成新 prompt
+        "generate_qa_from_text_mapper",  # 1→N,无结构文本→QA 对
+        "optimize_prompt_mapper",  # few-shot 合成/扩展 prompt(亦在增强桶)
+        "pair_preference_mapper",  # 构造 DPO 偏好对(造新偏好数据)
     }
 )
 
 AUGMENT_OPS: frozenset[str] = frozenset(
     {
-        # 增强:改写/扩写/校准/打标(均 1→1)
+        "calibrate_qa_mapper",  # 事实校准 QA
+        "calibrate_query_mapper",  # 校准优化 query
+        "calibrate_response_mapper",  # 事实校准 response
+        "llm_extract_mapper",  # 通用结构化抽取
+        "nlpaug_en_mapper",  # 英文规则增强
+        "nlpcda_zh_mapper",  # 中文规则增强
+        "optimize_prompt_mapper",  # 优化已有 prompt(亦在合成桶)
         "optimize_qa_mapper",  # 优化 QA 对(同时优化 q+a)
         "optimize_query_mapper",  # Evol-Instruct:只优化 query
         "optimize_response_mapper",  # Evol-Instruct:只优化 response
+        "pair_preference_mapper",  # DPO 偏好数据构造(亦在合成桶)
         "sentence_augmentation_mapper",  # 通用 paraphrasing/改写/扩写
-        "calibrate_qa_mapper",  # 事实校准 QA
-        "calibrate_response_mapper",  # 事实校准 response
-        "llm_extract_mapper",  # 通用结构化抽取
-        "pair_preference_mapper",  # DPO 偏好数据构造
         "text_tagging_by_prompt_mapper",  # LLM 文本分类打标
     }
 )
@@ -117,6 +152,16 @@ def is_make_operator(name: str) -> bool:
 
 def is_augment_operator(name: str) -> bool:
     return name in AUGMENT_OPS
+
+
+# 业务桶 → 白名单集合:供算子库按任务类型过滤(清洗/蒸馏/合成/增强各自只展示对应算子)。
+# 成员可重叠(如 pair_preference / optimize_prompt 同属 make+augment),按集合成员判定而非单值归属。
+_BUCKET_SETS: dict[str, frozenset[str]] = {
+    "cleansing": CLEANSING_OPS,
+    "distillation": DISTILLATION_OPS,
+    "make": MAKE_OPS,
+    "augment": AUGMENT_OPS,
+}
 
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
 
@@ -176,21 +221,15 @@ _META_KEY_MAP = {
 def to_api(op: dict[str, Any]) -> dict[str, Any]:
     """单个算子 → camelCase 出参形态;``runnable`` 用运行时有效状态覆盖。
 
-    一个算子可以同时打多个 scenarioGroup 标签(同时在加工和清洗场景里都合理):
-    前端 OperatorLibrary 用 scenarioGroup 过滤时显示"凡含此标签的算子"即可。
+    scenarioGroup 保留 data-juicer 原生中文场景(如 质量过滤 / 文本清洗 / 去重),
+    供算子市场左侧场景菜单分组——不再覆盖为业务桶英文键。业务桶(cleansing/
+    distillation/make/augment)归属由独立 ``bucket`` 查询参数 + ``_BUCKET_SETS``
+    表达,与场景维度解耦。
     """
     out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items()}
-    out["runnable"] = effective_runnable(op)
-    # 多个 scenarioGroup 标签并存:首次设置,后续 append。
-    # (前端暂只展示第一个;未来多标签场景再切到数组。)
-    if out["name"] in DISTILLATION_OPS:
-        out["scenarioGroup"] = "distillation"
-    elif out["name"] in CLEANSING_OPS:
-        out["scenarioGroup"] = "cleansing"
-    elif out["name"] in MAKE_OPS:
-        out["scenarioGroup"] = "make"
-    elif out["name"] in AUGMENT_OPS:
-        out["scenarioGroup"] = "augment"
+    # 市场/编辑器口径:只看环境能力(media_ok=True),不预判数据集格式——
+    # 媒体算子按环境(GPU/LLM/...)判 ready,数据集适配留到提交期 runnable_reason。
+    out["runnable"] = effective_runnable(op, media_ok=True)
     return out
 
 
@@ -200,7 +239,7 @@ def meta_api() -> dict[str, Any]:
     caps = get_capabilities()
     counts: dict[str, int] = {}
     for op in all_operators():
-        status = effective_runnable(op, caps)
+        status = effective_runnable(op, caps, media_ok=True)
         counts[status] = counts.get(status, 0) + 1
     out["byRunnable"] = counts
     return out
@@ -211,18 +250,24 @@ def meta_api() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 目录 JSON 里烤死的 ``runnable`` 是"无 GPU 环境"快照,运行时不再采信——改由
 # 本函数按当前环境真实能力实时计算,守门 / 徽章 / 计数 / AI 上下文统一口径。
-def effective_runnable(op: dict[str, Any], caps: Capabilities | None = None) -> str:
+def effective_runnable(
+    op: dict[str, Any], caps: Capabilities | None = None, *, media_ok: bool = False
+) -> str:
     """算子在当前环境的有效可运行状态。
 
-    优先级与构建期 ``runnable()`` 一致,但每条算力门改为按 ``caps`` 实时判定:
-    媒体模态(平台受管数据集为文本 jsonl,永不适用)→ needs_media;否则按
-    resource_class / ray_ 前缀对应所需能力,满足则 ready,不满足给对应阻塞态。
+    优先级与构建期 ``runnable()`` 一致,但每条算力门改为按 ``caps`` 实时判定。
+    媒体模态的处理分两处口径,由 ``media_ok`` 切换:
+    - ``media_ok=False``(默认;提交期 ``runnable_reason`` 用):数据集已知,媒体算子
+      在非 manifest(文本)数据集上 → needs_media,由调用方再按真实数据集类型定夺。
+    - ``media_ok=True``(市场 / 编辑器浏览用):假定数据集匹配,**跳过 needs_media 分支**,
+      继续按 resource_class / ray_ 前缀判环境能力——市场只回答"环境能不能跑",
+      不预判数据集格式(那是提交时 _operator_block 的事)。
     """
     caps = caps or get_capabilities()
     res = op["resource_class"]
     mod = set(op.get("modality") or [])
     name = op["name"]
-    if mod & _MEDIA_MODALITIES:
+    if mod & _MEDIA_MODALITIES and not media_ok:
         return "needs_media"
     if res == "api_llm":
         return "ready" if caps.llm else "needs_api"
@@ -231,7 +276,15 @@ def effective_runnable(op: dict[str, Any], caps: Capabilities | None = None) -> 
     if res in ("gpu", "hf_model"):
         return "ready" if caps.cuda else "needs_compute"
     if res == "vllm":
-        return "ready" if caps.vllm else "needs_compute"
+        # vllm 标注的算子绝大多数同时支持 HF 本地模型(frameworks 含 "hf",
+        # enable_vllm 默认 False;平台 build_config 不强制 vLLM)。故:vLLM 服务就绪
+        # 即用;否则有 GPU 时退回 HF-on-GPU 跑(与 hf_model 算子同口径)。纯 vLLM
+        # (无 hf 回退)才在缺 vLLM 时拦 needs_compute。
+        if caps.vllm:
+            return "ready"
+        if caps.cuda and "hf" in (op.get("frameworks") or []):
+            return "ready"
+        return "needs_compute"
     return "ready"
 
 
@@ -380,6 +433,7 @@ def legacy_operators(
 def query_catalog(
     *,
     scenario: str | None = None,
+    bucket: str | None = None,
     category: str | None = None,
     modality: str | None = None,
     resource_class: str | None = None,
@@ -389,11 +443,18 @@ def query_catalog(
     current: int = 1,
     page_size: int = 24,
 ) -> dict[str, Any]:
-    """按多维条件过滤算子目录,返回分页数据 + 总数。"""
+    """按多维条件过滤算子目录,返回分页数据 + 总数。
+
+    ``bucket``:业务桶(cleansing/distillation/make/augment),供任务编辑器只展示对应算子;
+    按白名单集合成员判定(见 ``_BUCKET_SETS``),未知桶名退化为不限制。
+    """
     kw = keyword.lower().strip() if keyword else None
     caps = get_capabilities()
+    bucket_set = _BUCKET_SETS.get(bucket) if bucket else None
 
     def match(op: dict[str, Any]) -> bool:
+        if bucket_set is not None and op["name"] not in bucket_set:
+            return False
         if scenario and op["scenario_group"] != scenario:
             return False
         if category and op["category"] != category:
@@ -402,7 +463,7 @@ def query_catalog(
             return False
         if resource_class and op["resource_class"] != resource_class:
             return False
-        if runnable and effective_runnable(op, caps) != runnable:
+        if runnable and effective_runnable(op, caps, media_ok=True) != runnable:
             return False
         if recommend is not None and op["recommend"] != recommend:
             return False
