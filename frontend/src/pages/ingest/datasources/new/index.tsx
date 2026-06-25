@@ -9,7 +9,7 @@ import {
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
-import { Card, Tag, Typography } from 'antd';
+import { Badge, Card, Tag, Tooltip, Typography } from 'antd';
 import type { FC } from 'react';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
 import { DB_KIND_CARDS, STORAGE_CARDS } from '../components/constants';
@@ -115,9 +115,23 @@ const NewDataSourcePage: FC = () => {
             }
             styles={{ body: { padding: 16 } }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <DatabaseOutlined style={{ fontSize: 18, color: '#1677ff' }} />
-              <Text strong>{c.title}</Text>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 10,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <DatabaseOutlined style={{ fontSize: 18, color: '#1677ff' }} />
+                <Text strong>{c.title}</Text>
+              </div>
+              {c.ready && (
+                <Tooltip title="已实测可连">
+                  <Badge status="success" />
+                </Tooltip>
+              )}
             </div>
           </Card>
         ))}

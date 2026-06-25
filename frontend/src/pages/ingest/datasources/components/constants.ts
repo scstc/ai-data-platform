@@ -131,13 +131,17 @@ export const STORAGE_CARDS: {
   },
 ];
 
-/** 数据库连接 — 网格小卡片(仅已实测可真连品牌) */
-export const DB_KIND_CARDS: { kind: DataPlatform.DbKind; title: string }[] = [
-  { kind: 'postgresql', title: 'PostgreSQL' },
-  { kind: 'goldendb', title: 'GoldenDB' },
-  { kind: 'kingbase', title: 'Kingbase(金仓)' },
-  { kind: 'doris', title: 'Doris' },
-  { kind: 'dameng', title: 'DM(达梦)' },
+/** 数据库连接 — 网格小卡片(ready=true 的实测可真连,卡片右上角亮绿点) */
+export const DB_KIND_CARDS: {
+  kind: DataPlatform.DbKind;
+  title: string;
+  ready: boolean;
+}[] = [
+  { kind: 'postgresql', title: 'PostgreSQL', ready: true },
+  { kind: 'goldendb', title: 'GoldenDB', ready: true },
+  { kind: 'kingbase', title: 'Kingbase(金仓)', ready: true },
+  { kind: 'doris', title: 'Doris', ready: true },
+  { kind: 'dameng', title: 'DM(达梦)', ready: true },
 ];
 
 /** 配置页标题(按类型) */
