@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Cookie, Depends, HTTPException
@@ -63,3 +64,30 @@ async def require_admin(
             detail={"success": False, "message": "无权限"},
         )
     return user
+
+
+def require_perm(code: str) -> Callable:
+    """权限门控工厂:要求当前用户持 code(或通配)。未登录 401 / 无权 403。
+
+    与 require_admin 并存:管理类细粒度写端点(P2+)用本依赖;
+    遗留写端点继续用 require_admin(靠 users.role 保持不变)。
+    """
+
+    async def _dep(
+        session: SessionDep,
+        user: Annotated[User | None, Depends(current_user)],
+    ) -> User:
+        # 惰性引入,避免与 services 包的潜在导入环
+        from app.services import rbac
+
+        if user is None:
+            raise HTTPException(status_code=401, detail="请先登录")
+        perms = await rbac.get_user_perms(session, user)
+        if not rbac.has_perm(perms, code):
+            raise HTTPException(
+                status_code=403,
+                detail={"success": False, "message": "无权限"},
+            )
+        return user
+
+    return _dep

@@ -181,3 +181,41 @@ async def test_build_router_tree_admin_sees_all(
         tree = await rbac.build_router_tree(s, u)
         assert tree and tree[0]["path"] == "/system"
         assert [c["path"] for c in tree[0]["children"]] == ["/system/user"]
+
+
+async def test_require_perm_gates(session_factory, seed_rbac) -> None:
+    """require_perm:无 perm→403、有 perm/超管→200、匿名→401。
+
+    用独立 FastAPI 实例挂临时路由,避免污染全局 app。
+    """
+    from fastapi import Depends, FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api.deps import require_perm
+    from app.core.db import get_session
+    from app.services.auth import sign_token
+
+    test_app = FastAPI()
+
+    @test_app.get("/need-perm")
+    async def _need_perm(user=Depends(require_perm("system:user:add"))):
+        return {"ok": user.id}
+
+    async def _ov():
+        async with session_factory() as s:
+            yield s
+
+    test_app.dependency_overrides[get_session] = _ov
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # u-super(admin 通配)→200
+        ac.cookies.set("adp_session", sign_token("u-super"))
+        assert (await ac.get("/need-perm")).status_code == 200
+        # u-staff(self 角色,无该 perm)→403
+        ac.cookies.set("adp_session", sign_token("u-staff"))
+        r = await ac.get("/need-perm")
+        assert r.status_code == 403
+        assert r.json()["detail"]["message"] == "无权限"
+        # 匿名→401
+        ac.cookies.delete("adp_session")
+        assert (await ac.get("/need-perm")).status_code == 401
