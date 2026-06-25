@@ -30,6 +30,19 @@ declare namespace DataPlatform {
     note?: string;
   };
 
+  /** 标签（全局标签池,扁平,仅挂数据集多对多） */
+  type Tag = {
+    id: string;
+    name: string;
+    /** 引用该标签的数据集数（管理页展示） */
+    usageCount: number;
+    createdAt: string;
+  };
+  type TagCreate = { name: string };
+  type TagUpdate = { name: string };
+  type TagMerge = { sourceId: string; targetId: string };
+  type TagBatchDelete = { ids: string[] };
+
   /** 数据源类型 */
   type DataSourceType = 's3' | 'hdfs' | 'database' | 'api';
 

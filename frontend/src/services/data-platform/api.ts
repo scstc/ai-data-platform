@@ -10,11 +10,64 @@ export async function listCategories(options?: { [key: string]: any }) {
   );
 }
 
-/** 全部标签（自由输入联想）GET /api/v1/tags */
+/** 全部标签（管理页列表 / 自由输入联想）GET /api/v1/tags */
 export async function listTags(options?: { [key: string]: any }) {
-  return request<{ data: { id: string; name: string }[]; success: boolean }>(
+  return request<{ data: DataPlatform.Tag[]; success: boolean }>(
     '/api/v1/tags',
     { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 新建标签（admin;同名 find-or-create 返回已存在项）POST /api/v1/tags */
+export async function createTag(
+  body: DataPlatform.TagCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Tag; success: boolean }>(
+    '/api/v1/tags',
+    { method: 'POST', data: body, ...(options || {}) },
+  );
+}
+
+/** 重命名标签（admin;重名 409）PATCH /api/v1/tags/{id} */
+export async function updateTag(
+  id: string,
+  body: DataPlatform.TagUpdate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Tag; success: boolean }>(
+    `/api/v1/tags/${id}`,
+    { method: 'PATCH', data: body, ...(options || {}) },
+  );
+}
+
+/** 删除标签 + 级联解绑（admin）DELETE /api/v1/tags/{id} */
+export async function deleteTag(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(
+    `/api/v1/tags/${id}`,
+    { method: 'DELETE', ...(options || {}) },
+  );
+}
+
+/** 批量删除标签 + 级联（admin）DELETE /api/v1/tags */
+export async function batchDeleteTags(
+  body: DataPlatform.TagBatchDelete,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    '/api/v1/tags',
+    { method: 'DELETE', data: body, ...(options || {}) },
+  );
+}
+
+/** 合并标签 source→target（去重 + 删源，admin）POST /api/v1/tags/merge */
+export async function mergeTags(
+  body: DataPlatform.TagMerge,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    '/api/v1/tags/merge',
+    { method: 'POST', data: body, ...(options || {}) },
   );
 }
 
