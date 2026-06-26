@@ -50,6 +50,11 @@ class Job(Base):
     # 重跑用:建任务时存原始执行规格(JobCreate:算子 + 输出去向 + 输入版本),
     # POST /jobs/{id}/rerun 据此对原输入版本再跑一次。早于本特性的任务为空。
     spec: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # 触发来源(切片 C):manual(手工) | cron(定时,Task 3 真跑);
+    # 存量 job 一律 'manual'(迁移 0025 server_default 安全回填)。
+    trigger: Mapped[str] = mapped_column(
+        String, nullable=False, default="manual", server_default="manual"
+    )
     created_by: Mapped[str] = mapped_column(String, nullable=False, default="admin")
     # 所属部门(RBAC 数据权限快照);存量回填为根部门
     dept_id: Mapped[str | None] = mapped_column(String, nullable=True)

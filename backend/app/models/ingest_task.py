@@ -53,3 +53,13 @@ class IngestTask(Base):
     quality_policy: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True
     )
+    # 增量采集配置(切片 C):二选一形,与 schemas.ingest_task.Incremental 同形;
+    # 未配置为空(等价全量采集)。
+    #   库形  {column, type:'timestamp'|'integer'}  按 DB 列水位推进;
+    #   文件形 {by:'mtime'|'name'}                 按 mtime/文件名推进。
+    incremental: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    # 增量水位快照(切片 C):{value, updatedAt},由运行期写入;
+    # 空表示该任务尚未做过增量采集(首次按全量跑)。
+    watermark: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

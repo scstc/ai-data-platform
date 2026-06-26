@@ -43,6 +43,48 @@ class QualityPolicy(CamelModel):
     block_on_schema_drift: bool = False
 
 
+class Incremental(CamelModel):
+    """增量采集配置(切片 C / Task 1)。
+
+    两种互斥形,二选一(model_validator 拒绝混合或全空):
+    - 库形(DB 列水位):``{column:str, type:Literal['timestamp','integer']}``
+      按 DB 某列(时间戳/自增主键)的高水位推进;由运行期根据 type 解析 value。
+    - 文件形(mtime/name):``{by:Literal['mtime','name']}``
+      按 S3/HDFS 对象的 mtime 或文件名排序推进。
+
+    与模型层 ingest_tasks.incremental JSONB 同形;未配置(整个 incremental=None)
+    等价全量采集。
+    """
+
+    # 库形字段
+    column: str | None = None
+    type: Literal["timestamp", "integer"] | None = None
+    # 文件形字段
+    by: Literal["mtime", "name"] | None = None
+
+    @model_validator(mode="after")
+    def _check_one_form(self) -> Incremental:
+        """二选一:库形(column + type 全填)/ 文件形(by 填)任选其一,
+        混合或全空拒绝。"""
+        has_db = self.column is not None and self.type is not None
+        has_db_partial = (self.column is not None) ^ (self.type is not None)
+        has_file = self.by is not None
+
+        if has_db_partial:
+            raise ValueError(
+                "incremental 库形必须同时给 column + type"
+            )
+        if has_db and has_file:
+            raise ValueError(
+                "incremental 不能同时指定库形(column+type)与文件形(by)"
+            )
+        if not has_db and not has_file:
+            raise ValueError(
+                "incremental 必须二选一:库形 {column,type} 或 文件形 {by}"
+            )
+        return self
+
+
 class IngestExtract(CamelModel):
     """采集对象(extract spec):拉什么 + 落地前怎么过滤。
 
@@ -109,6 +151,8 @@ class IngestTaskRead(CamelModel):
     output: list[dict[str, Any]] | None = None
     # 任务级质量策略(切片 B):透传出前端展示/编辑,可空
     quality_policy: QualityPolicy | None = None
+    # 增量采集配置(切片 C):透传出前端展示/编辑,可空(None=全量采集)
+    incremental: Incremental | None = None
 
 
 class IngestRunRead(CamelModel):
@@ -137,6 +181,8 @@ class IngestTaskCreate(CamelModel):
     category_id: str | None = None
     # 任务级质量策略(切片 B):可选,None 表示不做质量门检查
     quality_policy: QualityPolicy | None = None
+    # 增量采集配置(切片 C):可选,None 表示全量采集(无增量)
+    incremental: Incremental | None = None
 
     @model_validator(mode="after")
     def _reject_cron_schedule(self) -> IngestTaskCreate:
@@ -156,6 +202,8 @@ class IngestTaskUpdate(CamelModel):
     category_id: str | None = None
     # 任务级质量策略(切片 B):可选,传 None/缺省 = 不变(由路由侧区分)
     quality_policy: QualityPolicy | None = None
+    # 增量采集配置(切片 C):可选,传 None/缺省 = 不变(由路由侧区分)
+    incremental: Incremental | None = None
 
     @model_validator(mode="after")
     def _reject_cron_schedule(self) -> IngestTaskUpdate:
