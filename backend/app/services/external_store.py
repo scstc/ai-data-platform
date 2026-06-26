@@ -721,6 +721,23 @@ async def upload_file_to_uploads(
     return f"s3://{bucket}/{key}"
 
 
+async def upload_parquet_file_to_uploads(
+    dataset_id: str, version_no: int, path: Path
+) -> str:
+    """把本地 parquet 产物**流式**上传到平台 MinIO uploads 桶,键 = ``<id>/v<n>/data.parquet``。
+
+    镜像 upload_file_to_uploads,但产物格式为 parquet。流式上传(不全量入内存),
+    适合大体量产出。平台未配置 → ExternalStoreError。
+    """
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/data.parquet"
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        await upload_object(cfg, bucket, key, f, size)
+    return f"s3://{bucket}/{key}"
+
+
 def _list_dir_sync(
     client: Minio, bucket: str, prefix: str
 ) -> dict[str, list[Any]]:

@@ -28,8 +28,9 @@ from app.services.external_store import (
     materialized_version,
     persist_manifest_output,
     upload_file_to_uploads,
+    upload_parquet_file_to_uploads,
 )
-from app.services.landing import MANIFEST_FORMAT
+from app.services.landing import MANIFEST_FORMAT, parquet_bytes_to_records
 from app.services.llm_config import get_active_llm_config
 
 # 多 job 并发上限
@@ -213,6 +214,13 @@ def _read_jsonl_head(path: Path, limit: int) -> list[dict[str, Any]]:
             if limit > 0 and len(rows) >= limit:
                 break
     return rows
+
+
+def _read_head_records(path: Path, n: int) -> list[dict[str, Any]]:
+    """取数据文件前 N 行 dict(jsonl 逐行 / parquet 读表),供 text_key 探测。"""
+    if path.suffix == ".parquet":
+        return parquet_bytes_to_records(path.read_bytes(), limit=n)
+    return _read_jsonl_head(path, n)
 
 
 # 常见文本字段名:数据无 text 时按此优先级匹配主文本字段(text_key)
@@ -414,7 +422,8 @@ async def run_process_job(
     new_vno = (max_vno or 0) + 1
     out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "data.jsonl"
+    is_parquet = input_version.format == "parquet"
+    out_path = out_dir / ("data.parquet" if is_parquet else "data.jsonl")
     yaml_path = out_dir / "job.yaml"
     log_path = out_dir / "run.log"
 
@@ -422,7 +431,7 @@ async def run_process_job(
     # 产出仍写受管存储(origin=managed),源不动;血缘 JobInput 指向 hosted 输入版本。
     async with materialized_version(input_version, session) as input_path:
         # 数据无 text 字段时(如新闻用 title)显式指定 text_key,否则 DJ load_dataset 报错
-        text_key = detect_text_key(_read_jsonl_head(input_path, 50))
+        text_key = detect_text_key(_read_head_records(input_path, 50))
         cfg = build_config(
             project_name=job_id,
             input_path=str(input_path),
@@ -465,18 +474,24 @@ async def run_process_job(
             note=f"加工产出(来自 v{input_version.version_no})",
         )
     else:
-        rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
         stats_path = out_dir / "data_stats.jsonl"
         # 产出文件上传 MinIO(治理产出必须持久化到对象存储,不能只在本地;
         # 读路径 preview/download/materialize 已按 s3:// scheme 走,无需改动)
-        storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
+        if is_parquet:
+            rows = len(parquet_bytes_to_records(out_path.read_bytes()))
+            storage_uri = await upload_parquet_file_to_uploads(dataset_id, new_vno, out_path)
+            out_fmt = "parquet"
+        else:
+            rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
+            storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
+            out_fmt = "jsonl"
         version = DatasetVersion(
             id=_new_version_id(),
             dataset_id=dataset_id,
             version_no=new_vno,
             storage_uri=storage_uri,
             stats_uri=str(stats_path) if stats_path.exists() else None,
-            format="jsonl",
+            format=out_fmt,
             rows=rows,
             size=out_path.stat().st_size,
             origin="managed",
