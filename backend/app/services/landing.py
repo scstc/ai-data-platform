@@ -245,11 +245,13 @@ def records_to_parquet_bytes(records: list[dict]) -> bytes:
 
     try:
         table = pa.Table.from_pylist(records)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as exc:
-        raise ParquetCodecError(f"parquet schema 推断失败:{exc}") from exc
-    buf = io.BytesIO()
-    pq.write_table(table, buf)
-    return buf.getvalue()
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        return buf.getvalue()
+    except ParquetCodecError:
+        raise
+    except Exception as exc:  # 任何 parquet 推断/写失败 → 兜底回退 jsonl(D2 红线)
+        raise ParquetCodecError(f"parquet 编码失败:{exc}") from exc
 
 
 def parquet_bytes_to_records(content: bytes, limit: int = 0) -> list[dict]:
