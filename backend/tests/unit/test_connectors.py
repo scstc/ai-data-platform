@@ -205,6 +205,26 @@ def test_build_queries_table_empty_raises():
         _build_queries({"mode": "table", "tables": ["  ", ""]})
 
 
+def test_build_queries_table_columns_projected():
+    """勾选列 → SELECT 投影到选中列(单点裁剪,rerun 与生成数据集双路径受益)。"""
+    out = _build_queries(
+        {"mode": "table", "tables": ["public.users"], "columns": ["id", "name"]}
+    )
+    assert out == [("public.users", 'SELECT "id", "name" FROM "public"."users"')]
+
+
+def test_build_queries_table_no_columns_keeps_star():
+    """未勾列 → 维持 SELECT *(向后兼容存量任务)。"""
+    out = _build_queries({"mode": "table", "tables": ["t1"]})
+    assert out == [("t1", 'SELECT * FROM "t1"')]
+
+
+def test_build_queries_table_empty_columns_keeps_star():
+    """columns 显式空数组 → 等价未勾,维持 SELECT *。"""
+    out = _build_queries({"mode": "table", "tables": ["t1"], "columns": []})
+    assert out == [("t1", 'SELECT * FROM "t1"')]
+
+
 def test_build_queries_path_mode_raises_not_a_query_source():
     """path 模式(S3/HDFS)不走 SQL 编排 → 落到「未配置采集对象」分支抛错。
 

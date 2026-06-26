@@ -121,6 +121,12 @@ def _build_queries(extract: dict[str, Any] | None) -> list[tuple[str | None, str
         tables = [t.strip() for t in (extract.get("tables") or []) if t.strip()]
         if not tables:
             raise IngestError("采集对象为表,但未选择任何表")
+        columns = [c.strip() for c in (extract.get("columns") or []) if c.strip()]
+        if columns:
+            col_list = ", ".join(_quote_ident(c) for c in columns)
+            return [
+                (t, f"SELECT {col_list} FROM {_quote_ident(t)}") for t in tables
+            ]
         return [(t, f"SELECT * FROM {_quote_ident(t)}") for t in tables]
     raise IngestError("未配置采集对象(请选择表或填写 SQL)")
 
