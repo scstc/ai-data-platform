@@ -104,11 +104,54 @@ def _quote_ident(name: str) -> str:
     return ".".join('"' + p.replace('"', '""') + '"' for p in parts)
 
 
-def _build_queries(extract: dict[str, Any] | None) -> list[tuple[str | None, str]]:
+def _sql_compare_literal(value: Any, type_: str) -> str:
+    """把 Python 水位值渲染为 SQL 比较字面值(``WHERE col > <literal>`` 用)。
+
+    - ``type_='integer'``:严格 int-like(int 或纯数字 str)→ 纯数字字面值(无引号);
+      非 int-like(如 ``"1; DROP TABLE--"``)→ ``IngestError``(防注入 + 防脏数据)。
+    - ``type_='timestamp'``:ISO 时间戳字符串 → 单引号字符串字面值,内部单引号
+      翻倍转义(防御性:正常 ISO 不含单引号,但恶意/脏数据可能含)。
+    - 其他 type_ → ``IngestError``(诚实失败,不猜语义)。
+
+    列名走 ``_quote_ident``(双引号转义);**值**走本函数——两端都防注入,
+    杜绝 ``column='"id); DROP..."`` 之类的字面值注入路径。
+    """
+    if type_ == "integer":
+        try:
+            n = int(value)
+        except (TypeError, ValueError) as exc:
+            raise IngestError(
+                f"增量水位值 {value!r} 不是整数(type=integer)"
+            ) from exc
+        return str(n)
+    if type_ == "timestamp":
+        # ISO 时间戳不含单引号,但用户/脏数据可能塞进来——翻倍转义即可防御。
+        s = str(value)
+        return "'" + s.replace("'", "''") + "'"
+    raise IngestError(
+        f"不支持的增量列类型 {type_!r}(仅 'timestamp' / 'integer')"
+    )
+
+
+def _build_queries(
+    extract: dict[str, Any] | None,
+    *,
+    incremental: dict[str, Any] | None = None,
+    watermark: dict[str, Any] | None = None,
+) -> list[tuple[str | None, str]]:
     """由采集对象生成 [(数据集名后缀, 查询)] 列表。
 
-    - sql 模式:单条,后缀为空。
+    - sql 模式:单条,后缀为空(不消费 incremental/watermark——用户自己控制 SQL,
+      自动拼 WHERE 会破坏用户语义;spec 文档化「SQL 模式自行控制增量」)。
     - table 模式:勾选的每张表一条(后缀=表名),各产一个数据集。
+      切片 C / Task 5:若同时给 ``incremental``(``{column, type}``)与
+      ``watermark``(``{value: ...}``),每张表 SELECT 自动追加
+      ``WHERE "增量列" > <字面值>``(类型经 ``_sql_compare_literal`` 严格渲染),
+      推进式增量采集。``incremental`` 缺 / ``watermark`` 缺 value → 不拼 WHERE
+      (首跑全量,行为零回归)。
+
+    其余参数(签名关键字参数,**向后兼容**):``_build_queries(task.extract)``
+    等既有调用点行为不变(无 incremental → 全量 SELECT *)。
     """
     extract = extract or {}
     mode = extract.get("mode")
@@ -124,11 +167,64 @@ def _build_queries(extract: dict[str, Any] | None) -> list[tuple[str | None, str
         columns = [c.strip() for c in (extract.get("columns") or []) if c.strip()]
         if columns:
             col_list = ", ".join(_quote_ident(c) for c in columns)
-            return [
+            base_queries = [
                 (t, f"SELECT {col_list} FROM {_quote_ident(t)}") for t in tables
             ]
-        return [(t, f"SELECT * FROM {_quote_ident(t)}") for t in tables]
+        else:
+            base_queries = [
+                (t, f"SELECT * FROM {_quote_ident(t)}") for t in tables
+            ]
+        return [
+            (suffix, _apply_incremental_where(q, incremental, watermark))
+            for suffix, q in base_queries
+        ]
     raise IngestError("未配置采集对象(请选择表或填写 SQL)")
+
+
+def _apply_incremental_where(
+    base_sql: str,
+    incremental: dict[str, Any] | None,
+    watermark: dict[str, Any] | None,
+) -> str:
+    """若 ``incremental`` + ``watermark.value`` 均就绪 → 在 ``base_sql`` 后拼
+    ``WHERE "列名" > <字面值>``;否则原样返回(零回归,首跑全量)。
+
+    抽出此纯函数是为单测可断言(避免 ``_build_queries`` 把列裁剪 + 增量 WHERE
+    两件事缠在一起测),并在 PG/MySQL 族连接器间共享相同拼装语义。
+    """
+    if not incremental:
+        return base_sql
+    column = incremental.get("column")
+    type_ = incremental.get("type")
+    if not column or not type_:
+        return base_sql
+    wm_value = (watermark or {}).get("value")
+    if wm_value is None:
+        return base_sql  # 首跑(无水位)→ 全量
+    literal = _sql_compare_literal(wm_value, type_)
+    return f"{base_sql} WHERE {_quote_ident(column)} > {literal}"
+
+
+def compute_db_watermark(
+    records: list[dict[str, Any]], column: str
+) -> Any | None:
+    """取本批记录中 ``column`` 列的最大值(下一轮增量的高水位)。
+
+    - 空批 → ``None``(调用方据此**不推进** watermark:无新增不动水位)。
+    - 部分行缺列 / 列为 ``None`` → 忽略,取非空值的 max;
+      全部为 None/缺失 → ``None``。
+
+    返回值类型由记录里的列决定(timestamp 列 → ``datetime``;
+    integer 列 → ``int``)。调用方负责把 ``datetime`` 序列化为 ISO 字符串再存 JSONB。
+    """
+    values = [
+        r.get(column)
+        for r in records
+        if r.get(column) is not None
+    ]
+    if not values:
+        return None
+    return max(values)
 
 
 async def apply_filter_operators(

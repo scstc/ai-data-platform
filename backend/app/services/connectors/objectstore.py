@@ -183,6 +183,107 @@ def _keys_from_extract(
     return list(seen)
 
 
+# ---------------------------------------------------------------------------
+# 增量过滤 + 水位推进(切片 C / Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _filter_keys_by_watermark(
+    keys: list[str],
+    all_objects: list[dict[str, Any]],
+    incremental: dict[str, Any] | None,
+    watermark: dict[str, Any] | None,
+) -> list[str]:
+    """按增量水位过滤已匹配的 keys,只保留「比水位新」的子集(保序)。
+
+    - ``incremental.by='mtime'``:用 ``all_objects[*].lastModified > watermark['value']``
+      判定;缺 lastModified 的 key 视为「无据判断 newer-than」→ 被过滤(避免重复)。
+    - ``incremental.by='name'``:用 ``key > watermark['value']`` 字典序比较
+      (适合按日期/序号命名的批次文件)。
+    - 首跑(``watermark`` 为 None / 缺 ``value``)→ 不过滤(全量采)。
+    - 无 ``incremental`` → 不过滤(零回归:既有任务行为不变)。
+    - 未知 ``by`` → 不过滤(诚实降级,不丢数据)。
+
+    与 HDFS ``_filter_paths_by_watermark`` 同形(后者仅支持 by=name,因为当前
+    HDFS 连接器不走 LISTSTATUS 拿 mtime);若后续 HDFS 接 mtime,可统一到此函数。
+    """
+    if not incremental:
+        return keys
+    wm_value = (watermark or {}).get("value")
+    if wm_value is None:
+        return keys  # 首跑(无水位)→ 全量
+    by = incremental.get("by")
+    if by == "mtime":
+        mtime_map: dict[str, Any] = {
+            obj.get("key"): obj.get("lastModified")
+            for obj in all_objects
+            if obj.get("key")
+        }
+        return [
+            k for k in keys
+            if mtime_map.get(k) is not None and mtime_map[k] > wm_value
+        ]
+    if by == "name":
+        return [k for k in keys if k > wm_value]
+    return keys  # 未知 by → 不过滤
+
+
+def _compute_file_watermark(
+    keys: list[str],
+    all_objects: list[dict[str, Any]],
+    incremental: dict[str, Any] | None,
+) -> Any | None:
+    """计算本轮采集后应推进到的新水位值(本批已采 keys 的「最大值」)。
+
+    - ``by='mtime'`` → ``max(lastModified of keys)``,忽略 None;
+    - ``by='name'``  → ``max(key)``;
+    - 空 keys / 无 incremental / 未知 by / 全部缺值 → ``None``
+      (调用方据此**不推进**:无新增不动水位,避免误把 None 写入后下轮当成首跑全量)。
+    """
+    if not incremental or not keys:
+        return None
+    by = incremental.get("by")
+    if by == "mtime":
+        mtime_map = {
+            obj.get("key"): obj.get("lastModified")
+            for obj in all_objects
+            if obj.get("key")
+        }
+        values = [
+            mtime_map[k] for k in keys
+            if k in mtime_map and mtime_map[k] is not None
+        ]
+        return max(values) if values else None
+    if by == "name":
+        return max(keys)
+    return None
+
+
+def _advance_file_watermark(
+    task: IngestTask,
+    keys: list[str],
+    all_objects: list[dict[str, Any]],
+    incremental: dict[str, Any] | None,
+) -> None:
+    """把本批 keys 的 max(mtime|name) 写回 ``task.watermark``(切片 C / Task 5)。
+
+    必须在 land_records / 媒体 manifest 落地**之前**调用——SQLAlchemy UnitOfWork
+    把 task 变更与 land_records 的内部 commit 一并落盘(同事务,无 duplicate-ingest
+    窗口)。空批(无可采对象)/ 无 incremental → 不动既有水位(零回归)。
+    """
+    if not incremental:
+        return
+    new_value = _compute_file_watermark(keys, all_objects, incremental)
+    if new_value is None:
+        return  # 空批 → 不推进
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    task.watermark = {
+        "value": new_value,
+        "updatedAt": datetime.now(UTC).isoformat(),
+    }
+
+
 class S3Connector:
     """S3(及 OSS/OBS 等 S3 兼容)平铺文件采集连接器。
 
@@ -282,12 +383,25 @@ class S3Connector:
         # 由 extract spec 计算本次要采集的 key 列表
         keys = _keys_from_extract(extract, all_objects)
 
+        # 切片 C / Task 5:增量过滤——按 task.incremental(by=mtime|name)
+        # + task.watermark 过滤掉「不比水位新」的对象(只采新增)。
+        # 首跑(无 watermark)/ 无 incremental → 不过滤(零回归,全量采)。
+        incremental = getattr(task, "incremental", None)
+        keys = _filter_keys_by_watermark(
+            keys, all_objects, incremental, getattr(task, "watermark", None)
+        )
+
         # 按扩展名分流:媒体走「复制进内置 MinIO + 汇成 manifest」,其余走逐对象落地
         media_keys = [k for k in keys if _ext(k) in BINARY_FORMATS]
         data_keys = [k for k in keys if _ext(k) not in BINARY_FORMATS]
 
         results: list[tuple[Dataset, DatasetVersion]] = []
         skipped = 0
+
+        # 切片 C / Task 5:水位推进——在第一笔 land_records / 媒体 manifest 落地
+        # **之前**写 task.watermark,确保 SQLAlchemy UnitOfWork 与 land_records 的
+        # 内部 commit 一并落盘(同事务,无 duplicate-ingest 窗口)。空批 → None → 不推进。
+        _advance_file_watermark(task, keys, all_objects, incremental)
 
         for key in data_keys:
             tmp_path: Path | None = None

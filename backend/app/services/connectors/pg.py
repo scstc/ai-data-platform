@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -18,6 +19,7 @@ from app.services.connectors.base import (
     IngestError,
     _build_queries,
     apply_filter_operators,
+    compute_db_watermark,
 )
 
 
@@ -26,8 +28,17 @@ async def fetch_records(datasource: Any, task: Any) -> list[dict[str, Any]]:
 
     供「生成 CSV 数据集」复用:只取记录,落地(CSV→MinIO)由调用方负责,
     不写本地受管 jsonl。连接/查询失败抛 IngestError。
+
+    切片 C / Task 5:增量任务(``task.incremental`` + ``task.watermark`` 均就绪)
+    → ``_build_queries`` 自动在表查询后拼 ``WHERE "增量列" > <水位>``。
+    本函数**只过滤、不推进水位**——推进由 ``run_pg_ingest`` 在 land_records 同事务
+    做;本函数供 generate-dataset 路径复用,其自身事务边界由路由层管理。
     """
-    queries = _build_queries(task.extract)
+    queries = _build_queries(
+        task.extract,
+        incremental=getattr(task, "incremental", None),
+        watermark=getattr(task, "watermark", None),
+    )
     cfg = datasource.config or {}
     out: list[dict[str, Any]] = []
     try:
@@ -72,6 +83,38 @@ async def _connect(cfg: dict[str, Any]) -> asyncpg.Connection:
 
 
 # ---------------------------------------------------------------------------
+# 增量水位推进辅助(切片 C / Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _merge_max(current: Any, candidate: Any) -> Any:
+    """跨表合并本批增量列的最大值(任一为 None → 取对方;同类型 → max)。"""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return max(current, candidate)
+
+
+def _stamp_task_watermark(task: Any, value: Any) -> None:
+    """把本批 max(增量列) 写回 ``task.watermark``(同事务持久化由 land_records commit)。
+
+    - ``value`` 为 None(空批)→ **不**覆盖既有水位(空批不推进)。
+    - ``value`` 非 None → 写 ``{value: <可 JSON 化的值>, updatedAt: <UTC ISO>}``。
+      datetime 转 ISO 字符串(JSONB 不直接接受 datetime);int 原样。
+    """
+    if value is None:
+        return
+    serializable: Any = (
+        value.isoformat() if isinstance(value, datetime) else value
+    )
+    task.watermark = {
+        "value": serializable,
+        "updatedAt": datetime.now(UTC).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 公开函数(供 ingest_runner 薄 re-export,§4.4)
 # ---------------------------------------------------------------------------
 
@@ -107,12 +150,27 @@ async def run_pg_ingest(
     - data_type 继续写 "sql"(SQL 接入栏功能键,test_ingest_tasks:314 断言保留)。
     - semantic_type 写 "structured"(版本级语义快照,新断言 §9)。
     遇到某条查询失败即中止(更早成功的已落地数据集保留),原因上抛。
+
+    切片 C / Task 5:增量采集水位推进。
+    - 表模式 + ``task.incremental={column,type}`` + ``task.watermark={value}`` →
+      ``_build_queries`` 自动拼 ``WHERE "column" > <字面值>``。
+    - 落地前算 ``max(增量列)``(本批所有表合并)→ 写回 ``task.watermark``。
+      在 ``land_records`` **之前**赋值,确保 SQLAlchemy UnitOfWork 把 watermark
+      与新建 Dataset/Version 一并 commit(同事务,无 duplicate-ingest 窗口)。
+    - 空批 / 无 incremental / 无 column → 不推进(不覆盖既有水位)。
     """
     from app.services.landing import land_records
 
-    queries = _build_queries(task.extract)
+    incremental = getattr(task, "incremental", None) or {}
+    inc_column: str | None = incremental.get("column") if incremental else None
+    queries = _build_queries(
+        task.extract,
+        incremental=incremental,
+        watermark=getattr(task, "watermark", None),
+    )
     cfg = datasource.config or {}
     results: list[tuple[Dataset, DatasetVersion]] = []
+    batch_max: Any = None  # 本批增量列的最大值(跨表合并)
     try:
         conn = await _connect(cfg)
         try:
@@ -121,6 +179,17 @@ async def run_pg_ingest(
                 records = [dict(r) for r in rows]
                 # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
                 records = await apply_filter_operators(task, records)
+
+                # 增量水位推进:本批合并取 max(增量列),写回 task.watermark。
+                # 必须在 land_records 之前赋值——land_records 内部会 commit,
+                # SQLAlchemy UnitOfWork 会把 task.watermark 与新版本一并落盘
+                # (同事务保证:land 成功 ⇔ 水位推进,无重复采的窗口)。
+                if inc_column:
+                    batch_max = _merge_max(
+                        batch_max, compute_db_watermark(records, inc_column)
+                    )
+                    _stamp_task_watermark(task, batch_max)
+
                 name = f"{task.name} - {suffix}" if suffix else task.name
                 ds, ver = await land_records(
                     session,

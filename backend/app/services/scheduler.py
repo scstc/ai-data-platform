@@ -17,7 +17,9 @@
   直接调 ``app.api.v1.ingest_tasks._execute_ingest(trigger="cron")``——无需
   sync/async bridge。
 - 重叠跳过:该任务最近一条 Job.state="running" → 日志 + 跳过,不建重复 Job。
-- 水位推进(增量采集)留 ``# TODO(C5)`` 钩子,Task 5 填。
+- 增量水位推进(切片 C / Task 5)在连接器内部完成——``run_pg_ingest`` /
+  ``S3Connector.run_ingest`` / ``HdfsConnector.run_ingest`` 各自在 land_records
+  **之前**写 ``task.watermark``(同事务),``_execute_ingest`` 不必单独处理。
 
 DEFERRED:真实 ``AsyncIOScheduler.start()`` / ``SQLAlchemyJobStore`` 建表 /
 对真 DB 扫描需 PG 可达——当前 .60 测试库 ConnectionRefused,留待回归。
@@ -154,9 +156,9 @@ async def _trigger_ingest(task_id: str) -> None:
             )
             return
 
-        # TODO(C5): advance watermark —— 增量采集水位推进在此处插入,
-        # 先于 _execute_ingest 执行(把上次成功 Job 的 watermark 投影到 task.extract)。
-
+        # 切片 C / Task 5:增量水位推进不再在此处单独处理——连接器
+        # (run_pg_ingest / S3Connector / HdfsConnector) 在 land_records 之前
+        # 写 task.watermark(同事务持久化),_execute_ingest 内自然透传到 task。
         await _execute_ingest(session, task, datasource, trigger="cron")
         await session.commit()
 

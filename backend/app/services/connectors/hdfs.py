@@ -281,6 +281,11 @@ class HdfsConnector:
 
         端到端承诺级:需真实 HDFS 集群。
         无 paths 配置 / NameNode 不可达 → 抛 ``ConnectorNotReady``。
+
+        切片 C / Task 5:增量过滤(仅支持 ``incremental.by='name'``,因为当前
+        run_ingest 不走 LISTSTATUS,没有 mtime)。``by='mtime'`` 在 HDFS 上
+        视为「不支持」→ 不过滤(诚实降级,不丢数据)。水位推进同 S3:落地前写
+        ``task.watermark``,同事务持久化(空批不推进)。
         """
         config = datasource.config or {}
         nn = self._namenode(config)
@@ -295,7 +300,25 @@ class HdfsConnector:
                 "HDFS 采集未配置 extract.paths,无法拉取文件(端到端承诺级)"
             )
 
+        # 增量过滤:HDFS 当前 run_ingest 不获取 mtime,仅支持 by=name。
+        incremental = getattr(task, "incremental", None) or {}
+        watermark = getattr(task, "watermark", None) or {}
+        if incremental.get("by") == "name":
+            wm_value = watermark.get("value")
+            if wm_value is not None:
+                paths = [p for p in paths if p > wm_value]
+
         results: list[tuple[Dataset, DatasetVersion]] = []
+
+        # 水位推进:落地前写 task.watermark(同事务持久化),空批不推进。
+        # 仅在 by=name 模式下推进(by=mtime 在 HDFS 上不支持,不推进)。
+        if incremental.get("by") == "name" and paths:
+            from datetime import UTC, datetime  # noqa: PLC0415
+
+            task.watermark = {
+                "value": max(paths),
+                "updatedAt": datetime.now(UTC).isoformat(),
+            }
 
         for hdfs_path in paths:
             url = _build_webhdfs_url(nn, hdfs_path, "OPEN", **extra)
