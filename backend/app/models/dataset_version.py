@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import BigInteger, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -71,4 +73,18 @@ class DatasetVersion(Base):
     # 版本不可变,仅记录创建时间(无 updated_at)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
+    )
+    # 采集质量统计快照(切片 B):{rows, columns:[{name,null_rate}], ...};
+    # 未配置质量策略的版本为空。版本不可变,写入即定格。
+    quality_stats: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    # 采集时的表结构快照(切片 B):[{name, type}, ...],用于后续 schema drift 比较。
+    schema_snapshot: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    # 采集质量门结论(切片 B):skipped(未配置策略) | passed | failed。
+    # 与 scan_verdict(安全扫描)正交:一个管"脏不脏",一个管"安不安全"。
+    quality_verdict: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="skipped"
     )

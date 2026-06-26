@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from app.schemas.common import CamelModel, UtcDateTime
 
@@ -28,6 +28,19 @@ class PipelineStep(CamelModel):
 
     name: str
     params: dict[str, Any] = {}
+
+
+class QualityPolicy(CamelModel):
+    """任务级采集质量策略(切片 B)。
+
+    采集落地时据此对版本数据做质量门检查,失败可阻断发布或仅记 verdict。
+    - maxNullRate:单列最大允许 null 率,闭区间 [0, 1];None 表示不做该检查。
+    - blockOnSchemaDrift:与历史 schema_snapshot 比较出现 drift 时是否阻断
+      (True 阻断/标 failed,False 仅记录不阻断)。默认 False。
+    """
+
+    max_null_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    block_on_schema_drift: bool = False
 
 
 class IngestExtract(CamelModel):
@@ -94,6 +107,8 @@ class IngestTaskRead(CamelModel):
     logs: list[str] | None = None
     # 产物概要列表(仅详情填充):每项含 datasetId/datasetName/versionId/versionNo/rows
     output: list[dict[str, Any]] | None = None
+    # 任务级质量策略(切片 B):透传出前端展示/编辑,可空
+    quality_policy: QualityPolicy | None = None
 
 
 class IngestRunRead(CamelModel):
@@ -120,6 +135,8 @@ class IngestTaskCreate(CamelModel):
     extract: IngestExtract | None = None
     # 分类(#15):受控分类库引用 id,可空
     category_id: str | None = None
+    # 任务级质量策略(切片 B):可选,None 表示不做质量门检查
+    quality_policy: QualityPolicy | None = None
 
     @model_validator(mode="after")
     def _reject_cron_schedule(self) -> IngestTaskCreate:
@@ -137,6 +154,8 @@ class IngestTaskUpdate(CamelModel):
     extract: IngestExtract | None = None
     # 分类(#15):受控分类库引用 id
     category_id: str | None = None
+    # 任务级质量策略(切片 B):可选,传 None/缺省 = 不变(由路由侧区分)
+    quality_policy: QualityPolicy | None = None
 
     @model_validator(mode="after")
     def _reject_cron_schedule(self) -> IngestTaskUpdate:

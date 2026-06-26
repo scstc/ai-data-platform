@@ -48,3 +48,8 @@ class IngestTask(Base):
         server_default=func.now(), nullable=False
     )
     last_run_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # 任务级质量策略(切片 B):{maxNullRate, blockOnSchemaDrift},与
+    # schemas.ingest_task.QualityPolicy 同形;未配置为空(等价 skipped 结论)。
+    quality_policy: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
