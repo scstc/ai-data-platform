@@ -40,6 +40,7 @@ from app.core.audit import audit_middleware
 from app.core.config import settings
 from app.core.db import async_session_factory
 from app.services import job_runner
+from app.services import scheduler as scheduler_mod
 from app.services.llm_config import refresh_cache
 
 _logger = logging.getLogger(__name__)
@@ -56,14 +57,36 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             await refresh_cache(session)
     except Exception:  # noqa: BLE001
         _logger.warning("启动时刷新 LLM 配置缓存失败（已忽略）", exc_info=True)
-    # best-effort：确保平台上传桶存在(未配置 MinIO 时静默跳过)
+    # best-effort:确保平台上传桶存在(未配置 MinIO 时静默跳过)
     try:
         from app.services.external_store import ensure_upload_bucket
 
         await ensure_upload_bucket()
     except Exception:  # noqa: BLE001
         _logger.warning("启动时确保平台上传桶失败（已忽略）", exc_info=True)
-    yield
+
+    # 调度器(切片 C):scheduler_enabled=False 时跳过;启动 / 对账失败仅告警,
+    # 不阻断 app 启动——采集主流程不依赖调度器在线(可手工触发)。
+    scheduler: scheduler_mod.AsyncIOScheduler | None = None
+    if settings.scheduler_enabled:
+        try:
+            scheduler = scheduler_mod.init_scheduler()
+            scheduler.start()
+            async with async_session_factory() as session:
+                await scheduler_mod.reconcile(session, scheduler)
+            _logger.info("调度器启动并对账完成")
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "调度器启动/对账失败（已忽略，采集主流程不依赖调度器）",
+                exc_info=True,
+            )
+            scheduler_mod.shutdown_scheduler(scheduler)
+            scheduler = None
+    try:
+        yield
+    finally:
+        # 关闭路径必须无条件执行:即便启动失败(scheduler=None)也要进入 finally
+        scheduler_mod.shutdown_scheduler(scheduler)
 
 
 def create_app() -> FastAPI:

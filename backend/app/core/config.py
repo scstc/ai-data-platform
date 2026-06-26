@@ -83,6 +83,11 @@ class Settings(BaseSettings):
         "http://127.0.0.1:8001",
     ]
 
+    # 调度器开关(切片 C):False 时启动不构造 AsyncIOScheduler,适合测试 / 无 PG
+    # 环境。生产默认开;启动失败(如 PG 不可达)也仅告警不阻断主流程(采集不依赖
+    # 调度器在线)。
+    scheduler_enabled: bool = True
+
     @model_validator(mode="after")
     def _derive_dj_analyze_bin(self) -> Settings:
         """dj_analyze_bin 未显式配置时,默认与 dj_process_bin 同目录。"""
