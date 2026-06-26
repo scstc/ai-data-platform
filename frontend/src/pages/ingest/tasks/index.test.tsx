@@ -94,7 +94,24 @@ vi.mock('@ant-design/pro-components', () => ({
   ProFormTreeSelect: ({ label }: any) => (
     <div data-testid="form-tree-select">{label}</div>
   ),
-  ProFormRadio: { Group: ({ label }: any) => <div>{label}</div> },
+  ProFormRadio: {
+    Group: ({ label, options }: any) => (
+      <div data-testid="form-radio-group" data-label={label}>
+        {label}
+        <div data-testid="radio-options">
+          {(options ?? []).map((opt: any) => (
+            <span
+              key={String(opt.value)}
+              data-testid={`radio-${opt.value}`}
+              data-disabled={opt.disabled ? 'true' : 'false'}
+            >
+              {opt.label}
+            </span>
+          ))}
+        </div>
+      </div>
+    ),
+  },
   ProFormDependency: ({ children }: any) =>
     children?.({ schedule: { mode: 'cron' } }) ?? null,
 }));
@@ -400,5 +417,116 @@ describe('IngestTasksPage', () => {
     expect(dpApi.createIngestTask).toHaveBeenCalledTimes(1);
     const call = vi.mocked(dpApi.createIngestTask).mock.calls[0][0];
     expect(call.qualityPolicy).toBeUndefined();
+  });
+
+  it('Cron 选项已启用（不再 disabled）—— 切片 C 解禁', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    // step-object 内的调度方式选项里,cron 不能再带 disabled(切片 C 解禁的契约)
+    const stepObject = screen.getByTestId('step-object');
+    const cronOption = within(stepObject).getByTestId('radio-cron');
+    expect(cronOption).toHaveAttribute('data-disabled', 'false');
+    expect(cronOption).toHaveTextContent('Cron 周期');
+    // 「未启用」字样已被移除(不再误导用户)
+    expect(cronOption.textContent).not.toContain('未启用');
+  });
+
+  it('向导提交时 schedule.cron 透传到 createIngestTask 载荷', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    await stepsState.wizardOnFinish?.({
+      name: 't-cron',
+      datasourceId: 'ds-pg-01',
+      schedule: { mode: 'cron', cron: '0 2 * * *' },
+      extract: { mode: 'table', tables: ['users'] },
+    });
+
+    expect(dpApi.createIngestTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schedule: { mode: 'cron', cron: '0 2 * * *' },
+      }),
+    );
+  });
+
+  it('DB 增量配置(column+type)透传到 createIngestTask 载荷的 incremental', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    await stepsState.wizardOnFinish?.({
+      name: 't-inc-db',
+      datasourceId: 'ds-pg-01',
+      schedule: { mode: 'once' },
+      extract: { mode: 'table', tables: ['users'] },
+      incremental: { column: 'updated_at', type: 'timestamp' },
+    });
+
+    expect(dpApi.createIngestTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        incremental: { column: 'updated_at', type: 'timestamp' },
+      }),
+    );
+  });
+
+  it('文件增量配置(by)透传到 createIngestTask 载荷的 incremental', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    await stepsState.wizardOnFinish?.({
+      name: 't-inc-file',
+      datasourceId: 'ds-s3-01',
+      schedule: { mode: 'once' },
+      extract: { mode: 'path', paths: ['raw/data.jsonl'] },
+      incremental: { by: 'mtime' },
+    });
+
+    expect(dpApi.createIngestTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        incremental: { by: 'mtime' },
+      }),
+    );
+  });
+
+  it('全空 incremental（column/type/by 都未填）在载荷中被剔除为 undefined（避免后端 model_validator 拒绝）', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    await stepsState.wizardOnFinish?.({
+      name: 't-inc-empty',
+      datasourceId: 'ds-pg-01',
+      schedule: { mode: 'once' },
+      extract: { mode: 'table', tables: ['users'] },
+      // 表单上「增量列」留空 + 「类型」未选 → 字段都是 undefined / 空
+      incremental: { column: undefined, type: undefined },
+    });
+
+    expect(dpApi.createIngestTask).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(dpApi.createIngestTask).mock.calls[0][0];
+    expect(call.incremental).toBeUndefined();
+  });
+
+  it('validateCronFields: 5 段合法表达式通过,4 段/含字母段被拒(前端轻校验契约)', async () => {
+    const { validateCronFields } = await import('./index');
+    // 合法:5 段、* / - , 数字
+    expect(validateCronFields('0 2 * * *')).toBeUndefined();
+    expect(validateCronFields('*/15 0 1-7 * 1,2,3')).toBeUndefined();
+    // 段数错
+    expect(validateCronFields('0 2 * *')).toBe(
+      'cron 表达式须为 5 段(分 时 日 月 周)',
+    );
+    expect(validateCronFields('0 2 * * * *')).toBe(
+      'cron 表达式须为 5 段(分 时 日 月 周)',
+    );
+    // 含字母(非标准 crontab 段)
+    expect(validateCronFields('0 2 L * *')).toMatch(/只能含数字/);
+    // 空
+    expect(validateCronFields(undefined)).toBe('请输入 cron 表达式');
+    expect(validateCronFields('   ')).toBe('请输入 cron 表达式');
   });
 });

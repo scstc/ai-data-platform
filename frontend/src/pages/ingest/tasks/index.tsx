@@ -80,28 +80,113 @@ export const VERDICT_META: Record<
   failed: { text: '未通过', color: 'error', dot: 'red' },
 };
 
-/** 把 qualityPolicy 全空（未填阈值 + 未开开关）的策略字段从载荷中剔除
- *  —— 避免后端存入 `{max_null_rate: None, block_on_schema_drift: False}`
- *  这种"形式上配置了但实际无任何检查"的策略体（会让 verdict 落 passed 而非 skipped） */
-const pruneEmptyQualityPolicy = <
-  T extends { qualityPolicy?: DataPlatform.QualityPolicy },
->(
-  values: T,
-): T => {
-  const p = values.qualityPolicy;
-  if (p && p.maxNullRate == null && !p.blockOnSchemaDrift) {
-    return { ...values, qualityPolicy: undefined };
-  }
-  return values;
-};
-
 /** 格式化调度展示：单次 / cron 表达式 */
 const renderSchedule = (schedule: DataPlatform.IngestSchedule) =>
   schedule.mode === 'once' ? (
     <Tag>单次</Tag>
   ) : (
-    <Typography.Text code>{schedule.cron}</Typography.Text>
+    <span>
+      <Tag color="blue">Cron</Tag>
+      <Typography.Text code>{schedule.cron}</Typography.Text>
+    </span>
   );
+
+/** Cron 表达式客户端轻校验(5 字段标准 crontab:分 时 日 月 周)。
+ *  仅作格式初检,严格语义校验由后端 APScheduler CronTrigger.from_crontab 完成。
+ *  返回 undefined=通过,字符串=错误提示(供 ProFormText rules validator 使用)。
+ *  导出供 index.test.tsx 断言校验契约(5 段格式 + 字符集)。 */
+export const validateCronFields = (
+  value: string | undefined,
+): string | undefined => {
+  if (!value || !value.trim()) return '请输入 cron 表达式';
+  const fields = value.trim().split(/\s+/);
+  if (fields.length !== 5) return 'cron 表达式须为 5 段(分 时 日 月 周)';
+  // 每段允许 * / - , 数字(含 L/W step 等扩展字符由后端判定),这里只做粗筛
+  if (!fields.every((f) => /^[*/\d,-]+$/.test(f))) {
+    return 'cron 段只能含数字与 * / - , 字符';
+  }
+  return undefined;
+};
+
+/** 调度方式选项(切片 C:Cron 已启用) */
+const SCHEDULE_OPTIONS = [
+  { label: '单次', value: 'once' },
+  { label: 'Cron 周期', value: 'cron' },
+];
+
+/** 增量配置(切片 C,任务级,与 qualityPolicy 并列)。
+ *  - DB 数据源:column(列名)+ type(timestamp|integer)
+ *  - s3/hdfs 数据源:by(mtime|name)
+ *  - 空=全量采集(incremental 不写入载荷)
+ *  说明:此片段共享给新建向导 step-4「落地确认」与编辑 ModalForm。
+ *  按 datasource.type 条件渲染(由调用方包 ProFormDependency 切数据源)。 */
+const renderIncrementalFields = (ds: DataPlatform.DataSource | undefined) => {
+  if (!ds) return null;
+  if (ds.type === 'database') {
+    return (
+      <>
+        <ProFormText
+          name={['incremental', 'column']}
+          label="增量列（可选）"
+          tooltip="DB 数据库按此列的高水位推进;留空=全量。须与下方「类型」同时填写,否则后端拒绝"
+          placeholder="如 updated_at 或 id"
+        />
+        <ProFormSelect
+          name={['incremental', 'type']}
+          label="增量列类型"
+          tooltip="timestamp=按时间戳水位;integer=按自增主键水位"
+          options={[
+            { label: 'timestamp', value: 'timestamp' },
+            { label: 'integer', value: 'integer' },
+          ]}
+          placeholder="与「增量列」配套选择"
+          allowClear
+        />
+      </>
+    );
+  }
+  if (ds.type === 's3' || ds.type === 'hdfs') {
+    return (
+      <ProFormSelect
+        name={['incremental', 'by']}
+        label="增量按（可选）"
+        tooltip="按对象 mtime(修改时间)或 name(字典序)推进;留空=全量"
+        options={[
+          { label: 'mtime（修改时间）', value: 'mtime' },
+          { label: 'name（文件名）', value: 'name' },
+        ]}
+        placeholder="选择增量维度"
+        allowClear
+      />
+    );
+  }
+  return null;
+};
+
+/** 把 qualityPolicy 全空（未填阈值 + 未开开关）与 incremental 全空(未填任何字段)
+ *  的策略字段从载荷中剔除——避免后端存入形式上配置了但实际无任何检查/过滤的载荷
+ *  (会让质量门 verdict 落 passed 而非 skipped;incremental 会被后端 model_validator 拒绝)。
+ *  保留原函数名以最小化改动;incremental 剪枝是切片 C 在此基础上的扩展。 */
+const pruneEmptyQualityPolicy = <
+  T extends {
+    qualityPolicy?: DataPlatform.QualityPolicy;
+    incremental?: Record<string, unknown>;
+  },
+>(
+  values: T,
+): T => {
+  let out = values;
+  const p = out.qualityPolicy;
+  if (p && p.maxNullRate == null && !p.blockOnSchemaDrift) {
+    out = { ...out, qualityPolicy: undefined };
+  }
+  const inc = out.incremental;
+  // incremental 任一子字段都没有值 → 视为未配置,从载荷剔除
+  if (inc && !Object.values(inc).some((v) => v != null && v !== '')) {
+    out = { ...out, incremental: undefined };
+  }
+  return out;
+};
 
 const IngestTasksPage: React.FC = () => {
   const access = useAccess();
@@ -385,10 +470,7 @@ const IngestTasksPage: React.FC = () => {
         name={['schedule', 'mode']}
         label="调度方式"
         rules={[{ required: true, message: '请选择调度方式' }]}
-        options={[
-          { label: '单次', value: 'once' },
-          { label: 'Cron 周期（未启用）', value: 'cron', disabled: true },
-        ]}
+        options={SCHEDULE_OPTIONS}
       />
       <ProFormDependency name={[['schedule', 'mode']]}>
         {({ schedule }) =>
@@ -397,7 +479,17 @@ const IngestTasksPage: React.FC = () => {
               name={['schedule', 'cron']}
               label="Cron 表达式"
               placeholder="如 0 2 * * *（每天凌晨 2 点，分 时 日 月 周）"
-              rules={[{ required: true, message: '请输入 cron 表达式' }]}
+              rules={[
+                { required: true, message: '请输入 cron 表达式' },
+                {
+                  validator: (_, value: string) => {
+                    const err = validateCronFields(value);
+                    return err
+                      ? Promise.reject(new Error(err))
+                      : Promise.resolve();
+                  },
+                },
+              ]}
             />
           ) : null
         }
@@ -413,6 +505,9 @@ const IngestTasksPage: React.FC = () => {
         }
       </ProFormDependency>
       {qualityPolicyFields}
+      <ProFormDependency name={[['datasourceId']]}>
+        {({ datasourceId }) => renderIncrementalFields(dsMap[datasourceId])}
+      </ProFormDependency>
     </>
   );
 
@@ -687,10 +782,7 @@ const IngestTasksPage: React.FC = () => {
               name={['schedule', 'mode']}
               label="调度方式"
               rules={[{ required: true, message: '请选择调度方式' }]}
-              options={[
-                { label: '单次', value: 'once' },
-                { label: 'Cron 周期（未启用）', value: 'cron', disabled: true },
-              ]}
+              options={SCHEDULE_OPTIONS}
             />
             <ProFormDependency name={[['schedule', 'mode']]}>
               {({ schedule }) =>
@@ -699,7 +791,17 @@ const IngestTasksPage: React.FC = () => {
                     name={['schedule', 'cron']}
                     label="Cron 表达式"
                     placeholder="如 0 2 * * *（每天凌晨 2 点，分 时 日 月 周）"
-                    rules={[{ required: true, message: '请输入 cron 表达式' }]}
+                    rules={[
+                      { required: true, message: '请输入 cron 表达式' },
+                      {
+                        validator: (_, value: string) => {
+                          const err = validateCronFields(value);
+                          return err
+                            ? Promise.reject(new Error(err))
+                            : Promise.resolve();
+                        },
+                      },
+                    ]}
                   />
                 ) : null
               }
@@ -745,6 +847,7 @@ const IngestTasksPage: React.FC = () => {
               </Form.Item>
             )}
             {qualityPolicyFields}
+            {renderIncrementalFields(dsMap[wizardCtx.datasourceId ?? ''])}
             <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
               请确认以上配置；提交后将创建采集任务并立即进入待运行状态。
             </Typography.Paragraph>
@@ -769,6 +872,7 @@ const IngestTasksPage: React.FC = () => {
                 extract: editRow.extract,
                 categoryId: editRow.categoryId ?? undefined,
                 qualityPolicy: editRow.qualityPolicy,
+                incremental: editRow.incremental,
               }
             : undefined
         }
@@ -838,6 +942,58 @@ const IngestTasksPage: React.FC = () => {
                           <Tag key={p}>{p}</Tag>
                         ))}
                         {!ext.glob && (ext.paths ?? []).length === 0 && '-'}
+                      </span>
+                    );
+                  },
+                },
+                {
+                  title: '增量配置',
+                  dataIndex: 'incremental',
+                  render: (_, record) => {
+                    const inc = record.incremental;
+                    if (!inc)
+                      return (
+                        <Typography.Text type="secondary">全量</Typography.Text>
+                      );
+                    if ('column' in inc) {
+                      return (
+                        <span>
+                          <Tag color="blue">DB 列</Tag>
+                          <Typography.Text code>{inc.column}</Typography.Text>
+                          <Typography.Text type="secondary">
+                            {' '}
+                            ({inc.type})
+                          </Typography.Text>
+                        </span>
+                      );
+                    }
+                    return (
+                      <span>
+                        <Tag color="blue">文件</Tag>
+                        <Typography.Text code>{inc.by}</Typography.Text>
+                      </span>
+                    );
+                  },
+                },
+                {
+                  title: '当前水位',
+                  dataIndex: 'watermark',
+                  render: (_, record) => {
+                    const wm = record.watermark;
+                    if (!wm?.value) {
+                      return (
+                        <Typography.Text type="secondary">-</Typography.Text>
+                      );
+                    }
+                    return (
+                      <span>
+                        <Typography.Text code>{wm.value}</Typography.Text>
+                        {wm.updatedAt && (
+                          <Typography.Text type="secondary">
+                            {' '}
+                            ({formatDateTime(wm.updatedAt)})
+                          </Typography.Text>
+                        )}
                       </span>
                     );
                   },
@@ -996,6 +1152,18 @@ const IngestTasksPage: React.FC = () => {
                     title: '开始时间',
                     dataIndex: 'startedAt',
                     render: (v) => formatDateTime(v),
+                  },
+                  {
+                    title: '触发',
+                    dataIndex: 'trigger',
+                    render: (v) =>
+                      v === 'cron' ? (
+                        <Tag color="blue">cron</Tag>
+                      ) : v === 'manual' ? (
+                        <Tag>手动</Tag>
+                      ) : (
+                        <Typography.Text type="secondary">-</Typography.Text>
+                      ),
                   },
                   {
                     title: '状态',

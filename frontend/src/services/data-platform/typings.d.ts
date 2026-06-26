@@ -117,6 +117,25 @@ declare namespace DataPlatform {
     blockOnSchemaDrift?: boolean;
   };
 
+  /** 增量采集配置(切片 C)：两种互斥形二选一(与后端 Incremental 同形)。
+   *  - 库形: {column, type}        按 DB 列水位推进(timestamp/integer)
+   *  - 文件形: {by}                 按 S3/HDFS 对象 mtime 或 name 推进
+   *  undefined = 全量采集(无增量)。前端按 datasource.type 决定渲染哪种形。
+   *  后端 model_validator 拒绝混合 / 全空;前端 UI 只暴露其中一种,避免误填。 */
+  type Incremental =
+    | { column: string; type: 'timestamp' | 'integer' }
+    | { by: 'mtime' | 'name' };
+
+  /** 增量水位快照(切片 C,后端写回 task.watermark JSONB;前端只读展示)。
+   *  - value: 当前高水位字符串(DB 列值 / 对象 mtime ISO / 对象 key)
+   *  - updatedAt: 后端推进水位的时刻(UTC ISO)
+   *  ⚠️ 后端 IngestTaskRead 当前未暴露 watermark,本字段为前向兼容占位:
+   *     backend 补读模型字段前,展示层会自然降级为「-」。 */
+  type Watermark = {
+    value: string;
+    updatedAt?: string;
+  };
+
   /** 采集质量统计·单列条目（与后端 ingest_quality.compute_quality_stats 对齐） */
   type QualityStatColumn = {
     name: string;
@@ -151,6 +170,9 @@ declare namespace DataPlatform {
     qualityStats?: QualityStats;
     /** 采集时的列结构快照(用于漂移比对；前端据此渲染 drift 提示) */
     schemaSnapshot?: SchemaSnapshotEntry[];
+    /** 该版本所在运行的触发来源(切片 C):manual=rerun 手动 / cron=调度器自动。
+     *  undefined 兼容老数据(后端 IngestRunRead 未暴露 trigger 时降级为不显示)。 */
+    trigger?: 'manual' | 'cron';
   };
 
   /** 采集任务 */
@@ -168,6 +190,11 @@ declare namespace DataPlatform {
     categoryName?: string | null;
     /** 任务级质量策略(切片 B)：未配置时为 undefined */
     qualityPolicy?: QualityPolicy;
+    /** 增量采集配置(切片 C)：undefined = 全量采集 */
+    incremental?: Incremental;
+    /** 当前增量水位(切片 C,后端推进;前端只读展示)。
+     *  后端 IngestTaskRead 暂未暴露,backend 补字段前展示层降级为「-」。 */
+    watermark?: Watermark;
     createdAt: string;
     lastRunAt?: string;
     logs?: string[];
@@ -183,6 +210,9 @@ declare namespace DataPlatform {
     datasetCount: number;
     outputs?: IngestOutput[];
     error?: string;
+    /** 触发来源(切片 C):manual=rerun 手动 / cron=调度器自动。
+     *  undefined 兼容老数据 / 后端未暴露 trigger 时降级为不显示。 */
+    trigger?: 'manual' | 'cron';
     startedAt: string;
     finishedAt?: string;
   };
@@ -818,6 +848,8 @@ declare namespace DataPlatform {
     categoryId?: string;
     /** 任务级质量策略(切片 B)：undefined/空对象 = 不做质量门检查 */
     qualityPolicy?: QualityPolicy;
+    /** 增量采集配置(切片 C)：undefined = 全量采集 */
+    incremental?: Incremental;
   };
 
   /** 源数据预览：单列描述 */
