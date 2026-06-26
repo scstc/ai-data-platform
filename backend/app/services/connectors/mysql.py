@@ -208,6 +208,7 @@ class MysqlConnector:
                         source_kind="database",
                         note=f"采集落地:{task.name}(来源 {datasource.name})",
                         produced_by_job_id=job_id,
+                        storage_format="parquet",
                     )
                     results.append((ds, ver))
             finally:

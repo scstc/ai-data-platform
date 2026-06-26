@@ -434,3 +434,150 @@ async def test_pg_family_db_kinds_route_through_pgconnector(
         ds_row = await session.get(DSModel, version.dataset_id)
         assert ds_row is not None
         assert ds_row.data_type == "sql"  # 接入键不变
+
+
+# ---------------------------------------------------------------------------
+# Task 4: 数据库采集改用 parquet 落地(+ jsonl 回退)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pg_rerun_lands_parquet(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PG 真实拉取:land_records(storage_format='parquet') → version.format='parquet'。
+
+    沿用自引用测试库模式(与 test_pg_rerun_creates_ingest_job_and_lineage 一致),
+    额外断言落地版本 format 字段为 'parquet'。
+    """
+    from urllib.parse import urlparse
+
+    from app.core.config import settings
+    from tests.conftest import TEST_DATABASE_URL
+
+    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
+
+    u = urlparse(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
+    async with session_factory() as session:
+        from app.models.datasource import DataSource as DS
+
+        session.add(
+            DS(
+                id="ds-pg-parquet",
+                name="parquet落地测试库",
+                type="database",
+                db_kind="postgresql",
+                status="connected",
+                config={
+                    "host": u.hostname,
+                    "port": u.port,
+                    "database": u.path.lstrip("/"),
+                    "username": u.username,
+                    "password": u.password,
+                },
+                creator="admin",
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/ingest-tasks",
+        json={
+            "name": "parquet采集",
+            "datasourceId": "ds-pg-parquet",
+            "schedule": {"mode": "once"},
+            "extract": {"mode": "sql", "sql": "SELECT 1 AS n, 'hello' AS s"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["data"]["id"]
+
+    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
+    body = resp.json()
+    assert body["data"]["status"] == "success", body
+
+    async with session_factory() as session:
+        from sqlalchemy import select
+
+        from app.models.dataset_version import DatasetVersion as DV
+
+        version = (await session.scalars(select(DV))).one()
+        assert version.format == "parquet", f"期望 parquet,实际 {version.format!r}"
+        assert version.rows == 1
+
+
+@pytest.mark.asyncio
+async def test_pg_rerun_jsonl_fallback_on_codec_error(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """parquet 编解码失败时 land_records 自动回退 jsonl(ParquetCodecError → jsonl)。
+
+    monkeypatch records_to_parquet_bytes 抛 ParquetCodecError,
+    断言落地版本 format='jsonl'(采集仍 success,不报错)。
+    """
+    from urllib.parse import urlparse
+
+    from app.core.config import settings
+    from app.services.landing import ParquetCodecError
+    from tests.conftest import TEST_DATABASE_URL
+
+    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
+
+    def _codec_fail(_records: list) -> bytes:
+        raise ParquetCodecError("测试强制 parquet 失败 → 回退 jsonl")
+
+    monkeypatch.setattr("app.services.landing.records_to_parquet_bytes", _codec_fail)
+
+    u = urlparse(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
+    async with session_factory() as session:
+        from app.models.datasource import DataSource as DS
+
+        session.add(
+            DS(
+                id="ds-pg-jsonl-fb",
+                name="jsonl回退测试库",
+                type="database",
+                db_kind="postgresql",
+                status="connected",
+                config={
+                    "host": u.hostname,
+                    "port": u.port,
+                    "database": u.path.lstrip("/"),
+                    "username": u.username,
+                    "password": u.password,
+                },
+                creator="admin",
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/ingest-tasks",
+        json={
+            "name": "jsonl回退采集",
+            "datasourceId": "ds-pg-jsonl-fb",
+            "schedule": {"mode": "once"},
+            "extract": {"mode": "sql", "sql": "SELECT 42 AS x"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["data"]["id"]
+
+    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
+    body = resp.json()
+    assert body["data"]["status"] == "success", body
+
+    async with session_factory() as session:
+        from sqlalchemy import select
+
+        from app.models.dataset_version import DatasetVersion as DV
+
+        version = (await session.scalars(select(DV))).one()
+        assert version.format == "jsonl", f"期望 jsonl 回退,实际 {version.format!r}"
+        assert version.rows == 1

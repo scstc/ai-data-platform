@@ -490,31 +490,43 @@ async def generate_dataset(task_id: str, session: SessionDep) -> Response:
         )
         next_version = (max_v or 0) + 1
 
-    # 3) jsonl → 上传平台 MinIO(uploads/<dataset_id>/v<n>/data.jsonl)
-    jsonl_bytes = records_to_jsonl_bytes(records)
+    # 3) parquet → 上传平台 MinIO(uploads/<dataset_id>/v<n>/data.parquet);失败回退 jsonl
+    from app.services.landing import ParquetCodecError, records_to_parquet_bytes
+    from app.services.external_store import upload_parquet_to_uploads
+
+    fmt = "parquet"
     try:
-        storage_uri = await upload_jsonl_to_uploads(
-            dataset.id, next_version, jsonl_bytes
-        )
+        blob = records_to_parquet_bytes(records)
+        storage_uri = await upload_parquet_to_uploads(dataset.id, next_version, blob)
+    except ParquetCodecError:
+        fmt = "jsonl"
+        blob = records_to_jsonl_bytes(records)
+        try:
+            storage_uri = await upload_jsonl_to_uploads(dataset.id, next_version, blob)
+        except ExternalStoreError as exc:
+            await session.rollback()
+            return JSONResponse(
+                status_code=503, content={"success": False, "message": str(exc)}
+            )
     except ExternalStoreError as exc:
         await session.rollback()
         return JSONResponse(
             status_code=503, content={"success": False, "message": str(exc)}
         )
 
-    # 4) 登记 hosted jsonl 版本(source_datasource_id 留空 → 回退平台 MinIO)
+    # 4) 登记 hosted 版本(source_datasource_id 留空 → 回退平台 MinIO)
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
         version_no=next_version,
         storage_uri=storage_uri,
-        format="jsonl",
+        format=fmt,
         rows=len(records),
-        size=len(jsonl_bytes),
+        size=len(blob),
         origin="hosted",
         source_datasource_id=None,
         semantic_type="structured",
-        note=f"采集生成 jsonl(来源 {datasource.name},v{next_version})",
+        note=f"采集生成 {fmt}(来源 {datasource.name},v{next_version})",
     )
     session.add(version)
     task.last_run_at = _now()
@@ -536,7 +548,7 @@ async def generate_dataset(task_id: str, session: SessionDep) -> Response:
                 "versionNo": next_version,
                 "rows": len(records),
                 "bucket": bucket,
-                "fileKey": f"{dataset.id}/v{next_version}/data.jsonl",
+                "fileKey": f"{dataset.id}/v{next_version}/data.{fmt}",
                 "storageUri": storage_uri,
             },
             "success": True,
