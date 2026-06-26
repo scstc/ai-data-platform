@@ -203,6 +203,21 @@ export async function listDatasourceTables(
   );
 }
 
+/** 源数据预览（采集配置期采样，无副作用）POST /api/v1/ingest-tasks/preview */
+export async function previewIngestSource(
+  body: { datasourceId: string; extract: DataPlatform.IngestExtract },
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.IngestSourcePreview;
+    success: boolean;
+  }>('/api/v1/ingest-tasks/preview', {
+    method: 'POST',
+    data: body,
+    ...(options || {}),
+  });
+}
+
 /** 轮换 API 数据源推送 token（旧 token 立即失效）POST /api/v1/datasources/{id}/rotate-push-token */
 export async function rotatePushToken(
   id: string,

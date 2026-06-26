@@ -102,6 +102,8 @@ declare namespace DataPlatform {
     paths?: string[];
     /** mode='path' 时：glob 匹配模式（与 paths 二选一或叠加） */
     glob?: string;
+    /** table 模式勾选的列(裁剪落地);仅整表模式 */
+    columns?: string[];
   };
 
   /** 采集产物概要（详情接口返回） */
@@ -776,6 +778,16 @@ declare namespace DataPlatform {
     schedule: IngestSchedule;
     extract?: IngestExtract;
     categoryId?: string;
+  };
+
+  /** 源数据预览：单列描述 */
+  type IngestPreviewColumn = { name: string; type: string };
+  /** 源数据预览响应（采集配置期采样，无副作用） */
+  type IngestSourcePreview = {
+    columns: IngestPreviewColumn[];
+    rows: Record<string, any>[];
+    truncated: boolean;
+    sampledFrom: string;
   };
 
   /** 单个上传记录响应 */
