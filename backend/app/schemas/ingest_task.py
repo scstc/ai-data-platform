@@ -88,6 +88,24 @@ class Incremental(CamelModel):
         return self
 
 
+class Watermark(CamelModel):
+    """增量水位快照读模型(切片 C6):与 ``IngestTask.watermark`` JSONB 同形。
+
+    连接器写入位(pg.py / objectstore.py / hdfs.py 的 ``advance_*``)统一用
+    camelCase 键 ``{"value": <str>, "updatedAt": <iso8601 str>}``:
+    - ``value``:增量列最大值 / mtime / 对象键等可比较字面值的字符串化形式
+      (类型经 ``incremental.type`` 在连接器侧还原;此处保持 str 不强解析)。
+    - ``updatedAt``:推进时刻(UTC ISO-8601 字符串,由连接器 ``datetime.now(UTC).isoformat()`` 写)。
+
+    CamelModel alias_generator 把 ``updated_at`` ⇄ ``updatedAt``,``populate_by_name=True``
+    让 camelCase JSONB 输入正确解析;JSON 输出 ``model_dump(by_alias=True)`` 还原
+    为 ``updatedAt``,与前端 typings 的 ``{value, updatedAt}`` 形一致。
+    """
+
+    value: str
+    updated_at: UtcDateTime | None = None
+
+
 class IngestExtract(CamelModel):
     """采集对象(extract spec):拉什么 + 落地前怎么过滤。
 
@@ -169,6 +187,10 @@ class IngestTaskRead(CamelModel):
     quality_policy: QualityPolicy | None = None
     # 增量采集配置(切片 C):透传出前端展示/编辑,可空(None=全量采集)
     incremental: Incremental | None = None
+    # 增量水位快照(切片 C6):由连接器 run_ingest 内推进写入(JSONB {value, updatedAt}),
+    # _item() 经 model_validate(task) 自动填充;None=未跑过增量(全量任务/首次运行)。
+    # 前端「当前水位」据此渲染,不再降级为 "-"。
+    watermark: Watermark | None = None
 
 
 class IngestRunRead(CamelModel):
@@ -184,6 +206,9 @@ class IngestRunRead(CamelModel):
     error: str | None = None
     started_at: UtcDateTime
     finished_at: UtcDateTime | None = None
+    # 触发来源(切片 C6):从 Job.trigger(manual|cron)透传;None 仅在极端兜底/存量数据
+    # 未回填时出现。前端「触发来源」column 据此渲染,不再降级为 "-"。
+    trigger: Literal["manual", "cron"] | None = None
 
 
 class IngestTaskCreate(CamelModel):

@@ -889,6 +889,9 @@ async def list_ingest_runs(
                 error=job.error,
                 started_at=job.started_at or job.created_at,
                 finished_at=job.finished_at,
+                # 切片 C6:Job.trigger(manual|cron)透传到读模型,前端「触发来源」
+                # column 据此渲染。存量 job 经迁移 0025 server_default='manual' 安全回填。
+                trigger=job.trigger,
             )
         )
     return PageResponse[IngestRunRead](data=data, total=total)
