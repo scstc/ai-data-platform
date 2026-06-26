@@ -65,7 +65,7 @@ export function SourcePreview({
     return (
       <Alert
         type="error"
-        title="预览失败"
+        message="预览失败"
         description={error}
         action={
           <Button size="small" onClick={fetchPreview}>
@@ -102,7 +102,7 @@ export function SourcePreview({
         <Alert
           type="info"
           showIcon
-          title={`仅展示前 50 行(取样自 ${preview.sampledFrom})`}
+          message={`仅展示前 50 行(取样自 ${preview.sampledFrom})`}
           style={{ marginBottom: 8 }}
         />
       )}

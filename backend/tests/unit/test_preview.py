@@ -62,6 +62,17 @@ def test_parse_bytes_propagates_truncation():
     assert res["truncated"] is True
 
 
+def test_parse_csv_head_malformed_raises_value_error():
+    """畸形 CSV(单字段超 csv.field_size_limit)必须转 ValueError,供路由映射 400,而非 csv.Error→500。"""
+    import pytest  # noqa: PLC0415
+
+    # 默认 field_size_limit=131072,单字段超限 → csv 模块迭代时抛 csv.Error
+    big = "x" * (2 ** 20)
+    text = f"id,name\n1,{big}\n2,c\n"
+    with pytest.raises(ValueError):
+        _parse_csv_head(text, 50)
+
+
 def test_parse_bytes_no_truncation_when_small():
     from app.services.preview import _parse_bytes
 

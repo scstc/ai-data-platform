@@ -65,11 +65,14 @@ def _parse_csv_head(text: str, n: int) -> tuple[list[dict], bool]:
     reader = csv.DictReader(io.StringIO(text))
     rows = []
     truncated = False
-    for r in reader:
-        if len(rows) >= n:
-            truncated = True
-            break
-        rows.append(dict(r))
+    try:
+        for r in reader:
+            if len(rows) >= n:
+                truncated = True
+                break
+            rows.append(dict(r))
+    except csv.Error as exc:
+        raise ValueError(f"CSV 解析失败:{exc}") from exc
     return rows, truncated
 
 
