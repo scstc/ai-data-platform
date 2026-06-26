@@ -612,6 +612,34 @@ async def generate_dataset(task_id: str, session: SessionDep) -> Response:
         )
 
     # 4) 登记 hosted 版本(source_datasource_id 留空 → 回退平台 MinIO)
+    # 切片 B / Task 5:版本创建前算质量统计 + schema 快照 + 对比上一版漂移 +
+    # 应用任务级 quality_policy。失败**不删数据/不 400**(spec「阻断发布门不删数据」):
+    # 版本照常落地、quality_verdict=failed,响应带 verdict+reason 供 UI 标红。
+    # 这是唯一会在同一数据集累积 v1/v2/... 的入口,故 schema drift 比对在此处有意义
+    # (land_records / rerun 总是新建首版,无前序可比 → drift=None)。
+    from app.services.ingest_quality import (  # noqa: PLC0415
+        compute_quality_stats,
+        drift_diff,
+        evaluate_policy,
+        schema_snapshot,
+    )
+
+    stats = compute_quality_stats(records)
+    snapshot = schema_snapshot(stats)
+    # 取同数据集上一版本(version_no 最大且 < next_version)的 schema 快照做漂移比对。
+    # 首版 prev_snapshot=None → drift_diff 短路返回空三桶(无基线即无漂移)。
+    prev_snapshot = await session.scalar(
+        select(DatasetVersion.schema_snapshot)
+        .where(
+            DatasetVersion.dataset_id == dataset.id,
+            DatasetVersion.version_no < next_version,
+        )
+        .order_by(DatasetVersion.version_no.desc())
+        .limit(1)
+    )
+    drift = drift_diff(prev_snapshot, snapshot)
+    verdict, reason = evaluate_policy(task.quality_policy, stats, drift)
+
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
@@ -624,33 +652,38 @@ async def generate_dataset(task_id: str, session: SessionDep) -> Response:
         source_datasource_id=None,
         semantic_type="structured",
         note=f"采集生成 {fmt}(来源 {datasource.name},v{next_version})",
+        quality_stats=stats,
+        schema_snapshot=snapshot,
+        quality_verdict=verdict,
     )
     session.add(version)
     task.last_run_at = _now()
     task.run_count += 1
-    task.logs = [
-        *task.logs,
+    # 失败时日志带原因(可追溯;响应也带 verdict/reason,UI 据此标红)。
+    log_lines = [
         f"[INFO] 生成数据集 v{next_version}:{len(records)} 行 → {storage_uri}",
     ]
+    if verdict == "failed" and reason:
+        log_lines.append(f"[WARN] 质量门未通过:{reason}")
+    task.logs = [*task.logs, *log_lines]
     await session.commit()
     await session.refresh(version)
 
     bucket = settings.storage_minio_upload_bucket
-    return JSONResponse(
-        content={
-            "data": {
-                "datasetId": dataset.id,
-                "datasetName": dataset.name,
-                "versionId": version.id,
-                "versionNo": next_version,
-                "rows": len(records),
-                "bucket": bucket,
-                "fileKey": f"{dataset.id}/v{next_version}/data.{fmt}",
-                "storageUri": storage_uri,
-            },
-            "success": True,
-        }
-    )
+    data: dict[str, object] = {
+        "datasetId": dataset.id,
+        "datasetName": dataset.name,
+        "versionId": version.id,
+        "versionNo": next_version,
+        "rows": len(records),
+        "bucket": bucket,
+        "fileKey": f"{dataset.id}/v{next_version}/data.{fmt}",
+        "storageUri": storage_uri,
+        "qualityVerdict": verdict,
+    }
+    if reason:
+        data["qualityReason"] = reason
+    return JSONResponse(content={"data": data, "success": True})
 
 
 @router.get(
