@@ -10,10 +10,17 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _create_test_database() -> AsyncGenerator[None, None]:
     """覆盖上层同名 fixture：纯单测不连数据库。"""
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _job_runner_test_db() -> None:
+    """覆盖上层同名 fixture：纯单测不需要 job runner。"""
     yield

@@ -226,6 +226,44 @@ def records_to_jsonl_bytes(records: list[dict]) -> bytes:
     ).encode("utf-8")
 
 
+class ParquetCodecError(LandingError):
+    """records ↔ parquet 编解码失败(供 land_records 捕获兜底回退 jsonl)。"""
+
+
+def records_to_parquet_bytes(records: list[dict]) -> bytes:
+    """把记录列表写成 parquet 字节(pyarrow 推断 schema,保留列类型)。
+
+    空记录 / 同列异构类型等无法推断的情况抛 ParquetCodecError,由调用方兜底。
+    Decimal/date/datetime 等原生类型由 pyarrow 直接保留;不做 default=str 降级。
+    """
+    if not records:
+        raise ParquetCodecError("空记录无法推断 parquet schema")
+    import io
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    try:
+        table = pa.Table.from_pylist(records)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as exc:
+        raise ParquetCodecError(f"parquet schema 推断失败:{exc}") from exc
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def parquet_bytes_to_records(content: bytes, limit: int = 0) -> list[dict]:
+    """读 parquet 字节还原为 dict 列表(limit>0 取前 N)。供预览/行数/物化复用。"""
+    import io
+
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(io.BytesIO(content))
+    if limit > 0:
+        table = table.slice(0, limit)
+    return table.to_pylist()
+
+
 async def land_records(
     session: AsyncSession,
     records: list[dict],
