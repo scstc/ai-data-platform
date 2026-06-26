@@ -45,6 +45,8 @@ class IngestExtract(CamelModel):
     sql: str | None = None
     paths: list[str] | None = None
     glob: str | None = None
+    # table 模式下列裁剪(仅 mode=table 有效,Task 1 的 _build_queries 已消费此字段)
+    columns: list[str] | None = None
     operators: list[PipelineStep] | None = None
 
     @model_validator(mode="after")
@@ -58,6 +60,11 @@ class IngestExtract(CamelModel):
             raise ValueError("extract.mode=path 时不应携带 tables/sql")
         if self.mode != "path" and (self.paths or self.glob):
             raise ValueError("paths/glob 仅在 extract.mode=path 时有效")
+        if self.columns and self.mode != "table":
+            raise ValueError(
+                "extract.columns 仅在 mode=table 时有效"
+                "(sql 由语句决定列,path 为半结构化记录)"
+            )
         return self
 
 
