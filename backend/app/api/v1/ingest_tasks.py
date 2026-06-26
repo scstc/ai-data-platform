@@ -138,6 +138,10 @@ def _sync_cron_job(task: IngestTask) -> None:
     """
     if not settings.scheduler_enabled:
         return
+    # 仅 cron 模式任务建调度作业;once 任务即便携带历史 cron 字段也不调度
+    schedule = getattr(task, "schedule", None)
+    if not isinstance(schedule, dict) or schedule.get("mode") != "cron":
+        return
     scheduler = scheduler_mod.get_scheduler()
     if scheduler is None:
         return

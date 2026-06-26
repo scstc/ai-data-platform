@@ -212,6 +212,28 @@ class TestRouteBestEffortWithoutScheduler:
         # 不抛即通过——best-effort 契约
         routes._sync_cron_job(_FakeCronTask())
 
+    def test_sync_cron_job_skips_once_mode_task_with_stale_cron(self, monkeypatch) -> None:
+        """once 模式任务即便携带历史 cron 字段也不应建调度作业(回归)。"""
+        from app.api.v1 import ingest_tasks as routes
+
+        monkeypatch.setattr(routes.settings, "scheduler_enabled", True)
+
+        class _Scheduler:
+            pass
+
+        calls: list[int] = []
+        monkeypatch.setattr(routes.scheduler_mod, "get_scheduler", lambda: _Scheduler())
+        monkeypatch.setattr(
+            routes.scheduler_mod, "upsert_cron_job", lambda *a, **k: calls.append(1)
+        )
+
+        class _OnceTask:
+            id = "task-once"
+            schedule = {"mode": "once", "cron": "0 2 * * *"}
+
+        routes._sync_cron_job(_OnceTask())
+        assert calls == [], "once 模式任务不应触发 upsert_cron_job"
+
     def test_unsync_cron_job_swallows_remove_exception(self, monkeypatch) -> None:
         """remove 抛错时 best-effort 吞掉,delete 不应被拖累。"""
         from app.api.v1 import ingest_tasks as routes
