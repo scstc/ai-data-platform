@@ -937,6 +937,40 @@ const IngestTasksPage: React.FC = () => {
                                     ]}
                                   />
                                 )}
+                                {/* 表结构快照(切片 B / B6):版本落地时的列名+类型,
+                                    供直观核对结构。与列空值率明细独立展开。 */}
+                                {o.schemaSnapshot &&
+                                  o.schemaSnapshot.length > 0 && (
+                                    <Collapse
+                                      size="small"
+                                      style={{ marginTop: 4 }}
+                                      items={[
+                                        {
+                                          key: `schema-${o.versionId}`,
+                                          label: `表结构（${o.schemaSnapshot.length} 列）`,
+                                          children: (
+                                            <Table<DataPlatform.SchemaSnapshotEntry>
+                                              size="small"
+                                              pagination={false}
+                                              rowKey="name"
+                                              dataSource={o.schemaSnapshot}
+                                              columns={[
+                                                {
+                                                  title: '列',
+                                                  dataIndex: 'name',
+                                                },
+                                                {
+                                                  title: '类型',
+                                                  dataIndex: 'type',
+                                                  width: 90,
+                                                },
+                                              ]}
+                                            />
+                                          ),
+                                        },
+                                      ]}
+                                    />
+                                  )}
                               </div>
                             ),
                           };

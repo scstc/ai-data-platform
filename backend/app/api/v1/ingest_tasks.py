@@ -161,6 +161,12 @@ async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
                 version.version_no, version.created_at
             ),
             "rows": version.rows,
+            # 切片 B / B6:透传版本级质量字段,前端详情 Drawer 据此渲染结论 + 列空值率
+            # + 表结构快照。键名 camelCase 对齐前端 IngestOutput typings;缺省值由
+            # 模型 server_default / nullable 兜底(verdict=skipped、stats/snapshot 可空)。
+            "qualityVerdict": version.quality_verdict,
+            "qualityStats": version.quality_stats,
+            "schemaSnapshot": version.schema_snapshot,
         }
         for version, dataset in rows
     ]

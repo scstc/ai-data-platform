@@ -202,3 +202,56 @@ async def test_rerun_skipped_when_no_policy(
         assert version.quality_verdict == "skipped"
         job = (await session.scalars(select(Job))).one()
         assert job.state == "success"
+
+
+@pytest.mark.asyncio
+async def test_detail_output_exposes_quality_fields(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ingest-tasks/{id} 详情接口 output 项必须携带 qualityVerdict /
+    qualityStats / schemaSnapshot(切片 B / B6 修复)。
+
+    锁意图:_build_output 此前只回 datasetId/datasetName/versionId/versionNo/
+    versionLabel/rows,前端详情 Drawer 永远拿到 qualityVerdict=undefined → 恒显
+    「未校验」。修复后三字段随详情透传,前端据此渲染质量结论 + 列明细 + 表结构。
+    """
+    ds_id = await _seed_datasource(session_factory, ds_id="ds-qp-detail")
+    quality_stats = {
+        "rows": 10,
+        "columns": [
+            {"name": "clean_col", "type": "integer", "null_rate": 0.0},
+            {"name": "dirty_col", "type": "text", "null_rate": 0.3},
+        ],
+    }
+    _patch_resolve(monkeypatch, quality_stats)
+
+    resp = await client.post(
+        "/api/v1/ingest-tasks",
+        json={
+            "name": "详情质量字段透传",
+            "datasourceId": ds_id,
+            "schedule": {"mode": "once"},
+            "extract": {"mode": "sql", "sql": "SELECT 1"},
+            "qualityPolicy": {"maxNullRate": 0.2},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["data"]["id"]
+
+    # rerun 落地版本:dirty_col 空值率 0.3 > 0.2 → quality_verdict=failed
+    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
+    assert resp.status_code == 200, resp.text
+
+    # GET 详情:output[0] 必须携带三字段(B6 修复点)
+    resp = await client.get(f"/api/v1/ingest-tasks/{task_id}")
+    assert resp.status_code == 200, resp.text
+    output = resp.json()["data"]["output"]
+    assert output, "详情应回填产物列表"
+    out = output[0]
+    assert out["qualityVerdict"] == "failed"
+    assert out["qualityStats"] == quality_stats
+    snapshot = out["schemaSnapshot"]
+    assert snapshot is not None
+    assert {c["name"] for c in snapshot} == {"clean_col", "dirty_col"}
