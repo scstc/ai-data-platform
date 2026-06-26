@@ -356,6 +356,17 @@ async def land_records(
             raise
         size = len(jsonl_bytes)
 
+    # 切片 B:落地后由归一后 records 算结构化质量统计 + schema 快照(单次遍历,
+    # ingest 规模行数无忧)。land_records 不评估策略 → quality_verdict 保持默认
+    # "skipped",路由层根据任务级 policy 决定 passed/failed。
+    from app.services.ingest_quality import (  # 延迟 import 避免无谓启动期加载
+        compute_quality_stats,
+        schema_snapshot,
+    )
+
+    quality_stats = compute_quality_stats(records)
+    snapshot = schema_snapshot(quality_stats)
+
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
@@ -368,6 +379,8 @@ async def land_records(
         semantic_type=effective_semantic,
         produced_by_job_id=produced_by_job_id,
         note=note,
+        quality_stats=quality_stats,
+        schema_snapshot=snapshot,
     )
     session.add(version)
     await session.commit()
