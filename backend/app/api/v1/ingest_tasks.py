@@ -404,6 +404,63 @@ async def rerun_ingest_task(
     )
 
 
+@router.post("/ingest-tasks/preview")
+async def preview_ingest_source(payload: dict, session: SessionDep) -> Response:
+    """源数据预览(切片 A):无副作用采样,不建任务/不落地/不建 job。
+
+    - database(PG族/GoldenDB):SELECT * FROM (查询) LIMIT 50;多表取首张
+    - s3/hdfs:首个匹配文件按 jsonl/csv/parquet 解析头部(parquet 走 DuckDB)
+    - api / 不支持类型 / 未配采集对象 → 4xx 诚实失败
+    """
+    datasource_id = payload.get("datasourceId") or payload.get("datasource_id")
+    extract = payload.get("extract") or {}
+    datasource = await session.get(DataSource, datasource_id or "")
+    if datasource is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据源不存在"},
+        )
+
+    from app.services.preview import preview_db, preview_file  # noqa: PLC0415
+
+    try:
+        if datasource.type == "database":
+            db_kind = (datasource.db_kind or "").lower()
+            if db_kind in _PG_KINDS:
+                from app.services.connectors.pg import _connect  # noqa: PLC0415
+            elif db_kind == "goldendb":
+                from app.services.connectors.mysql import _connect  # noqa: PLC0415
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": f"数据库品牌「{datasource.db_kind}」暂不支持预览",
+                    },
+                )
+            data = await preview_db(_connect, datasource.config or {}, extract)
+        elif datasource.type in ("s3", "hdfs"):
+            data = await preview_file(datasource, extract)
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"数据源类型「{datasource.type}」暂不支持预览",
+                },
+            )
+    except ConnectorNotReady as exc:
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": str(exc)}
+        )
+    except (IngestError, ValueError) as exc:
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": str(exc)}
+        )
+
+    return JSONResponse(content={"data": data, "success": True})
+
+
 @router.post("/ingest-tasks/{task_id}/generate-dataset")
 async def generate_dataset(task_id: str, session: SessionDep) -> Response:
     """生成数据集:库数据 → jsonl → 平台 MinIO(文件管理)uploads/<dataset_id>/v<n>/。
