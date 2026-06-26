@@ -1665,6 +1665,30 @@ async def preview_version(
     # s3:// 背书(hosted 外部 / 平台自有 jsonl):按需取前 offset+limit 条再切片
     # (按 storage_uri scheme 路由,不再凭 origin 二分;平台自有 jsonl 走 source=None 分支)
     if str(version.storage_uri).startswith("s3://"):
+        # parquet:走 DuckDB read_parquet(类型保真),复用 SQL 查询同款执行器
+        if version.format == "parquet":
+            try:
+                cfg = await _version_storage_cfg(version, session)
+                if cfg is None:
+                    raise ExternalStoreError("平台存储(MinIO)未配置")
+                s3 = s3_settings_for_duckdb(cfg)
+                rows, columns, _total = await asyncio.to_thread(
+                    _duck_query, version.storage_uri, "parquet",
+                    "SELECT * FROM t", limit, offset, s3,
+                )
+            except ExternalStoreError as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": f"读取 parquet 失败:{exc}"},
+                )
+            return JSONResponse(
+                content={
+                    "data": rows,
+                    "columns": columns,
+                    "total": version.rows or 0,
+                    "success": True,
+                }
+            )
         if version.source_datasource_id:
             ds = await session.get(DataSource, version.source_datasource_id)
             if ds is None:
