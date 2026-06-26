@@ -1,4 +1,8 @@
-import type { ActionType, ProColumns } from '@ant-design/pro-components';
+import type {
+  ActionType,
+  ProColumns,
+  ProFormInstance,
+} from '@ant-design/pro-components';
 import {
   ModalForm,
   PageContainer,
@@ -10,12 +14,14 @@ import {
   ProFormTextArea,
   ProFormTreeSelect,
   ProTable,
+  StepsForm,
 } from '@ant-design/pro-components';
 import { Access, useAccess } from '@umijs/max';
 import {
   Button,
   Drawer,
   Form,
+  Modal,
   message,
   Popconfirm,
   Progress,
@@ -46,6 +52,7 @@ import {
 } from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import FilterOperatorPicker from './components/FilterOperatorPicker';
+import { SourcePreview } from './components/SourcePreview';
 
 /** 状态 → 中文标签与 Tag 颜色 */
 const STATUS_META: Record<
@@ -81,6 +88,16 @@ const IngestTasksPage: React.FC = () => {
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
   );
+  // 新建向导：Modal 可见性 + 步骤间上下文（step-1 完成时记 datasourceId，step-2 完成时记 extract，
+  // 供 step-3 SourcePreview 与 step-4 落地确认按数据源类型条件渲染——StepsForm 各步是独立 form，
+  // 跨步值不自动透传，故用 React state 承载）
+  const [createOpen, setCreateOpen] = useState(false);
+  const [wizardCtx, setWizardCtx] = useState<{
+    datasourceId?: string;
+    extract?: DataPlatform.IngestExtract;
+  }>({});
+  const wizardFormRef =
+    useRef<ProFormInstance<DataPlatform.IngestTaskCreate>>(null);
 
   const loadCategories = useCallback(async () => {
     try {
@@ -167,7 +184,117 @@ const IngestTasksPage: React.FC = () => {
     }
   };
 
-  // 建任务 / 编辑任务共用的表单字段
+  /** 渲染采集对象字段：按数据源类型(database/s3/hdfs)分支
+   * 共享给编辑弹窗(走 ProFormDependency 读表单 datasourceId)与新建向导 step-2(读 wizardCtx)
+   * includeFilterOp=true 时把过滤算子内联（编辑弹窗旧行为）；向导中过滤算子后移到 step-4
+   */
+  const renderExtractFieldsForDs = (
+    ds: DataPlatform.DataSource | undefined,
+    datasourceId: string | undefined,
+    includeFilterOp: boolean,
+  ) => {
+    if (!ds) return null;
+    // 数据库类型：table / sql 模式
+    if (ds.type === 'database') {
+      return (
+        <>
+          <ProFormRadio.Group
+            name={['extract', 'mode']}
+            label="采集对象"
+            tooltip="数据库类型：整张表或自定义 SQL。PostgreSQL 可真连，其余品牌视驱动状态"
+            options={[
+              { label: '整张表', value: 'table' },
+              { label: '自定义 SQL', value: 'sql' },
+            ]}
+          />
+          <ProFormDependency name={[['extract', 'mode']]}>
+            {({ extract }) =>
+              extract?.mode === 'sql' ? (
+                <ProFormTextArea
+                  name={['extract', 'sql']}
+                  label="SQL"
+                  placeholder="如 SELECT * FROM your_table"
+                  fieldProps={{ rows: 3 }}
+                  rules={[{ required: true, message: '请输入 SQL' }]}
+                />
+              ) : extract?.mode === 'table' ? (
+                <ProFormSelect
+                  name={['extract', 'tables']}
+                  label="选择表"
+                  mode="multiple"
+                  placeholder="选择一张或多张表（每张表各产一个数据集）"
+                  rules={[{ required: true, message: '请至少选择一张表' }]}
+                  params={{ datasourceId }}
+                  request={async () => {
+                    if (!datasourceId) return [];
+                    try {
+                      const res = await listDatasourceTables(datasourceId);
+                      return (res.data ?? []).map((t) => ({
+                        label: t,
+                        value: t,
+                      }));
+                    } catch {
+                      return [];
+                    }
+                  }}
+                  fieldProps={{ showSearch: true }}
+                />
+              ) : null
+            }
+          </ProFormDependency>
+          {includeFilterOp && (
+            <Form.Item
+              name={['extract', 'operators']}
+              label="过滤算子（可选）"
+              tooltip="采集到的记录在落地前依次过算子过滤/清洗（仅数据库采集生效）"
+            >
+              <FilterOperatorPicker />
+            </Form.Item>
+          )}
+        </>
+      );
+    }
+    // S3 / HDFS 类型：路径/glob 模式
+    if (ds.type === 's3' || ds.type === 'hdfs') {
+      return (
+        <>
+          <ProFormRadio.Group
+            name={['extract', 'mode']}
+            label="采集模式"
+            tooltip="path：按路径列表或 glob 匹配拉取对象/文件"
+            options={[{ label: '路径 / Glob', value: 'path' }]}
+            initialValue="path"
+          />
+          <ProFormSelect
+            name={['extract', 'paths']}
+            label="路径列表（可选）"
+            placeholder={
+              ds.type === 's3'
+                ? '输入 S3 key 后按 Enter 添加，如 raw/2026/data.jsonl'
+                : '输入 HDFS 路径后按 Enter 添加，如 /user/data/train.jsonl'
+            }
+            tooltip="每条路径按 Enter 确认；与 Glob 可同时填写"
+            mode="tags"
+            options={[]}
+            fieldProps={{ tokenSeparators: [',', '\n'] }}
+          />
+          <ProFormText
+            name={['extract', 'glob']}
+            label="Glob 模式（可选）"
+            placeholder={
+              ds.type === 's3'
+                ? '如 raw/2026/**/*.jsonl'
+                : '如 /user/data/**/*.csv'
+            }
+            tooltip="支持 ** 递归匹配；与路径列表可同时填写"
+          />
+        </>
+      );
+    }
+    return null;
+  };
+
+  // 建任务 / 编辑任务共用的表单字段（编辑弹窗仍整体渲染所有字段；新建已迁至 StepsForm）
   const taskFormFields = (
     <>
       <ProFormText
@@ -224,108 +351,14 @@ const IngestTasksPage: React.FC = () => {
         }
       </ProFormDependency>
       <ProFormDependency name={[['datasourceId']]}>
-        {({ datasourceId }) => {
-          const ds = dsMap[datasourceId];
-          // 数据库类型：table / sql 模式
-          if (ds?.type === 'database') {
-            return (
-              <>
-                <ProFormRadio.Group
-                  name={['extract', 'mode']}
-                  label="采集对象"
-                  tooltip="数据库类型：整张表或自定义 SQL。PostgreSQL 可真连，其余品牌视驱动状态"
-                  options={[
-                    { label: '整张表', value: 'table' },
-                    { label: '自定义 SQL', value: 'sql' },
-                  ]}
-                />
-                <ProFormDependency name={[['extract', 'mode']]}>
-                  {({ extract }) =>
-                    extract?.mode === 'sql' ? (
-                      <ProFormTextArea
-                        name={['extract', 'sql']}
-                        label="SQL"
-                        placeholder="如 SELECT * FROM your_table"
-                        fieldProps={{ rows: 3 }}
-                        rules={[{ required: true, message: '请输入 SQL' }]}
-                      />
-                    ) : extract?.mode === 'table' ? (
-                      <ProFormSelect
-                        name={['extract', 'tables']}
-                        label="选择表"
-                        mode="multiple"
-                        placeholder="选择一张或多张表（每张表各产一个数据集）"
-                        rules={[
-                          { required: true, message: '请至少选择一张表' },
-                        ]}
-                        params={{ datasourceId }}
-                        request={async () => {
-                          if (!datasourceId) return [];
-                          try {
-                            const res =
-                              await listDatasourceTables(datasourceId);
-                            return (res.data ?? []).map((t) => ({
-                              label: t,
-                              value: t,
-                            }));
-                          } catch {
-                            return [];
-                          }
-                        }}
-                        fieldProps={{ showSearch: true }}
-                      />
-                    ) : null
-                  }
-                </ProFormDependency>
-                <Form.Item
-                  name={['extract', 'operators']}
-                  label="过滤算子（可选）"
-                  tooltip="采集到的记录在落地前依次过算子过滤/清洗（仅数据库采集生效）"
-                >
-                  <FilterOperatorPicker />
-                </Form.Item>
-              </>
-            );
-          }
-          // S3 / HDFS 类型：路径/glob 模式
-          if (ds?.type === 's3' || ds?.type === 'hdfs') {
-            return (
-              <>
-                <ProFormRadio.Group
-                  name={['extract', 'mode']}
-                  label="采集模式"
-                  tooltip="path：按路径列表或 glob 匹配拉取对象/文件"
-                  options={[{ label: '路径 / Glob', value: 'path' }]}
-                  initialValue="path"
-                />
-                <ProFormSelect
-                  name={['extract', 'paths']}
-                  label="路径列表（可选）"
-                  placeholder={
-                    ds.type === 's3'
-                      ? '输入 S3 key 后按 Enter 添加，如 raw/2026/data.jsonl'
-                      : '输入 HDFS 路径后按 Enter 添加，如 /user/data/train.jsonl'
-                  }
-                  tooltip="每条路径按 Enter 确认；与 Glob 可同时填写"
-                  mode="tags"
-                  options={[]}
-                  fieldProps={{ tokenSeparators: [',', '\n'] }}
-                />
-                <ProFormText
-                  name={['extract', 'glob']}
-                  label="Glob 模式（可选）"
-                  placeholder={
-                    ds.type === 's3'
-                      ? '如 raw/2026/**/*.jsonl'
-                      : '如 /user/data/**/*.csv'
-                  }
-                  tooltip="支持 ** 递归匹配；与路径列表可同时填写"
-                />
-              </>
-            );
-          }
-          return null;
-        }}
+        {({ datasourceId }) =>
+          renderExtractFieldsForDs(
+            dsMap[datasourceId],
+            datasourceId,
+            // 编辑弹窗保留旧版"过滤算子内联在 db 分支"的行为
+            true,
+          )
+        }
       </ProFormDependency>
     </>
   );
@@ -505,28 +538,165 @@ const IngestTasksPage: React.FC = () => {
           <Access key="category" accessible={!!access.canAdmin}>
             <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
           </Access>,
-          <ModalForm<DataPlatform.IngestTaskCreate>
+          <Button
             key="create"
-            title="新建采集任务"
-            trigger={<Button type="primary">新建任务</Button>}
-            modalProps={{ destroyOnHidden: true }}
-            initialValues={{ schedule: { mode: 'once' } }}
-            onFinish={async (values) => {
-              try {
-                await createIngestTask(values);
-                message.success('采集任务创建成功');
-                actionRef.current?.reload();
-                return true;
-              } catch {
-                message.error('创建失败，请重试');
-                return false;
-              }
+            type="primary"
+            onClick={() => {
+              setWizardCtx({});
+              setCreateOpen(true);
             }}
           >
-            {taskFormFields}
-          </ModalForm>,
+            新建任务
+          </Button>,
         ]}
       />
+
+      <Modal
+        title="新建采集任务"
+        width={800}
+        open={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        footer={null}
+        destroyOnHidden
+      >
+        <StepsForm<DataPlatform.IngestTaskCreate>
+          formRef={wizardFormRef}
+          formProps={{ initialValues: { schedule: { mode: 'once' } } }}
+          onFinish={async (values) => {
+            try {
+              await createIngestTask(values);
+              message.success('采集任务创建成功');
+              setCreateOpen(false);
+              actionRef.current?.reload();
+              return true;
+            } catch {
+              message.error('创建失败，请重试');
+              return false;
+            }
+          }}
+        >
+          <StepsForm.StepForm
+            name="base"
+            title="基本信息"
+            onFinish={async (values) => {
+              // 把 datasourceId 写入步骤间上下文，供 step-2 按 ds 类型渲染 extract 字段
+              setWizardCtx((c) => ({
+                ...c,
+                datasourceId: values.datasourceId,
+              }));
+              return true;
+            }}
+          >
+            <ProFormText
+              name="name"
+              label="任务名"
+              placeholder="请输入任务名称"
+              rules={[{ required: true, message: '请输入任务名称' }]}
+            />
+            <ProFormSelect
+              name="datasourceId"
+              label="数据源"
+              placeholder="请选择数据源"
+              rules={[{ required: true, message: '请选择数据源' }]}
+              request={async () => {
+                const res = await listDataSources({ pageSize: 100 });
+                setDsMap(Object.fromEntries(res.data.map((d) => [d.id, d])));
+                return res.data.map((d) => ({
+                  label: `${d.name}（${d.type}${d.dbKind ? `/${d.dbKind}` : ''}）`,
+                  value: d.id,
+                }));
+              }}
+            />
+            <ProFormTreeSelect
+              name="categoryId"
+              label="分类"
+              placeholder="请选择分类（可选）"
+              fieldProps={{
+                treeData: categoryTreeData,
+                allowClear: true,
+                showSearch: true,
+                treeNodeFilterProp: 'title',
+                treeDefaultExpandAll: true,
+              }}
+            />
+          </StepsForm.StepForm>
+
+          <StepsForm.StepForm
+            name="object"
+            title="采集对象"
+            onFinish={async (values) => {
+              // 把 extract 写入步骤间上下文，供 step-3 SourcePreview 触发预览
+              setWizardCtx((c) => ({ ...c, extract: values.extract }));
+              return true;
+            }}
+          >
+            <ProFormRadio.Group
+              name={['schedule', 'mode']}
+              label="调度方式"
+              rules={[{ required: true, message: '请选择调度方式' }]}
+              options={[
+                { label: '单次', value: 'once' },
+                { label: 'Cron 周期（未启用）', value: 'cron', disabled: true },
+              ]}
+            />
+            <ProFormDependency name={[['schedule', 'mode']]}>
+              {({ schedule }) =>
+                schedule?.mode === 'cron' ? (
+                  <ProFormText
+                    name={['schedule', 'cron']}
+                    label="Cron 表达式"
+                    placeholder="如 0 2 * * *（每天凌晨 2 点，分 时 日 月 周）"
+                    rules={[{ required: true, message: '请输入 cron 表达式' }]}
+                  />
+                ) : null
+              }
+            </ProFormDependency>
+            {renderExtractFieldsForDs(
+              dsMap[wizardCtx.datasourceId ?? ''],
+              wizardCtx.datasourceId,
+              // 过滤算子后移到 step-4，step-2 仅渲染 schedule + extract 主体
+              false,
+            )}
+          </StepsForm.StepForm>
+
+          <StepsForm.StepForm name="preview" title="预览与字段">
+            {wizardCtx.datasourceId && wizardCtx.extract ? (
+              <SourcePreview
+                datasourceId={wizardCtx.datasourceId}
+                extract={wizardCtx.extract}
+                mode={wizardCtx.extract.mode}
+                onColumnsChange={(cols) => {
+                  // SourcePreview 勾列回写：写入当前 step 的 form 字段，
+                  // StepsForm 在最后一步会把所有 step form 值 deep-merge 后交给 onFinish
+                  wizardFormRef.current?.setFieldValue(
+                    ['extract', 'columns'],
+                    cols,
+                  );
+                }}
+              />
+            ) : (
+              <Typography.Text type="secondary">
+                请先在前两步选择数据源与采集对象
+              </Typography.Text>
+            )}
+          </StepsForm.StepForm>
+
+          <StepsForm.StepForm name="confirm" title="落地确认">
+            {dsMap[wizardCtx.datasourceId ?? '']?.type === 'database' && (
+              <Form.Item
+                name={['extract', 'operators']}
+                label="过滤算子（可选）"
+                tooltip="采集到的记录在落地前依次过算子过滤/清洗（仅数据库采集生效）"
+              >
+                <FilterOperatorPicker />
+              </Form.Item>
+            )}
+            <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+              请确认以上配置；提交后将创建采集任务并立即进入待运行状态。
+            </Typography.Paragraph>
+          </StepsForm.StepForm>
+        </StepsForm>
+      </Modal>
 
       <ModalForm<DataPlatform.IngestTaskCreate>
         title="编辑采集任务"
