@@ -30,7 +30,9 @@ from app.services.connectors.base import (
     _sql_compare_literal,
     compute_db_watermark,
 )
+from app.services.connectors.mysql import MysqlConnector
 from app.services.connectors.objectstore import (
+    S3Connector,
     _compute_file_watermark,
     _filter_keys_by_watermark,
 )
@@ -419,3 +421,263 @@ class TestFilterComputeRoundtrip:
         assert kept == []
         new_wm = _compute_file_watermark(kept, all_objects, incremental)
         assert new_wm is None, "空批不推进(否则下轮水位会变成 None,误成首跑全量)"
+
+
+# ===========================================================================
+# §6 部分失败水位推进(C5 评审 Finding 1:DATA LOSS 修复)
+#
+# 锁的意图:水位推进必须在 land_records **成功之后**(running max of landed),
+# 绝不能在落地前一次性取 max(ALL keys)——否则中途失败会把未落地的 key 也跳过。
+# ===========================================================================
+
+
+class _FakeTmpPath:
+    """S3 download_to_temp 返回的替身:够 run_ingest 读 suffix / read_bytes / unlink。"""
+
+    def __init__(self, suffix: str = ".jsonl") -> None:
+        self.suffix = suffix
+
+    def read_bytes(self) -> bytes:
+        return b'{"x": 1}\n'
+
+    def unlink(self, missing_ok: bool = False) -> None:  # noqa: ARG002
+        pass
+
+
+@pytest.mark.asyncio
+async def test_s3_partial_failure_watermark_reflects_only_landed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """land_records 在 k1 失败 → task.watermark 只反映 k0(running max of landed),
+    NOT max(ALL keys)。未落地的 k1/k2 在重试时仍可被采(防 DATA LOSS)。
+
+    C5 评审 Finding 1 的核心断言:部分失败后水位 = max(已成功落地 keys),
+    不能取 max(全量 keys)——否则 k1/k2 被 `_filter_keys_by_watermark` 过滤掉。
+    """
+    all_objects = [
+        {"key": "a.jsonl", "size": 10, "lastModified": None},
+        {"key": "b.jsonl", "size": 10, "lastModified": None},
+        {"key": "c.jsonl", "size": 10, "lastModified": None},
+    ]
+
+    class _IncTask:
+        name = "S3增量采集"
+        extract = {"mode": "path", "paths": ["a.jsonl", "b.jsonl", "c.jsonl"]}
+        incremental = {"by": "name"}
+        watermark: Any | None = None
+        category_id: str | None = None
+
+    class _S3Ds:
+        name = "S3源"
+        config = {"bucket": "test-bucket"}
+
+    async def _fake_list_objects(cfg: Any, bucket: str, prefix: str) -> list[dict]:  # noqa: ANN401
+        return all_objects
+
+    monkeypatch.setattr(
+        "app.services.connectors.objectstore.list_objects", _fake_list_objects
+    )
+
+    async def _fake_download(cfg: Any, bucket: str, key: str) -> _FakeTmpPath:  # noqa: ANN401
+        return _FakeTmpPath()
+
+    monkeypatch.setattr(
+        "app.services.connectors.objectstore.download_to_temp", _fake_download
+    )
+
+    def _fake_normalize(content: bytes, ext: str) -> list[dict]:  # noqa: ARG001
+        return [{"x": 1}]
+
+    monkeypatch.setattr(
+        "app.services.connectors.objectstore.normalize_to_records",
+        _fake_normalize,
+    )
+
+    landed_names: list[str] = []
+
+    async def _fake_land(session: Any, records: list[dict], **kwargs: Any) -> tuple:  # noqa: ANN401
+        name = kwargs.get("dataset_name", "")
+        landed_names.append(name)
+        if name == "b":  # Path("b.jsonl").stem == "b"
+            raise RuntimeError("simulated landing failure on b.jsonl")
+        return ("DS", "VER")
+
+    monkeypatch.setattr(
+        "app.services.connectors.objectstore.land_records", _fake_land
+    )
+
+    conn = S3Connector()
+    task = _IncTask()
+    ds = _S3Ds()
+
+    # land_records 在 b.jsonl 处抛 → run_ingest 传播异常
+    with pytest.raises(RuntimeError, match="simulated"):
+        await conn.run_ingest(object(), task, ds, job_id="job-pf")
+
+    # k0 (a.jsonl) 成功落地, k1 (b.jsonl) 失败 → 水位只反映 k0
+    assert task.watermark is not None, "至少 a.jsonl 落地成功, 水位应被推进"
+    assert task.watermark["value"] == "a.jsonl", (
+        "部分失败后水位只能反映已成功落地的 a.jsonl;"
+        "若取 max(ALL)=c.jsonl, 则 b/c 在重试时被过滤 → DATA LOSS"
+    )
+    # k0 落地, k1 尝试后失败, k2 未被尝试
+    assert landed_names == ["a", "b"]
+    # 回归断言:k1/k2 仍可通过过滤(重试可采)——水位 a.jsonl < b.jsonl < c.jsonl
+    retry_kept = _filter_keys_by_watermark(
+        ["a.jsonl", "b.jsonl", "c.jsonl"],
+        all_objects,
+        {"by": "name"},
+        task.watermark,
+    )
+    assert set(retry_kept) == {"b.jsonl", "c.jsonl"}, (
+        "重试时 b/c 应仍可被采(水位=a.jsonl, 字典序更大)"  # noqa: FLY002
+    )
+
+
+@pytest.mark.asyncio
+async def test_s3_all_keys_land_advances_to_max() -> None:
+    """全部 key 成功落地 → 水位 = max(ALL keys)(正常路径,与部分失败对照)。"""
+    all_objects = [
+        {"key": "a.jsonl", "size": 10, "lastModified": None},
+        {"key": "b.jsonl", "size": 10, "lastModified": None},
+        {"key": "c.jsonl", "size": 10, "lastModified": None},
+    ]
+
+    class _IncTask:
+        name = "S3增量采集"
+        extract = {"mode": "path", "paths": ["a.jsonl", "b.jsonl", "c.jsonl"]}
+        incremental = {"by": "name"}
+        watermark: Any | None = None
+        category_id: str | None = None
+
+    class _S3Ds:
+        name = "S3源"
+        config = {"bucket": "test-bucket"}
+
+    async def _fake_list_objects(cfg: Any, bucket: str, prefix: str) -> list[dict]:  # noqa: ANN401
+        return all_objects
+
+    monkeypatch_proxy = pytest.MonkeyPatch()
+
+    async def _fake_download(cfg: Any, bucket: str, key: str) -> _FakeTmpPath:  # noqa: ANN401
+        return _FakeTmpPath()
+
+    def _fake_normalize(content: bytes, ext: str) -> list[dict]:  # noqa: ARG001
+        return [{"x": 1}]
+
+    async def _fake_land(session: Any, records: list[dict], **kwargs: Any) -> tuple:  # noqa: ANN401
+        return ("DS", "VER")
+
+    monkeypatch_proxy.setattr(
+        "app.services.connectors.objectstore.list_objects", _fake_list_objects
+    )
+    monkeypatch_proxy.setattr(
+        "app.services.connectors.objectstore.download_to_temp", _fake_download
+    )
+    monkeypatch_proxy.setattr(
+        "app.services.connectors.objectstore.normalize_to_records",
+        _fake_normalize,
+    )
+    monkeypatch_proxy.setattr(
+        "app.services.connectors.objectstore.land_records", _fake_land
+    )
+
+    try:
+        conn = S3Connector()
+        task = _IncTask()
+        ds = _S3Ds()
+        await conn.run_ingest(object(), task, ds, job_id="job-ok")
+        assert task.watermark is not None
+        assert task.watermark["value"] == "c.jsonl", (
+            "全部成功落地 → 水位 = max(ALL) = c.jsonl"
+        )
+    finally:
+        monkeypatch_proxy.undo()
+
+
+# ===========================================================================
+# §7 MySQL(goldendb)增量 fail-loud(C5 评审 Finding 2:silent wrong behavior)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_mysql_run_ingest_rejects_incremental() -> None:
+    """task.incremental 设置 → IngestError(fail loud,不静默全量采)。
+
+    C5 评审 Finding 2:MySQL 连接器没接增量 WHERE / 水位推进,配置 incremental
+    却静默走全量 = silent wrong behavior。Rule 12 要求显式报错。
+    """
+    conn = MysqlConnector()
+    task = type(
+        "_IncMysqlTask",
+        (),
+        {
+            "name": "goldendb增量",
+            "extract": {"mode": "sql", "sql": "SELECT 1"},
+            "incremental": {"column": "id", "type": "integer"},
+        },
+    )()
+    ds = type(
+        "_MysqlDs", (), {"name": "goldendb源", "config": {"host": "h"}}
+    )()
+    with pytest.raises(IngestError, match="暂不支持增量采集"):
+        await conn.run_ingest(object(), task, ds, job_id="job-x")
+
+
+@pytest.mark.asyncio
+async def test_mysql_run_ingest_no_incremental_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """task.incremental=None → 正常编排(零回归:非增量任务行为不变)。"""
+    import sys
+    import types
+
+    fake = types.ModuleType("asyncmy")
+
+    class _FakeCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def execute(self, sql):
+            pass
+
+        description = [("id",), ("name",)]
+
+        async def fetchall(self):
+            return [(1, "alice")]
+
+    class _FakeConn:
+        def cursor(self):  # asyncmy: 同步方法返回 async context manager
+            return _FakeCursor()
+
+        def close(self):
+            pass
+
+    async def _connect(**kwargs):  # noqa: ANN003
+        return _FakeConn()
+
+    fake.connect = _connect
+    monkeypatch.setitem(sys.modules, "asyncmy", fake)
+
+    async def _fake_land(session, records, **kwargs):  # noqa: ANN001, ANN003
+        return ("DS", "VER")
+
+    monkeypatch.setattr(
+        "app.services.landing.land_records", _fake_land
+    )
+
+    conn = MysqlConnector()
+    task = type(
+        "_MysqlTask",
+        (),
+        {
+            "name": "goldendb全量",
+            "extract": {"mode": "sql", "sql": "SELECT id, name FROM users"},
+        },
+    )()
+    ds = type(
+        "_MysqlDs", (), {"name": "goldendb源", "config": {"host": "h"}}
+    )()
+    results = await conn.run_ingest(object(), task, ds, job_id="job-7")
+    assert results == [("DS", "VER")]

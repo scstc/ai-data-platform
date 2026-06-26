@@ -87,29 +87,30 @@ async def _connect(cfg: dict[str, Any]) -> asyncpg.Connection:
 # ---------------------------------------------------------------------------
 
 
-def _merge_max(current: Any, candidate: Any) -> Any:
-    """跨表合并本批增量列的最大值(任一为 None → 取对方;同类型 → max)。"""
-    if candidate is None:
-        return current
-    if current is None:
-        return candidate
-    return max(current, candidate)
-
-
 def _stamp_task_watermark(task: Any, value: Any) -> None:
-    """把本批 max(增量列) 写回 ``task.watermark``(同事务持久化由 land_records commit)。
+    """以 running-max 方式把 max(增量列) 写回 ``task.watermark``。
 
-    - ``value`` 为 None(空批)→ **不**覆盖既有水位(空批不推进)。
-    - ``value`` 非 None → 写 ``{value: <可 JSON 化的值>, updatedAt: <UTC ISO>}``。
-      datetime 转 ISO 字符串(JSONB 不直接接受 datetime);int 原样。
+    在每张表 land_records **成功之后**调用,取 ``max(当前水位, 本表增量列 max)``,
+    保证水位不超过「实际已落地」范畴。中途某表失败 → 水位只反映此前已成功落地的
+    表,失败表在重试时仍被采(防 DATA LOSS,C5 评审 Finding 1)。
+
+    - ``value`` 为 None(空批)→ 不动既有水位(空批不推进)。
+    - datetime → ISO 字符串(JSONB 不直接接受 datetime);int 原样。
     """
     if value is None:
         return
     serializable: Any = (
         value.isoformat() if isinstance(value, datetime) else value
     )
+    current_wm = getattr(task, "watermark", None) or {}
+    current_value = current_wm.get("value")
+    merged: Any = (
+        max(current_value, serializable)
+        if current_value is not None
+        else serializable
+    )
     task.watermark = {
-        "value": serializable,
+        "value": merged,
         "updatedAt": datetime.now(UTC).isoformat(),
     }
 
@@ -151,13 +152,12 @@ async def run_pg_ingest(
     - semantic_type 写 "structured"(版本级语义快照,新断言 §9)。
     遇到某条查询失败即中止(更早成功的已落地数据集保留),原因上抛。
 
-    切片 C / Task 5:增量采集水位推进。
+    切片 C / Task 5 + C5 评审 Finding 1 修复:增量采集水位推进(running-max-after-success)。
     - 表模式 + ``task.incremental={column,type}`` + ``task.watermark={value}`` →
       ``_build_queries`` 自动拼 ``WHERE "column" > <字面值>``。
-    - 落地前算 ``max(增量列)``(本批所有表合并)→ 写回 ``task.watermark``。
-      在 ``land_records`` **之前**赋值,确保 SQLAlchemy UnitOfWork 把 watermark
-      与新建 Dataset/Version 一并 commit(同事务,无 duplicate-ingest 窗口)。
-    - 空批 / 无 incremental / 无 column → 不推进(不覆盖既有水位)。
+    - 每张表 ``land_records`` **成功之后**推进 ``task.watermark`` 到
+      ``max(当前水位, 本表增量列 max)``;中途某表失败 → 水位只反映此前已落地的表,
+      失败表重试时仍被采(防 DATA LOSS)。空批 / 无 incremental / 无 column → 不推进。
     """
     from app.services.landing import land_records
 
@@ -170,7 +170,6 @@ async def run_pg_ingest(
     )
     cfg = datasource.config or {}
     results: list[tuple[Dataset, DatasetVersion]] = []
-    batch_max: Any = None  # 本批增量列的最大值(跨表合并)
     try:
         conn = await _connect(cfg)
         try:
@@ -179,16 +178,6 @@ async def run_pg_ingest(
                 records = [dict(r) for r in rows]
                 # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
                 records = await apply_filter_operators(task, records)
-
-                # 增量水位推进:本批合并取 max(增量列),写回 task.watermark。
-                # 必须在 land_records 之前赋值——land_records 内部会 commit,
-                # SQLAlchemy UnitOfWork 会把 task.watermark 与新版本一并落盘
-                # (同事务保证:land 成功 ⇔ 水位推进,无重复采的窗口)。
-                if inc_column:
-                    batch_max = _merge_max(
-                        batch_max, compute_db_watermark(records, inc_column)
-                    )
-                    _stamp_task_watermark(task, batch_max)
 
                 name = f"{task.name} - {suffix}" if suffix else task.name
                 ds, ver = await land_records(
@@ -207,6 +196,14 @@ async def run_pg_ingest(
                     storage_format="parquet",
                 )
                 results.append((ds, ver))
+
+                # C5 评审 Finding 1 修复:水位推进改为每表成功落地**之后**
+                # running-max(当前水位, 本表增量列 max)。中途某表失败 → 水位
+                # 只反映此前已成功落地的表,失败表重试时仍被采(防 DATA LOSS)。
+                if inc_column:
+                    _stamp_task_watermark(
+                        task, compute_db_watermark(records, inc_column)
+                    )
         finally:
             await conn.close()
     except IngestError:

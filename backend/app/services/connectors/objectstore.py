@@ -265,21 +265,26 @@ def _advance_file_watermark(
     all_objects: list[dict[str, Any]],
     incremental: dict[str, Any] | None,
 ) -> None:
-    """把本批 keys 的 max(mtime|name) 写回 ``task.watermark``(切片 C / Task 5)。
+    """以 running-max 方式把「已成功落地的 keys」的 max(mtime|name) 写回 ``task.watermark``。
 
-    必须在 land_records / 媒体 manifest 落地**之前**调用——SQLAlchemy UnitOfWork
-    把 task 变更与 land_records 的内部 commit 一并落盘(同事务,无 duplicate-ingest
-    窗口)。空批(无可采对象)/ 无 incremental → 不动既有水位(零回归)。
+    必须在每个 key/媒体批次 land_records **成功之后**调用——取
+    ``max(当前水位, 本批 keys 的 max)``,保证水位永远不会超过「实际已落地」的
+    范畴。中途某个 key 落地失败抛异常 → 水位只反映此前已成功落地的 keys,失败的
+    key 及后续 key 在重试时仍被采(防 DATA LOSS,C5 评审 Finding 1)。
+    空 keys / 无 incremental / 计算值为 None → 不动既有水位(零回归)。
     """
-    if not incremental:
+    if not incremental or not keys:
         return
     new_value = _compute_file_watermark(keys, all_objects, incremental)
     if new_value is None:
         return  # 空批 → 不推进
     from datetime import UTC, datetime  # noqa: PLC0415
 
+    current_wm = getattr(task, "watermark", None) or {}
+    current_value = current_wm.get("value")
+    merged = new_value if current_value is None else max(current_value, new_value)
     task.watermark = {
-        "value": new_value,
+        "value": merged,
         "updatedAt": datetime.now(UTC).isoformat(),
     }
 
@@ -398,10 +403,8 @@ class S3Connector:
         results: list[tuple[Dataset, DatasetVersion]] = []
         skipped = 0
 
-        # 切片 C / Task 5:水位推进——在第一笔 land_records / 媒体 manifest 落地
-        # **之前**写 task.watermark,确保 SQLAlchemy UnitOfWork 与 land_records 的
-        # 内部 commit 一并落盘(同事务,无 duplicate-ingest 窗口)。空批 → None → 不推进。
-        _advance_file_watermark(task, keys, all_objects, incremental)
+        # C5 评审 Finding 1 修复:水位推进改为 running-max-after-success——
+        # 每个 key 成功落地后再推进,中途失败水位只反映已落地部分(防 DATA LOSS)。
 
         for key in data_keys:
             tmp_path: Path | None = None
@@ -459,6 +462,9 @@ class S3Connector:
                     produced_by_job_id=job_id,
                 )
                 results.append(pair)
+                # 成功落地后推进水位(running max of landed keys only)——
+                # 失败的 key 不推进,重试时仍可被采。
+                _advance_file_watermark(task, [key], all_objects, incremental)
 
             finally:
                 # 无论成功失败都清理临时文件
@@ -467,18 +473,19 @@ class S3Connector:
 
         # 媒体文件:原样复制进平台内置 MinIO + 汇成一个 manifest 数据集(逐行带 type)
         if media_keys:
-            results.append(
-                await self._ingest_media_to_manifest(
-                    session,
-                    task=task,
-                    datasource=datasource,
-                    src_config=config,
-                    src_bucket=bucket,
-                    media_keys=media_keys,
-                    data_type=data_type,
-                    job_id=job_id,
-                )
+            pair = await self._ingest_media_to_manifest(
+                session,
+                task=task,
+                datasource=datasource,
+                src_config=config,
+                src_bucket=bucket,
+                media_keys=media_keys,
+                data_type=data_type,
+                job_id=job_id,
             )
+            results.append(pair)
+            # 媒体 manifest 成功落地后推进水位(整批 media_keys 作为一个单元)
+            _advance_file_watermark(task, media_keys, all_objects, incremental)
 
         if skipped:
             logger.info(

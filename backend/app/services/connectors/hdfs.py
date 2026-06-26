@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import urllib.parse
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
     from app.models.dataset_version import DatasetVersion
     from app.models.datasource import DataSource
     from app.models.ingest_task import IngestTask
+
+logger = logging.getLogger(__name__)
 
 
 # WebHDFS 默认端口(namenode HTTP)
@@ -282,10 +285,11 @@ class HdfsConnector:
         端到端承诺级:需真实 HDFS 集群。
         无 paths 配置 / NameNode 不可达 → 抛 ``ConnectorNotReady``。
 
-        切片 C / Task 5:增量过滤(仅支持 ``incremental.by='name'``,因为当前
-        run_ingest 不走 LISTSTATUS,没有 mtime)。``by='mtime'`` 在 HDFS 上
-        视为「不支持」→ 不过滤(诚实降级,不丢数据)。水位推进同 S3:落地前写
-        ``task.watermark``,同事务持久化(空批不推进)。
+        切片 C / Task 5 + C5 评审修复:增量过滤(仅支持 ``incremental.by='name'``,因为
+        当前 run_ingest 不走 LISTSTATUS,没有 mtime)。``by='mtime'`` 在 HDFS 上
+        **显式 warn**(不静默降级,Rule 12)→ 本次全量采,建议改用 ``by=name``。
+        水位推进改为每路径 land_records **成功之后** running-max(C5 Finding 1);
+        中途失败水位只反映此前已落地路径,失败/后续路径重试时仍被采(防 DATA LOSS)。
         """
         config = datasource.config or {}
         nn = self._namenode(config)
@@ -303,22 +307,20 @@ class HdfsConnector:
         # 增量过滤:HDFS 当前 run_ingest 不获取 mtime,仅支持 by=name。
         incremental = getattr(task, "incremental", None) or {}
         watermark = getattr(task, "watermark", None) or {}
-        if incremental.get("by") == "name":
+        by = incremental.get("by")
+        if by == "mtime":
+            # HDFS run_ingest 不走 LISTSTATUS,拿不到 mtime → 无法按 mtime 增量。
+            # 不静默降级(Rule 12):显式 warn + 本次全量采,建议改用 by=name。
+            logger.warning(
+                "HDFS 增量采集 by=mtime 不支持(当前 run_ingest 不经 LISTSTATUS "
+                "获取 mtime),本次降级为全量拉取;建议改用 by=name 按路径字典序增量"
+            )
+        if by == "name":
             wm_value = watermark.get("value")
             if wm_value is not None:
                 paths = [p for p in paths if p > wm_value]
 
         results: list[tuple[Dataset, DatasetVersion]] = []
-
-        # 水位推进:落地前写 task.watermark(同事务持久化),空批不推进。
-        # 仅在 by=name 模式下推进(by=mtime 在 HDFS 上不支持,不推进)。
-        if incremental.get("by") == "name" and paths:
-            from datetime import UTC, datetime  # noqa: PLC0415
-
-            task.watermark = {
-                "value": max(paths),
-                "updatedAt": datetime.now(UTC).isoformat(),
-            }
 
         for hdfs_path in paths:
             url = _build_webhdfs_url(nn, hdfs_path, "OPEN", **extra)
@@ -356,5 +358,23 @@ class HdfsConnector:
                 produced_by_job_id=job_id,
             )
             results.append((ds, ver))
+
+            # C5 评审 Finding 1 修复:水位推进改为每路径成功落地**之后**
+            # running-max(当前水位, 本路径名)。中途失败 → 水位只反映此前已成功
+            # 落地的路径,失败及后续路径在重试时仍被采(防 DATA LOSS)。
+            if by == "name":
+                from datetime import UTC, datetime  # noqa: PLC0415
+
+                current_wm = getattr(task, "watermark", None) or {}
+                current_value = current_wm.get("value")
+                merged = (
+                    hdfs_path
+                    if current_value is None
+                    else max(current_value, hdfs_path)
+                )
+                task.watermark = {
+                    "value": merged,
+                    "updatedAt": datetime.now(UTC).isoformat(),
+                }
 
         return results

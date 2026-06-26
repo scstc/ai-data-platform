@@ -76,7 +76,16 @@ async def fetch_records(datasource: Any, task: Any) -> list[dict[str, Any]]:
     """拉取 MySQL(goldendb)记录(不落地):跑 extract 全部查询 → 合并 → 过滤算子。
 
     供「生成 CSV 数据集」复用。驱动未装抛 ConnectorNotReady;查询失败抛 IngestError。
+
+    C5 评审 Finding 2:``task.incremental`` 设置 → ``IngestError``(fail loud)。
+    MySQL 连接器未接增量 WHERE / 水位推进,配置 incremental 却静默走全量
+    = silent wrong behavior。Rule 12 要求显式报错,不静默全量。
     """
+    # MySQL(goldendb)暂不支持增量采集——fail loud,不静默全量。
+    if getattr(task, "incremental", None):
+        raise IngestError(
+            "MySQL(goldendb)暂不支持增量采集,请改用 PG 族或移除 incremental 配置"
+        )
     _import_asyncmy()  # 未装则抛 ConnectorNotReady
     queries = _build_queries(task.extract)
     cfg = datasource.config or {}
@@ -172,8 +181,19 @@ class MysqlConnector:
 
         遇到某条查询失败即中止;已落地数据集保留,原因上抛。
         驱动未装 → 抛 ConnectorNotReady。
+
+        C5 评审 Finding 2:``task.incremental`` 设置 → ``IngestError``(fail loud)。
+        MySQL 连接器未接增量 WHERE / 水位推进,配置 incremental 却静默走全量
+        = silent wrong behavior。Rule 12 要求显式报错。
         """
         from app.services.landing import land_records  # noqa: PLC0415
+
+        # C5 评审 Finding 2:MySQL(goldendb)暂不支持增量采集——fail loud(Rule 12),
+        # 不静默降级为全量(用户以为增量,实际全量采 = silent wrong behavior)。
+        if getattr(task, "incremental", None):
+            raise IngestError(
+                "MySQL(goldendb)暂不支持增量采集,请改用 PG 族或移除 incremental 配置"
+            )
 
         _import_asyncmy()  # 未装则抛 ConnectorNotReady
 
