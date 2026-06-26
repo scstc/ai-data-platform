@@ -672,6 +672,21 @@ async def upload_jsonl_to_uploads(
     return f"s3://{bucket}/{key}"
 
 
+async def upload_parquet_to_uploads(
+    dataset_id: str, version_no: int, parquet_bytes: bytes
+) -> str:
+    """把 parquet 字节上传到平台 MinIO uploads 桶,键 = ``<dataset_id>/v<n>/data.parquet``。
+
+    与 upload_jsonl_to_uploads 同前缀约定(不同版本落不同文件夹)。
+    返回 storage_uri(``s3://<bucket>/<key>``)。平台未配置 → ExternalStoreError。
+    """
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/data.parquet"
+    await upload_object(cfg, bucket, key, io.BytesIO(parquet_bytes), len(parquet_bytes))
+    return f"s3://{bucket}/{key}"
+
+
 async def upload_file_to_uploads(
     dataset_id: str, version_no: int, path: Path
 ) -> str:

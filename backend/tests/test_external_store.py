@@ -283,3 +283,27 @@ async def test_host_s3_flow(client: AsyncClient, seeded_object: str) -> None:
 
     # 6) 断言 S3 源对象仍在(取消托管绝不动源)
     assert external_store_object_exists(seeded_object)
+
+
+# ---------------------------------------------------------------------------
+# upload_parquet_to_uploads 单元测试
+# ---------------------------------------------------------------------------
+async def test_upload_parquet_to_uploads_key_and_uri(monkeypatch):
+    from app.services import external_store
+
+    captured = {}
+
+    async def fake_upload_object(cfg, bucket, key, data, length, content_type="application/octet-stream"):
+        captured["bucket"] = bucket
+        captured["key"] = key
+        captured["content_type"] = content_type
+
+    monkeypatch.setattr(
+        external_store, "platform_config", lambda: {"endpoint": "e", "accessKey": "a", "secretKey": "s"}
+    )
+    monkeypatch.setattr(external_store.settings, "storage_minio_upload_bucket", "uploads")
+    monkeypatch.setattr(external_store, "upload_object", fake_upload_object)
+
+    uri = await external_store.upload_parquet_to_uploads("dset-abc123", 2, b"PAR1data")
+    assert uri == "s3://uploads/dset-abc123/v2/data.parquet"
+    assert captured["key"] == "dset-abc123/v2/data.parquet"
