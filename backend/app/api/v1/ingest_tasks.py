@@ -231,6 +231,13 @@ async def create_ingest_task(
         progress=0,
         logs=["[INFO] 任务已创建"],
         category_id=payload.category_id,
+        # 切片 B:quality_policy 以 snake_case dict 存(JSONB),
+        # 与 evaluate_policy 期望的键名一致(max_null_rate / block_on_schema_drift)。
+        quality_policy=(
+            payload.quality_policy.model_dump()
+            if payload.quality_policy
+            else None
+        ),
     )
     session.add(task)
     await session.commit()
@@ -275,6 +282,10 @@ async def update_ingest_task(
         task.datasource_name = datasource.name
     if body.category_id is not None:
         task.category_id = body.category_id
+    # 切片 B:quality_policy 仅在显式传入时更新(None/缺省 = 不变,与现有字段一致)。
+    # 以 snake_case dict 存(JSONB),供 rerun 时 evaluate_policy 直接消费。
+    if body.quality_policy is not None:
+        task.quality_policy = body.quality_policy.model_dump()
 
     await session.commit()
     await session.refresh(task)
@@ -378,17 +389,46 @@ async def rerun_ingest_task(
                 session, task, datasource, job_id=job.id
             )
             total_rows = sum(v.rows or 0 for _, v in results)
-            task.status = "success"
-            task.progress = PROGRESS_DONE
-            task.logs = [
-                *task.logs,
-                f"[INFO] 采集 {len(results)} 项,共 {total_rows} 条 → 产出 "
-                f"{len(results)} 个数据集:"
-                + "、".join(f"{ds.name}({v.rows or 0}行)" for ds, v in results),
-                "[INFO] 任务完成",
-            ]
-            job.state = "success"
-            job.progress = PROGRESS_DONE
+
+            # 切片 B / Task 4:对每个落地版本应用任务级 quality_policy(空值率阈值
+            # 阻断发布门)。drift=None:rerun 总是新建首版(land_records version_no=1),
+            # 无历史 schema 快照可比;schema 漂移检查在此处为 N/A。
+            from app.services.ingest_quality import evaluate_policy
+
+            quality_failures: list[str] = []
+            for _ds, ver in results:
+                verdict, reason = evaluate_policy(
+                    task.quality_policy, ver.quality_stats or {}, drift=None
+                )
+                ver.quality_verdict = verdict
+                if verdict == "failed" and reason:
+                    quality_failures.append(reason)
+
+            if quality_failures:
+                # 任一版本质量门未通过 → 任务/job 标 failed,不进入正常成功路径
+                reason_text = "; ".join(quality_failures)
+                task.status = "failed"
+                task.progress = PROGRESS_DONE
+                task.logs = [
+                    *task.logs,
+                    f"[ERROR] 质量门未通过:{reason_text}",
+                ]
+                job.state = "failed"
+                job.error = f"质量门未通过:{reason_text}"
+            else:
+                task.status = "success"
+                task.progress = PROGRESS_DONE
+                task.logs = [
+                    *task.logs,
+                    f"[INFO] 采集 {len(results)} 项,共 {total_rows} 条 → 产出 "
+                    f"{len(results)} 个数据集:"
+                    + "、".join(
+                        f"{ds.name}({v.rows or 0}行)" for ds, v in results
+                    ),
+                    "[INFO] 任务完成",
+                ]
+                job.state = "success"
+                job.progress = PROGRESS_DONE
         except (IngestError, ConnectorNotReady) as exc:
             task.status = "failed"
             task.logs = [*task.logs, f"[ERROR] 采集失败:{exc}"]
