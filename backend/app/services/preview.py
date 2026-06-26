@@ -77,12 +77,14 @@ def _parse_parquet_head(path: Path, n: int) -> tuple[list[dict], bool]:
     import duckdb  # noqa: PLC0415
 
     con = duckdb.connect()
-    rel = con.execute(f"SELECT * FROM read_parquet('{path}') LIMIT {n + 1}")
-    cols = [d[0] for d in rel.description]
-    fetched = rel.fetchall()
-    truncated = len(fetched) > n
-    rows = [dict(zip(cols, row, strict=False)) for row in fetched[:n]]
-    con.close()
+    try:
+        rel = con.execute(f"SELECT * FROM read_parquet('{path}') LIMIT {n + 1}")
+        cols = [d[0] for d in rel.description]
+        fetched = rel.fetchall()
+        truncated = len(fetched) > n
+        rows = [dict(zip(cols, row, strict=False)) for row in fetched[:n]]
+    finally:
+        con.close()  # execute/fetchall 抛错也必须释放连接
     return rows, truncated
 
 
@@ -211,14 +213,15 @@ async def _preview_hdfs(cfg: dict[str, Any], extract: dict[str, Any]) -> dict[st
 
 def _parse_file(path: Path, key: str) -> dict[str, Any]:
     ext = path.suffix.lower().lstrip(".")
+    # N+1:让 _to_result 的 len>N 截断判断成立(与 DB 路径 LIMIT N+1 一致)
     if ext == "parquet":
-        rows, _ = _parse_parquet_head(path, PREVIEW_SAMPLE_ROWS)
+        rows, _ = _parse_parquet_head(path, PREVIEW_SAMPLE_ROWS + 1)
     else:
         text = path.read_text(encoding="utf-8", errors="replace")
         if ext == "jsonl":
-            rows, _ = _parse_jsonl_head(text, PREVIEW_SAMPLE_ROWS)
+            rows, _ = _parse_jsonl_head(text, PREVIEW_SAMPLE_ROWS + 1)
         elif ext == "csv":
-            rows, _ = _parse_csv_head(text, PREVIEW_SAMPLE_ROWS)
+            rows, _ = _parse_csv_head(text, PREVIEW_SAMPLE_ROWS + 1)
         else:
             raise ValueError(f"暂不支持预览的文件格式:{ext}")
     return _to_result(rows, key)
@@ -228,17 +231,18 @@ def _parse_bytes(data: bytes, key: str) -> dict[str, Any]:
     import tempfile  # noqa: PLC0415
 
     ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+    # N+1:让 _to_result 的 len>N 截断判断成立(与 DB 路径 LIMIT N+1 一致)
     if ext == "parquet":
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
             f.write(data)
             f.flush()
-            rows, _ = _parse_parquet_head(Path(f.name), PREVIEW_SAMPLE_ROWS)
+            rows, _ = _parse_parquet_head(Path(f.name), PREVIEW_SAMPLE_ROWS + 1)
     else:
         text = data.decode("utf-8", errors="replace")
         if ext == "jsonl":
-            rows, _ = _parse_jsonl_head(text, PREVIEW_SAMPLE_ROWS)
+            rows, _ = _parse_jsonl_head(text, PREVIEW_SAMPLE_ROWS + 1)
         elif ext == "csv":
-            rows, _ = _parse_csv_head(text, PREVIEW_SAMPLE_ROWS)
+            rows, _ = _parse_csv_head(text, PREVIEW_SAMPLE_ROWS + 1)
         else:
             raise ValueError(f"暂不支持预览的文件格式:{ext}")
     return _to_result(rows, key)

@@ -50,3 +50,22 @@ def test_parse_csv_head():
     rows, truncated = _parse_csv_head(text, 50)
     assert rows == [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]
     assert truncated is False
+
+
+def test_parse_bytes_propagates_truncation():
+    """文件预览 truncated 必须如实反映源数据超出样本行数(回归:曾被丢弃恒 False)。"""
+    from app.services.preview import _parse_bytes, PREVIEW_SAMPLE_ROWS
+
+    data = ("\n".join('{"i": %d}' % i for i in range(PREVIEW_SAMPLE_ROWS + 50))).encode()
+    res = _parse_bytes(data, "sample.jsonl")
+    assert len(res["rows"]) == PREVIEW_SAMPLE_ROWS
+    assert res["truncated"] is True
+
+
+def test_parse_bytes_no_truncation_when_small():
+    from app.services.preview import _parse_bytes
+
+    data = b'{"i": 1}\n{"i": 2}\n'
+    res = _parse_bytes(data, "sample.jsonl")
+    assert len(res["rows"]) == 2
+    assert res["truncated"] is False
