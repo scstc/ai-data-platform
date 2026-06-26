@@ -146,8 +146,14 @@ async def reconcile(
     for t in cron_tasks:
         jid = job_id_for(t.id)
         if jid not in existing:
-            upsert_cron_job(scheduler, t)
-            added += 1
+            # 单条 cron 非法不拖垮整个 reconcile/调度器:跳过该任务并告警
+            try:
+                upsert_cron_job(scheduler, t)
+                added += 1
+            except (ValueError, TypeError):
+                _logger.warning(
+                    "任务 %s 的 cron 表达式无效,跳过", t.id, exc_info=True
+                )
 
     # 多则 remove(调度器里有但 DB 里没有对应 cron 任务 = 孤儿)
     removed = 0
