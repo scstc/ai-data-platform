@@ -121,7 +121,7 @@ declare namespace DataPlatform {
   type QualityStatColumn = {
     name: string;
     type: string;
-    nullRate: number;
+    null_rate: number;
   };
 
   /** 采集质量统计（版本级聚合） */

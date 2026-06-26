@@ -925,7 +925,7 @@ const IngestTasksPage: React.FC = () => {
                                               },
                                               {
                                                 title: '空值率',
-                                                dataIndex: 'nullRate',
+                                                dataIndex: 'null_rate',
                                                 width: 90,
                                                 render: (v) =>
                                                   `${(v * 100).toFixed(1)}%`,
