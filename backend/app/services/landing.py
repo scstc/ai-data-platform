@@ -278,6 +278,7 @@ async def land_records(
     produced_by_job_id: str | None = None,
     creator: str = "admin",
     strict_semantic: bool = False,
+    storage_format: str = "jsonl",
 ) -> tuple[Dataset, DatasetVersion]:
     """统一落地出口:把规范化记录写 jsonl → 建 Dataset(v1) + DatasetVersion。
 
@@ -320,23 +321,47 @@ async def land_records(
     from app.services.external_store import (  # 延迟 import 避免与 external_store 循环
         ExternalStoreError,
         upload_jsonl_to_uploads,
+        upload_parquet_to_uploads,
     )
 
-    jsonl_bytes = records_to_jsonl_bytes(records)
-    try:
-        storage_uri = await upload_jsonl_to_uploads(dataset.id, 1, jsonl_bytes)
-    except ExternalStoreError:
-        await session.rollback()
-        raise
+    effective_format = "jsonl"
+    storage_uri: str
+    size: int
+    if storage_format == "parquet":
+        try:
+            parquet_bytes = records_to_parquet_bytes(records)
+            storage_uri = await upload_parquet_to_uploads(dataset.id, 1, parquet_bytes)
+            effective_format = "parquet"
+            size = len(parquet_bytes)
+        except ParquetCodecError:
+            # 兜底:无法推断 parquet schema(空/嵌套/异构)→ 退回 jsonl,采集照常成功
+            jsonl_bytes = records_to_jsonl_bytes(records)
+            try:
+                storage_uri = await upload_jsonl_to_uploads(dataset.id, 1, jsonl_bytes)
+            except ExternalStoreError:
+                await session.rollback()
+                raise
+            size = len(jsonl_bytes)
+        except ExternalStoreError:
+            await session.rollback()
+            raise
+    else:
+        jsonl_bytes = records_to_jsonl_bytes(records)
+        try:
+            storage_uri = await upload_jsonl_to_uploads(dataset.id, 1, jsonl_bytes)
+        except ExternalStoreError:
+            await session.rollback()
+            raise
+        size = len(jsonl_bytes)
 
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
         version_no=1,
         storage_uri=storage_uri,
-        format="jsonl",
+        format=effective_format,
         rows=len(records),
-        size=len(jsonl_bytes),
+        size=size,
         origin="managed",
         semantic_type=effective_semantic,
         produced_by_job_id=produced_by_job_id,
