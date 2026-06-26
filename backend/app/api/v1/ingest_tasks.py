@@ -453,7 +453,7 @@ async def preview_ingest_source(payload: dict, session: SessionDep) -> Response:
         return JSONResponse(
             status_code=400, content={"success": False, "message": str(exc)}
         )
-    except (IngestError, ValueError) as exc:
+    except (IngestError, ValueError, ExternalStoreError) as exc:
         return JSONResponse(
             status_code=400, content={"success": False, "message": str(exc)}
         )

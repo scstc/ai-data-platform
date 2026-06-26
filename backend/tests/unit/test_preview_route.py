@@ -276,6 +276,30 @@ async def test_connector_not_ready_maps_to_400(
     assert "namenode" in resp.json()["message"]
 
 
+async def test_preview_s3_external_store_error_maps_400(
+    app: FastAPI, fake_session: _FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 传输层错误(MinIO 不可达等)→ 400,不泄漏 500(诚实失败)。
+
+    ExternalStoreError 由 list_objects / download_to_temp 等抛出(MinIO 连不上、
+    桶缺失、凭证错误);它不是 IngestError/ValueError 的子类,未补进 except 链时
+    会冒成 FastAPI 500。本测试锁定该回归。
+    """
+    from app.services.external_store import ExternalStoreError
+
+    fake_session._by_id["ds-s3"] = _make_ds("ds-s3", type="s3")
+
+    async def _raise(*a: Any, **k: Any) -> None:
+        raise ExternalStoreError("MinIO 不可达")
+
+    monkeypatch.setattr("app.services.preview.preview_file", _raise)
+    resp = await _post(app, {"datasourceId": "ds-s3", "extract": {}})
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert "MinIO 不可达" in body["message"]
+
+
 # ---------------------------------------------------------------------------
 # 9. 兼容蛇形 datasource_id
 # ---------------------------------------------------------------------------
