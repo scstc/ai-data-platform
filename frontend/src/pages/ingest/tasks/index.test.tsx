@@ -75,6 +75,16 @@ vi.mock('@ant-design/pro-components', () => ({
   ),
   ProDescriptions: () => <div data-testid="pro-descriptions" />,
   ProFormText: ({ label }: any) => <div data-testid="form-text">{label}</div>,
+  ProFormDigit: ({ label, name }: any) => (
+    <div data-testid="form-digit" data-name={JSON.stringify(name)}>
+      {label}
+    </div>
+  ),
+  ProFormSwitch: ({ label, name }: any) => (
+    <div data-testid="form-switch" data-name={JSON.stringify(name)}>
+      {label}
+    </div>
+  ),
   ProFormSelect: ({ label }: any) => (
     <div data-testid="form-select">{label}</div>
   ),
@@ -316,5 +326,79 @@ describe('IngestTasksPage', () => {
         }),
       }),
     );
+  });
+
+  it('VERDICT_META 映射：failed=error/red, passed=success/green, skipped=default/gray（产物 Tag 颜色契约）', async () => {
+    // ProDescriptions 在本测试套件被桩代,无法直接断言 Drawer 内 Tag DOM;
+    // 把映射作为契约固定——index.tsx 的 Tag color=meta.color 与 Timeline color=meta.dot
+    // 据此渲染,等价于「failed 版本得到红色 Tag」。
+    const { VERDICT_META } = await import('./index');
+    expect(VERDICT_META.failed).toEqual({
+      text: '未通过',
+      color: 'error',
+      dot: 'red',
+    });
+    expect(VERDICT_META.passed.color).toBe('success');
+    expect(VERDICT_META.passed.dot).toBe('green');
+    expect(VERDICT_META.skipped.color).toBe('default');
+    expect(VERDICT_META.skipped.dot).toBe('gray');
+  });
+
+  it('qualityPolicy 字段出现在新建向导 step-4 落地确认（form-digit/form-switch name=qualityPolicy.*）', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    // 落地确认 step 已渲染质量策略两个字段（name 落在 data-name 上）
+    // 同时编辑 ModalForm（taskFormFields）也含此字段，故需 scope 到 step-confirm 内断言
+    const confirmStep = within(screen.getByTestId('step-confirm'));
+    const digit = confirmStep.getByTestId('form-digit');
+    expect(digit).toHaveAttribute(
+      'data-name',
+      JSON.stringify(['qualityPolicy', 'maxNullRate']),
+    );
+    const sw = confirmStep.getByTestId('form-switch');
+    expect(sw).toHaveAttribute(
+      'data-name',
+      JSON.stringify(['qualityPolicy', 'blockOnSchemaDrift']),
+    );
+  });
+
+  it('提交向导时 qualityPolicy 透传到 createIngestTask 载荷', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    await stepsState.wizardOnFinish?.({
+      name: 't-policy',
+      datasourceId: 'ds-pg-01',
+      schedule: { mode: 'once' },
+      extract: { mode: 'table', tables: ['users'] },
+      qualityPolicy: { maxNullRate: 0.2, blockOnSchemaDrift: true },
+    });
+
+    expect(dpApi.createIngestTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        qualityPolicy: { maxNullRate: 0.2, blockOnSchemaDrift: true },
+      }),
+    );
+  });
+
+  it('全空 qualityPolicy（未填阈值 + 未开开关）在载荷中被剔除为 undefined（让后端落 skipped 而非 passed）', async () => {
+    render(<IngestTasksPage />);
+    fireEvent.click(screen.getByText('新建任务'));
+    await screen.findByTestId('steps-form');
+
+    await stepsState.wizardOnFinish?.({
+      name: 't-empty',
+      datasourceId: 'ds-pg-01',
+      schedule: { mode: 'once' },
+      extract: { mode: 'table', tables: ['users'] },
+      qualityPolicy: { maxNullRate: undefined, blockOnSchemaDrift: false },
+    });
+
+    expect(dpApi.createIngestTask).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(dpApi.createIngestTask).mock.calls[0][0];
+    expect(call.qualityPolicy).toBeUndefined();
   });
 });

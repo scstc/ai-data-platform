@@ -106,6 +106,36 @@ declare namespace DataPlatform {
     columns?: string[];
   };
 
+  /** 采集质量门结论(切片 B)：skipped=未配置策略 / passed=通过 / failed=未通过 */
+  type QualityVerdict = 'skipped' | 'passed' | 'failed';
+
+  /** 任务级采集质量策略(切片 B)：空值率阈值 + schema 漂移阻断，均可空 */
+  type QualityPolicy = {
+    /** 单列最大允许 null 率，闭区间 [0,1]；undefined 表示不做此项检查 */
+    maxNullRate?: number;
+    /** 与历史 schema 快照比较出现 drift 时是否阻断（true=阻断/标 failed） */
+    blockOnSchemaDrift?: boolean;
+  };
+
+  /** 采集质量统计·单列条目（与后端 ingest_quality.compute_quality_stats 对齐） */
+  type QualityStatColumn = {
+    name: string;
+    type: string;
+    nullRate: number;
+  };
+
+  /** 采集质量统计（版本级聚合） */
+  type QualityStats = {
+    rows: number;
+    columns: QualityStatColumn[];
+  };
+
+  /** 采集时表结构快照条目（用于后续 schema drift 比对） */
+  type SchemaSnapshotEntry = {
+    name: string;
+    type: string;
+  };
+
   /** 采集产物概要（详情接口返回） */
   type IngestOutput = {
     datasetId: string;
@@ -115,6 +145,12 @@ declare namespace DataPlatform {
     /** 版本展示标签:v2026.6.16 (#5)（后端按创建日期+内部版本号生成） */
     versionLabel?: string;
     rows?: number;
+    /** 质量门结论(切片 B)：undefined 视为 skipped（兼容老数据） */
+    qualityVerdict?: QualityVerdict;
+    /** 列空值率统计(仅 verdict≠skipped 时由后端填充) */
+    qualityStats?: QualityStats;
+    /** 采集时的列结构快照(用于漂移比对；前端据此渲染 drift 提示) */
+    schemaSnapshot?: SchemaSnapshotEntry[];
   };
 
   /** 采集任务 */
@@ -130,6 +166,8 @@ declare namespace DataPlatform {
     runCount?: number;
     categoryId?: string | null;
     categoryName?: string | null;
+    /** 任务级质量策略(切片 B)：未配置时为 undefined */
+    qualityPolicy?: QualityPolicy;
     createdAt: string;
     lastRunAt?: string;
     logs?: string[];
@@ -778,6 +816,8 @@ declare namespace DataPlatform {
     schedule: IngestSchedule;
     extract?: IngestExtract;
     categoryId?: string;
+    /** 任务级质量策略(切片 B)：undefined/空对象 = 不做质量门检查 */
+    qualityPolicy?: QualityPolicy;
   };
 
   /** 源数据预览：单列描述 */

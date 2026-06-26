@@ -8,8 +8,10 @@ import {
   PageContainer,
   ProDescriptions,
   ProFormDependency,
+  ProFormDigit,
   ProFormRadio,
   ProFormSelect,
+  ProFormSwitch,
   ProFormText,
   ProFormTextArea,
   ProFormTreeSelect,
@@ -19,6 +21,7 @@ import {
 import { Access, useAccess } from '@umijs/max';
 import {
   Button,
+  Collapse,
   Drawer,
   Form,
   Modal,
@@ -63,6 +66,33 @@ const STATUS_META: Record<
   running: { text: '运行中', color: 'processing' },
   success: { text: '成功', color: 'success' },
   failed: { text: '失败', color: 'error' },
+};
+
+/** 质量门结论 → 中文标签 / Tag 颜色 / Timeline 节点颜色（切片 B）
+ *  导出供 index.test.tsx 断言映射正确性（ProDescriptions 在测试中被桩代，
+ *  无法直接断言 Drawer 内 DOM，故把映射列为契约） */
+export const VERDICT_META: Record<
+  DataPlatform.QualityVerdict,
+  { text: string; color: string; dot: string }
+> = {
+  skipped: { text: '未校验', color: 'default', dot: 'gray' },
+  passed: { text: '已通过', color: 'success', dot: 'green' },
+  failed: { text: '未通过', color: 'error', dot: 'red' },
+};
+
+/** 把 qualityPolicy 全空（未填阈值 + 未开开关）的策略字段从载荷中剔除
+ *  —— 避免后端存入 `{max_null_rate: None, block_on_schema_drift: False}`
+ *  这种"形式上配置了但实际无任何检查"的策略体（会让 verdict 落 passed 而非 skipped） */
+const pruneEmptyQualityPolicy = <
+  T extends { qualityPolicy?: DataPlatform.QualityPolicy },
+>(
+  values: T,
+): T => {
+  const p = values.qualityPolicy;
+  if (p && p.maxNullRate == null && !p.blockOnSchemaDrift) {
+    return { ...values, qualityPolicy: undefined };
+  }
+  return values;
 };
 
 /** 格式化调度展示：单次 / cron 表达式 */
@@ -294,6 +324,28 @@ const IngestTasksPage: React.FC = () => {
     return null;
   };
 
+  // 建任务 / 编辑任务共用的质量策略字段（切片 B：maxNullRate + blockOnSchemaDrift）
+  // 新建向导 step-4「落地确认」与编辑 ModalForm 都渲染此片段，避免重复
+  const qualityPolicyFields = (
+    <>
+      <ProFormDigit
+        name={['qualityPolicy', 'maxNullRate']}
+        label="最大空值率阈值（可选）"
+        tooltip="单列最大允许 null 率，闭区间 [0, 1]。任一列超出即标 failed。留空 = 不做此项检查"
+        min={0}
+        max={1}
+        step={0.05}
+        placeholder="如 0.20（留空 = 不检查）"
+        fieldProps={{ precision: 2 }}
+      />
+      <ProFormSwitch
+        name={['qualityPolicy', 'blockOnSchemaDrift']}
+        label="Schema 漂移阻断"
+        tooltip="开启后，与历史 schema 快照比较出现列增减或类型变化时，新版本标 failed"
+      />
+    </>
+  );
+
   // 建任务 / 编辑任务共用的表单字段（编辑弹窗仍整体渲染所有字段；新建已迁至 StepsForm）
   const taskFormFields = (
     <>
@@ -360,6 +412,7 @@ const IngestTasksPage: React.FC = () => {
           )
         }
       </ProFormDependency>
+      {qualityPolicyFields}
     </>
   );
 
@@ -564,7 +617,7 @@ const IngestTasksPage: React.FC = () => {
           formProps={{ initialValues: { schedule: { mode: 'once' } } }}
           onFinish={async (values) => {
             try {
-              await createIngestTask(values);
+              await createIngestTask(pruneEmptyQualityPolicy(values));
               message.success('采集任务创建成功');
               setCreateOpen(false);
               actionRef.current?.reload();
@@ -691,6 +744,7 @@ const IngestTasksPage: React.FC = () => {
                 <FilterOperatorPicker />
               </Form.Item>
             )}
+            {qualityPolicyFields}
             <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
               请确认以上配置；提交后将创建采集任务并立即进入待运行状态。
             </Typography.Paragraph>
@@ -714,13 +768,14 @@ const IngestTasksPage: React.FC = () => {
                 schedule: editRow.schedule,
                 extract: editRow.extract,
                 categoryId: editRow.categoryId ?? undefined,
+                qualityPolicy: editRow.qualityPolicy,
               }
             : undefined
         }
         onFinish={async (values) => {
           if (!editRow) return false;
           try {
-            await updateIngestTask(editRow.id, values);
+            await updateIngestTask(editRow.id, pruneEmptyQualityPolicy(values));
             message.success('已保存');
             setEditRow(undefined);
             actionRef.current?.reload();
@@ -818,11 +873,74 @@ const IngestTasksPage: React.FC = () => {
                   render: (_, record) =>
                     record.output && record.output.length > 0 ? (
                       <Timeline
-                        items={record.output.map((o) => ({
-                          key: o.versionId,
-                          color: 'green',
-                          children: `${o.datasetName}（${o.rows ?? '-'} 行 · ${o.datasetId} ${o.versionLabel ?? `v${o.versionNo}`}）`,
-                        }))}
+                        items={record.output.map((o) => {
+                          // 未携带 qualityVerdict 视为 skipped（兼容老数据/未配策略）
+                          const verdict: DataPlatform.QualityVerdict =
+                            o.qualityVerdict ?? 'skipped';
+                          const meta = VERDICT_META[verdict];
+                          const stats = o.qualityStats;
+                          return {
+                            key: o.versionId,
+                            color: meta.dot,
+                            children: (
+                              <div>
+                                <div>
+                                  <Tag color={meta.color}>{meta.text}</Tag>
+                                  <span>
+                                    {o.datasetName}（{o.rows ?? '-'} 行 ·{' '}
+                                    {o.datasetId}{' '}
+                                    {o.versionLabel ?? `v${o.versionNo}`}）
+                                  </span>
+                                </div>
+                                {/* 质量统计存在时给出可展开的列空值率明细；
+                                    failed 默认展开，其余收起。 */}
+                                {stats && stats.columns?.length > 0 && (
+                                  <Collapse
+                                    size="small"
+                                    style={{ marginTop: 4 }}
+                                    defaultActiveKey={
+                                      verdict === 'failed'
+                                        ? [`stats-${o.versionId}`]
+                                        : undefined
+                                    }
+                                    items={[
+                                      {
+                                        key: `stats-${o.versionId}`,
+                                        label: `列空值率（${stats.columns.length} 列）`,
+                                        children: (
+                                          <Table<DataPlatform.QualityStatColumn>
+                                            size="small"
+                                            pagination={false}
+                                            rowKey="name"
+                                            dataSource={stats.columns}
+                                            columns={[
+                                              {
+                                                title: '列',
+                                                dataIndex: 'name',
+                                              },
+                                              {
+                                                title: '类型',
+                                                dataIndex: 'type',
+                                                width: 90,
+                                              },
+                                              {
+                                                title: '空值率',
+                                                dataIndex: 'nullRate',
+                                                width: 90,
+                                                render: (v) =>
+                                                  `${(v * 100).toFixed(1)}%`,
+                                              },
+                                            ]}
+                                          />
+                                        ),
+                                      },
+                                    ]}
+                                  />
+                                )}
+                              </div>
+                            ),
+                          };
+                        })}
                       />
                     ) : (
                       '-'
@@ -866,6 +984,21 @@ const IngestTasksPage: React.FC = () => {
                         : r.error
                           ? `失败：${r.error}`
                           : '-',
+                  },
+                  {
+                    title: '操作',
+                    key: 'action',
+                    render: (_, r) =>
+                      // 失败 run（含质量门阻断）给重试入口，复用列表「运行」的 rerunIngestTask；
+                      // 成功 run 不重试（避免无意中重复落地新版本）。
+                      r.status === 'failed' && currentRow ? (
+                        <Popconfirm
+                          title="重试该任务？"
+                          onConfirm={() => handleRerun(currentRow.id)}
+                        >
+                          <a>重试</a>
+                        </Popconfirm>
+                      ) : null,
                   },
                 ]}
               />
