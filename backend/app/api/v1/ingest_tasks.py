@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import secrets
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -396,6 +396,114 @@ async def get_ingest_task(
     )
 
 
+async def _execute_ingest(
+    session: AsyncSession,
+    task: IngestTask,
+    datasource: DataSource,
+    *,
+    trigger: Literal["manual", "cron"],
+) -> list[tuple[Dataset, DatasetVersion]]:
+    """采集执行共享核(rerun + scheduler 触发共用)。
+
+    签名固定为 ``(session, task, datasource, *, trigger)``——前三个位置参数是
+    请求/调度两条路径都已查到的对象;``trigger`` 标签透传到新建的 Job(``manual``
+    或 ``cron``),供运维区分触发来源。 ``datasource`` 已由调用方校验非 None,
+    且其类型/采集对象已通过早退 guard(无数据源 / api 推送 / 未配 extract 等),
+    本函数**只负责执行路径**:建 Job → 连接器拉取 → 应用任务级 quality_policy
+    → 推进 task/job 状态机。
+
+    - success:任务 quality_policy 全过(或无策略=skipped)→ task.status=success、
+      job.state=success、返回 results 列表。
+    - quality_fail:任一版本 quality_verdict=failed → task.status=failed、
+      job.state=failed,reason 进 task.logs + job.error,仍返回 results(版本落地)。
+    - ingest_error:连接器抛 IngestError/ConnectorNotReady → task/job 均 failed,
+      返回空 results(未产出)。
+
+    不 commit(调用方负责:rerun 在路由层 commit,scheduler 在 _trigger_ingest 内
+    commit),但内部会 commit 一次——为了 connector.run_ingest 在其内部已 commit
+    产出的 Dataset/Version(原 rerun 逻辑保留,行为零变化)。
+    """
+    # --- 正常路径:建 job → 连接器真实拉取 ---
+    task.status = "running"
+    started = task.last_run_at or _now()
+    task.logs = [*task.logs, f"[INFO] 开始采集({datasource.name} 真实拉取)"]
+    # 每次运行一条 type=ingest 的 job(收编后 ingest_runs 的替代)
+    # trigger 标签(切片 C):manual=rerun 手工触发、cron=调度器定时触发
+    job = Job(
+        id=_new_job_id(),
+        name=task.name,
+        type="ingest",
+        ingest_task_id=task.id,
+        state="running",
+        progress=0,
+        created_by="admin",
+        started_at=started,
+        trigger=trigger,
+    )
+    session.add(job)
+    await session.commit()
+    results: list[tuple[Dataset, DatasetVersion]] = []
+    try:
+        connector = resolve(datasource.type, datasource.db_kind)
+        if connector is None:
+            # 理论不可达(调用方已 guard),防御性诚实 failed
+            raise ConnectorNotReady(
+                f"数据源类型 {datasource.type}/{datasource.db_kind} 无可用连接器"
+            )
+        results = await connector.run_ingest(
+            session, task, datasource, job_id=job.id
+        )
+        total_rows = sum(v.rows or 0 for _, v in results)
+
+        # 切片 B / Task 4:对每个落地版本应用任务级 quality_policy(空值率阈值
+        # 阻断发布门)。drift=None:_execute_ingest 总是经 land_records 新建首版,
+        # 无历史 schema 快照可比;schema 漂移检查在此处为 N/A。
+        from app.services.ingest_quality import evaluate_policy  # noqa: PLC0415
+
+        quality_failures: list[str] = []
+        for _ds, ver in results:
+            verdict, reason = evaluate_policy(
+                task.quality_policy, ver.quality_stats or {}, drift=None
+            )
+            ver.quality_verdict = verdict
+            if verdict == "failed" and reason:
+                quality_failures.append(reason)
+
+        if quality_failures:
+            # 任一版本质量门未通过 → 任务/job 标 failed,不进入正常成功路径
+            reason_text = "; ".join(quality_failures)
+            task.status = "failed"
+            task.progress = PROGRESS_DONE
+            task.logs = [
+                *task.logs,
+                f"[ERROR] 质量门未通过:{reason_text}",
+            ]
+            job.state = "failed"
+            job.error = f"质量门未通过:{reason_text}"
+        else:
+            task.status = "success"
+            task.progress = PROGRESS_DONE
+            task.logs = [
+                *task.logs,
+                f"[INFO] 采集 {len(results)} 项,共 {total_rows} 条 → 产出 "
+                f"{len(results)} 个数据集:"
+                + "、".join(
+                    f"{ds.name}({v.rows or 0}行)" for ds, v in results
+                ),
+                "[INFO] 任务完成",
+            ]
+            job.state = "success"
+            job.progress = PROGRESS_DONE
+    except (IngestError, ConnectorNotReady) as exc:
+        task.status = "failed"
+        task.logs = [*task.logs, f"[ERROR] 采集失败:{exc}"]
+        job.state = "failed"
+        job.error = str(exc)
+    job.finished_at = _now()
+    task.run_count += 1
+    return results
+
+
 @router.post("/ingest-tasks/{task_id}/rerun")
 async def rerun_ingest_task(
     task_id: str,
@@ -407,6 +515,10 @@ async def rerun_ingest_task(
     - PG 族 / goldendb / S3 + 已配采集对象 → 真实拉取并落地 DatasetVersion(同步);
     - 未配采集对象 / 不支持类型 / 未装驱动 / 无集群 → 诚实 failed(不伪造成功)。
     Job(type=ingest)创建逻辑不变。
+
+    切片 C / Task 4:成功路径的执行逻辑抽到共享核 ``_execute_ingest``(
+    供 scheduler._trigger_ingest 复用),rerun 调用时传 ``trigger="manual"``。
+    早退 guard(无数据源 / api / 未配 extract)是 HTTP 响应塑形,留在路由层。
     """
     task = await session.get(IngestTask, task_id)
     if task is None:
@@ -423,6 +535,11 @@ async def rerun_ingest_task(
     task.last_run_at = _now()
 
     # --- 诚实早退(不创建 job):无数据源 / 不支持类型 / api 推送 / 未配采集对象 ---
+    # 分支顺序与抽取前完全一致(零行为变化):
+    # 1) datasource 缺失 OR 连接器未注册 → 「不支持自动采集」
+    # 2) api 类型 → 「API 推送不走 rerun」
+    # 3) 未配采集对象 → 「请先配置」
+    # 否则 → 共享核 _execute_ingest(trigger=manual)
     if datasource is None or connector is None:
         kind = "?" if datasource is None else (
             f"{datasource.type}/{datasource.db_kind}"
@@ -450,75 +567,8 @@ async def rerun_ingest_task(
             "[ERROR] 未配置采集对象,请先在任务中选择表/对象或填写 SQL 后再运行",
         ]
     else:
-        # --- 正常路径:建 job → 连接器真实拉取 ---
-        task.status = "running"
-        started = task.last_run_at or _now()
-        task.logs = [*task.logs, f"[INFO] 开始采集({datasource.name} 真实拉取)"]
-        # 每次运行一条 type=ingest 的 job(收编后 ingest_runs 的替代)
-        job = Job(
-            id=_new_job_id(),
-            name=task.name,
-            type="ingest",
-            ingest_task_id=task.id,
-            state="running",
-            progress=0,
-            created_by="admin",
-            started_at=started,
-        )
-        session.add(job)
-        await session.commit()
-        try:
-            results = await connector.run_ingest(
-                session, task, datasource, job_id=job.id
-            )
-            total_rows = sum(v.rows or 0 for _, v in results)
-
-            # 切片 B / Task 4:对每个落地版本应用任务级 quality_policy(空值率阈值
-            # 阻断发布门)。drift=None:rerun 总是新建首版(land_records version_no=1),
-            # 无历史 schema 快照可比;schema 漂移检查在此处为 N/A。
-            from app.services.ingest_quality import evaluate_policy
-
-            quality_failures: list[str] = []
-            for _ds, ver in results:
-                verdict, reason = evaluate_policy(
-                    task.quality_policy, ver.quality_stats or {}, drift=None
-                )
-                ver.quality_verdict = verdict
-                if verdict == "failed" and reason:
-                    quality_failures.append(reason)
-
-            if quality_failures:
-                # 任一版本质量门未通过 → 任务/job 标 failed,不进入正常成功路径
-                reason_text = "; ".join(quality_failures)
-                task.status = "failed"
-                task.progress = PROGRESS_DONE
-                task.logs = [
-                    *task.logs,
-                    f"[ERROR] 质量门未通过:{reason_text}",
-                ]
-                job.state = "failed"
-                job.error = f"质量门未通过:{reason_text}"
-            else:
-                task.status = "success"
-                task.progress = PROGRESS_DONE
-                task.logs = [
-                    *task.logs,
-                    f"[INFO] 采集 {len(results)} 项,共 {total_rows} 条 → 产出 "
-                    f"{len(results)} 个数据集:"
-                    + "、".join(
-                        f"{ds.name}({v.rows or 0}行)" for ds, v in results
-                    ),
-                    "[INFO] 任务完成",
-                ]
-                job.state = "success"
-                job.progress = PROGRESS_DONE
-        except (IngestError, ConnectorNotReady) as exc:
-            task.status = "failed"
-            task.logs = [*task.logs, f"[ERROR] 采集失败:{exc}"]
-            job.state = "failed"
-            job.error = str(exc)
-        job.finished_at = _now()
-        task.run_count += 1
+        # --- 正常路径:调共享核 _execute_ingest(trigger=manual) ---
+        await _execute_ingest(session, task, datasource, trigger="manual")
 
     await session.commit()
     await session.refresh(task)

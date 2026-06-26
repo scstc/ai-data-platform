@@ -12,7 +12,12 @@
 - 缺则 upsert、多则 remove、匹配的不动(避免无谓重写 trigger);
 - 返回 ``(added, removed)`` 计数供运维观测。
 
-触发函数 ``_trigger_ingest`` 当前为占位(Task 4 注入真实采集执行逻辑)。
+触发函数 ``_trigger_ingest``(切片 C / Task 4 注入真实执行逻辑):
+- async:经 ``AsyncIOExecutor`` 在事件循环内 await(见 ``init_scheduler``),
+  直接调 ``app.api.v1.ingest_tasks._execute_ingest(trigger="cron")``——无需
+  sync/async bridge。
+- 重叠跳过:该任务最近一条 Job.state="running" → 日志 + 跳过,不建重复 Job。
+- 水位推进(增量采集)留 ``# TODO(C5)`` 钩子,Task 5 填。
 
 DEFERRED:真实 ``AsyncIOScheduler.start()`` / ``SQLAlchemyJobStore`` 建表 /
 对真 DB 扫描需 PG 可达——当前 .60 测试库 ConnectionRefused,留待回归。
@@ -23,6 +28,7 @@ from __future__ import annotations
 import logging
 from urllib.parse import urlsplit, urlunsplit
 
+from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -31,7 +37,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.db import async_session_factory
+from app.models.datasource import DataSource
 from app.models.ingest_task import IngestTask
+from app.models.job import Job
 
 _logger = logging.getLogger(__name__)
 
@@ -86,22 +95,70 @@ def init_scheduler() -> AsyncIOScheduler:
 
     SQLAlchemyJobStore 在首次连接时会自动建表(CREATE TABLE IF NOT EXISTS),
     无需 alembic 迁移。timezone=UTC 让 cron 在多 tz 部署下确定istic。
+
+    切片 C / Task 4:显式指定 ``AsyncIOExecutor`` 为默认 executor——这样
+    ``_trigger_ingest``(async)能在事件循环内被 await,无需 sync/async bridge。
+    AsyncIOScheduler 3.10+ 文档说默认就是 AsyncIOExecutor,但跨版本显式声明更稳妥。
     """
     sync_url = _sync_database_url(settings.database_url)
     jobstore = SQLAlchemyJobStore(url=sync_url, tablename="apscheduler_jobs")
     return AsyncIOScheduler(
         jobstores={"default": jobstore},
+        executors={"default": AsyncIOExecutor()},
         timezone="UTC",
     )
 
 
-def _trigger_ingest(task_id: str) -> None:
-    """调度器触发的采集执行入口(Task 4 注入真实逻辑,当前仅占位)。
+async def _trigger_ingest(task_id: str) -> None:
+    """调度器触发的采集执行入口(async,经 AsyncIOExecutor 在事件循环内 await)。
 
-    设为 sync 函数:APScheduler 3.x AsyncIOScheduler 默认 ThreadPoolExecutor
-    会在线程里跑 sync 任务;Task 4 可改 async 并显式指定 AsyncIOExecutor。
+    重叠跳过:若该任务最近一条 Job 仍 ``state="running"`` → 日志 + 跳过,不建
+    重复 Job。否则调 ``_execute_ingest(trigger="cron")`` 并 commit。
+
+    session 由模块级 ``async_session_factory`` 提供(调度器在请求上下文外运行,
+    不复用请求会话)。Task 5 在此函数内推进水位(增量采集)。
+
+    lazy import ``_execute_ingest`` 以避免 scheduler ↔ ingest_tasks 循环导入
+    (ingest_tasks 顶部 ``from app.services import scheduler as scheduler_mod``
+    会先于 ``_execute_ingest`` 定义完成)。
     """
-    _logger.warning("ingest 触发未接线:task_id=%s(Task 4 替换)", task_id)
+    # lazy import:避免与 ingest_tasks 路由模块顶部互相 import 时序问题
+    from app.api.v1.ingest_tasks import _execute_ingest  # noqa: PLC0415
+
+    async with async_session_factory() as session:
+        task = await session.get(IngestTask, task_id)
+        if task is None:
+            _logger.warning("调度触发找不到任务 task_id=%s,跳过", task_id)
+            return
+        datasource = await session.get(DataSource, task.datasource_id)
+        if datasource is None:
+            _logger.warning(
+                "任务 %s 的数据源不存在(datasource_id=%s),跳过",
+                task_id,
+                task.datasource_id,
+            )
+            return
+
+        # 重叠跳过:该任务最近一条 Job 仍 running → 跳过本次调度
+        latest_job = await session.scalar(
+            select(Job)
+            .where(Job.ingest_task_id == task_id)
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+        if latest_job is not None and latest_job.state == "running":
+            _logger.info(
+                "任务 %s 上次未完成,跳过本次调度(latest_job=%s state=running)",
+                task_id,
+                latest_job.id,
+            )
+            return
+
+        # TODO(C5): advance watermark —— 增量采集水位推进在此处插入,
+        # 先于 _execute_ingest 执行(把上次成功 Job 的 watermark 投影到 task.extract)。
+
+        await _execute_ingest(session, task, datasource, trigger="cron")
+        await session.commit()
 
 
 def upsert_cron_job(scheduler: AsyncIOScheduler, task: IngestTask) -> None:
