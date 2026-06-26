@@ -511,6 +511,19 @@ async def materialized_version(
             tmp.unlink(missing_ok=True)
         return
 
+    # parquet:dj ParquetFormatter 原生读 → 取字节落临时 .parquet,直接 yield 该路径
+    if version.format == "parquet":
+        cfg = await _version_cfg(version, session)
+        bucket, key = parse_s3_uri(version.storage_uri)
+        content = await cached_bytes(cfg, bucket, key)
+        tmp = Path(tempfile.mktemp(prefix="adp-pq-", suffix=".parquet"))
+        tmp.write_bytes(content)
+        try:
+            yield tmp
+        finally:
+            tmp.unlink(missing_ok=True)
+        return
+
     # 二进制 s3 版本无法规范化为 jsonl(加工/物化不适用)→ 明确报错,
     # 避免 normalize_to_records 对二进制字节抛未捕获的 UnsupportedFormatError(冒 500)
     if version.format in BINARY_FORMATS:
