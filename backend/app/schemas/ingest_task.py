@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import Field, model_validator
 
 from app.schemas.common import CamelModel, UtcDateTime
@@ -12,11 +13,13 @@ IngestTaskStatus = Literal["pending", "running", "success", "failed"]
 
 
 class IngestSchedule(CamelModel):
-    """调度配置。
+    """调度配置(切片 C / Task 3 已解除 cron 禁用)。
 
-    cron 调度本期未启用(§4.10):mode 模型层仍接受 'cron'(兼容存量 schedule
-    透传/读取),但在 IngestTaskCreate/Update 校验器里拒绝创建 cron 任务,杜绝
-    「UI 可建 cron 却永不触发」的误导面。
+    - ``mode=once``:一次性任务(由用户/外部手动触发,不参与 cron 调度)。
+    - ``mode=cron``:周期任务,必须携带非空 ``cron`` 表达式,且表达式需通过
+      APScheduler ``CronTrigger.from_crontab`` 解析(5 字段标准 crontab)。
+      校验在 ``IngestTaskCreate`` / ``IngestTaskUpdate`` 入口执行——避免用户
+      写错字段顺序/超范围值导致「UI 上建了 cron 却永不触发」。
     """
 
     mode: Literal["once", "cron"]
@@ -123,10 +126,23 @@ class IngestExtract(CamelModel):
         return self
 
 
-def _reject_cron(schedule: IngestSchedule | None) -> None:
-    """拒绝 cron 调度创建/更新(§4.10 兜底,本期不做 cron 真跑)。"""
-    if schedule is not None and schedule.mode == "cron":
-        raise ValueError("cron 调度尚未启用")
+def _validate_cron(schedule: IngestSchedule | None) -> None:
+    """校验 schedule 的 cron 表达式(切片 C / Task 3 解除 cron 禁用后)。
+
+    - ``schedule=None`` 或 ``mode='once'``:不校验 cron 字段(兼容存量/一次性)。
+    - ``mode='cron'``:必须有非空 cron 字符串(去空白后),且通过 APScheduler
+      ``CronTrigger.from_crontab`` 解析——解析抛 ValueError 即视为非法表达式,
+      在入口拦截,杜绝「写错字段顺序/超范围值导致建了永不触发的 cron 任务」。
+
+    5 字段标准 crontab(``分 时 日 月 周``);6 字段(秒级)/4 字段会被拒绝。
+    """
+    if schedule is None or schedule.mode != "cron":
+        return
+    cron_expr = (schedule.cron or "").strip()
+    if not cron_expr:
+        raise ValueError("schedule.mode=cron 必须携带非空 cron 表达式")
+    # from_crontab 解析失败抛 ValueError;非法字段(超范围/非数字/字段数错)在此暴露
+    CronTrigger.from_crontab(cron_expr)
 
 
 class IngestTaskRead(CamelModel):
@@ -185,9 +201,13 @@ class IngestTaskCreate(CamelModel):
     incremental: Incremental | None = None
 
     @model_validator(mode="after")
-    def _reject_cron_schedule(self) -> IngestTaskCreate:
-        """cron 调度尚未启用(§4.10):创建端拒绝,避免建了永不触发的任务。"""
-        _reject_cron(self.schedule)
+    def _validate_cron_schedule(self) -> IngestTaskCreate:
+        """校验 cron 表达式(切片 C / Task 3):mode=cron 时 cron 必须非空且合法。
+
+        APScheduler ``CronTrigger.from_crontab`` 解析失败会在入口拦截,
+        避免用户写出永不触发的 cron 任务。
+        """
+        _validate_cron(self.schedule)
         return self
 
 
@@ -206,7 +226,7 @@ class IngestTaskUpdate(CamelModel):
     incremental: Incremental | None = None
 
     @model_validator(mode="after")
-    def _reject_cron_schedule(self) -> IngestTaskUpdate:
-        """cron 调度尚未启用(§4.10):更新端同样拒绝。"""
-        _reject_cron(self.schedule)
+    def _validate_cron_schedule(self) -> IngestTaskUpdate:
+        """更新端同样校验 cron 表达式(与 Create 一致)。"""
+        _validate_cron(self.schedule)
         return self

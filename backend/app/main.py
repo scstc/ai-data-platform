@@ -67,6 +67,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 调度器(切片 C):scheduler_enabled=False 时跳过;启动 / 对账失败仅告警,
     # 不阻断 app 启动——采集主流程不依赖调度器在线(可手工触发)。
+    # 注册到 scheduler 模块的全局引用,供 routes best-effort upsert/remove。
     scheduler: scheduler_mod.AsyncIOScheduler | None = None
     if settings.scheduler_enabled:
         try:
@@ -82,11 +83,14 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             )
             scheduler_mod.shutdown_scheduler(scheduler)
             scheduler = None
+    # 不论启动成功/失败都暴露给 routes:成功→实例;失败/未启用→None(routes 静默跳过)
+    scheduler_mod.set_scheduler(scheduler)
     try:
         yield
     finally:
         # 关闭路径必须无条件执行:即便启动失败(scheduler=None)也要进入 finally
         scheduler_mod.shutdown_scheduler(scheduler)
+        scheduler_mod.set_scheduler(None)
 
 
 def create_app() -> FastAPI:

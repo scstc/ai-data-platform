@@ -38,6 +38,30 @@ _logger = logging.getLogger(__name__)
 # 作业 id 前缀:reconcile 据此识别「ingest 调度」作业,与其他子系统解耦。
 JOB_ID_PREFIX = "ingest:"
 
+# 模块级运行期 scheduler 引用(由 _lifespan 注册 / 清空)。
+# Routes 通过 ``get_scheduler()`` best-effort 读取;None 时静默跳过——
+# 采集主流程不依赖调度器在线(可手工 rerun)。
+_running_scheduler: AsyncIOScheduler | None = None
+
+
+def set_scheduler(scheduler: AsyncIOScheduler | None) -> None:
+    """注册 / 清空模块级运行期 scheduler 引用(由 ``_lifespan`` 调用)。
+
+    - 启动成功:``set_scheduler(scheduler)``
+    - 启动失败 / 关闭:``set_scheduler(None)``
+    """
+    global _running_scheduler
+    _running_scheduler = scheduler
+
+
+def get_scheduler() -> AsyncIOScheduler | None:
+    """读取运行期 scheduler 实例(未启动 / 未启用 / 启动失败时返回 None)。
+
+    Routes 据此决定是否 upsert/remove 调度作业;None 时静默跳过,
+    采集主流程不依赖调度器在线。
+    """
+    return _running_scheduler
+
 
 def job_id_for(task_id: str) -> str:
     """构造调度器作业 id:``ingest:{task_id}``。"""

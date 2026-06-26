@@ -3,17 +3,23 @@
 状态机要点（rerun 同步执行，返回即终态；不再凭 GET 轮询伪造进度/成功）：
 - create        → status=pending、progress=0、logs=["[INFO] 任务已创建"]，
                   datasource_name 从数据源表冗余（数据源不存在 → 404）。
+                  若 schedule.mode=cron,成功后 best-effort upsert 调度作业。
 - GET detail    → 只读：如实返回当前状态/进度，附产物列表（不修改任何字段）。
 - rerun         → PG+采集对象：真实拉取，success/failed；
                   PG 未配采集对象 / 非 PG 源：如实 failed（不产出数据集）。
 - stop          → 转 failed、追加"[WARN] 任务被手动停止"。
-- delete        → 删除记录。
+- update        → schedule.mode 变更:改 cron → upsert;改 once → remove。
+- delete        → 删除前先 remove 调度作业(best-effort),再删记录。
+
+调度器接线遵循「采集主流程不依赖调度器在线」:scheduler 未启用 / 未启动 /
+upsert/remove 抛错均 try/except + log,不阻断 HTTP 请求。
 
 单对象响应统一 {data:{...}, success:true}；未命中 404 + {success:false, message:str}。
 """
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import UTC, datetime
 from typing import Annotated
@@ -40,6 +46,7 @@ from app.schemas.ingest_task import (
     IngestTaskUpdate,
 )
 from app.services import operator_catalog as oc
+from app.services import scheduler as scheduler_mod
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
 from app.services.external_store import (
@@ -52,6 +59,8 @@ from app.services.landing import (
     records_to_jsonl_bytes,
 )
 from app.services.llm_config import get_active_llm_config
+
+_logger = logging.getLogger(__name__)
 
 # 可直连拉取记录的数据库品牌:PG 族走 asyncpg,goldendb 走 asyncmy
 _PG_KINDS = {"postgresql", "hologres", "kingbase", "gaussdb"}
@@ -117,6 +126,48 @@ def _not_found() -> JSONResponse:
         status_code=status.HTTP_404_NOT_FOUND,
         content={"success": False, "message": "任务不存在"},
     )
+
+
+def _sync_cron_job(task: IngestTask) -> None:
+    """best-effort upsert 调度作业(切片 C / Task 3)。
+
+    仅当 ``settings.scheduler_enabled`` 且 ``scheduler_mod.get_scheduler()``
+    返回实例时才尝试 upsert;任何异常(调度器未启动 / jobstore 不可达 /
+    cron 表达式异常)均 try/except + log,不抛给调用方——采集主流程不依赖
+    调度器在线(用户可手工 rerun)。
+    """
+    if not settings.scheduler_enabled:
+        return
+    scheduler = scheduler_mod.get_scheduler()
+    if scheduler is None:
+        return
+    try:
+        scheduler_mod.upsert_cron_job(scheduler, task)
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "调度作业 upsert 失败(已忽略,采集不依赖调度器) task_id=%s",
+            getattr(task, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _unsync_cron_job(task_id: str) -> None:
+    """best-effort remove 调度作业(切片 C / Task 3)。
+
+    与 ``_sync_cron_job`` 对称:``scheduler_enabled=False`` / scheduler 未启动 /
+    remove 抛错均 try/except + log,绝不阻断 delete/update 主流程。
+    """
+    if not settings.scheduler_enabled:
+        return
+    scheduler = scheduler_mod.get_scheduler()
+    if scheduler is None:
+        return
+    try:
+        scheduler_mod.remove_cron_job(scheduler, task_id)
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "调度作业 remove 失败(已忽略) task_id=%s", task_id, exc_info=True
+        )
 
 
 def _item(
@@ -248,6 +299,9 @@ async def create_ingest_task(
     session.add(task)
     await session.commit()
     await session.refresh(task)
+    # 切片 C / Task 3:cron 任务 best-effort upsert 调度作业(scheduler 未启用
+    # / 未启动 / upsert 抛错均静默跳过,采集主流程不依赖调度器在线)
+    _sync_cron_job(task)
     return JSONResponse(
         content=_item(task, category_name=await _category_name(session, task))
     )
@@ -273,8 +327,17 @@ async def update_ingest_task(
 
     if body.name is not None:
         task.name = body.name
+    # 切片 C / Task 3:schedule 变更时记录新旧 mode,用于 commit 后 best-effort
+    # 同步调度作业(cron→upsert;once→remove)。读取在赋值前,避免覆盖判断。
+    prev_mode: str | None = None
+    new_mode: str | None = None
     if body.schedule is not None:
+        prev_schedule = (
+            task.schedule if isinstance(task.schedule, dict) else {}
+        )
+        prev_mode = prev_schedule.get("mode")
         task.schedule = body.schedule.model_dump()
+        new_mode = body.schedule.mode
     if body.extract is not None:
         task.extract = body.extract.model_dump()
     if body.datasource_id is not None and body.datasource_id != task.datasource_id:
@@ -295,6 +358,16 @@ async def update_ingest_task(
 
     await session.commit()
     await session.refresh(task)
+    # 切片 C / Task 3:best-effort 同步调度作业——
+    # - schedule 改为 cron:upsert(覆盖旧作业)
+    # - schedule 改为 once(从 cron 切回):remove 旧 cron 作业
+    # - schedule 未变 / 改 once→once / 改 cron→cron 同表达式:仍按上面规则幂等执行
+    #   (upsert_cron_job 是 replace_existing=True;once 模式 remove 容忍 JobLookupError)
+    # scheduler 未启用 / 未启动 / 抛错均静默跳过,采集主流程不依赖调度器在线。
+    if new_mode == "cron":
+        _sync_cron_job(task)
+    elif new_mode == "once" and prev_mode == "cron":
+        _unsync_cron_job(task.id)
     return JSONResponse(
         content=_item(task, category_name=await _category_name(session, task))
     )
@@ -792,11 +865,17 @@ async def delete_ingest_task(
     task_id: str,
     session: SessionDep,
 ) -> Response:
-    """删除采集任务。"""
+    """删除采集任务。
+
+    切片 C / Task 3:删除前先 best-effort remove 调度作业(scheduler 未启用 /
+    未启动 / 抛错均静默跳过);再删 DB 记录。即便 remove 失败也继续删记录,
+    避免 jobstore 残留拖累 DB 清理——孤儿作业由 reconcile 在下次启动兜底清理。
+    """
     task = await session.get(IngestTask, task_id)
     if task is None:
         return _not_found()
 
+    _unsync_cron_job(task.id)
     await session.delete(task)
     await session.commit()
     return JSONResponse(content={"success": True})
