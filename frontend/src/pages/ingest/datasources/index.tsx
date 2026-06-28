@@ -1,12 +1,21 @@
 import { PlusOutlined } from '@ant-design/icons';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import { PageContainer, ProTable } from '@ant-design/pro-components';
+import {
+  ModalForm,
+  PageContainer,
+  ProFormSelect,
+  ProFormText,
+  ProTable,
+} from '@ant-design/pro-components';
 import { Access, history, useAccess } from '@umijs/max';
-import { Badge, Button, message, Popconfirm, Tag } from 'antd';
+import { Badge, Button, message, Popconfirm, Tag, Typography } from 'antd';
 import { type FC, useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
 import {
   deleteDataSource,
+  downloadDatasource,
+  exportDatasourceToS3,
+  listBuckets,
   listCategories,
   listDataSources,
   recheckDataSource,
@@ -27,6 +36,10 @@ const DataSourcesPage: FC = () => {
   );
   // 正在「重新检测」的数据源 id(防重复点击 + 行内 loading 文案)
   const [recheckingId, setRecheckingId] = useState<string | null>(null);
+  // 正在打开「导出到 S3」表单的数据源(单选:每行点击时设置,关闭时清空)
+  const [exportDatasource, setExportDatasource] = useState<
+    DataPlatform.DataSource | undefined
+  >();
 
   const loadCategories = useCallback(async () => {
     try {
@@ -82,6 +95,30 @@ const DataSourcesPage: FC = () => {
     } catch {
       message.error('删除失败，请重试');
     }
+  };
+
+  // 下载/导出 S3:仅 s3 真正可用,其它类型按钮常驻但前置拦截给诚实文案
+  // (与后端 400 消息保持一致;非 s3 类型后端会拒绝,前端拦截避免多走一次往返)。
+  const unsupportedMsg = (record: DataPlatform.DataSource, action: string) =>
+    `数据源类型「${record.type}」暂不支持${action}(当前仅 s3 完整支持;` +
+    'hdfs/database/api 类型无文件语义或尚未接入)';
+
+  // 下载:新窗口打开,浏览器自然跟随 302(单 s3 对象)或流式接 zip(多对象)。
+  const handleDownload = (record: DataPlatform.DataSource) => {
+    if (record.type !== 's3') {
+      message.warning(unsupportedMsg(record, '下载'));
+      return;
+    }
+    window.open(downloadDatasource(record.id), '_blank');
+  };
+
+  // 导出 S3:同下载前置拦截,非 s3 提前文案提示,避免打开空表单。
+  const handleOpenExport = (record: DataPlatform.DataSource) => {
+    if (record.type !== 's3') {
+      message.warning(unsupportedMsg(record, '导出 S3'));
+      return;
+    }
+    setExportDatasource(record);
   };
 
   const columns: ProColumns<DataPlatform.DataSource>[] = [
@@ -147,8 +184,9 @@ const DataSourcesPage: FC = () => {
     {
       title: '操作',
       valueType: 'option',
-      width: 200,
-      // 重新检测/编辑/删除仅 admin 可见(后端 require_admin 双层防护);非 admin 此列为空
+      width: 280,
+      // 重新检测/编辑/删除/下载/导出 S3 仅 admin 可见(后端 require_admin 双层防护);
+      // 非 admin 此列为空。
       render: (_, record) =>
         access.canAdmin
           ? [
@@ -166,6 +204,12 @@ const DataSourcesPage: FC = () => {
                   {recheckingId === record.id ? '检测中…' : '重新检测'}
                 </a>
               ) : null,
+              <a key="download" onClick={() => handleDownload(record)}>
+                下载
+              </a>,
+              <a key="export-s3" onClick={() => handleOpenExport(record)}>
+                导出到 S3
+              </a>,
               <a
                 key="edit"
                 onClick={() => {
@@ -232,6 +276,79 @@ const DataSourcesPage: FC = () => {
           actionRef.current?.reload();
         }}
       />
+      <ModalForm<DataPlatform.ExportS3Params>
+        title={`导出「${exportDatasource?.name ?? ''}」到 S3`}
+        width={520}
+        open={!!exportDatasource}
+        modalProps={{ destroyOnHidden: true }}
+        onOpenChange={(o) => {
+          if (!o) setExportDatasource(undefined);
+        }}
+        onFinish={async (values) => {
+          if (!exportDatasource) return false;
+          if (exportDatasource.type !== 's3') {
+            message.warning(unsupportedMsg(exportDatasource, '导出 S3'));
+            setExportDatasource(undefined);
+            return false;
+          }
+          try {
+            const res = await exportDatasourceToS3(exportDatasource.id, {
+              datasourceId: values.datasourceId,
+              bucket: values.bucket,
+              prefix: values.prefix || undefined,
+            });
+            message.success(
+              `已导出 ${res.data.exported} 个对象到 ${res.data.target}`,
+            );
+            setExportDatasource(undefined);
+            return true;
+          } catch (e: any) {
+            const msg =
+              e?.info?.errorMessage ||
+              e?.response?.data?.message ||
+              e?.data?.message;
+            message.error(msg || '导出失败，请重试');
+            return false;
+          }
+        }}
+      >
+        <Typography.Paragraph type="secondary">
+          把该数据源在 <code>config.bucket[/prefix]</code> 下的对象导出到目标 S3
+          数据源(读源、写目标,绝不回写源)。
+        </Typography.Paragraph>
+        <ProFormSelect
+          name="datasourceId"
+          label="目标 S3 数据源"
+          rules={[{ required: true, message: '请选择目标 S3 数据源' }]}
+          request={async () => {
+            const res = await listDataSources({ type: 's3', pageSize: 200 });
+            // 同源自写(同 id)留给后端红线拦截,前端不必屏蔽——让用户看到清晰错误。
+            return (res.data ?? []).map((d) => ({
+              label: d.name,
+              value: d.id,
+            }));
+          }}
+          fieldProps={{ showSearch: true }}
+        />
+        <ProFormSelect
+          name="bucket"
+          label="目标桶"
+          rules={[{ required: true, message: '请选择目标桶' }]}
+          dependencies={['datasourceId']}
+          request={async (params) => {
+            const dsId = (params as { datasourceId?: string }).datasourceId;
+            if (!dsId) return [];
+            const res = await listBuckets(dsId);
+            return (res.data ?? []).map((b) => ({ label: b, value: b }));
+          }}
+          fieldProps={{ showSearch: true }}
+        />
+        <ProFormText
+          name="prefix"
+          label="目标前缀(可选)"
+          placeholder="如 exports/my-source；对象将落在「前缀/文件名」"
+        />
+      </ModalForm>
     </PageContainer>
   );
 };

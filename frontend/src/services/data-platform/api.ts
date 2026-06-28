@@ -188,6 +188,32 @@ export async function deleteDataSource(id: string, options?: { [key: string]: an
   });
 }
 
+/** 下载数据源 URL 构造器(GET /api/v1/datasources/:id/download)。
+ *  后端:单 s3 对象 → 302 预签名;多对象 → zip 流(前端 window.open 跟随 302/触发下载)。
+ *  非 s3 类型 → 400(由前端 type 前置拦截,后端 message 兜底)。 */
+export function downloadDatasource(id: string) {
+  return `/api/v1/datasources/${id}/download`;
+}
+
+/** 导出数据源到 S3 POST /api/v1/datasources/:id/export-s3(下载/导出至 S3)。 */
+export async function exportDatasourceToS3(
+  id: string,
+  body: DataPlatform.ExportS3Params,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { exported: number; target: string };
+    success: boolean;
+  }>(`/api/v1/datasources/${id}/export-s3`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    // skipErrorHandler:交由调用方 catch 展示后端 4xx message(含类型不支持)
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
 /** 测试数据源连接 POST /api/v1/datasources/test */
 export async function testDataSource(
   body: DataPlatform.TestConnectionParams,
