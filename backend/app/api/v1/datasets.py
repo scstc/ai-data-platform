@@ -22,7 +22,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from app.api.deps import current_user, require_admin, require_user
+from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
@@ -82,10 +82,14 @@ from app.services.landing import (
 )
 from app.services.review import precheck_records
 from app.services.semantic_registry import (
+    SemanticType,
     SemanticValidationError,
     apply_semantic_spec,
+    classify_modalities,
+    collect_modalities,
     coerce_semantic_type,
     infer_semantic_from_data_type,
+    modalities_for_subtype,
     parse_semantic_type,
     semantic_type_catalog,
 )
@@ -469,6 +473,8 @@ async def upload_media_as_dataset(
             creator=actor,
         )
         session.add(dataset)
+        # manifest 媒体集:单模态(每行 text 是 dj 占位 token,非真实文本 → 单模态子标签)
+        media_modalities = [_MEDIA_FIELD[data_type]] if data_type else None
         version = DatasetVersion(
             id=_new_version_id(),
             dataset_id=dataset_id,
@@ -479,6 +485,7 @@ async def upload_media_as_dataset(
             size=total_size,
             origin="managed",
             source_datasource_id=None,
+            modalities=media_modalities,
             note=f"媒体批量接入:{len(files)} 个文件",
         )
         session.add(version)
@@ -610,14 +617,19 @@ async def upload_batch_as_dataset(
 
         # 语义维度(与 data_type 正交):显式→归一+校验(非严格只计数);否则按 data_type 推断
         explicit = coerce_semantic_type(semantic_type)
+        batch_modalities: list[str] | None = None
         if explicit is not None:
-            all_records, _report = apply_semantic_spec(
+            all_records, report = apply_semantic_spec(
                 all_records, explicit, strict=False
             )
             effective_semantic: str | None = explicit.value
+            if effective_semantic == SemanticType.MULTIMODAL.value:
+                batch_modalities = report.modalities or None
         else:
             inferred = infer_semantic_from_data_type(data_type)
             effective_semantic = inferred.value if inferred else None
+            if effective_semantic == SemanticType.MULTIMODAL.value:
+                batch_modalities = collect_modalities(all_records) or None
 
         # 内容安全前置预检(#4):数据集落库前对全量解析文本跑审核,违规则回滚 + 回收
         # MinIO 原件,绝不创建脏数据集。默认敏感词 + PII(秒级),LLM 可选(默认关)。
@@ -673,6 +685,7 @@ async def upload_batch_as_dataset(
             origin="managed",
             source_datasource_id=None,
             semantic_type=effective_semantic,
+            modalities=batch_modalities,
             note=(
                 f"单一格式批量上传:{len(files)} 个文件"
                 f"(原件存 {prefix}originals/)"
@@ -1177,7 +1190,64 @@ async def delete_dataset_member(
     return JSONResponse(content={"data": {"rows": len(kept)}, "success": True})
 
 
-@router.get("/datasets", response_model=PageResponse[DatasetRead])
+async def _showcase_modalities(
+    session: AsyncSession, dataset_ids: list[str]
+) -> dict[str, list[str] | None]:
+    """取各数据集**展示版本**(优先 published,否则 version_no 最大)的 modalities。
+
+    与 latest_version_label 同口径,供列表子标签展示 + modality 筛选分类。
+    展示版本无 modalities(存量/非多模态)→ None。
+    """
+    if not dataset_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                DatasetVersion.dataset_id,
+                DatasetVersion.version_no,
+                DatasetVersion.publish_status,
+                DatasetVersion.modalities,
+            ).where(DatasetVersion.dataset_id.in_(dataset_ids))
+        )
+    ).all()
+    published: dict[str, tuple[int, object]] = {}
+    latest: dict[str, tuple[int, object]] = {}
+    for ds_id, vno, status, mods in rows:
+        if status == "published":
+            published[ds_id] = (vno, mods)
+        cur = latest.get(ds_id)
+        if cur is None or vno > cur[0]:
+            latest[ds_id] = (vno, mods)
+    out: dict[str, list[str] | None] = {}
+    for ds_id, (vno, mods) in latest.items():
+        out[ds_id] = published.get(ds_id, (vno, mods))[1]
+    return out
+
+
+async def _showcase_version(
+    session: AsyncSession, dataset_id: str
+) -> DatasetVersion | None:
+    """取数据集**展示版本**对象(优先 published,否则 version_no 最大),与
+    ``_showcase_modalities`` 同口径。供快速设置多模态子类型时反写 modalities。"""
+    versions = (
+        await session.scalars(
+            select(DatasetVersion).where(
+                DatasetVersion.dataset_id == dataset_id
+            )
+        )
+    ).all()
+    if not versions:
+        return None
+    published = [v for v in versions if v.publish_status == "published"]
+    pool = published or list(versions)
+    return max(pool, key=lambda v: v.version_no)
+
+
+@router.get(
+    "/datasets",
+    response_model=PageResponse[DatasetRead],
+    dependencies=[Depends(require_perm("dataset:list"))],
+)
 async def list_datasets(
     session: SessionDep,
     user: Annotated[User | None, Depends(current_user)] = None,
@@ -1195,6 +1265,10 @@ async def list_datasets(
     created_start: CreatedStartQuery = None,
     created_end: CreatedEndQuery = None,
     publish_status: str | None = Query(None, alias="publishStatus"),
+    modality: str | None = Query(
+        None,
+        description="多模态子分类筛选:image|video|audio|cross(按展示版本 modalities 分类)",
+    ),
 ) -> PageResponse[DatasetRead]:
     """分页查询数据集,按创建时间倒序;按元数据条件过滤(向后兼容)。
 
@@ -1246,6 +1320,17 @@ async def list_datasets(
     base = await dataset_acl.visible_dataset_filter(
         select(Dataset).where(*conds), session, user
     )
+    # 多模态子分类筛选(modality 是版本级字段,按展示版本 modalities 分类过滤):
+    # 取所有候选(其他条件 + ACL)的展示版本 modalities → Python 分类 → 命中 id 集再 IN。
+    if modality:
+        cand_ids = (
+            await session.scalars(
+                select(Dataset.id).select_from(base.subquery())
+            )
+        ).all()
+        sm = await _showcase_modalities(session, cand_ids)
+        matched = [d for d in cand_ids if classify_modalities(sm.get(d)) == modality]
+        base = select(Dataset).where(Dataset.id.in_(matched))
     total = await session.scalar(select(func.count()).select_from(base.subquery()))
     offset = (current - 1) * page_size
     rows = (
@@ -1297,6 +1382,8 @@ async def list_datasets(
             latest_label[ds_id] = format_version_label(
                 pick_vno, pick_created  # type: ignore[arg-type]
             )
+    # 展示版本(优先 published,否则最新)的多模态模态集合,回填 modalities(子标签)
+    showcase_mods = await _showcase_modalities(session, page_ids)
     # 批量取本页分类名(避免 N+1),回填 categoryName
     cat_names = await build_category_name_map(
         session, [r.category_id for r in rows]
@@ -1308,6 +1395,7 @@ async def list_datasets(
         item = DatasetRead.model_validate(r)
         item.hosted = r.id in hosted_ids
         item.latest_version_label = latest_label.get(r.id)
+        item.modalities = showcase_mods.get(r.id)
         if r.category_id:
             item.category_name = cat_names.get(r.category_id)
         item.tags = tags_map.get(r.id, [])
@@ -1373,6 +1461,18 @@ async def update_dataset(
     # tags 是多对多关联(非 Dataset 列),单独同步,不走 setattr。
     if "tags" in updates:
         await _sync_dataset_tags(session, dataset_id, updates.pop("tags") or [])
+    # modality_subtype 是版本级派生字段(非 Dataset 列):反写展示版本 modalities,
+    # 列表「数据类型」子标签据此还原(无展示版本则静默跳过,仅设 semantic_type)。
+    # 对称清理:semantic_type 显式切到非多模态(或清空)时一并清掉残留 modalities,
+    # 否则旧的多模态模态会继续命中模态筛选(列表/详情共用本 PATCH)。
+    subtype = updates.pop("modality_subtype", None)
+    sem_set = "semantic_type" in updates
+    if subtype is not None or (sem_set and updates["semantic_type"] != "multimodal"):
+        ver = await _showcase_version(session, dataset_id)
+        if ver is not None:
+            ver.modalities = (
+                modalities_for_subtype(subtype) if subtype is not None else None
+            )
     for field, value in updates.items():
         setattr(dataset, field, value)
     dataset.last_modifier = user.id if user else "admin"

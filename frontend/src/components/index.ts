@@ -16,6 +16,7 @@ export { default as ArticleListContent } from './ArticleListContent';
 export { default as AvatarList } from './AvatarList';
 export { CategoryPanel, default as CategoryManager } from './CategoryManager';
 export { default as ErrorBoundary } from './ErrorBoundary';
+export { default as NotificationBell } from './NotificationBell';
 export { default as OfflineBanner } from './OfflineBanner';
 export { default as PlaceholderPage } from './PlaceholderPage';
 export { default as StandardFormRow } from './StandardFormRow';

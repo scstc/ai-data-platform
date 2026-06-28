@@ -298,9 +298,7 @@ const DeptPage: FC = () => {
           }
         }}
       >
-        {(editTarget as any)?._isNewChild && (
-          <ProFormText name="name" label="名称" rules={[{ required: true }]} />
-        )}
+        <ProFormText name="name" label="名称" rules={[{ required: true }]} />
         <ProFormTreeSelect
           name="parentId"
           label="上级部门"

@@ -294,4 +294,23 @@ async def _run_job(job_id: str) -> None:
             _cancelled.discard(job_id)
             _paused.discard(job_id)
         job.finished_at = _now()
+        # 终态通知:仅 success/failed 给创建者写一条(不通知 cancelled/paused——
+        # 那是用户主动操作)。惰性引入避免与 services 包潜在导入环;emit 内部已
+        # loud-swallow,通知失败绝不影响任务终态(随本事务一起 commit)。
+        if job.state in ("success", "failed"):
+            from app.services import notifications  # noqa: PLC0415
+
+            notifications.emit(
+                session,
+                recipient=job.created_by,
+                level="success" if job.state == "success" else "error",
+                source_type="job",
+                source_id=job.id,
+                title=(
+                    f"{job.name} 已完成"
+                    if job.state == "success"
+                    else f"{job.name} 失败"
+                ),
+                body=job.error if job.state == "failed" else None,
+            )
         await session.commit()

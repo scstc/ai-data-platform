@@ -43,7 +43,16 @@ import {
   toCategoryTreeData,
 } from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
-import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
+import {
+  MODALITY_ENUM,
+  MODALITY_SUBTYPE_META,
+  ModalitySubtypeTag,
+} from '@/utils/modalitySubtype';
+import {
+  SEMANTIC_TYPE_ENUM,
+  SEMANTIC_TYPE_META,
+  SemanticTypeTag,
+} from '@/utils/semanticType';
 import {
   SENSITIVITY_LEVEL_COLOR,
   SENSITIVITY_LEVEL_ENUM,
@@ -228,6 +237,32 @@ const DatasetsList: React.FC = () => {
     }
   };
 
+  // 行内快速设置数据类型(admin):点类型 Tag 弹菜单即选即存,免进详情。
+  // key 命中多模态子类型(image|video|audio|cross)→ 一并把 semanticType 设为 multimodal,
+  // 子类型反写展示版本 modalities(后端合成代表值);否则按普通语义类型设置。
+  const handleQuickSetSemanticType = async (id: string, key: string) => {
+    const sub = MODALITY_SUBTYPE_META[key];
+    try {
+      await updateDataset(
+        id,
+        sub
+          ? {
+              semanticType: 'multimodal',
+              modalitySubtype: key as 'image' | 'video' | 'audio' | 'cross',
+            }
+          : { semanticType: key as DataPlatform.SemanticType },
+      );
+      message.success(
+        sub
+          ? `已设为多模态·${sub.label}`
+          : `已设为${SEMANTIC_TYPE_META[key]?.label ?? key}`,
+      );
+      actionRef.current?.reload();
+    } catch {
+      message.error('设置失败，请重试');
+    }
+  };
+
   // 行内快速设置分类(admin):点分类单元格弹 TreeSelect,选完即存并关 Popover。
   const handleQuickSetCategory = async (
     id: string,
@@ -291,7 +326,79 @@ const DatasetsList: React.FC = () => {
       dataIndex: 'semanticType',
       valueType: 'select',
       valueEnum: SEMANTIC_TYPE_ENUM,
-      render: (_, r) => <SemanticTypeTag type={r.semanticType} />,
+      render: (_, r) => {
+        const inner = (
+          <>
+            <SemanticTypeTag type={r.semanticType} />
+            {r.semanticType === 'multimodal' && (
+              <ModalitySubtypeTag modalities={r.modalities} />
+            )}
+          </>
+        );
+        if (!access.canAdmin) return inner;
+        // 多模态展开为子类型子菜单(图片/视频/音频/跨模态);其余语义类型为平铺项。
+        const items: MenuProps['items'] = Object.entries(
+          SEMANTIC_TYPE_META,
+        ).map(([k, meta]) =>
+          k === 'multimodal'
+            ? {
+                key: k,
+                label: (
+                  <Tag
+                    color={meta.color}
+                    icon={meta.icon}
+                    style={{ marginInlineEnd: 0 }}
+                  >
+                    {meta.label}
+                  </Tag>
+                ),
+                children: Object.entries(MODALITY_SUBTYPE_META).map(
+                  ([sk, sm]) => ({
+                    key: sk,
+                    label: (
+                      <Tag
+                        color={sm.color}
+                        icon={sm.icon}
+                        style={{ marginInlineEnd: 0 }}
+                      >
+                        {sm.label}
+                      </Tag>
+                    ),
+                  }),
+                ),
+              }
+            : {
+                key: k,
+                label: (
+                  <Tag
+                    color={meta.color}
+                    icon={meta.icon}
+                    style={{ marginInlineEnd: 0 }}
+                  >
+                    {meta.label}
+                  </Tag>
+                ),
+              },
+        );
+        return (
+          <Dropdown
+            menu={{
+              items,
+              onClick: (e) => handleQuickSetSemanticType(r.id, e.key),
+            }}
+            trigger={['click']}
+          >
+            <span style={{ cursor: 'pointer' }}>{inner}</span>
+          </Dropdown>
+        );
+      },
+    },
+    {
+      title: '模态',
+      dataIndex: 'modality',
+      valueType: 'select',
+      valueEnum: MODALITY_ENUM,
+      hideInTable: true, // 仅作查询筛选项,不显示为列
     },
     {
       title: '分类',
@@ -384,13 +491,15 @@ const DatasetsList: React.FC = () => {
       dataIndex: 'tags',
       search: false,
       render: (_, r) => {
-        const inner = r.tags?.length
-          ? r.tags.map((t) => (
-              <Tag key={t} color={tagColor(t)}>
-                {t}
-              </Tag>
-            ))
-          : <Tag bordered={false}>未设置</Tag>;
+        const inner = r.tags?.length ? (
+          r.tags.map((t) => (
+            <Tag key={t} color={tagColor(t)}>
+              {t}
+            </Tag>
+          ))
+        ) : (
+          <Tag bordered={false}>未设置</Tag>
+        );
         if (!access.canAdmin) return inner;
         return (
           <Popover
@@ -552,6 +661,7 @@ const DatasetsList: React.FC = () => {
             pageSize: params.pageSize,
             name: params.name || undefined,
             semanticType: params.semanticType || undefined,
+            modality: params.modality || undefined,
             sourceKind: params.sourceKind || undefined,
             creator: params.creator || undefined,
             categoryIds,

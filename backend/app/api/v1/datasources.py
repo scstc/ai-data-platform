@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import require_admin, require_perm
 from app.api.v1.categories import build_category_name_map
 from app.core.db import get_session
 from app.models import DataSource
@@ -119,7 +119,11 @@ async def _read_with_category(
     return read
 
 
-@router.get("/datasources", response_model=PageResponse[DataSourceRead])
+@router.get(
+    "/datasources",
+    response_model=PageResponse[DataSourceRead],
+    dependencies=[Depends(require_perm("ingest:datasource:list"))],
+)
 async def list_datasources(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,

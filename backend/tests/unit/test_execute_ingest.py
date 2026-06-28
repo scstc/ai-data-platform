@@ -40,6 +40,7 @@ class FakeTask:
     id: str = "task-fake01"
     name: str = "测试任务"
     datasource_id: str = "ds-fake01"
+    creator: str = "admin"
     last_run_at: datetime | None = None
     logs: list[str] = field(default_factory=lambda: ["[INFO] 任务已创建"])
     status: str = "pending"

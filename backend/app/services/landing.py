@@ -22,7 +22,9 @@ from app.models.dataset_version import DatasetVersion
 # 注意:external_store 反向 import 本模块的 BINARY_FORMATS,故此处用函数内延迟
 # import(见 land_records / land_upload_raw),避免模块加载期循环导入。
 from app.services.semantic_registry import (
+    SemanticType,
     apply_semantic_spec,
+    collect_modalities,
     coerce_semantic_type,
     infer_semantic_from_data_type,
 )
@@ -56,6 +58,10 @@ _MEDIA_KIND_BY_FORMAT = {
     **dict.fromkeys(AUDIO_FORMATS, "audio"),
     **dict.fromkeys(VIDEO_FORMATS, "video"),
 }
+
+# data_type(前端多模态上传传 image/audio/video 单数)→ 标准媒体字段名(复数)。
+# 单媒体原样/manifest 存储无真实文本 → 子标签为单模态(图片/音频/视频),不含 text。
+_DATA_TYPE_TO_MEDIA_FIELD = {"image": "images", "audio": "audios", "video": "videos"}
 
 
 def media_kind(fmt: str) -> str | None:
@@ -295,14 +301,21 @@ async def land_records(
     校验在写盘/建行之前完成,失败不留脏对象。
     """
     explicit = coerce_semantic_type(semantic_type)
+    version_modalities: list[str] | None = None
     if explicit is not None:
-        records, _report = apply_semantic_spec(
+        records, report = apply_semantic_spec(
             records, explicit, strict=strict_semantic
         )
         effective_semantic: str | None = explicit.value
+        # 多模态:从校验报告取模态集合(images/audios/videos/text)落版本快照
+        if effective_semantic == SemanticType.MULTIMODAL.value:
+            version_modalities = report.modalities or None
     else:
         inferred = infer_semantic_from_data_type(data_type)
         effective_semantic = inferred.value if inferred else None
+        # data_type 推断为 multimodal(如 image/audio/video):不改记录,纯扫描取模态集合
+        if effective_semantic == SemanticType.MULTIMODAL.value:
+            version_modalities = collect_modalities(records) or None
 
     dataset = Dataset(
         id=_new_dataset_id(),
@@ -377,6 +390,7 @@ async def land_records(
         size=size,
         origin="managed",
         semantic_type=effective_semantic,
+        modalities=version_modalities,
         produced_by_job_id=produced_by_job_id,
         note=note,
         quality_stats=quality_stats,
@@ -480,6 +494,14 @@ async def land_upload_raw(
         raise LandingError(f"原样存储失败:{exc}") from exc
     storage_uri = f"s3://{bucket}/{key}"
 
+    # 单媒体原样存:data_type(image/audio/video)→ 单模态字段(无真实文本 → 单模态子标签)
+    dt_key = (data_type or "").lower()
+    raw_modalities: list[str] | None = (
+        [_DATA_TYPE_TO_MEDIA_FIELD[dt_key]]
+        if dt_key in _DATA_TYPE_TO_MEDIA_FIELD
+        else None
+    )
+
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
@@ -490,6 +512,7 @@ async def land_upload_raw(
         size=len(content),
         origin="managed",
         semantic_type=effective_semantic,
+        modalities=raw_modalities,
         produced_by_job_id=None,
         note=f"本地上传(原样存):{filename}",
     )

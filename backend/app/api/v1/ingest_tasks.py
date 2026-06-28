@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_perm
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
@@ -227,7 +228,11 @@ async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
     ]
 
 
-@router.get("/ingest-tasks", response_model=PageResponse[IngestTaskRead])
+@router.get(
+    "/ingest-tasks",
+    response_model=PageResponse[IngestTaskRead],
+    dependencies=[Depends(require_perm("ingest:task:list"))],
+)
 async def list_ingest_tasks(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,
@@ -499,6 +504,25 @@ async def _execute_ingest(
         task.logs = [*task.logs, f"[ERROR] 采集失败:{exc}"]
         job.state = "failed"
         job.error = str(exc)
+    # 终态通知:success/failed 各发一条给创建者(task.creator)。此处是采集运行的
+    # 唯一终态汇合点(success / 质量门 failed / ingest_error failed 都到这),故恰好
+    # 一条;且该 Job(type=ingest)不经 job_runner._run_job,二者不会重复发。
+    # 惰性引入 + emit 内部 loud-swallow:通知失败不污染任务终态(随调用方事务提交)。
+    from app.services import notifications  # noqa: PLC0415
+
+    notifications.emit(
+        session,
+        recipient=task.creator,
+        level="success" if task.status == "success" else "error",
+        source_type="ingest_task",
+        source_id=task.id,
+        title=(
+            f"采集任务 {task.name} 已完成"
+            if task.status == "success"
+            else f"采集任务 {task.name} 失败"
+        ),
+        body=job.error if task.status == "failed" else None,
+    )
     job.finished_at = _now()
     task.run_count += 1
     return results

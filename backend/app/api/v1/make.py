@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import require_admin, require_perm
 from app.api.v1.jobs import (
     SessionDep,
     _binary_block,
@@ -130,7 +130,11 @@ async def create_make_job(
     return await _start_make(session, body)
 
 
-@router.get("/synthesis/jobs", response_model=PageResponse[JobRead])
+@router.get(
+    "/synthesis/jobs",
+    response_model=PageResponse[JobRead],
+    dependencies=[Depends(require_perm("governance:make:list"))],
+)
 async def list_make_jobs(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,

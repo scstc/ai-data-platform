@@ -1657,3 +1657,41 @@ export async function selectProviderModel(providerId: string, model: string) {
     },
   );
 }
+
+// ---------------------------------------------------------------------------
+// 通知中心
+// ---------------------------------------------------------------------------
+/** 通知列表 GET /api/v1/notifications */
+export async function listNotifications(
+  params?: { onlyUnread?: boolean; page?: number; pageSize?: number },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.NotificationItem[]; total: number; success: boolean }>(
+    '/api/v1/notifications',
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
+/** 未读计数 GET /api/v1/notifications/unread-count */
+export async function getUnreadCount(options?: { [key: string]: any }) {
+  return request<{ count: number; success: boolean }>(
+    '/api/v1/notifications/unread-count',
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 标记单条已读 POST /api/v1/notifications/{id}/read */
+export async function markRead(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(
+    `/api/v1/notifications/${id}/read`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 全部标记已读 POST /api/v1/notifications/read-all */
+export async function markAllRead(options?: { [key: string]: any }) {
+  return request<{ success: boolean; updated: number }>(
+    '/api/v1/notifications/read-all',
+    { method: 'POST', ...(options || {}) },
+  );
+}

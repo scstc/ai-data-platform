@@ -15,6 +15,7 @@ import {
   ErrorBoundary,
   Footer,
   LangDropdown,
+  NotificationBell,
   OfflineBanner,
   THEME_STORAGE_KEY,
   ThemeSwitch,
@@ -146,6 +147,7 @@ export const layout: RunTimeLayoutConfig = ({
       const localeEnabled =
         (initialState?.settings as { locale?: boolean })?.locale !== false;
       return [
+        <NotificationBell key="notifications" />,
         <ThemeSwitch key="theme" />,
         localeEnabled && <LangDropdown key="lang" />,
       ].filter(Boolean);

@@ -15,6 +15,7 @@ from app.models.llm_model import LlmModel
 from app.models.llm_provider import LlmProvider
 from app.models.llm_usage import LlmUsage
 from app.models.menu import Menu
+from app.models.notification import Notification
 from app.models.rbac_links import RoleDept, RoleMenu, UserRole
 from app.models.review_finding import ReviewFinding
 from app.models.role import Role
@@ -37,6 +38,7 @@ __all__ = [
     "LlmProvider",
     "LlmUsage",
     "Menu",
+    "Notification",
     "ReviewFinding",
     "Role",
     "RoleDept",

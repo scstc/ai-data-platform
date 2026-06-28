@@ -547,6 +547,8 @@ declare namespace DataPlatform {
     size?: number;
     /** 语义类型快照(与 dataType 正交,#1/#2/#8) */
     semanticType?: SemanticType;
+    /** 多模态模态集合(images/audios/videos/text 子集);仅 multimodal 版本有值 */
+    modalities?: string[];
     origin: string;
     producedByJobId?: string;
     /** 外部 S3 托管(origin=hosted)版本据此找 S3 凭证；受管版本为空 */
@@ -573,6 +575,8 @@ declare namespace DataPlatform {
     dataType?: string;
     /** 语义类型(与 dataType 正交,#1/#2/#8) */
     semanticType?: SemanticType;
+    /** 展示版本的多模态模态集合(后端聚合填充);前端按其分类显示子标签 + 筛选 */
+    modalities?: string[];
     /** 来源/接入方式(类型三轴之一):database|object_store|hdfs|local_upload|api_push */
     sourceKind?: string;
     /** 原始格式(类型三轴之一):txt/docx/csv/jsonl/image… */
@@ -706,6 +710,8 @@ declare namespace DataPlatform {
     dataType?: string | null;
     /** 语义类型:写入校验为枚举(非法 422);不传不改 */
     semanticType?: SemanticType;
+    /** 多模态子类型:反写展示版本 modalities 合成代表值;仅 multimodal 时有意义 */
+    modalitySubtype?: 'image' | 'video' | 'audio' | 'cross';
     sensitivityLevel?: string | null;
     // 受控分类:显式传 null 才能清空(后端 exclude_unset)
     categoryId?: string | null;
@@ -721,6 +727,8 @@ declare namespace DataPlatform {
     name?: string;
     dataType?: string;
     semanticType?: SemanticType;
+    /** 多模态子分类筛选:image|video|audio|cross(按展示版本 modalities 分类) */
+    modality?: 'image' | 'video' | 'audio' | 'cross';
     sourceKind?: string;
     creator?: string;
     categoryId?: string;
@@ -1102,4 +1110,17 @@ declare namespace DataPlatform {
     byDay: LlmUsageByDay[];
     recent: LlmUsageRecent[];
   }
+
+  /** 站内通知条目 */
+  type NotificationItem = {
+    id: string;
+    level: 'success' | 'error';
+    sourceType: 'job' | 'ingest_task';
+    sourceId: string;
+    title: string;
+    body: string | null;
+    read: boolean;
+    createdAt: string;
+    readAt: string | null;
+  };
 }

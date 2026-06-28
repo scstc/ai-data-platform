@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_perm
 from app.core.config import settings
 from app.core.db import get_session
 from app.models.upload import UploadRecord
@@ -62,7 +63,11 @@ def _file_ext(filename: str) -> str:
     return suffix[1:].lower() if suffix else ""
 
 
-@router.get("/uploads", response_model=PageResponse[UploadRecordRead])
+@router.get(
+    "/uploads",
+    response_model=PageResponse[UploadRecordRead],
+    dependencies=[Depends(require_perm("ingest:upload:list"))],
+)
 async def list_uploads(
     session: SessionDep,
     current: int = Query(1, ge=1),

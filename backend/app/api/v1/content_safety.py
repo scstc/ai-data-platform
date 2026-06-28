@@ -15,10 +15,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
+from app.api.deps import require_perm
 from app.api.v1.jobs import (
     SessionDep,
     _binary_block,
@@ -74,7 +75,11 @@ async def create_review_job(
     return JSONResponse(content=_item(job))
 
 
-@router.get("/content-safety/jobs", response_model=PageResponse[JobRead])
+@router.get(
+    "/content-safety/jobs",
+    response_model=PageResponse[JobRead],
+    dependencies=[Depends(require_perm("governance:contentsafety:list"))],
+)
 async def list_review_jobs(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,

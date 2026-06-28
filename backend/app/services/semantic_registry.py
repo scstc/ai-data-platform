@@ -234,6 +234,65 @@ def infer_semantic(records: Sequence[dict]) -> SemanticType | None:
     return SemanticType.TEXT
 
 
+# 多模态子分类(列表"图片/视频/音频/跨模态"子标签 + 筛选用)。
+# 媒体字段名(复数,与 SEMANTIC_SCHEMAS[MULTIMODAL].media_fields 一致)→ 子分类 key。
+_MEDIA_KIND = {
+    "images": "image",
+    "audios": "audio",
+    "videos": "video",
+}
+
+
+def classify_modalities(modalities: Sequence[str] | None) -> str | None:
+    """modalities 集合 → 子分类 key(image|video|audio|cross|None),纯函数。
+
+    语义(用户决策 B):``text`` 计入模态计数 —— 图文配对(images+text)算"跨模态"。
+      - ≥2 种(含 text)→ cross
+      - 恰好 1 种媒体、无 text → image / video / audio
+      - 空 / 仅 text / 无法判定 → None(前端兜底显示"多模态"主标签,无子标签)
+    """
+    if not modalities:
+        return None
+    media = {m for m in modalities if m in _MEDIA_KIND}
+    has_text = "text" in modalities
+    if len(media) + (1 if has_text else 0) >= 2:
+        return "cross"
+    if len(media) == 1 and not has_text:
+        return _MEDIA_KIND[next(iter(media))]
+    return None
+
+
+# classify_modalities 的逆:子分类 key → 代表性 modalities 集合。
+# 供列表「数据类型」快速设置多模态子类型时,反写展示版本 modalities(合成代表值,
+# 而非来自真实数据);经 classify_modalities 必须能原样还原回该子类型(round-trip)。
+_SUBTYPE_TO_MODALITIES: dict[str, list[str]] = {
+    "image": ["images"],
+    "video": ["videos"],
+    "audio": ["audios"],
+    "cross": ["images", "text"],  # 图文配对 → 跨模态(≥2 种含 text)
+}
+
+
+def modalities_for_subtype(subtype: str) -> list[str]:
+    """子分类 key(image|video|audio|cross)→ modalities 集合;非法 key 抛 KeyError。"""
+    return list(_SUBTYPE_TO_MODALITIES[subtype])
+
+
+def collect_modalities(records: Sequence[dict]) -> list[str]:
+    """扫描记录聚合出现过的模态(images/audios/videos/text);**不改记录**(纯读)。
+
+    供 land_records 推断路径(未显式传 semantic_type,原本不改记录)取模态集合:
+    复用 multimodal 的别名归一 + _modalities_of,但作用于副本,不动调用方 records。
+    """
+    spec = SEMANTIC_SCHEMAS[SemanticType.MULTIMODAL]
+    found: set[str] = set()
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        found.update(_modalities_of(_normalize_row(r, spec), spec))
+    return sorted(found)
+
+
 def _is_blank(value: object) -> bool:
     """空判定:None / 空串 / 空列表/空字典视为空。"""
     if value is None:

@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import require_admin, require_perm
 from app.api.v1.jobs import (
     SessionDep,
     _binary_block,
@@ -151,7 +151,11 @@ async def create_distillation_job(
     return await _start_distillation(session, body)
 
 
-@router.get("/distillation/jobs", response_model=PageResponse[JobRead])
+@router.get(
+    "/distillation/jobs",
+    response_model=PageResponse[JobRead],
+    dependencies=[Depends(require_perm("governance:distillation:list"))],
+)
 async def list_distillation_jobs(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,

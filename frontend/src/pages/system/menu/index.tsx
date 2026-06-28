@@ -12,12 +12,13 @@ import {
   ProTable,
 } from '@ant-design/pro-components';
 import { useAccess } from '@umijs/max';
-import { Button, Card, message, Popconfirm, Tag } from 'antd';
-import { type FC, useRef, useState } from 'react';
+import { AutoComplete, Button, Card, message, Popconfirm, Tag } from 'antd';
+import { type FC, useEffect, useRef, useState } from 'react';
 import {
   createMenu,
   deleteMenu,
   listMenus,
+  permissionOverview,
   updateMenu,
 } from '@/services/system';
 
@@ -58,8 +59,39 @@ const MenuPage: FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<System.Menu | null>(null);
   const [tree, setTree] = useState<System.Menu[]>([]);
+  const [permOptions, setPermOptions] = useState<{ value: string }[]>([]);
 
   const reload = () => actionRef.current?.reload();
+
+  // 加载已有权限标识(allPerms)作为「权限标识」输入的联想候选;仍允许手输新串。
+  // 候选来自 GET /system/permissions/overview(种子菜单已含 system:user:add 等代码真实 perms)。
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await permissionOverview();
+        setPermOptions((res.data?.allPerms ?? []).map((p) => ({ value: p })));
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  // 权限标识输入:联想下拉(候选 allPerms)+ 允许自定义。create/edit 两处复用。
+  const permField = (label: string) => (
+    <ProForm.Item name="perms" label={label}>
+      <AutoComplete
+        options={permOptions}
+        allowClear
+        filterOption={(input, option) =>
+          String(option?.value ?? '')
+            .toLowerCase()
+            .includes(input.toLowerCase())
+        }
+        placeholder="选择或输入,如 system:user:add"
+        style={{ width: 328 }}
+      />
+    </ProForm.Item>
+  );
 
   const columns: ProColumns<System.Menu>[] = [
     { title: '名称', dataIndex: 'name', width: 200 },
@@ -223,7 +255,7 @@ const MenuPage: FC = () => {
           <ProFormText name="component" label="组件(如 system/user)" />
         </ProForm.Group>
         <ProForm.Group>
-          <ProFormText name="perms" label="权限标识(如 system:user:add)" />
+          {permField('权限标识(如 system:user:add)')}
           <ProFormDigit
             name="sort"
             label="排序"
@@ -327,7 +359,7 @@ const MenuPage: FC = () => {
           />
         </ProForm.Group>
         <ProForm.Group>
-          <ProFormText name="perms" label="权限标识" />
+          {permField('权限标识')}
           <ProFormDigit name="sort" label="排序" fieldProps={{ step: 1 }} />
         </ProForm.Group>
         <ProFormSwitch name="visible" label="显示" />

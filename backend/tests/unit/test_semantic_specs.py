@@ -12,8 +12,11 @@ from app.services.semantic_registry import (
     SemanticType,
     SemanticValidationError,
     apply_semantic_spec,
+    classify_modalities,
+    collect_modalities,
     infer_semantic,
     infer_semantic_from_data_type,
+    modalities_for_subtype,
     parse_semantic_type,
     semantic_type_catalog,
 )
@@ -222,3 +225,41 @@ def test_catalog_covers_all_ten_types():
     assert qa["required"] == ["question", "answer"]
     mm = next(c for c in cat if c["key"] == "multimodal")
     assert mm["mediaFields"] == ["images", "audios", "videos"]
+
+
+# ---------------------------------------------------------------------------
+# 多模态子分类(图片/视频/音频/跨模态):classify_modalities —— 语义 B(图文算跨模态)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "modalities, expected",
+    [
+        (None, None),
+        ([], None),
+        (["images"], "image"),  # 纯图片(无 text)→ 图片
+        (["videos"], "video"),
+        (["audios"], "audio"),
+        (["images", "text"], "cross"),  # 图文配对 → 跨模态(语义 B,核心意图)
+        (["images", "audios"], "cross"),  # 多媒体 → 跨模态
+        (["images", "audios", "text"], "cross"),
+        (["text"], None),  # 仅 text → 兜底无子标签
+    ],
+)
+def test_classify_modalities(modalities, expected):
+    """锁语义 B:text 计入计数 → 图文配对算跨模态,纯单媒体才算图片/视频/音频。"""
+    assert classify_modalities(modalities) == expected
+
+
+@pytest.mark.parametrize("subtype", ["image", "video", "audio", "cross"])
+def test_modalities_for_subtype_roundtrip(subtype):
+    """快速设置子类型的反写值必须能被 classify_modalities 原样还原:
+    否则列表「数据类型」设了图片却显示成别的(或退化无子标签),设置即失真。"""
+    assert classify_modalities(modalities_for_subtype(subtype)) == subtype
+
+
+def test_collect_modalities_does_not_mutate_records():
+    """collect_modalities 纯读:聚合模态但不改调用方记录(land_records 推断路径零回归)。"""
+    recs = [{"image": "a.png", "caption": "hi"}, {"video": "b.mp4"}]
+    snapshot = [dict(r) for r in recs]
+    mods = collect_modalities(recs)
+    assert set(mods) == {"images", "videos", "text"}  # 别名归一后聚合
+    assert recs == snapshot  # 原记录未被改动(零回归)

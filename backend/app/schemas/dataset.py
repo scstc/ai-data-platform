@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import computed_field
 
@@ -23,6 +24,8 @@ class DatasetVersionRead(CamelModel):
     size: int | None = None
     # 语义类型快照(与 data_type 正交,#1/#2/#8);读模型宽松为 str(防御历史值)
     semantic_type: str | None = None
+    # 多模态模态快照(images/audios/videos/text 子集);仅 multimodal 版本有值
+    modalities: list[str] | None = None
     origin: str
     # hosted 版本指向的数据源 id(S3 凭证来源);受管版本为空(#18)
     source_datasource_id: str | None = None
@@ -72,6 +75,9 @@ class DatasetRead(CamelModel):
     # 同数据集至多一个 published),无已发布版本时回退最新版本;无版本时 None。
     # 非 ORM 字段,由路由批量聚合填充。
     latest_version_label: str | None = None
+    # 展示版本(优先 published,否则最新)的多模态模态集合;非 ORM,路由聚合填充。
+    # 前端按其分类显示"图片/视频/音频/跨模态"子标签 + 列表筛选。非多模态/存量为 None。
+    modalities: list[str] | None = None
     # 标签名列表(多对多);非 ORM 字段,由路由批量聚合填充。
     tags: list[str] = []
 
@@ -125,6 +131,9 @@ class DatasetUpdate(CamelModel):
     data_type: str | None = None
     # semantic_type 写入路径校验为枚举:非法值 422;None 放行(向后兼容)
     semantic_type: SemanticType | None = None
+    # 多模态子类型(image|video|audio|cross):反写展示版本 modalities(合成代表值,
+    # round-trip 经 classify_modalities 还原);仅 semantic_type=multimodal 时有意义。
+    modality_subtype: Literal["image", "video", "audio", "cross"] | None = None
     sensitivity_level: str | None = None
     # 分类(#15):受控分类库引用 id;显式传 null 清空分类
     category_id: str | None = None
