@@ -2,7 +2,7 @@
  * 数据集标签颜色:deterministic 哈希(标签名 → antd 预设色)。
  *
  * 零管理(标签库不存 color)、每标签稳定一色(同名同色)。
- * 复用模式对齐 utils/sensitivityLevel.ts。
+ * 复用模式对齐 utils/sourceKind.ts。
  */
 
 /** antd v6 Tag 支持的预设色板。 */

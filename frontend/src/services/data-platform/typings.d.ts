@@ -581,7 +581,6 @@ declare namespace DataPlatform {
     sourceKind?: string;
     /** 原始格式(类型三轴之一):txt/docx/csv/jsonl/image… */
     sourceFormat?: string;
-    sensitivityLevel?: string;
     categoryId?: string | null;
     categoryName?: string | null;
     owner: string;
@@ -712,7 +711,6 @@ declare namespace DataPlatform {
     semanticType?: SemanticType;
     /** 多模态子类型:反写展示版本 modalities 合成代表值;仅 multimodal 时有意义 */
     modalitySubtype?: 'image' | 'video' | 'audio' | 'cross';
-    sensitivityLevel?: string | null;
     // 受控分类:显式传 null 才能清空(后端 exclude_unset)
     categoryId?: string | null;
     validUntil?: string | null;

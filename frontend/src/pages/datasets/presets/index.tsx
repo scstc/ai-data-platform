@@ -12,7 +12,6 @@ import { VersionFilePreview } from '@/components';
 import { getDataset, listDatasets } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
-import { sensitivityLevelTag } from '@/utils/sensitivityLevel';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 
@@ -133,20 +132,6 @@ const DatasetsPresets: React.FC = () => {
       dataIndex: 'categoryName',
       search: false,
       render: (_, r) => r.categoryName || <Tag bordered={false}>未设置</Tag>,
-    },
-    {
-      title: '分级',
-      dataIndex: 'sensitivityLevel',
-      search: false,
-      width: 96,
-      render: (_, r) => {
-        const tag = sensitivityLevelTag(r.sensitivityLevel);
-        return tag ? (
-          <Tag color={tag.color}>{tag.label}</Tag>
-        ) : (
-          <Tag bordered={false}>未设置</Tag>
-        );
-      },
     },
     {
       title: '标签',

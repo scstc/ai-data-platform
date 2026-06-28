@@ -58,7 +58,6 @@ class DatasetRead(CamelModel):
     # 三轴拆分:来源/接入方式(database|object_store|hdfs|local_upload|api_push)+ 原始格式
     source_kind: str | None = None
     source_format: str | None = None
-    sensitivity_level: str | None = None
     # 分类(#15):受控分类库引用 id + 回填名(category_name 由路由批量取名填充)
     category_id: str | None = None
     category_name: str | None = None
@@ -134,7 +133,6 @@ class DatasetUpdate(CamelModel):
     # 多模态子类型(image|video|audio|cross):反写展示版本 modalities(合成代表值,
     # round-trip 经 classify_modalities 还原);仅 semantic_type=multimodal 时有意义。
     modality_subtype: Literal["image", "video", "audio", "cross"] | None = None
-    sensitivity_level: str | None = None
     # 分类(#15):受控分类库引用 id;显式传 null 清空分类
     category_id: str | None = None
     valid_until: datetime | None = None

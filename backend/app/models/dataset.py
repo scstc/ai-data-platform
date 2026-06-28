@@ -35,8 +35,6 @@ class Dataset(Base):
     # 原始格式(三轴拆分):接入时捕获的用户视角格式(txt/docx/csv/jsonl/image…),
     # 与 DatasetVersion.format(归一后存储格式,恒 jsonl)区分;数据库直连留空。
     source_format: Mapped[str | None] = mapped_column(String, nullable=True)
-    # 分级(#15):敏感级别,如 public | internal | confidential
-    sensitivity_level: Mapped[str | None] = mapped_column(String, nullable=True)
     # 分类(#15):受控分类库引用 categories.id(无 FK,可空,单选);
     # 收口原自由填 business_category(已由迁移 0009 删列)。
     category_id: Mapped[str | None] = mapped_column(String, nullable=True)

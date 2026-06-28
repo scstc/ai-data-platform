@@ -53,12 +53,6 @@ import {
   SEMANTIC_TYPE_META,
   SemanticTypeTag,
 } from '@/utils/semanticType';
-import {
-  SENSITIVITY_LEVEL_COLOR,
-  SENSITIVITY_LEVEL_ENUM,
-  sensitivityLevelLabel,
-  sensitivityLevelTag,
-} from '@/utils/sensitivityLevel';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 
@@ -218,22 +212,6 @@ const DatasetsList: React.FC = () => {
     } catch {
       hide();
       message.error('删除失败，请重试');
-    }
-  };
-
-  // 行内快速设置分级(admin):点分级 Tag 弹菜单即选即存,免进详情。
-  const handleQuickSetSensitivity = async (
-    id: string,
-    level: string | null,
-  ) => {
-    try {
-      await updateDataset(id, { sensitivityLevel: level });
-      message.success(
-        level ? `已设为${sensitivityLevelLabel(level)}` : '已清除分级',
-      );
-      actionRef.current?.reload();
-    } catch {
-      message.error('设置失败，请重试');
     }
   };
 
@@ -438,51 +416,6 @@ const DatasetsList: React.FC = () => {
           >
             <span style={{ cursor: 'pointer' }}>{inner}</span>
           </Popover>
-        );
-      },
-    },
-    {
-      title: '分级',
-      dataIndex: 'sensitivityLevel',
-      search: false,
-      width: 96,
-      render: (_, r) => {
-        const tag = sensitivityLevelTag(r.sensitivityLevel);
-        const inner = tag ? (
-          <Tag color={tag.color}>{tag.label}</Tag>
-        ) : (
-          <Tag bordered={false}>未设置</Tag>
-        );
-        if (!access.canAdmin) return inner;
-        const items: MenuProps['items'] = [
-          ...(['public', 'internal', 'confidential'] as const).map((k) => ({
-            key: k,
-            label: (
-              <Tag
-                color={SENSITIVITY_LEVEL_COLOR[k]}
-                style={{ marginInlineEnd: 0 }}
-              >
-                {SENSITIVITY_LEVEL_ENUM[k].text}
-              </Tag>
-            ),
-          })),
-          { type: 'divider' },
-          { key: '__clear', label: '清除分级' },
-        ];
-        return (
-          <Dropdown
-            menu={{
-              items,
-              onClick: (e) =>
-                handleQuickSetSensitivity(
-                  r.id,
-                  e.key === '__clear' ? null : e.key,
-                ),
-            }}
-            trigger={['click']}
-          >
-            <span style={{ cursor: 'pointer' }}>{inner}</span>
-          </Dropdown>
         );
       },
     },

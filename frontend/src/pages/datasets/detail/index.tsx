@@ -47,10 +47,6 @@ import {
 } from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import { SemanticTypeTag } from '@/utils/semanticType';
-import {
-  SENSITIVITY_LEVEL_ENUM,
-  sensitivityLevelLabel,
-} from '@/utils/sensitivityLevel';
 import { SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 import AclDrawer from './components/AclDrawer';
@@ -422,12 +418,6 @@ const DatasetDetail: React.FC = () => {
                     r.sourceFormat ? r.sourceFormat.toUpperCase() : '-',
                 },
                 {
-                  title: '分级',
-                  dataIndex: 'sensitivityLevel',
-                  render: (_, r) =>
-                    sensitivityLevelLabel(r.sensitivityLevel) ?? '-',
-                },
-                {
                   title: '分类',
                   dataIndex: 'categoryName',
                   render: (_, r) => r.categoryName ?? '-',
@@ -576,7 +566,6 @@ const DatasetDetail: React.FC = () => {
                 name: detail.name,
                 description: detail.description,
                 dataType: detail.dataType,
-                sensitivityLevel: detail.sensitivityLevel,
                 categoryId: detail.categoryId ?? undefined,
                 validUntil: detail.validUntil,
                 tags: detail.tags,
@@ -590,7 +579,6 @@ const DatasetDetail: React.FC = () => {
               name: values.name,
               description: values.description ?? null,
               dataType: values.dataType ?? null,
-              sensitivityLevel: values.sensitivityLevel ?? null,
               categoryId: values.categoryId ?? null,
               validUntil: values.validUntil
                 ? dayjs(values.validUntil).format('YYYY-MM-DD')
@@ -622,12 +610,6 @@ const DatasetDetail: React.FC = () => {
           label="类型"
           valueEnum={DATA_TYPE_ENUM}
           fieldProps={{ allowClear: true }}
-        />
-        <ProFormSelect
-          name="sensitivityLevel"
-          label="分级"
-          fieldProps={{ allowClear: true }}
-          valueEnum={SENSITIVITY_LEVEL_ENUM}
         />
         <ProFormTreeSelect
           name="categoryId"
