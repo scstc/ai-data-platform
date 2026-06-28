@@ -7,7 +7,7 @@ description: 一键本地启动数据平台（后端 :18003 + 前端 :8001 真�
 把数据平台前后端在本地跑起来，前端连真实后端（非 mock）。比分别 `/adp-server` + `/adp-web`
 更省事，且用的是本机验证过的命令（避开 `uv run` exit 127、端口残留等坑）。
 
-前置：后端连**远程 PG**（`backend/.env` 里 `DATABASE_URL` 指向 `10.60.1.119:55433`），无需本地起 docker；
+前置：后端连**远程 PG**（`backend/.env` 里 `DATABASE_URL` 指向 `10.60.1.60:55433`），无需本地起 docker；
 前端依赖已装（`frontend/node_modules` 在）。
 
 ## 执行步骤
@@ -54,7 +54,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8001/api/v1/data-tasks
 ```
 前端：http://127.0.0.1:8001/   登录 admin / ant.design
 后端：http://127.0.0.1:18003/docs（Swagger）
-数据库：远程 PG 10.60.1.119:55433（经 backend/.env）
+数据库：远程 PG 10.60.1.60:55433（经 backend/.env）
 ```
 
 入口：**运维监控 → 数据任务**（统一控制台）；**数据评估 → 质量评估**（跑成功后报告 Tab 展示 dj-analyze analysis）。

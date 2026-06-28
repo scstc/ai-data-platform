@@ -53,7 +53,7 @@ dashboard 是纯静态产物（demo 模式，无访问控制），随仓库提�
 |---|---|
 | 前端 | http://127.0.0.1:8001/ （Ant Design Pro，登录 `admin / ant.design`） |
 | 后端 | http://127.0.0.1:18003/docs （FastAPI Swagger） |
-| 数据库 | 远程 PG `10.60.1.119:55433`（经 `backend/.env` 的 `DATABASE_URL`，无需本地 docker） |
+| 数据库 | 远程 PG `10.60.1.60:55433`（经 `backend/.env` 的 `DATABASE_URL`，无需本地 docker） |
 | 前端命令 | `cd frontend && PORT=8001 MOCK=none npm run dev`（`PORT=8001` 避开 dj-api 的 8000；`MOCK=none` 走真实后端） |
 | 后端命令 | `cd backend && ./.venv/Scripts/uvicorn.exe app.main:app --port 18003`（**勿用 `uv run uvicorn`，本机 `uv` exit 127**；无 `--reload`，改 `.py` 手动重启） |
 | 停止 | kill 后台任务；或按端口清进程（会话退出可能留 node/uvicorn 残留致端口占用） |
