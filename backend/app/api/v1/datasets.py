@@ -44,6 +44,7 @@ from app.schemas.dataset import (
     DatasetRead,
     DatasetUpdate,
     DatasetVersionRead,
+    ExportS3Request,
     HostS3Request,
     PlatformHostRequest,
 )
@@ -2427,6 +2428,8 @@ async def _download_zip(
         own_bucket = ""
     tmp = Path(tempfile.mktemp(suffix=".zip"))
     used: set[str] = set()
+    # 记录被跳过的成员及原因(全部跳过时诚实回因,不再笼统报「无可用成员」,fail-loud)
+    skipped: list[str] = []
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
             for m in members:
@@ -2435,11 +2438,17 @@ async def _download_zip(
                         data = await cached_bytes(
                             cfg, m.bucket or own_bucket, m.key
                         )
-                    except ExternalStoreError:
+                    except ExternalStoreError as exc:
+                        skipped.append(f"{m.name or m.key}:S3 拉取失败({exc})")
                         continue
                 else:  # 本地路径成员(managed 本地 jsonl)
                     p = Path(m.key)
                     if not p.exists():
+                        skipped.append(
+                            f"{m.name or m.key}:本地文件不存在({m.key});"
+                            "该版本数据存于其它部署机磁盘,请在数据所在机器下载,"
+                            "或改用对象存储(s3://)的版本"
+                        )
                         continue
                     data = p.read_bytes()
                 name = m.name or Path(m.key).name or "file"
@@ -2459,9 +2468,13 @@ async def _download_zip(
         )
     if not used:
         tmp.unlink(missing_ok=True)
+        reason = "；".join(skipped[:5]) if skipped else "成员列表为空"
         return JSONResponse(
             status_code=410,
-            content={"success": False, "message": "无可用成员文件,无法打包"},
+            content={
+                "success": False,
+                "message": f"无可下载的成员文件:{reason}",
+            },
         )
     # 文件名用「数据集名 + 版本号」;名取不到回退 dataset_id;剥文件名非法字符
     ds = await session.get(Dataset, version.dataset_id)
@@ -2483,27 +2496,15 @@ async def _download_zip(
 async def download_version(
     version_id: str, session: SessionDep
 ) -> JSONResponse | FileResponse:
-    """导出/下载一个已发布版本的数据(闭环终点:算法工程师选已发布版本取走训练集)。
+    """导出/下载一个版本的数据(任意版本均可,不再设发布门控)。
 
-    门:``publish_status`` 必须为 ``published``,否则 409。统一打包为 zip 下发
-    (单文件亦打包,体验一致);成员含本地文件与/或 s3 对象。
+    统一打包为 zip 下发(单文件亦打包,体验一致);成员含本地文件与/或 s3 对象。
     """
     version = await session.get(DatasetVersion, version_id)
     if version is None:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
-        )
-    if version.publish_status != "published":
-        return JSONResponse(
-            status_code=409,
-            content={
-                "success": False,
-                "message": (
-                    "仅已发布版本可导出/下载。请先对该版本通过安全扫描并发布"
-                    "(草稿区数据不对算法侧开放)。"
-                ),
-            },
         )
     try:
         members = await _members_of(version, session)
@@ -2530,6 +2531,127 @@ async def download_version(
             )
         return RedirectResponse(url, status_code=302)
     return await _download_zip(version, members, session)
+
+
+@router.post("/dataset-versions/{version_id}/export-s3", response_model=None)
+async def export_version_to_s3(
+    version_id: str, body: ExportS3Request, session: SessionDep
+) -> JSONResponse:
+    """导出一个版本到外部 S3 数据源(下载/导出至 S3,download 的对偶,任意版本均可)。
+
+    把版本各成员(本地 / 平台 / 托管 S3)读出后上传到目标 s3 数据源的
+    ``bucket[/prefix]``——**读源、写目标**,绝不回写托管源对象
+    (同源同桶同 key 会被拦)。返回导出对象数。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+    if not body.bucket:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "请选择导出目标桶"},
+        )
+    ds = await session.get(DataSource, body.datasource_id)
+    if ds is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "目标数据源不存在"},
+        )
+    if ds.type != "s3":
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "仅支持导出到 s3 类型数据源"},
+        )
+    try:
+        members = await _members_of(version, session)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": f"读取成员失败:{exc}"},
+        )
+    has_s3 = any(m.bucket for m in members)
+    src_cfg = await _version_storage_cfg(version, session) if has_s3 else None
+    if has_s3 and src_cfg is None:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "平台存储(MinIO)未配置"},
+        )
+    try:
+        own_bucket, _own_key = parse_s3_uri(version.storage_uri)
+    except ExternalStoreError:
+        own_bucket = ""
+
+    prefix = (body.prefix or "").strip().strip("/")
+    exported = 0
+    used: set[str] = set()
+    # 记录被跳过的成员及原因(全部跳过时诚实回因,fail-loud)
+    skipped: list[str] = []
+    for m in members:
+        if m.bucket:  # s3 成员:从源对象存储取字节(命中物化缓存则免重复下载)
+            try:
+                data = await cached_bytes(src_cfg, m.bucket or own_bucket, m.key)
+            except ExternalStoreError as exc:
+                skipped.append(f"{m.name or m.key}:S3 拉取失败({exc})")
+                continue
+        else:  # 本地路径成员(managed 本地 jsonl)
+            p = Path(m.key)
+            if not p.exists():
+                skipped.append(
+                    f"{m.name or m.key}:本地文件不存在({m.key});"
+                    "该版本数据存于其它部署机磁盘,请在数据所在机器导出,"
+                    "或改用对象存储(s3://)的版本"
+                )
+                continue
+            data = await asyncio.to_thread(p.read_bytes)
+        name = m.name or Path(m.key).name or "file"
+        if name in used:  # 同名成员加序号去重(与 _download_zip 一致)
+            pp = Path(name)
+            n = 1
+            while f"{pp.stem} ({n}){pp.suffix}" in used:
+                n += 1
+            name = f"{pp.stem} ({n}){pp.suffix}"
+        used.add(name)
+        dest_key = f"{prefix}/{name}" if prefix else name
+        # 红线:绝不回写托管源对象(同数据源 + 同桶 + 同 key)→ 阻止
+        if (
+            version.source_datasource_id == ds.id
+            and m.bucket == body.bucket
+            and m.key == dest_key
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "导出目标与托管源对象相同,已阻止回写源;请换目标桶或前缀",
+                },
+            )
+        try:
+            await upload_object(
+                ds.config, body.bucket, dest_key, io.BytesIO(data), len(data)
+            )
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=502,
+                content={"success": False, "message": f"导出失败:{exc}"},
+            )
+        exported += 1
+
+    if exported == 0:
+        reason = "；".join(skipped[:5]) if skipped else "成员列表为空"
+        return JSONResponse(
+            status_code=410,
+            content={
+                "success": False,
+                "message": f"无可导出的成员文件:{reason}",
+            },
+        )
+    target = f"s3://{body.bucket}/{prefix}" if prefix else f"s3://{body.bucket}"
+    return JSONResponse(
+        content={"success": True, "data": {"exported": exported, "target": target}}
+    )
 
 
 # ---- 数据集级 ACL(共享/成员权限)----------------------------------------------

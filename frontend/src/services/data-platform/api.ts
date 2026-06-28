@@ -363,6 +363,25 @@ export async function setVersionVerdict(
   );
 }
 
+/** 导出已发布版本到外部 S3 数据源 POST /api/v1/dataset-versions/:id/export-s3（下载/导出至 S3） */
+export async function exportVersionToS3(
+  versionId: string,
+  body: DataPlatform.ExportS3Params,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { exported: number; target: string };
+    success: boolean;
+  }>(`/api/v1/dataset-versions/${versionId}/export-s3`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    // skipErrorHandler:交由调用方 catch 展示后端 409/4xx message
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
 /** 获取采集任务列表 GET /api/v1/ingest-tasks */
 export async function listIngestTasks(
   params?: DataPlatform.IngestTaskListParams,

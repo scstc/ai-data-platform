@@ -680,6 +680,13 @@ declare namespace DataPlatform {
     categoryId?: string;
   };
 
+  /** 导出已发布版本到外部 S3 数据源入参（下载/导出至 S3）：读源、写目标，不回写源 */
+  type ExportS3Params = {
+    datasourceId: string;
+    bucket: string;
+    prefix?: string;
+  };
+
   /** 文件管理零拷贝接入入参（数据接入）：把平台 MinIO 对象登记为受管数据集，不下载 */
   type PlatformHostParams = {
     bucket: string;

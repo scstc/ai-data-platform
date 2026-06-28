@@ -33,8 +33,11 @@ import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { VersionFilePreview } from '@/components';
 import {
+  exportVersionToS3,
   getDataset,
+  listBuckets,
   listCategories,
+  listDataSources,
   listTags,
   publishVersion,
   setVersionVerdict,
@@ -100,6 +103,9 @@ const DatasetDetail: React.FC = () => {
     verdict: 'passed' | 'failed';
   }>();
   const [verdictNote, setVerdictNote] = useState('');
+  // 导出到 S3:记录当前要导出的版本(打开 ModalForm)
+  const [exportVersion, setExportVersion] =
+    useState<DataPlatform.DatasetVersion>();
 
   // 切换当前查看的版本;文件清单 + 按文件预览由 VersionFilePreview 按 versionId 自管
   const loadPreview = useCallback((versionId: string) => {
@@ -336,6 +342,23 @@ const DatasetDetail: React.FC = () => {
             {renderPipelineLinks(v)}
           </Descriptions.Item>
         </Descriptions>
+        <Divider style={{ margin: '12px 0' }} />
+        <Space size="small" wrap>
+          <Button
+            size="small"
+            onClick={() =>
+              window.open(
+                `/api/v1/dataset-versions/${v.id}/download`,
+                '_blank',
+              )
+            }
+          >
+            下载
+          </Button>
+          <Button size="small" onClick={() => setExportVersion(v)}>
+            导出到 S3
+          </Button>
+        </Space>
         {access.canAdmin && (
           <>
             <Divider style={{ margin: '12px 0' }} />
@@ -662,6 +685,74 @@ const DatasetDetail: React.FC = () => {
           onChange={(e) => setVerdictNote(e.target.value)}
         />
       </Modal>
+
+      <ModalForm<DataPlatform.ExportS3Params>
+        title="导出到 S3"
+        width={520}
+        open={!!exportVersion}
+        modalProps={{ destroyOnHidden: true }}
+        onOpenChange={(o) => {
+          if (!o) setExportVersion(undefined);
+        }}
+        onFinish={async (values) => {
+          if (!exportVersion) return false;
+          try {
+            const res = await exportVersionToS3(exportVersion.id, {
+              datasourceId: values.datasourceId,
+              bucket: values.bucket,
+              prefix: values.prefix || undefined,
+            });
+            message.success(
+              `已导出 ${res.data.exported} 个对象到 ${res.data.target}`,
+            );
+            setExportVersion(undefined);
+            return true;
+          } catch (e: any) {
+            const msg =
+              e?.info?.errorMessage ||
+              e?.response?.data?.message ||
+              e?.data?.message;
+            message.error(msg || '导出失败，请重试');
+            return false;
+          }
+        }}
+      >
+        <Typography.Paragraph type="secondary">
+          把该已发布版本的数据导出到一个已登记的 S3
+          数据源（读源、写目标，绝不回写托管源）。
+        </Typography.Paragraph>
+        <ProFormSelect
+          name="datasourceId"
+          label="目标 S3 数据源"
+          rules={[{ required: true, message: '请选择目标 S3 数据源' }]}
+          request={async () => {
+            const res = await listDataSources({ type: 's3', pageSize: 200 });
+            return (res.data ?? []).map((d) => ({
+              label: d.name,
+              value: d.id,
+            }));
+          }}
+          fieldProps={{ showSearch: true }}
+        />
+        <ProFormSelect
+          name="bucket"
+          label="目标桶"
+          rules={[{ required: true, message: '请选择目标桶' }]}
+          dependencies={['datasourceId']}
+          request={async (params) => {
+            const dsId = (params as { datasourceId?: string }).datasourceId;
+            if (!dsId) return [];
+            const res = await listBuckets(dsId);
+            return (res.data ?? []).map((b) => ({ label: b, value: b }));
+          }}
+          fieldProps={{ showSearch: true }}
+        />
+        <ProFormText
+          name="prefix"
+          label="目标前缀（可选）"
+          placeholder="如 exports/my-dataset；对象将落在「前缀/文件名」"
+        />
+      </ModalForm>
 
       {detail && (
         <AclDrawer

@@ -103,6 +103,18 @@ class PlatformHostRequest(CamelModel):
     category_id: str | None = None
 
 
+class ExportS3Request(CamelModel):
+    """导出已发布版本到外部 S3 数据源入参(下载/导出至 S3)。
+
+    把版本各成员上传到目标 s3 数据源的 bucket[/prefix]——
+    读源、写目标,绝不回写托管源对象。
+    """
+
+    datasource_id: str
+    bucket: str
+    prefix: str | None = None
+
+
 class DatasetMemberRead(CamelModel):
     """数据集成员文件(manifest 数据集的一个媒体对象)读模型。"""
 
