@@ -2,10 +2,10 @@ import {
   ApartmentOutlined,
   BranchesOutlined,
   CommentOutlined,
+  ContainerOutlined,
   DeploymentUnitOutlined,
   EnvironmentOutlined,
   FileTextOutlined,
-  FileUnknownOutlined,
   HeartOutlined,
   LineChartOutlined,
   TableOutlined,
@@ -24,12 +24,12 @@ export type SemanticTypeMeta = {
 };
 
 export const SEMANTIC_TYPE_META: Record<string, SemanticTypeMeta> = {
-  text: { label: '文本', color: 'default', icon: <FileTextOutlined /> },
+  text: { label: '文本', color: 'orange', icon: <FileTextOutlined /> },
   structured: { label: '结构化', color: 'geekblue', icon: <TableOutlined /> },
   unstructured: {
     label: '非结构化',
-    color: 'default',
-    icon: <FileUnknownOutlined />,
+    color: 'lime',
+    icon: <ContainerOutlined />,
   },
   multimodal: { label: '多模态', color: 'purple', icon: <ApartmentOutlined /> },
   cot: { label: 'COT 思维链', color: 'blue', icon: <BranchesOutlined /> },
