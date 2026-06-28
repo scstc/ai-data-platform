@@ -166,6 +166,20 @@ export async function updateDataSource(
   );
 }
 
+/** 重新检测数据源连接并回写状态 POST /api/v1/datasources/:id/recheck */
+export async function recheckDataSource(
+  id: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DataSource; success: boolean }>(
+    `/api/v1/datasources/${id}/recheck`,
+    {
+      method: 'POST',
+      ...(options || {}),
+    },
+  );
+}
+
 /** 删除数据源 DELETE /api/v1/datasources/:id */
 export async function deleteDataSource(id: string, options?: { [key: string]: any }) {
   return request<{ success: boolean }>(`/api/v1/datasources/${id}`, {

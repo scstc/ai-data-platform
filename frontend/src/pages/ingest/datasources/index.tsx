@@ -9,6 +9,7 @@ import {
   deleteDataSource,
   listCategories,
   listDataSources,
+  recheckDataSource,
 } from '@/services/data-platform';
 import {
   type CategoryTreeNode,
@@ -24,6 +25,8 @@ const DataSourcesPage: FC = () => {
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
   );
+  // 正在「重新检测」的数据源 id(防重复点击 + 行内 loading 文案)
+  const [recheckingId, setRecheckingId] = useState<string | null>(null);
 
   const loadCategories = useCallback(async () => {
     try {
@@ -46,6 +49,25 @@ const DataSourcesPage: FC = () => {
       `/ingest/datasources/new/${record.type}?id=${encodeURIComponent(record.id)}`,
       { record },
     );
+  };
+
+  // 重新检测:按数据源当前配置真连一次并回写状态,结果即时反映到列表
+  const handleRecheck = async (id: string) => {
+    setRecheckingId(id);
+    try {
+      const res = await recheckDataSource(id, { skipErrorHandler: true });
+      const meta = STATUS_META[res.data.status];
+      if (res.data.status === 'connected') {
+        message.success(`检测完成：${meta.label}`);
+      } else {
+        message.warning(`检测完成：${meta.label}`);
+      }
+      actionRef.current?.reload();
+    } catch {
+      message.error('检测失败，请重试');
+    } finally {
+      setRecheckingId(null);
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -125,11 +147,25 @@ const DataSourcesPage: FC = () => {
     {
       title: '操作',
       valueType: 'option',
-      width: 140,
-      // 编辑/删除仅 admin 可见(后端 require_admin 双层防护);非 admin 此列为空
+      width: 200,
+      // 重新检测/编辑/删除仅 admin 可见(后端 require_admin 双层防护);非 admin 此列为空
       render: (_, record) =>
         access.canAdmin
           ? [
+              // api 推送无在线探测语义,不显示「重新检测」
+              record.type !== 'api' ? (
+                <a
+                  key="recheck"
+                  style={
+                    recheckingId === record.id
+                      ? { pointerEvents: 'none', color: '#aaa' }
+                      : undefined
+                  }
+                  onClick={() => handleRecheck(record.id)}
+                >
+                  {recheckingId === record.id ? '检测中…' : '重新检测'}
+                </a>
+              ) : null,
               <a
                 key="edit"
                 onClick={() => {

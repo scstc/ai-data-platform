@@ -164,6 +164,66 @@ async def test_update(client: AsyncClient) -> None:
     assert updated["description"] == "用于测试"
 
 
+async def test_update_reprobes_status_when_status_omitted(
+    client: AsyncClient,
+) -> None:
+    """未显式传 status 的更新会按最新 config 重新定状态。
+
+    WHY:历史上 status 仅在 create 时定一次,「测试连接已通但列表仍显示陈旧失败」
+    就是因为编辑保存从不刷新。补齐 config 后保存(不传 status)→ pending 应纠为
+    connected,证明保存即校准。
+    """
+    data = await _create(
+        client,
+        name="HDFS补字段",
+        type="hdfs",
+        config={"nameNode": "hdfs://nn:8020"},  # 缺 path → pending
+    )
+    assert data["status"] == "pending"
+    ds_id = data["id"]
+
+    resp = await client.put(
+        f"/api/v1/datasources/{ds_id}",
+        json={"config": {"nameNode": "hdfs://nn:8020", "path": "/data"}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "connected"
+
+
+async def test_recheck_refreshes_stale_status(client: AsyncClient) -> None:
+    """重新检测按存储 config 真探一次并回写状态,纠正陈旧快照。
+
+    WHY:选项3 给列表一个显式「重新检测」入口。先把一个 connected 源人为置为
+    陈旧 failed(模拟历史快照),recheck 后应按当前 config 纠回 connected。
+    """
+    data = await _create(
+        client,
+        name="HDFS校准",
+        type="hdfs",
+        config={"nameNode": "hdfs://nn:8020", "path": "/data"},
+    )
+    assert data["status"] == "connected"
+    ds_id = data["id"]
+
+    # 显式置陈旧 failed(显式 status 被尊重,不触发重探)
+    resp = await client.put(
+        f"/api/v1/datasources/{ds_id}", json={"status": "failed"}
+    )
+    assert resp.json()["data"]["status"] == "failed"
+
+    # 重新检测:按存储 config 重探 → connected
+    resp = await client.post(f"/api/v1/datasources/{ds_id}/recheck")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "connected"
+
+
+async def test_recheck_not_found(client: AsyncClient) -> None:
+    """对不存在的数据源重新检测 → 404 + {success:false}。"""
+    resp = await client.post("/api/v1/datasources/ds-nope00/recheck")
+    assert resp.status_code == 404
+    assert resp.json()["success"] is False
+
+
 async def test_update_not_found(client: AsyncClient) -> None:
     """更新不存在的数据源 → 404 + {success:false, message}。"""
     resp = await client.put(

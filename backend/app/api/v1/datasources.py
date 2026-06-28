@@ -74,6 +74,21 @@ def _push_url(request: Request, token: str) -> str:
     return f"{base}/api/v1/ingest/push/{token}"
 
 
+async def _probe_status(
+    type_: str, db_kind: str | None, config: dict[str, Any] | None
+) -> str:
+    """按数据源类型推导持久化状态(create 初始定状态,update/recheck 复用)。
+
+    - database+postgresql / s3:经连接器真连 → connected/failed。
+    - 其余类型:按必填字段是否齐全 → connected/pending。
+    - api 不走此函数(状态恒 connected,且建库时要生成 push token,见 create)。
+    """
+    if (type_ == "database" and db_kind == "postgresql") or type_ == "s3":
+        ok, _, _ = await _probe_via_connector(type_, db_kind, config)
+        return "connected" if ok else "failed"
+    return "connected" if _config_is_valid(type_, config) else "pending"
+
+
 async def _probe_via_connector(
     type_: str, db_kind: str | None, config: dict[str, Any] | None
 ) -> tuple[bool, int, str]:
@@ -185,20 +200,14 @@ async def create_datasource(
     """
     config: dict[str, Any] = dict(body.config or {})
     ds_id = _new_id()
-    if body.type == "database" and body.db_kind == "postgresql":
-        ok, _, _ = await _probe_via_connector(body.type, body.db_kind, config)
-        status = "connected" if ok else "failed"
-    elif body.type == "s3":
-        ok, _, _ = await _probe_via_connector(body.type, body.db_kind, config)
-        status = "connected" if ok else "failed"
-    elif body.type == "api":
+    if body.type == "api":
         # API 推送:生成入站凭证 token 并回填真实入站地址(替换前端占位 url)。
         token = secrets.token_urlsafe(16)
         config["pushToken"] = token
         config["url"] = _push_url(request, token)
         status = "connected"
     else:
-        status = "connected" if _config_is_valid(body.type, config) else "pending"
+        status = await _probe_status(body.type, body.db_kind, config)
     item = DataSource(
         id=ds_id,
         name=body.name,
@@ -235,8 +244,36 @@ async def update_datasource(
     for field, value in updates.items():
         setattr(item, field, value)
 
+    # 选项2:未显式指定 status 且非 api → 按最新 config 重新探测刷新状态,
+    # 修正"测试连接已通但列表仍显示失败"的陈旧快照(显式传 status 时尊重调用方)。
+    if "status" not in updates and item.type != "api":
+        item.status = await _probe_status(item.type, item.db_kind, item.config)
+
     await session.commit()
     await session.refresh(item)
+    return _SingleDataSource(data=await _read_with_category(session, item))
+
+
+@router.post(
+    "/datasources/{ds_id}/recheck",
+    response_model=_SingleDataSource,
+    dependencies=[Depends(require_admin)],
+)
+async def recheck_datasource(
+    ds_id: str,
+    session: SessionDep,
+) -> _SingleDataSource | JSONResponse:
+    """选项3:按数据源当前配置重新探测连接并回写状态(供列表「重新检测」)。
+
+    database+postgresql / s3 真连刷新 connected/failed;api 无在线探测语义,状态不变。
+    """
+    item = await session.get(DataSource, ds_id)
+    if item is None:
+        return _not_found()
+    if item.type != "api":
+        item.status = await _probe_status(item.type, item.db_kind, item.config)
+        await session.commit()
+        await session.refresh(item)
     return _SingleDataSource(data=await _read_with_category(session, item))
 
 
