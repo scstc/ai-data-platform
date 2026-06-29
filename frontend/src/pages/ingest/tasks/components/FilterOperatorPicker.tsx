@@ -31,7 +31,10 @@ const FILTER_CATEGORIES = new Set(['filter', 'mapper', 'deduplicator']);
  * 仅暴露当前环境「可运行」且非媒体的算子(媒体算子对文本/结构化采集无意义)。
  * value/onChange 由外层 <Form.Item name={['extract','operators']}> 注入。
  */
-const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
+const FilterOperatorPicker: React.FC<Props> = ({ value, onChange }) => {
+  // 后端把未配置算子的字段序列化为 null（非 undefined），默认参数 value=[] 对 null 不生效，
+  // 故在此显式兜底，避免下方 .map/.find 在编辑回填 null 时抛错导致整页崩溃
+  const steps = value ?? [];
   const [catalog, setCatalog] = useState<DataPlatform.CatalogOperator[]>([]);
 
   useEffect(() => {
@@ -70,20 +73,20 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
     [catalog],
   );
 
-  const selectedNames = value.map((s) => s.name);
+  const selectedNames = steps.map((s) => s.name);
 
   // 选择变化:保留已配参数,新增的参数空对象,顺序按选择顺序
   const onSelect = (names: string[]) => {
     onChange?.(
       names.map(
-        (n) => value.find((s) => s.name === n) ?? { name: n, params: {} },
+        (n) => steps.find((s) => s.name === n) ?? { name: n, params: {} },
       ),
     );
   };
 
   const setParam = (idx: number, key: string, val: unknown) => {
     onChange?.(
-      value.map((s, i) =>
+      steps.map((s, i) =>
         i === idx ? { ...s, params: { ...s.params, [key]: val } } : s,
       ),
     );
@@ -140,7 +143,7 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
         options={options}
         onChange={onSelect}
       />
-      {value.length === 0 ? (
+      {steps.length === 0 ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description="未选择算子(采集到的数据将原样落地)"
@@ -155,7 +158,7 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
             gap: 8,
           }}
         >
-          {value.map((step, idx) => {
+          {steps.map((step, idx) => {
             const meta = byName[step.name];
             const params = meta?.params ?? [];
             return (
@@ -177,7 +180,7 @@ const FilterOperatorPicker: React.FC<Props> = ({ value = [], onChange }) => {
                   <DeleteOutlined
                     style={{ color: '#ff4d4f', cursor: 'pointer' }}
                     onClick={() =>
-                      onChange?.(value.filter((_, i) => i !== idx))
+                      onChange?.(steps.filter((_, i) => i !== idx))
                     }
                   />
                 }

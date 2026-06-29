@@ -132,6 +132,8 @@ vi.mock('antd', async () => {
 vi.mock('@/services/data-platform', () => ({
   listIngestTasks: vi.fn(),
   getIngestTask: vi.fn(),
+  ingestTaskStats: vi.fn(),
+  listIngestRuns: vi.fn(),
   rerunIngestTask: vi.fn(),
   stopIngestTask: vi.fn(),
   deleteIngestTask: vi.fn(),
@@ -152,6 +154,12 @@ vi.mock('@/components', () => ({
 vi.mock('@umijs/max', () => ({
   useAccess: () => ({ canAdmin: true }),
   Access: ({ accessible, children }: any) => (accessible ? children : null),
+}));
+
+// Dashboard 桩：内部用 @antv/g2 图表，jsdom 无 canvas 无法初始化；
+// 本测试不验证图表渲染，占位即可（含命名导出 IngestTaskStatsData 的类型不影响运行时）
+vi.mock('./Dashboard', () => ({
+  default: () => <div data-testid="dashboard" />,
 }));
 
 // SourcePreview 桩：渲染占位 + 暴露 onColumnsChange 触发器
@@ -221,6 +229,11 @@ describe('IngestTasksPage', () => {
       data: [],
       success: true,
     });
+    vi.mocked(dpApi.ingestTaskStats).mockResolvedValue({
+      total: 0,
+      running: 0,
+      success: true,
+    } as any);
   });
 
   it('应正常渲染 ProTable', () => {
