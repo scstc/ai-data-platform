@@ -1773,3 +1773,33 @@ export async function markAllRead(options?: { [key: string]: any }) {
     { method: 'POST', ...(options || {}) },
   );
 }
+
+/** 当前用户资料 GET /api/v1/profile */
+export async function getProfile(options?: { [key: string]: any }) {
+  return request<{ data: DataPlatform.Profile; success: boolean }>(
+    '/api/v1/profile',
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 更新当前用户昵称 PUT /api/v1/profile */
+export async function updateProfile(
+  body: { displayName: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Profile; success: boolean }>(
+    '/api/v1/profile',
+    { method: 'PUT', data: body, ...(options || {}) },
+  );
+}
+
+/** 修改当前用户密码 PUT /api/v1/profile/password */
+export async function changePassword(
+  body: { oldPassword: string; newPassword: string },
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean; message?: string }>(
+    '/api/v1/profile/password',
+    { method: 'PUT', data: body, ...(options || {}) },
+  );
+}

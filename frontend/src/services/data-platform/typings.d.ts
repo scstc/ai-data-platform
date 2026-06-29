@@ -2,6 +2,14 @@
 /* eslint-disable */
 
 declare namespace DataPlatform {
+  /** 当前登录用户的自助资料(GET/PUT /api/v1/profile) */
+  type Profile = {
+    id: string;
+    username: string;
+    displayName: string;
+    role: string;
+  };
+
   /** 受控分类（多级树，邻接表 parentId，根为 null；跨实体共享，#15） */
   type Category = {
     id: string;

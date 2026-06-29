@@ -28,6 +28,7 @@ from app.api.v1 import (
     make,
     notifications,
     operators,
+    profile,
     quality,
     tags,
     uploads,
@@ -128,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(tags.router, prefix="/api/v1")
     app.include_router(llm_config.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
+    app.include_router(profile.router, prefix="/api/v1")
     app.include_router(system_menus.router, prefix="/api/v1")
     app.include_router(system_roles.router, prefix="/api/v1")
     app.include_router(system_users.router, prefix="/api/v1")

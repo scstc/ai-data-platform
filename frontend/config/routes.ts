@@ -51,6 +51,13 @@ export default [
     icon: 'block',
     component: './processing/market',
   },
+  // 个人设置(头像下拉进入,不进左侧菜单)
+  {
+    path: '/account/settings',
+    name: 'account-settings',
+    component: './account/settings',
+    hideInMenu: true,
+  },
   // ① 数据接入
   {
     path: '/ingest',
