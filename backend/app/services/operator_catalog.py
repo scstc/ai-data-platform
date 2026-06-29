@@ -11,16 +11,36 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.db import get_db
+from app.core.config import settings
 from app.models.operator import Operator
 from app.services.capabilities import Capabilities, get_capabilities
 
 _MEDIA_MODALITIES = {"image", "video", "audio", "multimodal"}
 
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
+
+
+# 同步数据库会话工厂（用于初始化加载）
+def _get_sync_session() -> Session:
+    """创建同步会话（仅用于初始化缓存）。"""
+    sync_url = str(settings.database_url).replace("+asyncpg", "+psycopg2")
+    engine = create_engine(sync_url, pool_pre_ping=True)
+    SessionLocal = sessionmaker(bind=engine)
+    return SessionLocal()
+
+
+@lru_cache(maxsize=1)
+def _load_all_operators() -> list[dict[str, Any]]:
+    """从数据库加载全部算子并缓存（启动时一次性加载）。"""
+    session = _get_sync_session()
+    try:
+        ops = session.execute(select(Operator)).scalars().all()
+        return [_operator_to_dict(op) for op in ops]
+    finally:
+        session.close()
 
 
 def _operator_to_dict(op: Operator) -> dict[str, Any]:
@@ -48,54 +68,43 @@ def _operator_to_dict(op: Operator) -> dict[str, Any]:
 
 
 def all_operators() -> list[dict[str, Any]]:
-    """获取全部算子(从数据库)。"""
-    db = next(get_db())
-    ops = db.execute(select(Operator)).scalars().all()
-    return [_operator_to_dict(op) for op in ops]
+    """获取全部算子（从缓存）。"""
+    return _load_all_operators()
 
 
 def get_operator(name: str) -> dict[str, Any] | None:
     """按名称获取单个算子。"""
-    db = next(get_db())
-    op = db.execute(select(Operator).where(Operator.name == name)).scalar_one_or_none()
-    return _operator_to_dict(op) if op else None
+    for op in all_operators():
+        if op["name"] == name:
+            return op
+    return None
 
 
 def operator_names() -> set[str]:
     """全部算子名(用于存在性校验)。"""
-    db = next(get_db())
-    names = db.execute(select(Operator.name)).scalars().all()
-    return set(names)
+    return {op["name"] for op in all_operators()}
 
 
 def catalog_meta() -> dict[str, Any]:
     """目录概览(总数/各维度分布/推荐数)。"""
-    db = next(get_db())
-    total = db.scalar(select(func.count()).select_from(Operator))
+    ops = all_operators()
+    total = len(ops)
 
     # 按类别统计
     by_category = {}
-    rows = db.execute(
-        select(Operator.category, func.count())
-        .group_by(Operator.category)
-    ).all()
-    for cat, cnt in rows:
-        by_category[cat] = cnt
+    for op in ops:
+        cat = op["category"]
+        by_category[cat] = by_category.get(cat, 0) + 1
 
     # 按场景统计
     by_scenario = {}
-    rows = db.execute(
-        select(Operator.scenario_group, func.count())
-        .group_by(Operator.scenario_group)
-    ).all()
-    for sc, cnt in rows:
+    for op in ops:
+        sc = op.get("scenario_group")
         if sc:
-            by_scenario[sc] = cnt
+            by_scenario[sc] = by_scenario.get(sc, 0) + 1
 
     # 推荐数
-    recommend_count = db.scalar(
-        select(func.count()).select_from(Operator).where(Operator.recommend == True)
-    )
+    recommend_count = sum(1 for op in ops if op.get("recommend", False))
 
     return {
         "total": total,
@@ -499,43 +508,41 @@ def query_catalog(
     ``bucket``:业务桶(cleansing/distillation/make/augment),供任务编辑器只展示对应算子;
     按白名单集合成员判定(见 ``_BUCKET_SETS``),未知桶名退化为不限制。
     """
-    db = next(get_db())
-    stmt = select(Operator)
-
-    # 基础过滤
-    if scenario:
-        stmt = stmt.where(Operator.scenario_group == scenario)
-    if category:
-        stmt = stmt.where(Operator.category == category)
-    if resource_class:
-        stmt = stmt.where(Operator.resource_class == resource_class)
-    if recommend is not None:
-        stmt = stmt.where(Operator.recommend == recommend)
-
-    # 关键字搜索
-    if keyword:
-        kw = f"%{keyword.lower()}%"
-        stmt = stmt.where(
-            (Operator.name.ilike(kw))
-            | (Operator.summary_zh.ilike(kw))
-            | (Operator.zh_label.ilike(kw))
-        )
-
-    # 获取全部结果做内存过滤（bucket、modality、runnable 需要业务逻辑）
-    all_results = db.execute(stmt).scalars().all()
+    ops = all_operators()
     bucket_set = _BUCKET_SETS.get(bucket) if bucket else None
     caps = get_capabilities()
+    kw = keyword.lower().strip() if keyword else None
 
     filtered = []
-    for op in all_results:
-        op_dict = _operator_to_dict(op)
-        if bucket_set and op.name not in bucket_set:
+    for op in ops:
+        # Bucket 过滤
+        if bucket_set and op["name"] not in bucket_set:
             continue
-        if modality and modality not in (op.modality or []):
+        # 基础过滤
+        if scenario and op.get("scenario_group") != scenario:
             continue
-        if runnable and effective_runnable(op_dict, caps, media_ok=True) != runnable:
+        if category and op["category"] != category:
             continue
-        filtered.append(op_dict)
+        if resource_class and op["resource_class"] != resource_class:
+            continue
+        if recommend is not None and op.get("recommend", False) != recommend:
+            continue
+        # Modality 过滤
+        if modality and modality not in (op.get("modality") or []):
+            continue
+        # Runnable 过滤
+        if runnable and effective_runnable(op, caps, media_ok=True) != runnable:
+            continue
+        # 关键字搜索
+        if kw:
+            hay = (
+                op["name"]
+                + (op.get("summary_zh") or "")
+                + (op.get("zh_label") or "")
+            ).lower()
+            if kw not in hay:
+                continue
+        filtered.append(op)
 
     # 分页
     total = len(filtered)
