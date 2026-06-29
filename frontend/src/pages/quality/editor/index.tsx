@@ -25,6 +25,7 @@ import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
+import { useOpCartIntake } from '../../processing/editor/useOpCartIntake';
 
 const { Text } = Typography;
 
@@ -50,6 +51,8 @@ const QualityEditor: React.FC = () => {
     (next: DataPlatform.PipelineStep[]) => setSteps(next),
     [],
   );
+  // 市场购物车交接:质量评估无业务桶,接受任意算子(bucket=undefined → 全收)
+  useOpCartIntake(undefined, '质量评估', replaceAll);
   const reorder = useCallback(
     (from: number, to: number) =>
       setSteps((prev) => {

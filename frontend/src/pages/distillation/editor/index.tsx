@@ -26,6 +26,7 @@ import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
+import { useOpCartIntake } from '../../processing/editor/useOpCartIntake';
 import DistillationGoalPanel from './DistillationGoalPanel';
 
 const { Text } = Typography;
@@ -39,7 +40,7 @@ const DEFAULT_GOAL: DataPlatform.DistillationGoal = {
 };
 
 const DistillationEditor: React.FC = () => {
-  // 页面内本地 state(一次性任务,不走 opCart)
+  // 页面内本地 state(算子经市场购物车一次性交接,见 useOpCartIntake)
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
   const [datasetId, setDatasetId] = useState<string>();
@@ -51,6 +52,8 @@ const DistillationEditor: React.FC = () => {
   >({});
   const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
+  // 市场购物车交接:只带入 distillation 桶的算子,其余跳过并提示
+  useOpCartIntake('distillation', '蒸馏', setSteps);
   const [goal, setGoal] = useState<DataPlatform.DistillationGoal>(DEFAULT_GOAL);
   const [outputDatasetId, setOutputDatasetId] = useState<string>();
   const [submitting, setSubmitting] = useState(false);

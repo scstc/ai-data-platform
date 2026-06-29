@@ -26,6 +26,7 @@ import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
+import { useOpCartIntake } from '../../processing/editor/useOpCartIntake';
 import MakeGoalPanel from './MakeGoalPanel';
 
 const { Text } = Typography;
@@ -47,6 +48,8 @@ const MakeEditor: React.FC = () => {
   >({});
   const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
+  // 市场购物车交接:只带入 make 桶的算子,其余跳过并提示
+  useOpCartIntake('make', '合成', setSteps);
   const [goal, setGoal] = useState<DataPlatform.MakeGoal>(DEFAULT_GOAL);
   const [outputDatasetId, setOutputDatasetId] = useState<string>();
   const [submitting, setSubmitting] = useState(false);

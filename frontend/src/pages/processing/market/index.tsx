@@ -7,6 +7,7 @@ import {
   Col,
   Divider,
   Drawer,
+  Dropdown,
   Empty,
   Input,
   Menu,
@@ -97,6 +98,21 @@ const metaLine = (op: DataPlatform.CatalogOperator) =>
     .join(' · ');
 
 const PAGE_SIZE = 24;
+
+/** 「去新建任务」下拉的目标治理任务:消费市场购物车的 5 个任务。
+ *  跳转后各编辑器经 useOpCartIntake 按 bucket 过滤购物车(质量评估无桶=全收),
+ *  不适用的算子在目标页诚实跳过并提示。标注/内容安全无算子流水线,不在此列。 */
+const INTAKE_TARGETS: { key: string; label: string; route: string }[] = [
+  { key: 'cleaning', label: '数据清洗', route: '/governance/cleaning/editor' },
+  { key: 'quality', label: '质量评估', route: '/assessment/quality/editor' },
+  {
+    key: 'distillation',
+    label: '数据蒸馏',
+    route: '/governance/distillation/editor',
+  },
+  { key: 'make', label: '数据合成', route: '/governance/make/editor' },
+  { key: 'augment', label: '数据增强', route: '/governance/augment/editor' },
+];
 
 const Market: React.FC = () => {
   const { steps, add, clear } = useModel('opCart');
@@ -263,12 +279,21 @@ const Market: React.FC = () => {
               <Space key="cart">
                 <Text type="secondary">已选 {steps.length} 个算子</Text>
                 <Button onClick={clear}>清空</Button>
-                <Button
-                  type="primary"
-                  onClick={() => history.push('/governance/cleaning/editor')}
+                <Dropdown
+                  trigger={['click']}
+                  menu={{
+                    items: INTAKE_TARGETS.map((t) => ({
+                      key: t.key,
+                      label: t.label,
+                    })),
+                    onClick: ({ key }) => {
+                      const target = INTAKE_TARGETS.find((t) => t.key === key);
+                      if (target) history.push(target.route);
+                    },
+                  }}
                 >
-                  去新建清洗任务
-                </Button>
+                  <Button type="primary">去新建任务</Button>
+                </Dropdown>
               </Space>,
             ]
           : undefined
