@@ -21,7 +21,6 @@ import {
   Col,
   Empty,
   Row,
-  Select,
   Space,
   Spin,
   Tag,
@@ -35,6 +34,7 @@ import {
   listDatasets,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+import DatasetPicker from './components/DatasetPicker';
 
 const JOB_TYPE_LABEL: Record<string, string> = {
   process: '数据加工',
@@ -279,18 +279,17 @@ const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
 };
 
 const Lineage: React.FC = () => {
-  const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [datasetId, setDatasetId] = useState<string>();
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
   const [graph, setGraph] = useState<DataPlatform.LineageGraph>();
   const [loading, setLoading] = useState(false);
 
+  // 首次进入自动选第一个数据集(轻量拉一页 1 条,避免旧版一次拉 200 条)
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 200 })
+    listDatasets({ current: 1, pageSize: 1 })
       .then((res) => {
-        const list = res.data ?? [];
-        setDatasets(list);
-        if (list.length) setDatasetId((cur) => cur ?? list[0].id);
+        const first = res.data?.[0];
+        if (first) setDatasetId((cur) => cur ?? first.id);
       })
       .catch(() => undefined);
   }, []);
@@ -319,19 +318,7 @@ const Lineage: React.FC = () => {
       content={
         <Space>
           <Typography.Text type="secondary">数据集</Typography.Text>
-          <Select
-            showSearch
-            style={{ width: 380 }}
-            placeholder="选择数据集查看其版本与血缘"
-            value={datasetId}
-            onChange={setDatasetId}
-            options={datasets.map((d) => ({ label: d.name, value: d.id }))}
-            filterOption={(input, option) =>
-              ((option?.label as string) ?? '')
-                .toLowerCase()
-                .includes(input.toLowerCase())
-            }
-          />
+          <DatasetPicker value={datasetId} onChange={setDatasetId} />
         </Space>
       }
     >
