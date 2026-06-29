@@ -1753,7 +1753,12 @@ async def preview_version(
     # 绕开合并 jsonl 的全行 key 并集,消除多文件字段错乱。
     # 仅对 s3:// 背书的版本生效——本地单文件版本(任务产出/输入 jsonl)的成员 key
     # 即其本地 storage_uri,应直接走末尾的本地读盘分支,而非尝试 S3 解析(否则 503)。
-    if key and str(version.storage_uri).startswith("s3://"):
+    # parquet 排除在外:head_records→normalize_to_records 仅解析文本格式(jsonl/csv/...),
+    # 对 parquet 字节会 UTF-8 解码失败;parquet 单成员的 key 即 storage_uri 的 key 部分,
+    # 指向同一文件,放行到下方 DuckDB read_parquet 分支处理(类型保真,数据一致)。
+    if key and version.format != "parquet" and str(version.storage_uri).startswith(
+        "s3://"
+    ):
         try:
             cfg = platform_config()
             bucket, _vk = parse_s3_uri(version.storage_uri)

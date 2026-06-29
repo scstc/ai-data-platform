@@ -24,7 +24,8 @@ import {
 hljs.registerLanguage('json', jsonLang);
 
 /** 预览格式分流:结构化走表格;其余统一走 kkFileView(onlinePreview?url=base64(presigned))。
- *  与 datasets/detail 原内联逻辑一致——抽到这里供「数据集详情」与「数据任务详情抽屉」共用。 */
+ *  与 datasets/detail 原内联逻辑一致——抽到这里供「数据集详情」与「数据任务详情抽屉」共用。
+ *  parquet 后端 preview_version 走 DuckDB read_parquet(类型保真),与 csv/jsonl 同走表格预览。 */
 const PREVIEW_STRUCTURAL = new Set([
   'csv',
   'tsv',
@@ -32,6 +33,7 @@ const PREVIEW_STRUCTURAL = new Set([
   'xls',
   'json',
   'jsonl',
+  'parquet',
   'txt',
   'log',
 ]);
