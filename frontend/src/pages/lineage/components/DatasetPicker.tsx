@@ -197,9 +197,8 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
           onMouseLeave={() => setHovered(false)}
           style={{
             // 紧凑组合框:前导来源图标 + 两行文字 + 尾部 chevron。
-            // 宽度对齐左侧版本管理列(Col md=6≈25vw),clamp 限定上下限避免极端屏过宽/过窄;
-            // minWidth:0 让内层 ellipsis 稳定生效,既不溢出也不空旷。
-            width: 'clamp(360px, 25vw, 680px)',
+            // 定宽 650,近似对齐左侧版本管理列;minWidth:0 让内层 ellipsis 稳定生效。
+            width: 650,
             display: 'flex',
             alignItems: 'center',
             gap: 10,
