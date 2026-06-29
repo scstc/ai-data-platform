@@ -15,6 +15,7 @@ import { AvatarDropdown } from './RightContent/AvatarDropdown';
 export { default as ArticleListContent } from './ArticleListContent';
 export { default as AvatarList } from './AvatarList';
 export { CategoryPanel, default as CategoryManager } from './CategoryManager';
+export { default as DatasetFilter } from './DatasetFilter';
 export { default as ErrorBoundary } from './ErrorBoundary';
 export { default as JobDetail } from './JobDetail';
 export { default as NotificationBell } from './NotificationBell';

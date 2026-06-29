@@ -23,6 +23,7 @@ from app.api.v1.jobs import (
     _binary_block,
     _build_input,
     _build_output,
+    _dataset_job_filter,
     _item,
     _new_job_id,
     _now,
@@ -136,10 +137,14 @@ async def list_augment_jobs(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
+    dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出增强任务。"""
+    """分页列出增强任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
     count_stmt = select(func.count()).select_from(Job).where(Job.type == _AUGMENT_TYPE)
     list_stmt = select(Job).where(Job.type == _AUGMENT_TYPE)
+    if dataset_id:
+        count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
+        list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
     total = await session.scalar(count_stmt) or 0
     rows = (
         await session.scalars(

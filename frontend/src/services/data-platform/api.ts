@@ -877,7 +877,12 @@ export async function listOperators(options?: { [key: string]: any }) {
 
 /** 加工任务列表 GET /api/v1/jobs */
 export async function listJobs(
-  params?: { current?: number; pageSize?: number; type?: string },
+  params?: {
+    current?: number;
+    pageSize?: number;
+    type?: string;
+    datasetId?: string;
+  },
   options?: { [key: string]: any },
 ) {
   return request<DataPlatform.PageResult<DataPlatform.Job>>('/api/v1/jobs', {
@@ -896,6 +901,7 @@ export async function listDataTasks(
     types?: string;
     state?: string;
     keyword?: string;
+    datasetId?: string;
   },
   options?: { [key: string]: any },
 ) {
@@ -1061,7 +1067,7 @@ export async function createDistillationJob(
 
 /** 分页列出蒸馏任务 GET /api/v1/distillation/jobs */
 export async function listDistillationJobs(
-  params: { current?: number; pageSize?: number } = {},
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
   options?: { [key: string]: any },
 ) {
   return request<{
@@ -1167,7 +1173,7 @@ export async function createMakeJob(
 
 /** 分页列出合成任务 GET /api/v1/synthesis/jobs */
 export async function listMakeJobs(
-  params: { current?: number; pageSize?: number } = {},
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
   options?: { [key: string]: any },
 ) {
   return request<{
@@ -1273,7 +1279,7 @@ export async function createAugmentJob(
 
 /** 分页列出增强任务 GET /api/v1/augmentation/jobs */
 export async function listAugmentJobs(
-  params: { current?: number; pageSize?: number } = {},
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
   options?: { [key: string]: any },
 ) {
   return request<{
@@ -1441,7 +1447,7 @@ export async function createReviewJob(
 
 /** 内容安全:审核任务列表（type=review）GET /api/v1/content-safety/jobs */
 export async function listReviewJobs(
-  params?: { current?: number; pageSize?: number },
+  params?: { current?: number; pageSize?: number; datasetId?: string },
   options?: { [key: string]: any },
 ) {
   return request<DataPlatform.PageResult<DataPlatform.Job>>(

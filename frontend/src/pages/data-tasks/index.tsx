@@ -12,6 +12,7 @@ import {
   dataTaskStats,
   deleteJob,
   getJob,
+  listDatasets,
   listDataTasks,
   pauseJob,
   rerunAugmentJob,
@@ -98,6 +99,14 @@ const DataTasks: React.FC = () => {
   const [polling, setPolling] = useState<number | undefined>(undefined);
   // 页顶概览统计,驱动 Dashboard。随列表 request(含 reload/轮询)一同刷新。
   const [stats, setStats] = useState<DataTaskStatsData>();
+  // 数据集列表:供「数据集」搜索项下拉选项
+  const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
+
+  useEffect(() => {
+    listDatasets({ current: 1, pageSize: 1000 })
+      .then((r) => setDatasets(r.data ?? []))
+      .catch(() => setDatasets([]));
+  }, []);
 
   const refreshStats = () => {
     dataTaskStats()
@@ -257,6 +266,20 @@ const DataTasks: React.FC = () => {
           {TYPE_LABEL[r.type] ?? r.type}
         </Tag>
       ),
+    },
+    {
+      // 仅作搜索项(数据集筛选);列表展示由 jobVersionColumns 的「数据集」列负责
+      title: '数据集',
+      dataIndex: 'datasetId',
+      hideInTable: true,
+      valueType: 'select',
+      fieldProps: {
+        showSearch: true,
+        allowClear: true,
+        optionFilterProp: 'label',
+        placeholder: '全部数据集',
+        options: datasets.map((d) => ({ label: d.name, value: d.id })),
+      },
     },
     ...jobVersionColumns(),
     {
@@ -420,6 +443,7 @@ const DataTasks: React.FC = () => {
               ? params.type.join(',')
               : params.type,
             state: params.state,
+            datasetId: params.datasetId,
           });
           const rows = res.data ?? [];
           setPolling(

@@ -3,7 +3,7 @@ import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Tag } from 'antd';
 import { useRef, useState } from 'react';
-import { JobDetail } from '@/components';
+import { DatasetFilter, JobDetail } from '@/components';
 import {
   batchDeleteJobs,
   deleteJob,
@@ -31,6 +31,8 @@ const Processing: React.FC<{
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Job[]>([]);
   // 有任务在跑/排队时自动轮询刷新状态(后台执行,进度异步推进)
   const [polling, setPolling] = useState<number | undefined>(undefined);
+  // 数据集筛选(undefined=全部)
+  const [datasetId, setDatasetId] = useState<string>();
 
   /** 重跑:用原配置对原输入版本再跑一次,产出新版本(同步执行,完成后刷新列表) */
   const handleRerun = async (id: string) => {
@@ -199,11 +201,13 @@ const Processing: React.FC<{
           </Popconfirm>
         )}
         polling={polling}
+        params={{ datasetId }}
         request={async (params) => {
           const res = await listJobs({
             current: params.current,
             pageSize: params.pageSize,
             type: jobType,
+            datasetId,
           });
           // 有任务在跑/排队 → 每 3s 轮询;全部终态 → 停止轮询
           const active = res.data?.some(
@@ -214,6 +218,11 @@ const Processing: React.FC<{
         }}
         columns={columns}
         toolBarRender={() => [
+          <DatasetFilter
+            key="dataset"
+            value={datasetId}
+            onChange={setDatasetId}
+          />,
           <Button
             type="primary"
             key="new"

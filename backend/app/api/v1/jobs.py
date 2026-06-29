@@ -180,19 +180,43 @@ def _item(
     return JobItemResponse(data=read).model_dump(by_alias=True, mode="json")
 
 
+def _dataset_job_filter(dataset_id: str):
+    """构造"任务的输入或产物版本属于该数据集"的 Job.id 过滤条件。
+
+    输入侧:job_inputs → dataset_versions → dataset_id;
+    产物侧:dataset_versions.produced_by_job_id == Job.id 且 dataset_id 命中。
+    供治理/评估各任务列表按数据集筛选共用。返回可直接塞进 .where() 的表达式。
+    """
+    input_job_ids = (
+        select(JobInput.job_id)
+        .join(DatasetVersion, DatasetVersion.id == JobInput.dataset_version_id)
+        .where(DatasetVersion.dataset_id == dataset_id)
+    )
+    output_job_ids = select(DatasetVersion.produced_by_job_id).where(
+        DatasetVersion.dataset_id == dataset_id,
+        DatasetVersion.produced_by_job_id.is_not(None),
+    )
+    return Job.id.in_(input_job_ids.union(output_job_ids))
+
+
 @router.get("/jobs", response_model=PageResponse[JobRead])
 async def list_jobs(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     type_: Annotated[str | None, Query(alias="type")] = None,
+    dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出加工任务,按创建时间倒序;可按 type 过滤(如 type=quality)。"""
+    """分页列出加工任务,按创建时间倒序;可按 type 过滤(如 type=quality)、
+    按 datasetId 过滤(输入或产物版本属于该数据集)。"""
     count_stmt = select(func.count()).select_from(Job)
     list_stmt = select(Job)
     if type_:
         count_stmt = count_stmt.where(Job.type == type_)
         list_stmt = list_stmt.where(Job.type == type_)
+    if dataset_id:
+        count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
+        list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
     total = await session.scalar(count_stmt) or 0
     rows = (
         await session.scalars(

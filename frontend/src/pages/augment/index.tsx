@@ -4,7 +4,7 @@ import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Tag, Typography } from 'antd';
 import { useRef, useState } from 'react';
-import { JobDetail } from '@/components';
+import { DatasetFilter, JobDetail } from '@/components';
 import {
   batchDeleteAugmentJobs,
   deleteAugmentJob,
@@ -27,6 +27,7 @@ const Augment: React.FC = () => {
     Record<string, DataPlatform.AugmentReport>
   >({});
   const [polling, setPolling] = useState<number | undefined>(undefined);
+  const [datasetId, setDatasetId] = useState<string>();
 
   const openReport = async (jobId: string) => {
     if (reportCache[jobId]) {
@@ -245,10 +246,12 @@ const Augment: React.FC = () => {
           </Popconfirm>
         )}
         polling={polling}
+        params={{ datasetId }}
         request={async (params) => {
           const res = await listAugmentJobs({
             current: params.current,
             pageSize: params.pageSize,
+            datasetId,
           });
           const active = res.data?.some(
             (j) => j.state === 'running' || j.state === 'pending',
@@ -262,6 +265,11 @@ const Augment: React.FC = () => {
         }}
         columns={columns}
         toolBarRender={() => [
+          <DatasetFilter
+            key="dataset"
+            value={datasetId}
+            onChange={setDatasetId}
+          />,
           <Button
             type="primary"
             key="new"

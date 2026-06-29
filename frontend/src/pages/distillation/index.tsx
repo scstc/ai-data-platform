@@ -5,7 +5,7 @@ import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Progress } from 'antd';
 import { useRef, useState } from 'react';
-import { JobDetail } from '@/components';
+import { DatasetFilter, JobDetail } from '@/components';
 import {
   batchDeleteDistillationJobs,
   deleteDistillationJob,
@@ -30,6 +30,7 @@ const Distillation: React.FC = () => {
   >({});
   // 有任务在跑/排队时自动轮询
   const [polling, setPolling] = useState<number | undefined>(undefined);
+  const [datasetId, setDatasetId] = useState<string>();
 
   const openReport = async (jobId: string) => {
     if (reportCache[jobId]) {
@@ -254,10 +255,12 @@ const Distillation: React.FC = () => {
           </Popconfirm>
         )}
         polling={polling}
+        params={{ datasetId }}
         request={async (params) => {
           const res = await listDistillationJobs({
             current: params.current,
             pageSize: params.pageSize,
+            datasetId,
           });
           const active = res.data?.some(
             (j) => j.state === 'running' || j.state === 'pending',
@@ -272,6 +275,11 @@ const Distillation: React.FC = () => {
         }}
         columns={columns}
         toolBarRender={() => [
+          <DatasetFilter
+            key="dataset"
+            value={datasetId}
+            onChange={setDatasetId}
+          />,
           <Button
             type="primary"
             key="new"

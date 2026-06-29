@@ -21,6 +21,7 @@ import {
   Typography,
 } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { DatasetFilter } from '@/components';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createReviewJob,
@@ -213,6 +214,7 @@ const ContentSafety: React.FC = () => {
 
   // —— 报告区 state ——
   const [activeJob, setActiveJob] = useState<DataPlatform.Job>();
+  const [jobDatasetId, setJobDatasetId] = useState<string>();
   const [report, setReport] = useState<DataPlatform.ReviewReport>();
 
   // 数据集 → 版本级联(用 listDatasets + getDataset,参照 quality/editor)
@@ -554,13 +556,22 @@ const ContentSafety: React.FC = () => {
           search={false}
           options={{ reload: true }}
           columns={jobColumns}
+          params={{ datasetId: jobDatasetId }}
           request={async (params) => {
             const res = await listReviewJobs({
               current: params.current,
               pageSize: params.pageSize,
+              datasetId: jobDatasetId,
             });
             return { data: res.data, total: res.total, success: res.success };
           }}
+          toolBarRender={() => [
+            <DatasetFilter
+              key="dataset"
+              value={jobDatasetId}
+              onChange={setJobDatasetId}
+            />,
+          ]}
         />
       </Card>
 
