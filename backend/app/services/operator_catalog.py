@@ -1,29 +1,108 @@
-"""加工算子目录:加载构建期生成的全量目录(212 算子),提供查询/分面/UI 归一。
+"""加工算子目录:从数据库加载算子,提供查询/分面/UI 归一。
 
-目录由 ``backend/scripts/build_operator_catalog.py`` 解析 data-juicer 文档
-(``docs/Operators.md`` + ``docs/operators/**``)生成,随后端发布为
-``app/data/operators_catalog.json``。后端 py3.12 无法直接 import DJ(py3.11)
-的算子类,故采用"构建期快照";DJ 升级后重跑脚本刷新即可。
+原设计:构建期生成 JSON 快照(operators_catalog.json)
+新设计:算子入库,支持运行时统计、动态查询、用户自定义算子
 
 设计见 docs/plan/04-算子市场设计.md。
 """
 
 from __future__ import annotations
 
-import json
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.models.operator import Operator
 from app.services.capabilities import Capabilities, get_capabilities
 
 _MEDIA_MODALITIES = {"image", "video", "audio", "multimodal"}
 
-_CATALOG_PATH = (
-    Path(__file__).resolve().parent.parent / "data" / "operators_catalog.json"
-)
+_MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
 
-# 蒸馏桶:filter + deduplicator + selector。蒸馏 = 过滤 + 去重 + 选择,把数据集减量成高质量子集。
+
+def _operator_to_dict(op: Operator) -> dict[str, Any]:
+    """ORM 模型转字典(兼容原 JSON 结构)。"""
+    return {
+        "name": op.name,
+        "category": op.category,
+        "zh_label": op.zh_label,
+        "summary_en": op.summary_en,
+        "summary_zh": op.summary_zh,
+        "desc_en": op.desc_en,
+        "desc_zh": op.desc_zh,
+        "zh_usage_tip": op.zh_usage_tip,
+        "scenario_group": op.scenario_group,
+        "resource_class": op.resource_class,
+        "modality": op.modality,
+        "frameworks": op.frameworks,
+        "params": op.params,
+        "example": op.example,
+        "detail_page": op.detail_page,
+        "recommend": op.recommend,
+        "runnable": op.runnable,
+        "usage_count": op.usage_count,
+    }
+
+
+def all_operators() -> list[dict[str, Any]]:
+    """获取全部算子(从数据库)。"""
+    db = next(get_db())
+    ops = db.execute(select(Operator)).scalars().all()
+    return [_operator_to_dict(op) for op in ops]
+
+
+def get_operator(name: str) -> dict[str, Any] | None:
+    """按名称获取单个算子。"""
+    db = next(get_db())
+    op = db.execute(select(Operator).where(Operator.name == name)).scalar_one_or_none()
+    return _operator_to_dict(op) if op else None
+
+
+def operator_names() -> set[str]:
+    """全部算子名(用于存在性校验)。"""
+    db = next(get_db())
+    names = db.execute(select(Operator.name)).scalars().all()
+    return set(names)
+
+
+def catalog_meta() -> dict[str, Any]:
+    """目录概览(总数/各维度分布/推荐数)。"""
+    db = next(get_db())
+    total = db.scalar(select(func.count()).select_from(Operator))
+
+    # 按类别统计
+    by_category = {}
+    rows = db.execute(
+        select(Operator.category, func.count())
+        .group_by(Operator.category)
+    ).all()
+    for cat, cnt in rows:
+        by_category[cat] = cnt
+
+    # 按场景统计
+    by_scenario = {}
+    rows = db.execute(
+        select(Operator.scenario_group, func.count())
+        .group_by(Operator.scenario_group)
+    ).all()
+    for sc, cnt in rows:
+        if sc:
+            by_scenario[sc] = cnt
+
+    # 推荐数
+    recommend_count = db.scalar(
+        select(func.count()).select_from(Operator).where(Operator.recommend == True)
+    )
+
+    return {
+        "total": total,
+        "by_category": by_category,
+        "by_scenario": by_scenario,
+        "recommend": recommend_count,
+    }
 # 由 data-juicer 全量算子业务归类生成(primary/secondary=蒸馏 且为 filter/dedup/selector、非多模态)。
 # 含 LLM/GPU 评分类 filter——运行时按算力门 gating(UI「只看可运行」隐藏不可用项)。
 # 归类见 docs/ 算子业务归纳;平台侧硬编码,data-juicer 仓无 PR。
@@ -166,35 +245,7 @@ _BUCKET_SETS: dict[str, frozenset[str]] = {
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
 
 
-@lru_cache(maxsize=1)
-def _data() -> dict[str, Any]:
-    return json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
-
-
-def catalog_meta() -> dict[str, Any]:
-    """目录概览(总数/各维度分布/推荐数),驱动市场筛选项与统计卡。"""
-    return _data()["meta"]
-
-
-def all_operators() -> list[dict[str, Any]]:
-    return _data()["operators"]
-
-
-@lru_cache(maxsize=1)
-def _by_name() -> dict[str, dict[str, Any]]:
-    return {o["name"]: o for o in all_operators()}
-
-
-def get_operator(name: str) -> dict[str, Any] | None:
-    return _by_name().get(name)
-
-
-def operator_names() -> set[str]:
-    """全部 212 个算子名(用于存在性校验)。"""
-    return set(_by_name())
-
-
-# ---------------------------------------------------------------------------
+# 蒸馏桶:filter + deduplicator + selector。蒸馏 = 过滤 + 去重 + 选择,把数据集减量成高质量子集。
 # 出参 camelCase 化(与平台其余 API 一致;只浅改顶层键,不动嵌套数据键)
 # ---------------------------------------------------------------------------
 _OP_KEY_MAP = {
@@ -448,36 +499,45 @@ def query_catalog(
     ``bucket``:业务桶(cleansing/distillation/make/augment),供任务编辑器只展示对应算子;
     按白名单集合成员判定(见 ``_BUCKET_SETS``),未知桶名退化为不限制。
     """
-    kw = keyword.lower().strip() if keyword else None
-    caps = get_capabilities()
+    db = next(get_db())
+    stmt = select(Operator)
+
+    # 基础过滤
+    if scenario:
+        stmt = stmt.where(Operator.scenario_group == scenario)
+    if category:
+        stmt = stmt.where(Operator.category == category)
+    if resource_class:
+        stmt = stmt.where(Operator.resource_class == resource_class)
+    if recommend is not None:
+        stmt = stmt.where(Operator.recommend == recommend)
+
+    # 关键字搜索
+    if keyword:
+        kw = f"%{keyword.lower()}%"
+        stmt = stmt.where(
+            (Operator.name.ilike(kw))
+            | (Operator.summary_zh.ilike(kw))
+            | (Operator.zh_label.ilike(kw))
+        )
+
+    # 获取全部结果做内存过滤（bucket、modality、runnable 需要业务逻辑）
+    all_results = db.execute(stmt).scalars().all()
     bucket_set = _BUCKET_SETS.get(bucket) if bucket else None
+    caps = get_capabilities()
 
-    def match(op: dict[str, Any]) -> bool:
-        if bucket_set is not None and op["name"] not in bucket_set:
-            return False
-        if scenario and op["scenario_group"] != scenario:
-            return False
-        if category and op["category"] != category:
-            return False
-        if modality and modality not in (op["modality"] or []):
-            return False
-        if resource_class and op["resource_class"] != resource_class:
-            return False
-        if runnable and effective_runnable(op, caps, media_ok=True) != runnable:
-            return False
-        if recommend is not None and op["recommend"] != recommend:
-            return False
-        if kw:
-            hay = (
-                op["name"]
-                + (op.get("summary_zh") or "")
-                + (op.get("zh_label") or "")
-            ).lower()
-            if kw not in hay:
-                return False
-        return True
+    filtered = []
+    for op in all_results:
+        op_dict = _operator_to_dict(op)
+        if bucket_set and op.name not in bucket_set:
+            continue
+        if modality and modality not in (op.modality or []):
+            continue
+        if runnable and effective_runnable(op_dict, caps, media_ok=True) != runnable:
+            continue
+        filtered.append(op_dict)
 
-    filtered = [op for op in all_operators() if match(op)]
+    # 分页
     total = len(filtered)
     start = (current - 1) * page_size
     return {"data": filtered[start : start + page_size], "total": total}

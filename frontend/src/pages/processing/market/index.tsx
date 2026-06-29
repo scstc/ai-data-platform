@@ -5,8 +5,6 @@ import {
   Button,
   Card,
   Col,
-  Divider,
-  Drawer,
   Dropdown,
   Empty,
   Input,
@@ -17,7 +15,6 @@ import {
   Segmented,
   Space,
   Spin,
-  Table,
   Tag,
   Typography,
 } from 'antd';
@@ -132,8 +129,6 @@ const Market: React.FC = () => {
 
   // 分页
   const [current, setCurrent] = useState(1);
-
-  const [detail, setDetail] = useState<DataPlatform.CatalogOperator>();
 
   // 拉全量目录:按 total 翻页取齐(目录是构建期快照,当前 212 条;
   // 后端单页上限 500,目录将来超限也不会被静默截断)
@@ -396,7 +391,7 @@ const Market: React.FC = () => {
                           },
                         }}
                         style={{ height: '100%' }}
-                        onClick={() => setDetail(op)}
+                        onClick={() => history.push(`/processing/market/detail/${op.name}`)}
                       >
                         <div
                           style={{
@@ -481,98 +476,6 @@ const Market: React.FC = () => {
           </Card>
         </Col>
       </Row>
-
-      <Drawer
-        width={680}
-        open={!!detail}
-        title={detail && `${detail.zhLabel} · ${detail.name}`}
-        onClose={() => setDetail(undefined)}
-        extra={
-          detail && (
-            <Button type="primary" onClick={() => onAdd(detail)}>
-              加入加工任务
-            </Button>
-          )
-        }
-      >
-        {detail && (
-          <>
-            <Space wrap style={{ marginBottom: 16 }}>
-              <Tag>{detail.category}</Tag>
-              {(detail.modality ?? []).map((m) => (
-                <Tag key={m}>{m}</Tag>
-              ))}
-              <Tag>
-                {RESOURCE_LABEL[detail.resourceClass] ?? detail.resourceClass}
-              </Tag>
-              <Tag color={runnableTag(detail).color}>
-                {runnableTag(detail).label}
-              </Tag>
-            </Space>
-            {detail.zhUsageTip && (
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginBottom: 16 }}
-                title="何时使用"
-                description={detail.zhUsageTip}
-              />
-            )}
-            <Paragraph>{detail.descZh || detail.summaryZh}</Paragraph>
-            {detail.descEn && (
-              <Paragraph type="secondary" style={{ fontSize: 12 }}>
-                {detail.descEn}
-              </Paragraph>
-            )}
-            <Typography.Title level={5} style={{ marginTop: 16 }}>
-              参数
-            </Typography.Title>
-            {detail.params?.length ? (
-              <Table
-                size="small"
-                rowKey="name"
-                pagination={false}
-                dataSource={detail.params}
-                columns={PARAM_COLUMNS}
-              />
-            ) : (
-              <Text type="secondary">无参数</Text>
-            )}
-            {detail.example && (
-              <>
-                <Typography.Title level={5} style={{ marginTop: 16 }}>
-                  用法示例
-                </Typography.Title>
-                <pre
-                  style={{
-                    background: 'var(--ant-color-fill-quaternary, #f5f5f5)',
-                    padding: 12,
-                    borderRadius: 6,
-                    overflow: 'auto',
-                    fontSize: 12,
-                  }}
-                >
-                  {detail.example}
-                </pre>
-              </>
-            )}
-            {detail.runnable !== 'ready' && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginTop: 16 }}
-                title={
-                  detail.runnable === 'needs_api'
-                    ? '该算子需要 LLM API:在后端 .env 配置 OPENAI_* 后可用。'
-                    : detail.runnable === 'needs_compute'
-                      ? '该算子需要 Ray 集群 / GPU 算力,当前环境暂不可执行(可加入,提交时按环境精确校验)。'
-                      : '该算子处理图像/音视频,仅适用于多模态(媒体)数据集;请先接入多模态数据集后再使用。'
-                }
-              />
-            )}
-          </>
-        )}
-      </Drawer>
     </PageContainer>
   );
 };
