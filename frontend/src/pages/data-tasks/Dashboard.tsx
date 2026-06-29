@@ -133,6 +133,9 @@ const Dashboard: React.FC<Props> = ({ stats }) => {
         <Col flex="1 1 160px">
           <Card size="small">
             <Statistic title="总任务" value={total} />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              已完成 {success}
+            </Typography.Text>
           </Card>
         </Col>
         <Col flex="1 1 160px">
@@ -167,15 +170,21 @@ const Dashboard: React.FC<Props> = ({ stats }) => {
               suffix={successRate == null ? undefined : '%'}
               styles={{ content: { color: SUCCESS } }}
             />
-            <Progress
-              percent={successRate ?? 0}
-              showInfo={false}
-              size="small"
-              strokeColor={STATE_HEX.success}
-            />
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              成功 {success} · 失败 {failed}
-            </Typography.Text>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Progress
+                percent={successRate ?? 0}
+                showInfo={false}
+                size="small"
+                strokeColor={STATE_HEX.success}
+                style={{ flex: 1, minWidth: 0, marginBottom: 0 }}
+              />
+              <Typography.Text
+                type="secondary"
+                style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+              >
+                成功 {success} · 失败 {failed}
+              </Typography.Text>
+            </div>
           </Card>
         </Col>
         <Col flex="1 1 160px">
