@@ -887,7 +887,7 @@ const IngestTasksPage: React.FC = () => {
       </ModalForm>
 
       <Drawer
-        width={560}
+        width={900}
         open={detailOpen}
         title={currentRow?.name}
         onClose={() => {
