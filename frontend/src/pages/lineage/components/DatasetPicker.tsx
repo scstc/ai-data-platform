@@ -29,6 +29,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { getDataset, listCategories, listDatasets } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 
+/** 从完整版本标签 "v2026.6.22 (#7)" 抽出括号里的内部版本号 "7"。 */
+const extractVersionNo = (label: string): string => {
+  const m = /\(#(\d+)\)/.exec(label);
+  return m ? m[1] : label;
+};
+
 // 来源 → 中文标签 + 图标。后端 sourceKind 自由串,未识别时退化为原始值。
 
 /** 防抖包装:返回 debounce 后的函数 + cancel 方法(避免引入 lodash)。 */
@@ -200,15 +206,21 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
               </Space>
               <Typography.Text
                 type="secondary"
-                style={{ fontSize: 12, lineHeight: 1.4 }}
+                ellipsis
+                style={{
+                  fontSize: 12,
+                  lineHeight: 1.4,
+                  maxWidth: '100%',
+                }}
               >
                 {SOURCE_META[selected.sourceKind ?? '']?.label ??
                   selected.sourceKind ??
                   '—'}
                 {selected.sourceFormat && ` · ${selected.sourceFormat}`}
                 {selected.categoryName && ` · ${selected.categoryName}`}
+                {/* 只显示版本号 #N(去掉日期前缀,避免 sub text 过长) */}
                 {selected.latestVersionLabel &&
-                  ` · ${selected.latestVersionLabel}`}
+                  ` · #${extractVersionNo(selected.latestVersionLabel)}`}
               </Typography.Text>
             </>
           ) : (
