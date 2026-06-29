@@ -206,6 +206,7 @@ async def list_jobs(
         read = JobRead.model_validate(r)
         read.can_rerun = bool(r.spec)
         read.input = await _build_input(session, r.id)
+        read.output = await _build_output(session, r.id)
         data.append(read)
     return PageResponse[JobRead](data=data, total=total)
 
