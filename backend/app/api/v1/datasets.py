@@ -872,9 +872,14 @@ async def _members_of(
     """枚举版本的成员文件(manifest → __member;受管批量上传 s3 → originals/;其余 → 单一成员)。
     复用于 members 端点与多文件 zip 下载。存储错误抛 ExternalStoreError。"""
     if version.format != MANIFEST_FORMAT:
-        # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件
-        if version.origin == "managed" and str(version.storage_uri).startswith(
-            "s3://"
+        # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件。
+        # 仅限批量上传落地版本(produced_by_job_id 为空);加工/采集等 job 产出是
+        # 单文件版本,storage_uri 直指产物对象——若也走 originals/ 会错列回数据集的
+        # 原始上传件(预览所有版本都显示成第一版原件,加工产物被掩盖)。
+        if (
+            version.produced_by_job_id is None
+            and version.origin == "managed"
+            and str(version.storage_uri).startswith("s3://")
         ):
             try:
                 cfg = platform_config()

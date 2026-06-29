@@ -175,6 +175,29 @@ def build_config(
     return result
 
 
+# 仅运行期有意义、对用户无价值的内部键:中转输入路径(S3 对象的一次性本地副本)、
+# 本地工作产出路径、job_id 充当的 project_name、单机并行度 np。落库展示前剥掉,
+# 用户看到的只剩"配方"(算子链 + 清洗字段)。磁盘上喂给 dj-process 的 job.yaml 不受影响。
+_DISPLAY_DROP_KEYS = frozenset(
+    {"project_name", "dataset_path", "export_path", "np"}
+)
+
+
+def config_yaml_for_display(yaml_text: str) -> str:
+    """把执行用 YAML 清理成面向用户的展示版:剥掉内部中转/运行期键。
+
+    解析失败或非 dict(理论上不会)时原样返回,绝不因展示美化而丢真实配置。
+    """
+    try:
+        cfg = yaml.safe_load(yaml_text)
+    except yaml.YAMLError:
+        return yaml_text
+    if not isinstance(cfg, dict):
+        return yaml_text
+    kept = {k: v for k, v in cfg.items() if k not in _DISPLAY_DROP_KEYS}
+    return yaml.safe_dump(kept, allow_unicode=True, sort_keys=False)
+
+
 async def _run_dj(yaml_path: Path, *, job_id: str | None = None) -> tuple[int, str]:
     """异步起 dj-process 子进程,返回 (退出码, 合并日志)。
 

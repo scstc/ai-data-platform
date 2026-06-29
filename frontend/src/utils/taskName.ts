@@ -27,6 +27,7 @@ function labelOf(name: string, labelMap?: Record<string, string>): string {
 
 export type TaskType =
   | '数据加工'
+  | '数据清洗'
   | '质量评估'
   | '数据蒸馏'
   | '数据合成'

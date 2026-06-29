@@ -127,16 +127,27 @@ const Editor: React.FC<{
     () =>
       suggestTaskName(
         selectedDatasetName,
-        '数据加工',
+        jobType === 'clean' ? '数据清洗' : '数据加工',
         steps.map((s) => s.name),
       ),
-    [selectedDatasetName, steps],
+    [selectedDatasetName, steps, jobType],
   );
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);
   }, [suggestedName, nameDirty]);
 
-  const yamlText = useMemo(() => stepsToYaml(steps), [steps]);
+  const selectedVersionLabel = versions.find(
+    (v) => v.id === versionId,
+  )?.versionLabel;
+  const yamlText = useMemo(
+    () =>
+      stepsToYaml(steps, {
+        datasetName: selectedDatasetName,
+        versionLabel: selectedVersionLabel,
+        textKeys,
+      }),
+    [steps, selectedDatasetName, selectedVersionLabel, textKeys],
+  );
 
   const onGenerate = () => {
     let goal = '';

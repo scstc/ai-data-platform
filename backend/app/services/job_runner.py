@@ -267,7 +267,8 @@ async def _run_job(job_id: str) -> None:
             job.state = "success"
             job.progress = 100
             if yaml_text is not None:
-                job.config_yaml = yaml_text
+                # 落库展示版:剥掉内部中转路径等运行期键,用户只看算子配方
+                job.config_yaml = engine.config_yaml_for_display(yaml_text)
             if log_path is not None:
                 job.logs_uri = log_path
         except _Paused:
