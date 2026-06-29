@@ -22,6 +22,7 @@ import { useEffect, useRef, useState } from 'react';
 import { VersionFilePreview } from '@/components';
 import {
   batchDeleteJobs,
+  dataTaskStats,
   deleteJob,
   getJob,
   listDataTasks,
@@ -35,6 +36,7 @@ import {
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { renderState } from '@/utils/jobState';
+import Dashboard, { type DataTaskStatsData } from './Dashboard';
 
 /** 任务类型中文标签(与后端 Job.type 对齐)。 */
 const TYPE_LABEL: Record<string, string> = {
@@ -110,6 +112,16 @@ const DataTasks: React.FC = () => {
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Job[]>([]);
   const [polling, setPolling] = useState<number | undefined>(undefined);
+  // 页顶概览统计,驱动 Dashboard。随列表 request(含 reload/轮询)一同刷新。
+  const [stats, setStats] = useState<DataTaskStatsData>();
+
+  const refreshStats = () => {
+    dataTaskStats()
+      .then((res) => {
+        if (res?.success) setStats(res);
+      })
+      .catch(() => undefined);
+  };
 
   const openDetail = (job?: DataPlatform.Job) => {
     setCurrentJob(job);
@@ -406,6 +418,8 @@ const DataTasks: React.FC = () => {
         breadcrumb: {},
       }}
     >
+      <Dashboard stats={stats} />
+
       <ProTable<DataPlatform.Job>
         headerTitle="任务统一管理（治理 + 评估）"
         actionRef={actionRef}
@@ -447,6 +461,8 @@ const DataTasks: React.FC = () => {
               ? 3000
               : undefined,
           );
+          // 概览统计与列表同源刷新(首次加载、reload、轮询都会带上)
+          refreshStats();
           return { data: rows, total: res.total, success: res.success };
         }}
         columns={columns}

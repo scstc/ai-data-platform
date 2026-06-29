@@ -913,6 +913,28 @@ export async function listDataTasks(
   );
 }
 
+/** 数据任务概览统计 GET /api/v1/data-tasks/stats
+ *  驱动页顶 dashboard:状态/类型分布 + 近 24h 完成 + 平均时长 + 近 14 天趋势。 */
+export async function dataTaskStats(options?: { [key: string]: any }) {
+  return request<{
+    total: number;
+    byState: Record<string, number>;
+    byTypeState: { type: string; state: string; count: number }[];
+    completedLast24h: number;
+    avgDurationSec: number | null;
+    trend14d: {
+      date: string;
+      created: number;
+      success: number;
+      failed: number;
+    }[];
+    success: boolean;
+  }>('/api/v1/data-tasks/stats', {
+    method: 'GET',
+    ...(options || {}),
+  });
+}
+
 /** 新建并执行加工任务 POST /api/v1/jobs */
 export async function createJob(
   body: DataPlatform.JobCreate,
