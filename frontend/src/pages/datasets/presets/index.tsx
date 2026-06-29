@@ -177,7 +177,6 @@ const DatasetsPresets: React.FC = () => {
           <Tag bordered={false}>未设置</Tag>
         ),
     },
-    { title: '描述', dataIndex: 'description', search: false, ellipsis: true },
     { title: '创建人', dataIndex: 'creator', search: false },
     {
       title: '创建时间',

@@ -347,10 +347,7 @@ const DatasetDetail: React.FC = () => {
           <Button
             size="small"
             onClick={() =>
-              window.open(
-                `/api/v1/dataset-versions/${v.id}/download`,
-                '_blank',
-              )
+              window.open(`/api/v1/dataset-versions/${v.id}/download`, '_blank')
             }
           >
             下载

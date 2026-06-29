@@ -471,7 +471,6 @@ const DatasetsList: React.FC = () => {
         optionFilterProp: 'label',
       },
     },
-    { title: '描述', dataIndex: 'description', search: false, ellipsis: true },
     { title: '创建人', dataIndex: 'creator' },
     {
       title: '创建时间',
