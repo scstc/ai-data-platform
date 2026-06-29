@@ -316,7 +316,7 @@ const Lineage: React.FC = () => {
     <PageContainer
       header={{ title: '数据血缘', breadcrumb: {} }}
       content={
-        <Space>
+        <Space size={8} align="center">
           <Typography.Text type="secondary">数据集</Typography.Text>
           <DatasetPicker value={datasetId} onChange={setDatasetId} />
         </Space>

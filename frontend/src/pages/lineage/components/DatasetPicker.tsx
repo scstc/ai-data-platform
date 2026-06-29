@@ -7,6 +7,7 @@ import {
   CaretRightOutlined,
   CloudOutlined,
   DatabaseOutlined,
+  DownOutlined,
   HddOutlined,
   SearchOutlined,
   UploadOutlined,
@@ -26,7 +27,11 @@ import {
   Typography,
 } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { getDataset, listCategories, listDatasets } from '@/services/data-platform';
+import {
+  getDataset,
+  listCategories,
+  listDatasets,
+} from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 
 /** 从完整版本标签 "v2026.6.22 (#7)" 抽出括号里的内部版本号 "7"。 */
@@ -68,6 +73,7 @@ interface Props {
 
 const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
   const [open, setOpen] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [selected, setSelected] = useState<DataPlatform.Dataset | undefined>();
   const [loading, setLoading] = useState(false);
@@ -176,59 +182,131 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
 
   return (
     <>
-      <Tooltip title="点击更换数据集">
-        <Button
-          size="large"
+      <Tooltip title={selected ? '点击更换数据集' : '点击选择数据集'}>
+        <div
+          role="button"
+          tabIndex={0}
           onClick={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setOpen(true);
+            }
+          }}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
           style={{
-            width: 'fit-content',
-            minWidth: 360,
-            maxWidth: 520,
-            height: 'auto',
-            padding: '6px 12px',
+            // 紧凑组合框:前导来源图标 + 两行文字 + 尾部 chevron。
+            // 宽度对齐左侧版本管理列(Col md=6≈25vw),clamp 限定上下限避免极端屏过宽/过窄;
+            // minWidth:0 让内层 ellipsis 稳定生效,既不溢出也不空旷。
+            width: 'clamp(360px, 25vw, 680px)',
             display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'flex-start',
-            gap: 2,
+            alignItems: 'center',
+            gap: 10,
+            padding: '7px 12px',
+            borderRadius: 8,
+            cursor: 'pointer',
+            background: 'var(--ant-color-bg-container)',
+            border: `1px solid ${
+              hovered || open
+                ? 'var(--ant-color-primary)'
+                : 'var(--ant-color-border)'
+            }`,
+            boxShadow:
+              hovered || open
+                ? '0 0 0 2px var(--ant-color-primary-bg)'
+                : 'none',
+            transition: 'border-color 0.2s, box-shadow 0.2s',
           }}
         >
-          {selected ? (
-            <>
-              <Space size={6} style={{ width: '100%' }}>
-                <Typography.Text strong ellipsis style={{ fontSize: 14 }}>
-                  {selected.name}
+          {/* 前导图标块:按来源着色,给控件一个视觉锚点 */}
+          <div
+            style={{
+              flex: 'none',
+              width: 34,
+              height: 34,
+              borderRadius: 7,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 16,
+              background: 'var(--ant-color-primary-bg)',
+              color: 'var(--ant-color-primary)',
+            }}
+          >
+            {selected ? (
+              (SOURCE_META[selected.sourceKind ?? '']?.icon ?? (
+                <DatabaseOutlined />
+              ))
+            ) : (
+              <DatabaseOutlined />
+            )}
+          </div>
+
+          {/* 主体两行:名称 + 元信息,均可省略 */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {selected ? (
+              <>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    width: '100%',
+                  }}
+                >
+                  <Typography.Text
+                    strong
+                    ellipsis
+                    style={{ fontSize: 14, flex: 1, minWidth: 0 }}
+                  >
+                    {selected.name}
+                  </Typography.Text>
+                  {selected.hosted && (
+                    <Tag
+                      color="cyan"
+                      style={{ margin: 0, flex: 'none', fontSize: 11 }}
+                    >
+                      S3 托管
+                    </Tag>
+                  )}
+                </div>
+                <Typography.Text
+                  type="secondary"
+                  ellipsis
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.4,
+                    width: '100%',
+                    display: 'block',
+                  }}
+                >
+                  {SOURCE_META[selected.sourceKind ?? '']?.label ??
+                    selected.sourceKind ??
+                    '—'}
+                  {selected.sourceFormat && ` · ${selected.sourceFormat}`}
+                  {selected.categoryName && ` · ${selected.categoryName}`}
+                  {/* 只显示版本号 #N(去掉日期前缀,避免 sub text 过长) */}
+                  {selected.latestVersionLabel &&
+                    ` · #${extractVersionNo(selected.latestVersionLabel)}`}
                 </Typography.Text>
-                {selected.hosted && (
-                  <Tag color="cyan" style={{ margin: 0 }}>
-                    S3 托管
-                  </Tag>
-                )}
-              </Space>
-              <Typography.Text
-                type="secondary"
-                ellipsis
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1.4,
-                  maxWidth: '100%',
-                }}
-              >
-                {SOURCE_META[selected.sourceKind ?? '']?.label ??
-                  selected.sourceKind ??
-                  '—'}
-                {selected.sourceFormat && ` · ${selected.sourceFormat}`}
-                {selected.categoryName && ` · ${selected.categoryName}`}
-                {/* 只显示版本号 #N(去掉日期前缀,避免 sub text 过长) */}
-                {selected.latestVersionLabel &&
-                  ` · #${extractVersionNo(selected.latestVersionLabel)}`}
+              </>
+            ) : (
+              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                选择数据集查看其版本与血缘
               </Typography.Text>
-            </>
-          ) : (
-            <Typography.Text type="secondary">
-              选择数据集查看其版本与血缘
-            </Typography.Text>
-          )}
-        </Button>
+            )}
+          </div>
+
+          {/* 尾部 chevron:明确"可展开"信号 */}
+          <DownOutlined
+            style={{
+              flex: 'none',
+              fontSize: 12,
+              color: 'var(--ant-color-text-quaternary)',
+            }}
+          />
+        </div>
       </Tooltip>
 
       <Drawer
