@@ -146,12 +146,16 @@ const UploadModal: React.FC<Props> = ({
       messageApi.error('请先选择至少一个文件');
       return;
     }
+    if (!mediaName.trim()) {
+      messageApi.error('请输入数据集名称');
+      return;
+    }
     setSubmitting(true);
     try {
       const formData = new FormData();
       for (const f of files) formData.append('files', f);
       formData.append('data_type', accessType.key);
-      if (mediaName.trim()) formData.append('name', mediaName.trim());
+      formData.append('name', mediaName.trim());
       if (categoryId) formData.append('categoryId', categoryId);
       const res = await uploadMediaDataset(formData);
       messageApi.success(
@@ -264,9 +268,11 @@ const UploadModal: React.FC<Props> = ({
               title={`一批${accessType.label.replace('接入', '')}将合并为一个数据集(清单形式),可直接用于数据加工。`}
             />
             <Space>
-              <span>接入名称:</span>
+              <span>
+                接入名称 <Text type="danger">*</Text>:
+              </span>
               <Input
-                placeholder="给这个数据集起个名(默认取首个文件名)"
+                placeholder="请输入数据集名称"
                 style={{ width: 360 }}
                 value={mediaName}
                 onChange={(e) => setMediaName(e.target.value)}

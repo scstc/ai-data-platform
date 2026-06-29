@@ -129,6 +129,7 @@ const ScenarioImportCard: React.FC<Props> = ({
 }) => {
   const cfg = CONFIG[semanticType];
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+  const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [modality, setModality] = useState(
     cfg?.modalities?.[0]?.key ?? 'image',
@@ -164,10 +165,15 @@ const ScenarioImportCard: React.FC<Props> = ({
       message.warning('请先选择文件');
       return;
     }
+    if (!name.trim()) {
+      message.warning('请输入数据集名称');
+      return;
+    }
     const fd = new FormData();
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
+    fd.append('name', name.trim());
     if (cfg.media) {
       fd.append('data_type', modality); // image / audio / video
     } else {
@@ -207,6 +213,18 @@ const ScenarioImportCard: React.FC<Props> = ({
       }
       extra={<Tag color="blue">上传即生成数据集</Tag>}
     >
+      <div style={{ marginBottom: 12 }}>
+        <Text strong>
+          数据集名称 <Text type="danger">*</Text>
+        </Text>
+        <Input
+          placeholder="请输入数据集名称"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          allowClear
+          style={{ marginTop: 8 }}
+        />
+      </div>
       <div
         style={{
           display: 'flex',

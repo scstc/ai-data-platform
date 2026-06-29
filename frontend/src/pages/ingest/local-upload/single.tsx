@@ -265,12 +265,16 @@ const SingleUploadPage: React.FC = () => {
       message.warning('请至少添加一个文件');
       return;
     }
+    if (!name.trim()) {
+      message.warning('请输入数据集名称');
+      return;
+    }
     const fd = new FormData();
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
     fd.append('data_type', format);
-    if (name.trim()) fd.append('name', name.trim());
+    fd.append('name', name.trim());
     if (categoryId) fd.append('categoryId', categoryId);
     fd.append('safety_check', String(safetyCheck));
     fd.append('safety_use_llm', String(safetyUseLlm));
@@ -388,10 +392,10 @@ const SingleUploadPage: React.FC = () => {
             </div>
           </div>
           <div>
-            <Text strong>数据集名称</Text>
+            <Text strong>数据集名称 <Text type="danger">*</Text></Text>
             <Space.Compact style={{ width: '100%', marginTop: 8 }}>
               <Input
-                placeholder="可选,留空则取首个文件名"
+                placeholder="请输入数据集名称"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 allowClear

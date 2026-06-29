@@ -376,6 +376,12 @@ async def upload_media_as_dataset(
     与 /datasets/upload(一文件一集)不同:整批只建一个数据集,版本是 manifest jsonl,
     可进 dj-process(物化时下载成员)。仅图/音/视频(同模态)。
     """
+    # 数据集名称必填校验(统一上传入口策略,不再自动派生)
+    if not name or not name.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "数据集名称不能为空"},
+        )
     field = _MEDIA_FIELD.get(data_type or "")
     token = _MEDIA_TOKEN.get(data_type or "")
     if field is None or token is None:
@@ -467,7 +473,7 @@ async def upload_media_as_dataset(
 
         dataset = Dataset(
             id=dataset_id,
-            name=name or (Path(files[0].filename or "媒体数据集").name),
+            name=name.strip(),
             data_type=data_type,
             category_id=category_id,
             owner=actor,
@@ -546,6 +552,12 @@ async def upload_batch_as_dataset(
     多模态(COT/GIS 等)接入逻辑后续单独处理;本端点只收非二进制单一格式。
     任一步失败回滚 DB + 回收整个 <id>/ 前缀,绝不留孤儿对象。
     """
+    # 数据集名称必填校验(统一上传入口策略,不再自动派生)
+    if not name or not name.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "数据集名称不能为空"},
+        )
     # 语义类型合法性(可选;与 data_type 正交,非法值 422)
     try:
         parse_semantic_type(semantic_type)
@@ -667,7 +679,7 @@ async def upload_batch_as_dataset(
 
         dataset = Dataset(
             id=dataset_id,
-            name=name or (Path(files[0].filename or "本地数据集").stem),
+            name=name.strip(),
             data_type=data_type,
             semantic_type=effective_semantic,
             category_id=category_id,
