@@ -27,9 +27,15 @@ export default [
     path: '/governance/quality/editor',
     redirect: '/assessment/quality/editor',
   },
-  { path: '/processing', redirect: '/governance/processing' },
-  { path: '/processing/jobs', redirect: '/governance/processing' },
-  { path: '/processing/editor', redirect: '/governance/processing/editor' },
+  // 数据加工(process)已并入数据清洗(clean):旧链接重定向到清洗页
+  { path: '/processing', redirect: '/governance/cleaning' },
+  { path: '/processing/jobs', redirect: '/governance/cleaning' },
+  { path: '/processing/editor', redirect: '/governance/cleaning/editor' },
+  { path: '/governance/processing', redirect: '/governance/cleaning' },
+  {
+    path: '/governance/processing/editor',
+    redirect: '/governance/cleaning/editor',
+  },
   { path: '/processing/market', redirect: '/operators' },
   { path: '/governance/operators', redirect: '/operators' },
   { path: '/annotation', redirect: '/governance/annotation' },
@@ -187,18 +193,6 @@ export default [
         path: '/governance/content-safety',
         name: 'contentSafety',
         component: './content-safety',
-      },
-      {
-        path: '/governance/processing',
-        name: 'processing',
-        component: './processing',
-        hideInMenu: true,
-      },
-      {
-        path: '/governance/processing/editor',
-        name: 'processing-editor',
-        component: './processing/editor',
-        hideInMenu: true,
       },
       {
         path: '/governance/cleaning',

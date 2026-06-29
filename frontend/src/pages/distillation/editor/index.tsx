@@ -127,11 +127,7 @@ const DistillationEditor: React.FC = () => {
 
   // 自动任务名:数据集/算子变化时重算,用户改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
-  const suggestedName = suggestTaskName(
-    selectedDatasetName,
-    '数据蒸馏',
-    steps.map((s) => s.name),
-  );
+  const suggestedName = suggestTaskName(selectedDatasetName, '数据蒸馏');
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);
   }, [suggestedName, nameDirty]);

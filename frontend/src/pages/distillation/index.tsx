@@ -1,22 +1,11 @@
 // 数据蒸馏任务列表页:复用 processing 的 ProTable + 状态机 + 详情抽屉形态;
 // 数据源切到 /api/v1/distillation/jobs,操作列加"查看蒸馏报告"。
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import {
-  PageContainer,
-  ProDescriptions,
-  ProTable,
-} from '@ant-design/pro-components';
+import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
-import {
-  Button,
-  Drawer,
-  message,
-  Popconfirm,
-  Progress,
-  Tag,
-  Typography,
-} from 'antd';
+import { Button, Drawer, message, Popconfirm, Progress } from 'antd';
 import { useRef, useState } from 'react';
+import { JobDetail } from '@/components';
 import {
   batchDeleteDistillationJobs,
   deleteDistillationJob,
@@ -26,7 +15,7 @@ import {
   stopDistillationJob,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
-import { renderOutput, renderState } from '@/utils/jobState';
+import { jobVersionColumns, renderState } from '@/utils/jobState';
 import ReportModal from './ReportModal';
 
 const Distillation: React.FC = () => {
@@ -141,21 +130,7 @@ const Distillation: React.FC = () => {
         </a>
       ),
     },
-    {
-      title: '输入版本',
-      dataIndex: 'input',
-      width: 240,
-      ellipsis: true,
-      render: (_, r) =>
-        r.input
-          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
-          : '-',
-    },
-    {
-      title: '产出版本',
-      dataIndex: 'output',
-      render: (_, r) => renderOutput(r.output),
-    },
+    ...jobVersionColumns(),
     {
       title: '状态',
       dataIndex: 'state',
@@ -308,7 +283,7 @@ const Distillation: React.FC = () => {
       />
 
       <Drawer
-        width={640}
+        width={960}
         open={detailOpen}
         title={currentJob?.name}
         onClose={() => {
@@ -316,48 +291,7 @@ const Distillation: React.FC = () => {
           setCurrentJob(undefined);
         }}
       >
-        {currentJob && (
-          <ProDescriptions<DataPlatform.Job>
-            column={1}
-            dataSource={currentJob}
-            columns={[
-              { title: '任务名', dataIndex: 'name' },
-              {
-                title: '状态',
-                dataIndex: 'state',
-                render: (_, r) => renderState(r.state),
-              },
-              {
-                title: '输入版本',
-                dataIndex: 'input',
-                render: (_, r) =>
-                  r.input
-                    ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
-                    : '-',
-              },
-              {
-                title: '产出版本',
-                dataIndex: 'output',
-                render: (_, r) => renderOutput(r.output),
-              },
-              {
-                title: '创建时间',
-                dataIndex: 'createdAt',
-                render: (_, r) => formatDateTime(r.createdAt),
-              },
-              {
-                title: '错误',
-                dataIndex: 'error',
-                render: (_, r) =>
-                  r.error ? (
-                    <Typography.Text type="danger">{r.error}</Typography.Text>
-                  ) : (
-                    '-'
-                  ),
-              },
-            ]}
-          />
-        )}
+        {currentJob && <JobDetail job={currentJob} />}
       </Drawer>
 
       <ReportModal

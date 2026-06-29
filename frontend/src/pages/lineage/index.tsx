@@ -37,7 +37,6 @@ import { formatDateTime } from '@/utils/format';
 import DatasetPicker from './components/DatasetPicker';
 
 const JOB_TYPE_LABEL: Record<string, string> = {
-  process: '数据加工',
   clean: '清洗',
   distillation: '数据蒸馏',
   synthesis: '数据合成',

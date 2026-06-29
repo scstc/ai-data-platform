@@ -232,11 +232,11 @@ const DatasetDetail: React.FC = () => {
         <a
           onClick={() =>
             history.push(
-              `/governance/processing/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
+              `/governance/cleaning/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
             )
           }
         >
-          数据加工
+          数据清洗
         </a>
       )}
     </Space>

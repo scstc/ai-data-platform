@@ -64,8 +64,6 @@ export default {
   'menu.datasets.tags': 'Tags',
   'menu.governance': 'Data Governance',
   'menu.governance.contentSafety': 'Content Safety',
-  'menu.governance.processing': 'Data Processing',
-  'menu.governance.processing-editor': 'New Processing Job',
   'menu.governance.distillation': 'Data Distillation',
   'menu.governance.distillation-editor': 'New Data Distillation',
   'menu.governance.make': 'Data Synthesis',

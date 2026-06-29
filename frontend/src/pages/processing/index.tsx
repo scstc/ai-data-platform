@@ -1,12 +1,9 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import {
-  PageContainer,
-  ProDescriptions,
-  ProTable,
-} from '@ant-design/pro-components';
+import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
-import { Button, Drawer, message, Popconfirm, Tag, Typography } from 'antd';
+import { Button, Drawer, message, Popconfirm, Tag } from 'antd';
 import { useRef, useState } from 'react';
+import { JobDetail } from '@/components';
 import {
   batchDeleteJobs,
   deleteJob,
@@ -15,18 +12,18 @@ import {
   stopJob,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
-import { renderOutput, renderState } from '@/utils/jobState';
+import { jobVersionColumns, renderState } from '@/utils/jobState';
 
-/** 加工/清洗任务列表(同构,按 jobType 过滤)。数据加工=process / 数据清洗=clean。
- *  参数化复用:cleaning/index.tsx 传 jobType="clean" 即成清洗列表。 */
+/** 清洗任务列表(可按 jobType 过滤)。数据清洗=clean。
+ *  作为通用列表组件保留,cleaning/index.tsx 传 jobType="clean" 复用。 */
 const Processing: React.FC<{
   jobType?: string;
   title?: string;
   createHref?: string;
 }> = ({
-  jobType = 'process',
-  title = '数据加工任务',
-  createHref = '/governance/processing/editor',
+  jobType = 'clean',
+  title = '数据清洗任务',
+  createHref = '/governance/cleaning/editor',
 }) => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -116,15 +113,11 @@ const Processing: React.FC<{
       dataIndex: 'type',
       render: (_, r) => <Tag>{r.type}</Tag>,
     },
+    ...jobVersionColumns(),
     {
       title: '状态',
       dataIndex: 'state',
       render: (_, r) => renderState(r.state),
-    },
-    {
-      title: '产物数据集',
-      dataIndex: 'output',
-      render: (_, r) => renderOutput(r.output),
     },
     {
       title: '创建时间',
@@ -232,7 +225,7 @@ const Processing: React.FC<{
       />
 
       <Drawer
-        width={640}
+        width={960}
         open={detailOpen}
         title={currentJob?.name}
         onClose={() => {
@@ -240,63 +233,7 @@ const Processing: React.FC<{
           setCurrentJob(undefined);
         }}
       >
-        {currentJob && (
-          <>
-            <ProDescriptions<DataPlatform.Job>
-              column={1}
-              dataSource={currentJob}
-              columns={[
-                { title: '任务名', dataIndex: 'name' },
-                { title: '类型', dataIndex: 'type' },
-                {
-                  title: '状态',
-                  dataIndex: 'state',
-                  render: (_, r) => renderState(r.state),
-                },
-                {
-                  title: '产物数据集',
-                  dataIndex: 'output',
-                  render: (_, r) => renderOutput(r.output),
-                },
-                {
-                  title: '创建时间',
-                  dataIndex: 'createdAt',
-                  render: (_, r) => formatDateTime(r.createdAt),
-                },
-                {
-                  title: '错误',
-                  dataIndex: 'error',
-                  render: (_, r) =>
-                    r.error ? (
-                      <Typography.Text type="danger">{r.error}</Typography.Text>
-                    ) : (
-                      '-'
-                    ),
-                },
-              ]}
-            />
-            {currentJob.configYaml && (
-              <>
-                <Typography.Title level={5} style={{ marginTop: 16 }}>
-                  算子配置（生成的 data-juicer YAML）
-                </Typography.Title>
-                <Typography.Paragraph>
-                  <pre
-                    style={{
-                      background: 'var(--ant-color-fill-quaternary, #f5f5f5)',
-                      padding: 12,
-                      borderRadius: 6,
-                      overflow: 'auto',
-                      fontSize: 12,
-                    }}
-                  >
-                    {currentJob.configYaml}
-                  </pre>
-                </Typography.Paragraph>
-              </>
-            )}
-          </>
-        )}
+        {currentJob && <JobDetail job={currentJob} />}
       </Drawer>
     </PageContainer>
   );

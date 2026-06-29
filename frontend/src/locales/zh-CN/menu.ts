@@ -64,8 +64,6 @@ export default {
   'menu.datasets.tags': '标签管理',
   'menu.governance': '数据治理',
   'menu.governance.contentSafety': '内容安全',
-  'menu.governance.processing': '数据加工',
-  'menu.governance.processing-editor': '新建加工任务',
   'menu.governance.cleaning': '数据清洗',
   'menu.governance.cleaning-editor': '新建清洗任务',
   'menu.governance.distillation': '数据蒸馏',

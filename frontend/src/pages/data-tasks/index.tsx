@@ -2,24 +2,11 @@
 // + 出入参数据集多版本按文件预览。定位为运维控制台——新建仍回各类型 editor。
 // 列表走 /api/v1/data-tasks;暂停/继续/停止走通用 /api/v1/jobs/{id}/pause|resume|stop。
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import {
-  PageContainer,
-  ProDescriptions,
-  ProTable,
-} from '@ant-design/pro-components';
+import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history, useSearchParams } from '@umijs/max';
-import {
-  Button,
-  Drawer,
-  message,
-  Popconfirm,
-  Progress,
-  Space,
-  Tag,
-  Typography,
-} from 'antd';
+import { Button, Drawer, message, Popconfirm, Progress, Tag } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import { VersionFilePreview } from '@/components';
+import { JobDetail } from '@/components';
 import {
   batchDeleteJobs,
   dataTaskStats,
@@ -35,12 +22,11 @@ import {
   stopJob,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
-import { renderState } from '@/utils/jobState';
+import { jobVersionColumns, renderState } from '@/utils/jobState';
 import Dashboard, { type DataTaskStatsData } from './Dashboard';
 
 /** 任务类型中文标签(与后端 Job.type 对齐)。 */
 const TYPE_LABEL: Record<string, string> = {
-  process: '数据加工',
   clean: '数据清洗',
   distillation: '数据蒸馏',
   synthesis: '数据合成',
@@ -54,7 +40,6 @@ const TYPE_VALUE_ENUM: Record<string, { text: string }> = Object.fromEntries(
 );
 
 const TYPE_TAG_COLOR: Record<string, string> = {
-  process: 'blue',
   clean: 'blue',
   distillation: 'geekblue',
   synthesis: 'geekblue',
@@ -83,7 +68,6 @@ const REPORT_PAGE: Record<string, string> = {
 
 /** 支持重跑的类型(quality/review 无重跑端点,不在此列)。 */
 const RERUN_SUPPORTED = new Set([
-  'process',
   'clean',
   'distillation',
   'synthesis',
@@ -242,8 +226,11 @@ const DataTasks: React.FC = () => {
     {
       title: '任务名',
       dataIndex: 'name',
+      width: 240,
+      ellipsis: true,
       render: (dom, record) => (
         <a
+          title={record.name}
           onClick={(e) => {
             e.preventDefault();
             openDetail(record);
@@ -271,28 +258,7 @@ const DataTasks: React.FC = () => {
         </Tag>
       ),
     },
-    {
-      title: '输入版本',
-      dataIndex: 'input',
-      width: 220,
-      ellipsis: true,
-      search: false,
-      render: (_, r) =>
-        r.input
-          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
-          : '-',
-    },
-    {
-      title: '产出版本',
-      dataIndex: 'output',
-      width: 220,
-      ellipsis: true,
-      search: false,
-      render: (_, r) =>
-        r.output
-          ? `${r.output.datasetName}（${r.output.versionLabel ?? `v${r.output.versionNo}`}）`
-          : '-',
-    },
+    ...jobVersionColumns(),
     {
       title: '状态',
       dataIndex: 'state',
@@ -408,8 +374,8 @@ const DataTasks: React.FC = () => {
     },
   ];
 
-  const inputVer = currentJob?.input;
-  const outputVer = currentJob?.output;
+  const _inputVer = currentJob?.input;
+  const _outputVer = currentJob?.output;
 
   return (
     <PageContainer
@@ -474,95 +440,7 @@ const DataTasks: React.FC = () => {
         title={currentJob?.name ?? '任务详情'}
         onClose={() => openDetail(undefined)}
       >
-        {currentJob && (
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <ProDescriptions<DataPlatform.Job>
-              column={2}
-              dataSource={currentJob}
-              columns={[
-                { title: '任务名', dataIndex: 'name' },
-                {
-                  title: '类型',
-                  dataIndex: 'type',
-                  render: (_, r) => (
-                    <Tag color={TYPE_TAG_COLOR[r.type] ?? 'default'}>
-                      {TYPE_LABEL[r.type] ?? r.type}
-                    </Tag>
-                  ),
-                },
-                {
-                  title: '状态',
-                  dataIndex: 'state',
-                  render: (_, r) => renderState(r.state),
-                },
-                {
-                  title: '进度',
-                  dataIndex: 'progress',
-                  render: (_, r) => `${r.progress ?? 0}%`,
-                },
-                {
-                  title: '创建时间',
-                  dataIndex: 'createdAt',
-                  render: (_, r) => formatDateTime(r.createdAt),
-                },
-                {
-                  title: '开始时间',
-                  dataIndex: 'startedAt',
-                  render: (_, r) =>
-                    r.startedAt ? formatDateTime(r.startedAt) : '-',
-                },
-                {
-                  title: '结束时间',
-                  dataIndex: 'finishedAt',
-                  render: (_, r) =>
-                    r.finishedAt ? formatDateTime(r.finishedAt) : '-',
-                },
-                {
-                  title: '错误',
-                  dataIndex: 'error',
-                  span: 2,
-                  render: (_, r) =>
-                    r.error ? (
-                      <Typography.Text type="danger">{r.error}</Typography.Text>
-                    ) : (
-                      '-'
-                    ),
-                },
-              ]}
-            />
-
-            <div>
-              <Typography.Title level={5}>输入版本</Typography.Title>
-              {inputVer ? (
-                <Typography.Paragraph
-                  type="secondary"
-                  style={{ marginBottom: 8 }}
-                >
-                  {inputVer.datasetName}（
-                  {inputVer.versionLabel ?? `v${inputVer.versionNo}`}）
-                </Typography.Paragraph>
-              ) : null}
-              <VersionFilePreview
-                versionId={inputVer?.versionId}
-                emptyText="无输入版本"
-              />
-            </div>
-
-            {outputVer && (
-              <div>
-                <Typography.Title level={5}>产出版本</Typography.Title>
-                <Typography.Paragraph
-                  type="secondary"
-                  style={{ marginBottom: 8 }}
-                >
-                  {outputVer.datasetName}（
-                  {outputVer.versionLabel ?? `v${outputVer.versionNo}`}）
-                </Typography.Paragraph>
-                <VersionFilePreview versionId={outputVer.versionId} />
-              </div>
-            )}
-          </Space>
-        )}
+        {currentJob && <JobDetail job={currentJob} />}
       </Drawer>
     </PageContainer>
   );

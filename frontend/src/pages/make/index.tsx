@@ -1,13 +1,10 @@
 // 数据合成任务列表页:复用 distillation 的 ProTable + 报告缓存模式
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import {
-  PageContainer,
-  ProDescriptions,
-  ProTable,
-} from '@ant-design/pro-components';
+import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Tag, Typography } from 'antd';
 import { useRef, useState } from 'react';
+import { JobDetail } from '@/components';
 import {
   batchDeleteMakeJobs,
   deleteMakeJob,
@@ -17,7 +14,7 @@ import {
   stopMakeJob,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
-import { renderOutput, renderState } from '@/utils/jobState';
+import { jobVersionColumns, renderState } from '@/utils/jobState';
 import MakeReportModal from './MakeReportModal';
 
 const Make: React.FC = () => {
@@ -130,22 +127,13 @@ const Make: React.FC = () => {
         </a>
       ),
     },
+    ...jobVersionColumns(),
     {
-      title: '输入版本',
-      dataIndex: 'input',
-      width: 240,
-      ellipsis: true,
-      render: (_, r) =>
-        r.input
-          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
-          : '-',
+      title: '状态',
+      dataIndex: 'state',
+      width: 90,
+      render: (_, r) => renderState(r.state),
     },
-    {
-      title: '产出版本',
-      dataIndex: 'output',
-      render: (_, r) => renderOutput(r.output),
-    },
-    { title: '状态', dataIndex: 'state', width: 90, render: (_, r) => renderState(r.state) },
     {
       title: '扩增比',
       dataIndex: 'progress',
@@ -285,7 +273,7 @@ const Make: React.FC = () => {
       />
 
       <Drawer
-        width={640}
+        width={960}
         open={detailOpen}
         title={currentJob?.name}
         onClose={() => {
@@ -293,44 +281,7 @@ const Make: React.FC = () => {
           setCurrentJob(undefined);
         }}
       >
-        {currentJob && (
-          <ProDescriptions<DataPlatform.Job>
-            column={1}
-            dataSource={currentJob}
-            columns={[
-              { title: '任务名', dataIndex: 'name' },
-              { title: '状态', dataIndex: 'state', render: (_, r) => renderState(r.state) },
-              {
-                title: '输入版本',
-                dataIndex: 'input',
-                render: (_, r) =>
-                  r.input
-                    ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
-                    : '-',
-              },
-              {
-                title: '产出版本',
-                dataIndex: 'output',
-                render: (_, r) => renderOutput(r.output),
-              },
-              {
-                title: '创建时间',
-                dataIndex: 'createdAt',
-                render: (_, r) => formatDateTime(r.createdAt),
-              },
-              {
-                title: '错误',
-                dataIndex: 'error',
-                render: (_, r) =>
-                  r.error ? (
-                    <Typography.Text type="danger">{r.error}</Typography.Text>
-                  ) : (
-                    '-'
-                  ),
-              },
-            ]}
-          />
-        )}
+        {currentJob && <JobDetail job={currentJob} />}
       </Drawer>
 
       <MakeReportModal

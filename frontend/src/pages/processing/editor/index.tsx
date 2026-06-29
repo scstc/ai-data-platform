@@ -36,20 +36,20 @@ import { stepsToYaml } from './yaml';
 
 const { Text, Paragraph } = Typography;
 
-/** 加工/清洗任务编辑器(同构,按 jobType 建任务)。数据加工=process / 数据清洗=clean。
- *  参数化复用:cleaning/editor 渲染 <Editor jobType="clean" ... /> 即成清洗编辑器。 */
+/** 清洗任务编辑器(按 jobType 建任务)。数据清洗=clean。
+ *  作为通用编辑器组件保留,cleaning/editor 渲染 <Editor jobType="clean" ... /> 复用。 */
 const Editor: React.FC<{
   jobType?: string;
   title?: string;
   noun?: string;
   redirectHref?: string;
-  /** 业务桶:清洗页传 "cleansing" 锁定算子库;加工页不传 → 展示全部算子 */
+  /** 业务桶:清洗页传 "cleansing" 锁定算子库;不传 → 展示全部算子 */
   bucket?: string;
 }> = ({
-  jobType = 'process',
-  title = '新建加工任务',
-  noun = '加工',
-  redirectHref = '/governance/processing',
+  jobType = 'clean',
+  title = '新建清洗任务',
+  noun = '清洗',
+  redirectHref = '/governance/cleaning',
   bucket,
 }) => {
   const { steps, add, remove, reorder, updateParams, replaceAll, clear } =
@@ -124,13 +124,8 @@ const Editor: React.FC<{
   // 自动任务名:数据集/算子变化时重算,用户手动改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
   const suggestedName = useMemo(
-    () =>
-      suggestTaskName(
-        selectedDatasetName,
-        jobType === 'clean' ? '数据清洗' : '数据加工',
-        steps.map((s) => s.name),
-      ),
-    [selectedDatasetName, steps, jobType],
+    () => suggestTaskName(selectedDatasetName, '数据清洗'),
+    [selectedDatasetName],
   );
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);

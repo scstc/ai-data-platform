@@ -21,9 +21,8 @@ export interface DataTaskStatsData {
   }[];
 }
 
-// 受管 7 类任务的中文标签(镜像 index.tsx 的 TYPE_LABEL 与后端 _TASK_TYPES)。
+// 受管任务类型的中文标签(镜像 index.tsx 的 TYPE_LABEL 与后端 _TASK_TYPES)。
 const TYPE_LABEL: Record<string, string> = {
-  process: '数据加工',
   clean: '数据清洗',
   distillation: '数据蒸馏',
   synthesis: '数据合成',

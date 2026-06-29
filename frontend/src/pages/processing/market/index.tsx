@@ -265,9 +265,9 @@ const Market: React.FC = () => {
                 <Button onClick={clear}>清空</Button>
                 <Button
                   type="primary"
-                  onClick={() => history.push('/governance/processing/editor')}
+                  onClick={() => history.push('/governance/cleaning/editor')}
                 >
-                  去新建加工任务
+                  去新建清洗任务
                 </Button>
               </Space>,
             ]

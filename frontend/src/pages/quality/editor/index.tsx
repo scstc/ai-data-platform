@@ -6,13 +6,14 @@ import {
   Col,
   Input,
   Modal,
+  message,
   Row,
   Select,
   Space,
   Typography,
-  message,
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
+import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createQualityJob,
   generateQuality,
@@ -20,7 +21,6 @@ import {
   listDatasets,
   listOperatorCatalog,
 } from '@/services/data-platform';
-import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
@@ -41,7 +41,9 @@ const QualityEditor: React.FC = () => {
   );
   const updateParams = useCallback(
     (idx: number, params: Record<string, unknown>) =>
-      setSteps((prev) => prev.map((s, i) => (i === idx ? { ...s, params } : s))),
+      setSteps((prev) =>
+        prev.map((s, i) => (i === idx ? { ...s, params } : s)),
+      ),
     [],
   );
   const replaceAll = useCallback(
@@ -65,9 +67,9 @@ const QualityEditor: React.FC = () => {
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  const [opMap, setOpMap] = useState<Record<string, DataPlatform.CatalogOperator>>(
-    {},
-  );
+  const [opMap, setOpMap] = useState<
+    Record<string, DataPlatform.CatalogOperator>
+  >({});
   const [activeIdx, setActiveIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
@@ -79,7 +81,9 @@ const QualityEditor: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 500 }).then((r) => setDatasets(r.data));
+    listDatasets({ current: 1, pageSize: 500 }).then((r) =>
+      setDatasets(r.data),
+    );
   }, []);
 
   useEffect(() => {
@@ -105,11 +109,7 @@ const QualityEditor: React.FC = () => {
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
   // 自动任务名:数据集/算子变化时重算,用户改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
-  const suggestedName = suggestTaskName(
-    selectedDatasetName,
-    '质量评估',
-    steps.map((s) => s.name),
-  );
+  const suggestedName = suggestTaskName(selectedDatasetName, '质量评估');
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);
   }, [suggestedName, nameDirty]);
@@ -138,7 +138,9 @@ const QualityEditor: React.FC = () => {
         const ops = r.data.operators;
         if (!ops.length) {
           // 空结果不覆盖已选算子,提示而非伪装成功
-          message.warning(r.data.explanation || '未生成可用算子,请调整目标后重试');
+          message.warning(
+            r.data.explanation || '未生成可用算子,请调整目标后重试',
+          );
           return Promise.reject();
         }
         replaceAll(ops);
@@ -182,7 +184,12 @@ const QualityEditor: React.FC = () => {
         <Button key="ai" onClick={onGenerate}>
           ✨ AI 生成
         </Button>,
-        <Button key="submit" type="primary" loading={submitting} onClick={onSubmit}>
+        <Button
+          key="submit"
+          type="primary"
+          loading={submitting}
+          onClick={onSubmit}
+        >
           创建评估
         </Button>,
       ]}
@@ -224,7 +231,11 @@ const QualityEditor: React.FC = () => {
 
       <Row gutter={16}>
         <Col span={7}>
-          <Card title="算子库" size="small" styles={{ body: { height: 460, padding: 12 } }}>
+          <Card
+            title="算子库"
+            size="small"
+            styles={{ body: { height: 460, padding: 12 } }}
+          >
             <OperatorLibrary category="filter" onAdd={add} />
           </Card>
         </Col>
@@ -248,7 +259,11 @@ const QualityEditor: React.FC = () => {
           </Card>
         </Col>
         <Col span={7}>
-          <Card title="参数" size="small" styles={{ body: { height: 460, overflow: 'auto' } }}>
+          <Card
+            title="参数"
+            size="small"
+            styles={{ body: { height: 460, overflow: 'auto' } }}
+          >
             <StepParamsForm
               op={activeOp}
               params={activeStep?.params ?? {}}
@@ -260,7 +275,8 @@ const QualityEditor: React.FC = () => {
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          质量评估对每条数据计算质量指标(不删除数据),结果写入该版本的 stats,可在评估任务详情查看报告。
+          质量评估对每条数据计算质量指标(不删除数据),结果写入该版本的
+          stats,可在评估任务详情查看报告。
         </Text>
       </Card>
     </PageContainer>
