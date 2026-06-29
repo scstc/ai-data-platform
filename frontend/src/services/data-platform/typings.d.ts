@@ -255,24 +255,22 @@ declare namespace DataPlatform {
   type CatalogOperator = {
     name: string;
     category: string;
-    summaryEn: string;
-    summaryZh: string;
-    descEn?: string;
-    descZh?: string;
-    modality: string[];
-    compute: string | null;
-    frameworks: string[];
-    stability: string | null;
-    resourceClass: 'cpu' | 'api_llm' | 'hf_model' | 'gpu' | 'vllm';
-    params: CatalogParam[];
-    example?: string | null;
-    reference?: string | null;
-    detailPage?: string | null;
-    scenarioGroup: string;
     zhLabel: string;
-    zhUsageTip?: string;
-    runnable: 'ready' | 'needs_api' | 'needs_media' | 'needs_compute';
+    summaryEn?: string | null;
+    summaryZh?: string | null;
+    descEn?: string | null;
+    descZh?: string | null;
+    zhUsageTip?: string | null;
+    scenarioGroup?: string | null;
+    resourceClass: 'cpu' | 'api_llm' | 'hf_model' | 'gpu' | 'vllm';
+    modality?: string[] | null;
+    frameworks?: string[] | null;
+    params?: CatalogParam[] | null;
+    example?: string | null;
+    detailPage?: string | null;
     recommend: boolean;
+    runnable: 'ready' | 'needs_api' | 'needs_media' | 'needs_compute';
+    usageCount?: number;
   };
 
   /** 当前环境探测到的执行能力(决定 GPU/LLM/vLLM/Ray 类算子是否可运行) */
