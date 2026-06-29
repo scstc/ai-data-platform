@@ -91,7 +91,11 @@ const OperatorDetail: React.FC = () => {
         <Row gutter={24}>
           {/* 左侧主内容 */}
           <Col xs={24} lg={18}>
-            <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            <Space
+              orientation="vertical"
+              size="large"
+              style={{ width: '100%' }}
+            >
               {/* 基本信息 */}
               <Card title="基本信息">
                 {operator.zhUsageTip && (
@@ -130,10 +134,14 @@ const OperatorDetail: React.FC = () => {
 
           {/* 右侧侧边栏 */}
           <Col xs={24} lg={6}>
-            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Space
+              orientation="vertical"
+              size="middle"
+              style={{ width: '100%' }}
+            >
               {/* 运行状态 */}
               <Card size="small" title="运行状态">
-                <Space direction="vertical" style={{ width: '100%' }}>
+                <Space orientation="vertical" style={{ width: '100%' }}>
                   {tag && <Tag color={tag.color}>{tag.label}</Tag>}
                   <Descriptions column={1} size="small">
                     <Descriptions.Item label="资源类型">
@@ -197,6 +205,3 @@ const OperatorDetail: React.FC = () => {
 };
 
 export default OperatorDetail;
-
-
-
