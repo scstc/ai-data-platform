@@ -422,6 +422,28 @@ export async function listIngestTasks(
   });
 }
 
+/** 采集任务概览统计 GET /api/v1/ingest-tasks/stats
+ *  驱动 ingest/tasks 页顶 dashboard:状态/数据源类型分布 + 近 24h 完成 + 平均时长 + 近 14 天趋势。 */
+export async function ingestTaskStats(options?: { [key: string]: any }) {
+  return request<{
+    total: number;
+    byState: Record<string, number>;
+    byDsTypeState: { dsType: string; state: string; count: number }[];
+    completedLast24h: number;
+    avgDurationSec: number | null;
+    trend14d: {
+      date: string;
+      created: number;
+      success: number;
+      failed: number;
+    }[];
+    success: boolean;
+  }>('/api/v1/ingest-tasks/stats', {
+    method: 'GET',
+    ...(options || {}),
+  });
+}
+
 /** 新建采集任务 POST /api/v1/ingest-tasks */
 export async function createIngestTask(
   body: DataPlatform.IngestTaskCreate,

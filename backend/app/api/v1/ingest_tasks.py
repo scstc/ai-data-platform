@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from pydantic import Field
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_perm
@@ -269,6 +270,193 @@ async def list_ingest_tasks(
             item.category_name = cat_names.get(r.category_id)
         data.append(item)
     return PageResponse[IngestTaskRead](data=data, total=total)
+
+
+# ---------------------------------------------------------------------------
+# 页顶概览 dashboard 统计(/ingest-tasks/stats)
+# 镜像 data-tasks/stats 的形态:状态/数据源类型分布 + 近 24h 完成 + 平均时长 + 14 天趋势。
+# - by_state 来自 IngestTask.status(任务级「当前态」)
+# - by_ds_type_state 来自 IngestTask JOIN DataSource(数据源类型 × 状态,堆叠柱)
+# - completed_last24h / avg_duration_sec / trend14d 来自 Job.type='ingest'(运行级)
+# ---------------------------------------------------------------------------
+
+# 采集任务生命周期阶段(与 IngestTask.status 对齐;比数据任务少 paused/cancelled)
+_INGEST_STATES: tuple[str, ...] = ("pending", "running", "success", "failed")
+# 采集终态(success/failed 都是「完成」)
+_INGEST_TERMINAL_STATES: tuple[str, ...] = ("success", "failed")
+# 趋势按北京日,与 data-tasks 对齐
+_BEIJING_OFFSET = timedelta(hours=8)
+_TREND_DAYS = 14
+
+
+class DsTypeStateCount(CamelModel):
+    """某数据源类型 × 某状态的采集任务数(仅非零组合)。"""
+
+    ds_type: str = Field(serialization_alias="dsType")
+    state: str
+    count: int
+
+
+class IngestTrendPoint(CamelModel):
+    """近 14 天(北京日)采集运行趋势:创建数 + 当日成功的成功/失败数。"""
+
+    date: str
+    created: int
+    success: int
+    failed: int
+
+
+class IngestTaskStats(CamelModel):
+    """采集任务概览统计,驱动 ingest/tasks 页顶 dashboard。
+
+    - byState: 各状态计数(4 种全量,无则 0);成功率由前端派生。
+    - byDsTypeState: 数据源类型 × 状态计数(仅非零组合),供堆叠柱状图。
+    - completedLast24h: 近 24h 进入终态的运行数(Job.type=ingest)。
+    - avgDurationSec: 成功运行的平均处理时长(秒);无样本为 None。
+    - trend14d: 近 14 天(北京日)创建 / 完成趋势,升序。
+    """
+
+    total: int
+    by_state: dict[str, int]
+    by_ds_type_state: list[DsTypeStateCount] = Field(
+        serialization_alias="byDsTypeState"
+    )
+    completed_last24h: int = Field(serialization_alias="completedLast24h")
+    avg_duration_sec: float | None
+    trend14d: list[IngestTrendPoint] = Field(serialization_alias="trend14d")
+    success: bool = True
+
+
+def _coerce_date(value: object) -> date:
+    """把 DB 返回的日期(asyncpg 通常给 date,亦兼容 datetime / ISO 字符串)规整为 date。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+async def _build_ingest_trend14d(session: SessionDep, now_utc: datetime) -> list[IngestTrendPoint]:
+    """近 14 天(北京日)采集运行趋势:Job.type='ingest' 的创建数 + 当日完成的成功/失败数。
+
+    库内时间戳为 naive UTC,按 ``ts + interval '8 hours'`` 取北京日分桶,
+    与列表 / UI 的北京时区展示对齐(否则傍晚的运行会被算到错误的日期)。
+    """
+    bj_today = (now_utc + _BEIJING_OFFSET).date()
+    days = [bj_today - timedelta(days=i) for i in range(_TREND_DAYS - 1, -1, -1)]
+    # 窗口起点(UTC):最早北京日 00:00 - 8h
+    since_utc = datetime.combine(days[0], datetime.min.time()) - _BEIJING_OFFSET
+
+    bj_created = func.date(Job.created_at + text("interval '8 hours'"))
+    created_rows = (
+        await session.execute(
+            select(bj_created.label("d"), func.count())
+            .where(Job.type == "ingest", Job.created_at >= since_utc)
+            .group_by(bj_created)
+        )
+    ).all()
+    created_map = {_coerce_date(d): n for d, n in created_rows}
+
+    bj_finished = func.date(Job.finished_at + text("interval '8 hours'"))
+    fin_rows = (
+        await session.execute(
+            select(bj_finished.label("d"), Job.state, func.count())
+            .where(
+                Job.type == "ingest",
+                Job.state.in_(("success", "failed")),
+                Job.finished_at >= since_utc,
+            )
+            .group_by(bj_finished, Job.state)
+        )
+    ).all()
+    succ_map: dict[date, int] = {}
+    fail_map: dict[date, int] = {}
+    for d, st, n in fin_rows:
+        (succ_map if st == "success" else fail_map)[_coerce_date(d)] = n
+
+    return [
+        IngestTrendPoint(
+            date=day.isoformat(),
+            created=created_map.get(day, 0),
+            success=succ_map.get(day, 0),
+            failed=fail_map.get(day, 0),
+        )
+        for day in days
+    ]
+
+
+@router.get(
+    "/ingest-tasks/stats",
+    response_model=IngestTaskStats,
+    dependencies=[Depends(require_perm("ingest:task:list"))],
+)
+async def ingest_tasks_stats(session: SessionDep) -> IngestTaskStats:
+    """采集任务概览:状态 / 数据源类型分布 + 近 24h 完成 + 平均时长 + 14 天趋势。
+
+    范围与列表一致——所有采集任务。均为廉价的 GROUP BY 聚合;随列表一同刷新
+    (含运行时 5s 轮询)。若 jobs 表显著增大,建议给 created_at / finished_at 加索引。
+    """
+    now_utc = datetime.now(UTC).replace(tzinfo=None)  # naive UTC,与库内列对齐
+
+    # 1) 任务级:总任务 + 状态分桶
+    state_rows = (
+        await session.execute(
+            select(IngestTask.status, func.count()).group_by(IngestTask.status)
+        )
+    ).all()
+    by_state = dict.fromkeys(_INGEST_STATES, 0)
+    total = 0
+    for st, count in state_rows:
+        total += count
+        if st in by_state:
+            by_state[st] = count
+
+    # 2) 任务级:数据源类型 × 状态(JOIN datasources 表)
+    ds_rows = (
+        await session.execute(
+            select(DataSource.type, IngestTask.status, func.count())
+            .join(IngestTask, IngestTask.datasource_id == DataSource.id)
+            .group_by(DataSource.type, IngestTask.status)
+        )
+    ).all()
+    by_ds_type_state = [
+        DsTypeStateCount(ds_type=t, state=s, count=n) for t, s, n in ds_rows
+    ]
+
+    # 3) 运行级:近 24h 完成 + 平均时长 + 14 天趋势(全从 Job.type='ingest' 算)
+    completed_last24h = (
+        await session.scalar(
+            select(func.count()).where(
+                Job.type == "ingest",
+                Job.state.in_(_INGEST_TERMINAL_STATES),
+                Job.finished_at >= now_utc - timedelta(hours=24),
+            )
+        )
+        or 0
+    )
+
+    avg_raw = await session.scalar(
+        select(
+            func.avg(func.extract("epoch", Job.finished_at - Job.started_at))
+        ).where(
+            Job.type == "ingest",
+            Job.state == "success",
+            Job.started_at.is_not(None),
+            Job.finished_at.is_not(None),
+        )
+    )
+    avg_duration_sec = float(avg_raw) if avg_raw is not None else None
+
+    trend14d = await _build_ingest_trend14d(session, now_utc)
+
+    return IngestTaskStats(
+        total=total,
+        by_state=by_state,
+        by_ds_type_state=by_ds_type_state,
+        completed_last24h=completed_last24h,
+        avg_duration_sec=avg_duration_sec,
+        trend14d=trend14d,
+    )
 
 
 @router.post("/ingest-tasks")

@@ -40,6 +40,7 @@ import {
   deleteIngestTask,
   generateDataset,
   getIngestTask,
+  ingestTaskStats,
   listCategories,
   listDataSources,
   listDatasourceTables,
@@ -56,6 +57,7 @@ import {
 import { formatDateTime } from '@/utils/format';
 import FilterOperatorPicker from './components/FilterOperatorPicker';
 import { SourcePreview } from './components/SourcePreview';
+import Dashboard, { type IngestTaskStatsData } from './Dashboard';
 
 /** 状态 → 中文标签与 Tag 颜色 */
 const STATUS_META: Record<
@@ -193,6 +195,15 @@ const IngestTasksPage: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentRow, setCurrentRow] = useState<DataPlatform.IngestTask>();
+  // 页顶概览统计,驱动 Dashboard。随列表 request(含 reload/轮询)一同刷新。
+  const [stats, setStats] = useState<IngestTaskStatsData>();
+  const refreshStats = () => {
+    ingestTaskStats()
+      .then((res) => {
+        if (res?.success) setStats(res);
+      })
+      .catch(() => undefined);
+  };
   // 数据源 id → 数据源（用于按所选数据源类型条件渲染"采集对象"）
   const [dsMap, setDsMap] = useState<Record<string, DataPlatform.DataSource>>(
     {},
@@ -638,6 +649,7 @@ const IngestTasksPage: React.FC = () => {
 
   return (
     <PageContainer>
+      <Dashboard stats={stats} />
       <ProTable<DataPlatform.IngestTask, DataPlatform.IngestTaskListParams>
         headerTitle="采集任务"
         actionRef={actionRef}
@@ -655,6 +667,8 @@ const IngestTasksPage: React.FC = () => {
           });
           // 对运行中的任务调用单任务接口推进进度，使轮询时进度可见
           const running = res.data.filter((t) => t.status === 'running');
+          // 概览统计与列表同源刷新（首次加载、reload、轮询都会带上）
+          refreshStats();
           if (running.length > 0) {
             const advanced = await Promise.all(
               running.map((t) => getIngestTask(t.id).catch(() => null)),
