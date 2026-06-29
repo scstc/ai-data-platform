@@ -1,26 +1,19 @@
-"""数据源路由：CRUD + 测试连接 + 下载/导出 S3。
+"""数据源路由：CRUD + 测试连接 + 桶/对象浏览。
 
 契约见前端 typings.d.ts / mock/dataPlatform.ts：
 - 列表：name 模糊、type 精确，分页 {data,total,success}。
 - 新建：按 config 必填字段是否齐全决定初始 status（connected / pending）。
 - 测试连接：同样的必填校验，返回 {data:{success,latencyMs,message}, success}。
-- 下载/导出 S3：与数据集版本 download/export-s3 行为对齐(见 datasets.py);
-  当前仅 s3 完整支持,hdfs/database/api 返回 400 友好错误(与按钮常驻策略一致)。
+- 桶/对象：仅 s3 类型支持,列桶 / 列对象供配置与数据集导入选择。
 """
 
 from __future__ import annotations
 
-import io
 import secrets
-import tempfile
-import zipfile
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,17 +30,11 @@ from app.schemas import (
     TestConnectionParams,
     TestConnectionResult,
 )
-from app.schemas.dataset import ExportS3Request
 from app.schemas.common import CamelModel
 from app.services import external_store
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
-from app.services.external_store import (
-    ExternalStoreError,
-    cached_bytes,
-    presigned_get_url,
-    upload_object,
-)
+from app.services.external_store import ExternalStoreError
 
 router = APIRouter(tags=["datasources"])
 
@@ -410,239 +397,3 @@ async def list_datasource_objects(
         )
     return JSONResponse(content={"data": objects, "success": True})
 
-
-# ===== 数据源下载 / 导出 S3(与数据集版本 download/export-s3 行为对齐)=====
-# 仅 s3 完整支持(直接复用 external_store.list_objects/cached_bytes/upload_object,
-# 传数据源自己的 config);hdfs/database/api → 400 友好错误(按钮常驻但类型不支持)。
-# 与版本实现差异:数据源没有"成员表",内容边界是 config.bucket + config.prefix;
-# 读源 = 数据源自身的 s3 config,写目标 = 选定 s3 数据源的 config。
-# 自写红线:导出目标桶/前缀与源桶/前缀相同 → 拒绝(防止回写源对象)。
-
-
-@dataclass(frozen=True)
-class _DsFile:
-    """数据源文件视图(对应数据集版本的 DatasetMemberRead)。"""
-
-    bucket: str
-    key: str
-    name: str
-
-
-def _not_supported_for_type(ds: DataSource, action: str) -> JSONResponse:
-    """统一非 s3 类型下载/导出 S3 拒绝消息(action: "下载" / "导出 S3")。"""
-    return JSONResponse(
-        status_code=400,
-        content={
-            "success": False,
-            "message": (
-                f"数据源类型「{ds.type}」暂不支持{action}"
-                "(当前仅 s3 完整支持;hdfs/database/api 类型无文件语义或尚未接入)"
-            ),
-        },
-    )
-
-
-async def _list_ds_files(ds: DataSource) -> list[_DsFile] | JSONResponse:
-    """列数据源当前可见的全部文件(s3 = config.bucket + config.prefix 下的对象)。"""
-    if ds.type != "s3":
-        return _not_supported_for_type(ds, "下载/导出 S3")
-    config = ds.config or {}
-    bucket = str(config.get("bucket") or "").strip()
-    if not bucket:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "数据源配置缺少 bucket 字段"},
-        )
-    prefix = str(config.get("prefix") or "").strip()
-    try:
-        objs = await external_store.list_objects(config, bucket, prefix)
-    except ExternalStoreError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": f"列对象失败:{exc}"},
-        )
-    return [
-        _DsFile(bucket=bucket, key=o["key"], name=Path(o["key"]).name)
-        for o in objs
-    ]
-
-
-def _safe_filename(name: str, fallback: str) -> str:
-    """剥文件名非法字符(与 _download_zip 一致);空名回退 fallback。"""
-    safe = "".join("_" if c in '\\/:*?"<>|' else c for c in name).strip()
-    return safe or fallback
-
-
-@router.get(
-    "/datasources/{ds_id}/download",
-    response_model=None,
-    dependencies=[Depends(require_admin)],
-)
-async def download_datasource(
-    ds_id: str, session: SessionDep
-) -> JSONResponse | FileResponse:
-    """下载一个 s3 数据源当前可见的全部对象(其它类型 400)。
-
-    单对象 → 302 到预签名 URL(免后端中转);多对象 → zip 打包(同数据集版本)。
-    """
-    ds = await session.get(DataSource, ds_id)
-    if ds is None:
-        return _not_found()
-    files = await _list_ds_files(ds)
-    if isinstance(files, JSONResponse):
-        return files
-    if not files:
-        return JSONResponse(
-            status_code=410,
-            content={"success": False, "message": "数据源无可见对象,无可下载内容"},
-        )
-    # 单对象走预签名直连(与数据集版本 download 一致:体验更好,S3 协议)
-    if len(files) == 1:
-        only = files[0]
-        try:
-            url = await presigned_get_url(ds.config or {}, only.bucket, only.key)
-        except ExternalStoreError as exc:
-            return JSONResponse(
-                status_code=502,
-                content={"success": False, "message": f"生成下载链接失败:{exc}"},
-            )
-        return RedirectResponse(url, status_code=302)
-    # 多对象 zip 打包
-    bucket = str((ds.config or {}).get("bucket") or "").strip()
-    tmp = Path(tempfile.mktemp(suffix=".zip"))
-    used: set[str] = set()
-    skipped: list[str] = []
-    try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in files:
-                try:
-                    data = await cached_bytes(ds.config or {}, f.bucket, f.key)
-                except ExternalStoreError as exc:
-                    skipped.append(f"{f.name or f.key}:S3 拉取失败({exc})")
-                    continue
-                name = f.name or Path(f.key).name or "file"
-                if name in used:
-                    pp = Path(name)
-                    n = 1
-                    while f"{pp.stem} ({n}){pp.suffix}" in used:
-                        n += 1
-                    name = f"{pp.stem} ({n}){pp.suffix}"
-                used.add(name)
-                zf.writestr(name, data)
-    except Exception as exc:
-        tmp.unlink(missing_ok=True)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"打包失败:{exc}"},
-        )
-    if not used:
-        tmp.unlink(missing_ok=True)
-        reason = "；".join(skipped[:5]) if skipped else "对象列表为空"
-        return JSONResponse(
-            status_code=410,
-            content={
-                "success": False,
-                "message": f"无可下载的对象文件:{reason}",
-            },
-        )
-    safe_name = _safe_filename(ds.name, ds.id)
-    filename = f"{safe_name}_{bucket}.zip" if bucket else f"{safe_name}.zip"
-    return FileResponse(
-        str(tmp),
-        media_type="application/zip",
-        filename=filename,
-        background=BackgroundTask(lambda t=tmp: t.unlink(missing_ok=True)),
-    )
-
-
-@router.post(
-    "/datasources/{ds_id}/export-s3",
-    response_model=None,
-    dependencies=[Depends(require_admin)],
-)
-async def export_datasource_to_s3(
-    ds_id: str, body: ExportS3Request, session: SessionDep
-) -> JSONResponse:
-    """把一个 s3 数据源当前可见的对象导出到另一个 s3 数据源(读源、写目标)。
-
-    与数据集版本 export-s3 行为一致:同名对象加序号去重;同源同桶同 key → 拒绝回写;
-    全员失败时诚实回因。其它类型数据源 → 400。
-    """
-    src = await session.get(DataSource, ds_id)
-    if src is None:
-        return _not_found()
-    files = await _list_ds_files(src)
-    if isinstance(files, JSONResponse):
-        return files
-    if not body.bucket:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "请选择导出目标桶"},
-        )
-    dst = await session.get(DataSource, body.datasource_id)
-    if dst is None:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "message": "目标数据源不存在"},
-        )
-    if dst.type != "s3":
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "仅支持导出到 s3 类型数据源"},
-        )
-    prefix = (body.prefix or "").strip().strip("/")
-    exported = 0
-    used: set[str] = set()
-    skipped: list[str] = []
-    for f in files:
-        try:
-            data = await cached_bytes(src.config or {}, f.bucket, f.key)
-        except ExternalStoreError as exc:
-            skipped.append(f"{f.name or f.key}:S3 拉取失败({exc})")
-            continue
-        name = f.name or Path(f.key).name or "file"
-        if name in used:
-            pp = Path(name)
-            n = 1
-            while f"{pp.stem} ({n}){pp.suffix}" in used:
-                n += 1
-            name = f"{pp.stem} ({n}){pp.suffix}"
-        used.add(name)
-        dest_key = f"{prefix}/{name}" if prefix else name
-        # 红线:同源数据源 + 同桶 + 同 key 视为回写源对象 → 拒绝
-        if (
-            src.id == dst.id
-            and f.bucket == body.bucket
-            and f.key == dest_key
-        ):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "导出目标与源对象相同,已阻止回写源;请换目标桶或前缀",
-                },
-            )
-        try:
-            await upload_object(
-                dst.config, body.bucket, dest_key, io.BytesIO(data), len(data)
-            )
-        except ExternalStoreError as exc:
-            return JSONResponse(
-                status_code=502,
-                content={"success": False, "message": f"导出失败:{exc}"},
-            )
-        exported += 1
-
-    if exported == 0:
-        reason = "；".join(skipped[:5]) if skipped else "对象列表为空"
-        return JSONResponse(
-            status_code=410,
-            content={
-                "success": False,
-                "message": f"无可导出的对象文件:{reason}",
-            },
-        )
-    target = f"s3://{body.bucket}/{prefix}" if prefix else f"s3://{body.bucket}"
-    return JSONResponse(
-        content={"success": True, "data": {"exported": exported, "target": target}}
-    )
