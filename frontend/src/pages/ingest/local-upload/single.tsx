@@ -392,7 +392,9 @@ const SingleUploadPage: React.FC = () => {
             </div>
           </div>
           <div>
-            <Text strong>数据集名称 <Text type="danger">*</Text></Text>
+            <Text strong>
+              数据集名称 <Text type="danger">*</Text>
+            </Text>
             <Space.Compact style={{ width: '100%', marginTop: 8 }}>
               <Input
                 placeholder="请输入数据集名称"

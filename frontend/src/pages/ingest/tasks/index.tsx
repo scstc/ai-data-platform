@@ -38,7 +38,6 @@ import { CategoryManager } from '@/components';
 import {
   createIngestTask,
   deleteIngestTask,
-  generateDataset,
   getIngestTask,
   ingestTaskStats,
   listCategories,
@@ -276,23 +275,6 @@ const IngestTasksPage: React.FC = () => {
     } catch {
       hide();
       message.error('运行失败，请重试');
-    }
-  };
-
-  /** 生成数据集：库数据 → jsonl → 平台 MinIO（文件管理），不同版本不同文件夹 */
-  const handleGenerate = async (id: string) => {
-    const hide = message.loading('正在生成数据集…', 0);
-    try {
-      const res = await generateDataset(id);
-      hide();
-      const d = res.data;
-      message.success(
-        `已生成「${d.datasetName}」v${d.versionNo}（${d.rows} 行）→ 文件管理 ${d.fileKey}`,
-      );
-      actionRef.current?.reload();
-    } catch (e: any) {
-      hide();
-      message.error(e?.data?.message ?? e?.message ?? '生成数据集失败');
     }
   };
 
@@ -631,9 +613,6 @@ const IngestTasksPage: React.FC = () => {
             运行
           </a>
         ),
-        <a key="generate" onClick={() => handleGenerate(record.id)}>
-          生成数据集
-        </a>,
         <Popconfirm
           key="delete"
           title="确认删除该任务？"
