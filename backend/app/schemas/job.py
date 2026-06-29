@@ -23,6 +23,9 @@ class JobCreate(CamelModel):
     type: str = "process"
     dataset_version_id: str
     operators: list[OperatorSpec]
+    # 清洗作用字段(DJ text_keys):留空则后端按字段名优先级自动探测;
+    # 显式指定则原样用(可多字段),用于脏字符不在标准字段(如 task)的场景。
+    text_keys: list[str] | None = None
 
 
 class QualityJobCreate(CamelModel):

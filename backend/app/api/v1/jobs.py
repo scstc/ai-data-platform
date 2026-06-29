@@ -113,6 +113,8 @@ class PreviewRequest(CamelModel):
     dataset_version_id: str
     operators: list[OperatorSpec]
     sample_size: int = 20
+    # 清洗作用字段(留空=自动探测);与 create_job 一致,使试跑与正式任务效果对齐
+    text_keys: list[str] | None = None
 
 
 def _new_job_id() -> str:
@@ -439,6 +441,7 @@ async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse
             input_version=input_version,
             operators=[o.model_dump() for o in body.operators],
             sample_size=size,
+            text_keys=body.text_keys,
         )
     except (EngineError, ExternalStoreError) as exc:
         return JSONResponse(

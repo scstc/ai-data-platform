@@ -129,6 +129,7 @@ def build_config(
     output_path: str,
     operators: list[dict[str, Any]],
     text_key: str | None = None,
+    text_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     """把算子编排序列化为 data-juicer 合法配置(dict)。
 
@@ -138,8 +139,10 @@ def build_config(
     ——DJ 该参数默认写死 ``gpt-4o``,不覆盖会向自定义端点请求不存在的模型而失败;
     用户在表单里显式填了 ``api_model`` 则尊重用户值。
 
-    text_key:数据主文本字段名。DJ 默认 text_key='text',数据无 text 字段时(如新闻
-    用 title)必须显式指定,否则 load_dataset 报 'no key [text]'。None 时不写(用 DJ 默认)。
+    text_key / text_keys:数据主文本字段名。DJ 默认 text_key='text',数据无 text
+    字段时(如新闻用 title)必须显式指定,否则 load_dataset 报 'no key [text]'。
+    text_keys(列表、可多字段,用户显式选择)优先于 text_key(单字段,自动探测);
+    两者皆空时不写(用 DJ 默认 ['text'])。
     """
     cfg = get_active_llm_config()
     process: list[dict[str, Any]] = []
@@ -163,8 +166,11 @@ def build_config(
         "export_path": Path(output_path).as_posix(),
         "process": process,
     }
-    if text_key:
-        # DJ 配置项是 text_keys(复数、列表),默认 ["text"];非 text 字段须显式指定
+    if text_keys:
+        # 用户显式指定(可多字段)优先;DJ 配置项是 text_keys(复数、列表)
+        result["text_keys"] = list(text_keys)
+    elif text_key:
+        # 自动探测的单字段:DJ 默认 ["text"],非 text 字段须显式指定
         result["text_keys"] = [text_key]
     return result
 
@@ -330,6 +336,7 @@ async def run_preview(
     input_version: DatasetVersion,
     operators: list[dict[str, Any]],
     sample_size: int = 20,
+    text_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     """在输入版本的前 sample_size 行上试跑算子流水线,返回加工前后样本。
 
@@ -370,7 +377,8 @@ async def run_preview(
                     input_path=str(sample_path),
                     output_path=str(out_path),
                     operators=operators,
-                    text_key=detect_text_key(before),
+                    text_key=None if text_keys else detect_text_key(before),
+                    text_keys=text_keys,
                 )
                 yaml_path.write_text(
                     yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
@@ -408,9 +416,11 @@ async def run_process_job(
     job_id: str,
     input_version: DatasetVersion,
     operators: list[dict[str, Any]],
+    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """对一个输入版本跑算子流水线 → 写回输入数据集,产出新版本。
 
+    text_keys:用户显式指定的清洗作用字段(可多字段);留空则按字段名优先级自动探测。
     返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 EngineError。
     """
     dataset_id = input_version.dataset_id
@@ -430,14 +440,18 @@ async def run_process_job(
     # 输入经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
     # 产出仍写受管存储(origin=managed),源不动;血缘 JobInput 指向 hosted 输入版本。
     async with materialized_version(input_version, session) as input_path:
-        # 数据无 text 字段时(如新闻用 title)显式指定 text_key,否则 DJ load_dataset 报错
-        text_key = detect_text_key(_read_head_records(input_path, 50))
+        # 用户显式指定 text_keys 则用之;否则自动探测主文本字段(数据无 text 字段时
+        # 如新闻用 title,不显式指定 DJ load_dataset 会报错)
+        detected_key = (
+            None if text_keys else detect_text_key(_read_head_records(input_path, 50))
+        )
         cfg = build_config(
             project_name=job_id,
             input_path=str(input_path),
             output_path=str(out_path),
             operators=operators,
-            text_key=text_key,
+            text_key=detected_key,
+            text_keys=text_keys,
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")

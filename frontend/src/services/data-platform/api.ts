@@ -986,6 +986,7 @@ export async function previewJob(body: {
   datasetVersionId: string;
   operators: DataPlatform.PipelineStep[];
   sampleSize?: number;
+  textKeys?: string[];
 }) {
   // skipErrorHandler:交由调用方 catch 展示后端 message,避免全局 handler 再弹一条 "Response status:400"
   return request<{ data: DataPlatform.PreviewResult; success: boolean }>(

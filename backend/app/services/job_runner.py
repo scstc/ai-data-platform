@@ -262,6 +262,7 @@ async def _run_job(job_id: str) -> None:
                         job_id=job_id,
                         input_version=input_version,
                         operators=operators,
+                        text_keys=getattr(body, "text_keys", None),
                     )
             job.state = "success"
             job.progress = 100

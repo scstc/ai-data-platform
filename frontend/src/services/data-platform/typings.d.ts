@@ -378,6 +378,9 @@ declare namespace DataPlatform {
     type?: string;
     datasetVersionId: string;
     operators: { name: string; params?: Record<string, any> }[];
+    /** 清洗作用字段(DJ text_keys):留空后端自动探测主文本字段;
+     *  显式指定(可多字段)用于脏字符不在标准字段(如 task)的场景 */
+    textKeys?: string[];
     /** 产物去向:version=写回原数据集新版本(默认);new_dataset=另存为新数据集 */
     outputMode?: 'version' | 'new_dataset';
     /** outputMode=new_dataset 时的新数据集名称 */
