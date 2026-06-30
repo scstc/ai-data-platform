@@ -703,6 +703,18 @@ declare namespace DataPlatform {
     publishStatus?: 'draft' | 'published' | 'unpublished';
     publishedAt?: string;
     createdAt: string;
+    /** 表成员数组(数据集优先/多表):单表=一个成员,多表=各表一个成员(后端按 dataset_version_tables 填充) */
+    tables?: DatasetTable[];
+  };
+
+  /** 版本内的一个表成员(多 parquet:一行一表/文件) */
+  type DatasetTable = {
+    tableName: string;
+    storageUri: string;
+    format: string;
+    rows?: number;
+    size?: number;
+    schemaVariant?: SchemaVariant;
   };
 
   /** 数据集（元信息） */
@@ -841,6 +853,17 @@ declare namespace DataPlatform {
 
   /** 数据集详情（含版本列表） */
   type DatasetDetail = Dataset & { versions: DatasetVersion[] };
+
+  /** 新建空数据集入参(数据集优先流程) */
+  type DatasetCreateParams = {
+    name: string;
+    categoryId?: string;
+    dataType?: string;
+    semanticType?: SemanticType;
+    trainType?: TrainType;
+    schemaVariant?: SchemaVariant;
+    tags?: string[];
+  };
 
   /** manifest 数据集的成员文件(一个媒体对象) */
   type DatasetMember = {

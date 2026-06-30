@@ -597,6 +597,18 @@ export async function suggestDatasetName(
   }>('/api/v1/ai/suggest-dataset-name', { method: 'POST', data: body });
 }
 
+/** 新建空数据集(数据集优先流程):建集后再由上传/采集往里加表成员
+ * POST /api/v1/datasets */
+export async function createDataset(
+  body: DataPlatform.DatasetCreateParams,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(
+    '/api/v1/datasets',
+    { method: 'POST', data: body, ...(options || {}) },
+  );
+}
+
 /** 上传文件并落地为数据集 POST /api/v1/datasets/upload */
 export async function uploadDataset(
   formData: FormData,
