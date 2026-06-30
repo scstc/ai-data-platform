@@ -382,6 +382,8 @@ declare namespace DataPlatform {
     canResume?: boolean;
     /** 可停止(pending/running/paused)——由后端 JobRead.can_stop 派生 */
     canStop?: boolean;
+    /** 前端展示用全局序号(按创建时间倒序:最新=最大),非后端主键;列表 request 时计算 */
+    seq?: number;
   };
 
   /** 新建加工任务入参 */
