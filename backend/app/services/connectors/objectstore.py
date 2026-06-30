@@ -1,26 +1,26 @@
-"""S3 平铺文件采集连接器(§4.5 / §4.9,数据接入重构)。
+"""S3 对象存储采集连接器(§4.5 / §4.9,数据接入重构)。
 
 支持 AWS S3 / MinIO / OSS / OBS 等 S3 兼容对象存储(通过 config.endpoint 区分);
 同一连接器,不同 endpoint 即不同厂商。
+
+落地策略 = **原样归档**:把匹配到的对象**原封不动**拷贝进平台内置 MinIO,每个对象
+落一个 Dataset + DatasetVersion(format=原始扩展名),**不解析、不转 jsonl、不生成
+媒体 manifest、不限文件大小**——保真原始文件,下游若需处理再单独转换。
 
 采集模式(extract.mode = 'path'):
 - paths: list[str] —— 显式对象键列表(可带 s3:// URI 前缀,也可裸 key)。
 - glob : str       —— Shell 风格通配符(fnmatch,匹配桶内全量对象的 key);
                       内部先列对象(list_objects),再用 fnmatch 过滤。
 两种模式可同时存在:先合并 paths 指定的键,再追加 glob 匹配的键,去重。
-每个对象独立落地为一个 Dataset + DatasetVersion(§4.9「每对象一个数据集」)。
 
 错误处理原则(Rule 12):
 - S3 配置/网络错误 (ExternalStoreError) → IngestError,不 500。
-- 不支持格式 (UnsupportedFormatError) → 记入警告日志并跳过,继续处理其余对象。
 - probe/list_tables 阶段的 ExternalStoreError → 直接上报,不崩。
 """
 
 from __future__ import annotations
 
 import fnmatch
-import io
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,8 +30,6 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.services.connectors.base import ConnectorNotReady, IngestError
 from app.services.external_store import (
-    MAX_MANIFEST_MEMBERS,
-    MAX_MATERIALIZE_BYTES,
     ExternalStoreError,
     download_to_temp,
     list_objects,
@@ -41,14 +39,8 @@ from app.services.external_store import (
     upload_object,
 )
 from app.services.landing import (
-    BINARY_FORMATS,
-    MANIFEST_FORMAT,
-    UnsupportedFormatError,
     _new_dataset_id,
     _new_version_id,
-    land_records,
-    media_kind,
-    normalize_to_records,
 )
 
 if TYPE_CHECKING:
@@ -59,44 +51,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 模态名 → DJ 多模态 jsonl 字段 + 特殊 token(与 datasets.upload-media 契约一致)
-_MEDIA_FIELD = {"image": "images", "audio": "audios", "video": "videos"}
-_MEDIA_TOKEN = {
-    "image": "<__dj__image>",
-    "audio": "<__dj__audio>",
-    "video": "<__dj__video>",
-}
-
-
 def _ext(key: str) -> str:
     """取对象键扩展名(小写、不含点);无扩展名返回空串。"""
     suffix = Path(key).suffix
     return suffix[1:].lower() if suffix else ""
-
-
-def _media_manifest_row(member_key: str, name: str, size: int, fmt: str) -> dict:
-    """构造一行媒体清单(DJ 多模态 jsonl 契约 + 平台旁路 __member + type 模态标注)。
-
-    - 多模态字段(images/audios/videos)按模态落 [member_key] 数组,喂 dj rel2abs;
-    - text 填该模态的 dj 特殊 token;
-    - **type 显式标注该文件模态**(image/audio/video)——满足「桶内多种文件混装时,
-      逐行 json 用 type 说明该文件类型」;
-    - __member 为平台旁路元信息(成员列表 / 预览 / 物化回传用,dj 物化时剥除)。
-    """
-    kind = media_kind(fmt)
-    field = _MEDIA_FIELD[kind]
-    return {
-        field: [member_key],
-        "type": kind,
-        "text": _MEDIA_TOKEN[kind],
-        "__member": {
-            "bucket": settings.storage_minio_upload_bucket,
-            "key": member_key,
-            "name": name,
-            "size": size,
-            "format": fmt,
-        },
-    }
 
 
 def _bucket_from_config(config: dict[str, Any]) -> str:
@@ -344,18 +302,15 @@ class S3Connector:
         *,
         job_id: str,
     ) -> list[tuple[Dataset, DatasetVersion]]:
-        """S3 平铺文件采集(s3/minio/oss/obs 同此连接器,endpoint 区分厂商)。
+        """对象存储采集(s3/minio/oss/obs 同此连接器,endpoint 区分厂商)。
 
-        按对象扩展名分两路处理:
-        - **媒体二进制**(图/音/视频,BINARY_FORMATS):不解析,**原样复制进平台内置
-          MinIO**(uploads 桶),整批汇成**一个** manifest 数据集——每行带 images/audios/
-          videos 字段 + dj token + **type 模态标注**(满足多类型混装逐行说明);
-          下游加工物化时按 manifest 下载成员(见 external_store.materialized_version)。
-        - **结构化/文本/文档**:下载 → normalize → land_records,每对象一集(原行为)。
+        **原样归档**:把匹配到的每个对象原封不动拷进平台内置 MinIO,逐对象落一个
+        Dataset + DatasetVersion(format=原始扩展名),不解析 / 不转 jsonl / 不限大小。
 
         extract.mode 须为 'path'(或 None);配置 paths/glob 指定对象范围。
-        data_type 由数据源 config.dataType(前端传入)或留 None;
-        semantic_type 由 land_records 内的 infer_semantic_from_data_type 自动推断。
+        data_type 由数据源 config.dataType(前端传入)或留 None,仅透传。
+        增量(incremental + watermark):running-max-after-success,每对象成功归档后
+        推进水位,中途失败只反映已落地部分(防 DATA LOSS,C5 评审 Finding 1)。
         """
         config: dict[str, Any] = datasource.config or {}
         extract: dict[str, Any] = task.extract or {}
@@ -367,11 +322,7 @@ class S3Connector:
                 f"S3 连接器不支持 extract.mode='{mode}',请使用 mode='path'"
             )
 
-        # 取桶名
-        try:
-            bucket = _bucket_from_config(config)
-        except IngestError:
-            raise
+        bucket = _bucket_from_config(config)
 
         # 取数据源层面的 data_type(接入功能键,不修改,仅透传)
         data_type: str | None = config.get("dataType") or None
@@ -396,108 +347,27 @@ class S3Connector:
             keys, all_objects, incremental, getattr(task, "watermark", None)
         )
 
-        # 按扩展名分流:媒体走「复制进内置 MinIO + 汇成 manifest」,其余走逐对象落地
-        media_keys = [k for k in keys if _ext(k) in BINARY_FORMATS]
-        data_keys = [k for k in keys if _ext(k) not in BINARY_FORMATS]
-
         results: list[tuple[Dataset, DatasetVersion]] = []
-        skipped = 0
-
-        # C5 评审 Finding 1 修复:水位推进改为 running-max-after-success——
-        # 每个 key 成功落地后再推进,中途失败水位只反映已落地部分(防 DATA LOSS)。
-
-        for key in data_keys:
-            tmp_path: Path | None = None
-            try:
-                # 1. 下载到临时文件
-                try:
-                    tmp_path = await download_to_temp(config, bucket, key)
-                except ExternalStoreError as exc:
-                    raise IngestError(f"S3 对象下载失败 {bucket}/{key}:{exc}") from exc
-                except Exception as exc:  # noqa: BLE001
-                    raise IngestError(
-                        f"S3 对象下载失败(未知错误) {bucket}/{key}:{exc}"
-                    ) from exc
-
-                # 2. 按扩展名解析为记录列表
-                ext = tmp_path.suffix.lstrip(".").lower() or "txt"
-                content = tmp_path.read_bytes()
-
-                try:
-                    records = normalize_to_records(content, ext)
-                except UnsupportedFormatError:
-                    logger.warning(
-                        "S3 采集跳过不支持格式 %s/%s (ext=%s),继续处理其余对象",
-                        bucket,
-                        key,
-                        ext,
-                    )
-                    skipped += 1
-                    continue
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "S3 采集解析失败 %s/%s (ext=%s):%s,跳过",
-                        bucket,
-                        key,
-                        ext,
-                        exc,
-                    )
-                    skipped += 1
-                    continue
-
-                # 3. 落地(每对象 → 一个 Dataset + DatasetVersion)
-                # dataset_name = 对象文件名(去扩展名)
-                dataset_name = Path(key).stem or key
-                pair = await land_records(
-                    session,
-                    records,
-                    dataset_name=dataset_name,
-                    data_type=data_type,
-                    # semantic_type 不传 → land_records 内按 data_type 推断(零回归)
-                    # 三轴:来源=对象存储;格式=对象原始扩展名
-                    source_kind="object_store",
-                    source_format=ext,
-                    description=f"S3 采集:{datasource.name} / {key}",
-                    note=f"S3 采集 job={job_id} bucket={bucket} key={key}",
-                    produced_by_job_id=job_id,
-                )
-                results.append(pair)
-                # 成功落地后推进水位(running max of landed keys only)——
-                # 失败的 key 不推进,重试时仍可被采。
-                _advance_file_watermark(task, [key], all_objects, incremental)
-
-            finally:
-                # 无论成功失败都清理临时文件
-                if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
-
-        # 媒体文件:原样复制进平台内置 MinIO + 汇成一个 manifest 数据集(逐行带 type)
-        if media_keys:
-            pair = await self._ingest_media_to_manifest(
+        # running-max-after-success:每对象成功归档后再推进水位,中途失败水位只反映
+        # 已落地部分,失败/未处理的 key 重试时仍可被采(防 DATA LOSS)。
+        for key in keys:
+            pair = await self._ingest_raw_file(
                 session,
                 task=task,
                 datasource=datasource,
                 src_config=config,
                 src_bucket=bucket,
-                media_keys=media_keys,
+                key=key,
                 data_type=data_type,
                 job_id=job_id,
             )
             results.append(pair)
-            # 媒体 manifest 成功落地后推进水位(整批 media_keys 作为一个单元)
-            _advance_file_watermark(task, media_keys, all_objects, incremental)
-
-        if skipped:
-            logger.info(
-                "S3 采集完成:成功 %d 个对象,跳过 %d 个(格式不支持或解析失败)",
-                len(results),
-                skipped,
-            )
+            _advance_file_watermark(task, [key], all_objects, incremental)
 
         return results
 
     # ------------------------------------------------------------------
-    # 媒体清单落地 —— 复制进平台内置 MinIO + 汇成一个 manifest 数据集
+    # 原样归档落地 —— 原文件拷进平台内置 MinIO + 逐对象一个数据集
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -508,7 +378,7 @@ class S3Connector:
         except ExternalStoreError:
             pass
 
-    async def _ingest_media_to_manifest(
+    async def _ingest_raw_file(
         self,
         session: AsyncSession,
         *,
@@ -516,91 +386,64 @@ class S3Connector:
         datasource: DataSource,
         src_config: dict[str, Any],
         src_bucket: str,
-        media_keys: list[str],
+        key: str,
         data_type: str | None,
         job_id: str,
     ) -> tuple[Dataset, DatasetVersion]:
-        """媒体对象 → 逐个从源对象存储下载,原样复制进平台内置 MinIO(uploads 桶),
-        整批汇成**一个** format=manifest 数据集(每行带 images/audios/videos + dj token +
-        type 模态标注)。返回 (Dataset, DatasetVersion)。
+        """原样归档:从源对象存储下载 key,**原封不动**拷进平台内置 MinIO(uploads 桶),
+        建一个 Dataset + DatasetVersion(format=原始扩展名,不解析/不转换/不限大小)。
+        返回 (Dataset, DatasetVersion)。
 
-        与 datasets.upload-media 同一清单契约,故复用既有物化/成员/预览路径:不同点
-        仅在每行追加 type 字段(混装多模态时逐行说明类型,dj 物化时随其余字段透传)。
-
-        失败(下载/写入/超限)→ 回滚未提交行 + 回收已写平台对象 + 抛 IngestError;
-        绝不留下没有清单的孤儿对象,也绝不动源对象存储(只读源、只写平台)。
+        失败(下载/写入/建行)→ 回滚未提交行 + 回收已写平台对象 + 抛 IngestError;
+        只读源、只写平台,绝不动源对象存储,也绝不留孤儿对象。
         """
-        if len(media_keys) > MAX_MANIFEST_MEMBERS:
-            raise IngestError(
-                f"S3 媒体采集一次最多 {MAX_MANIFEST_MEMBERS} 个文件,"
-                f"实际 {len(media_keys)} 个,请缩小 paths/glob 范围"
-            )
         try:
             cfg = platform_config()
         except ExternalStoreError as exc:
             raise IngestError(
-                f"平台内置存储(MinIO)未配置,无法复制媒体文件:{exc}"
+                f"平台内置存储(MinIO)未配置,无法归档文件:{exc}"
             ) from exc
 
         dst_bucket = settings.storage_minio_upload_bucket
         dataset_id = _new_dataset_id()
         prefix = f"{dataset_id}/"
-        manifest_rows: list[dict] = []
-        total_size = 0
+        fmt = _ext(key)  # 原始扩展名(可能为空)
+        base = Path(key).name  # 去路径,防 key 注入
+        dst_key = f"{prefix}v1/{base}"
+
+        # 1. 下载源对象 → 原样流式上传平台 MinIO(从临时文件句柄,不读进内存)
+        tmp_path: Path | None = None
         try:
-            for idx, key in enumerate(media_keys):
-                tmp_path: Path | None = None
-                try:
-                    try:
-                        tmp_path = await download_to_temp(src_config, src_bucket, key)
-                    except ExternalStoreError as exc:
-                        raise IngestError(
-                            f"S3 媒体下载失败 {src_bucket}/{key}:{exc}"
-                        ) from exc
-                    size = tmp_path.stat().st_size
-                    total_size += size
-                    if total_size > MAX_MATERIALIZE_BYTES:
-                        raise IngestError(
-                            "本次媒体采集总体积超过上限,无法复制/加工"
-                        )
-                    fmt = _ext(key) or tmp_path.suffix.lstrip(".").lower()
-                    base = Path(key).name  # 去路径,防 key 注入
-                    member_key = f"{prefix}{idx:06d}-{base}"
-                    # 流式上传(从临时文件句柄,不把大媒体读进内存)
-                    with tmp_path.open("rb") as fp:
-                        await upload_object(cfg, dst_bucket, member_key, fp, size)
-                    manifest_rows.append(
-                        _media_manifest_row(member_key, base, size, fmt)
-                    )
-                finally:
-                    if tmp_path is not None:
-                        tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path = await download_to_temp(src_config, src_bucket, key)
+            except ExternalStoreError as exc:
+                raise IngestError(
+                    f"S3 原样归档下载失败 {src_bucket}/{key}:{exc}"
+                ) from exc
+            size = tmp_path.stat().st_size
+            try:
+                with tmp_path.open("rb") as fp:
+                    await upload_object(cfg, dst_bucket, dst_key, fp, size)
+            except ExternalStoreError as exc:
+                await self._gc_prefix(cfg, dst_bucket, prefix)
+                raise IngestError(
+                    f"S3 原样归档写入平台存储失败 {key}:{exc}"
+                ) from exc
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
-            manifest_bytes = (
-                "\n".join(
-                    json.dumps(r, ensure_ascii=False) for r in manifest_rows
-                )
-                + "\n"
-            ).encode("utf-8")
-            manifest_key = f"{prefix}manifest.jsonl"
-            await upload_object(
-                cfg,
-                dst_bucket,
-                manifest_key,
-                io.BytesIO(manifest_bytes),
-                len(manifest_bytes),
-                content_type="application/x-ndjson",
-            )
-
+        # 2. 建 Dataset + DatasetVersion(不解析 → rows 留空);失败回收已写对象
+        try:
             dataset = Dataset(
                 id=dataset_id,
-                name=task.name or datasource.name,
-                description=(
-                    f"S3 媒体采集:{datasource.name}"
-                    f"({len(manifest_rows)} 个文件)"
-                ),
+                name=Path(key).stem or key,
+                description=f"对象存储原样归档:{datasource.name} / {key}",
                 data_type=data_type,
                 category_id=task.category_id,
+                # 三轴:来源=对象存储;格式=对象原始扩展名
+                source_kind="object_store",
+                source_format=fmt or None,
                 owner="admin",
                 creator="admin",
             )
@@ -609,30 +452,21 @@ class S3Connector:
                 id=_new_version_id(),
                 dataset_id=dataset_id,
                 version_no=1,
-                storage_uri=f"s3://{dst_bucket}/{manifest_key}",
-                format=MANIFEST_FORMAT,
-                rows=len(manifest_rows),
-                size=total_size,
+                storage_uri=f"s3://{dst_bucket}/{dst_key}",
+                format=fmt or "bin",  # 无扩展名兜底 bin
+                rows=None,  # 原样归档不解析 → 行数未知
+                size=size,
                 origin="managed",
                 source_datasource_id=None,
                 produced_by_job_id=job_id,
-                note=(
-                    f"S3 媒体采集 job={job_id} src={src_bucket}"
-                    f"({len(manifest_rows)} 个文件)"
-                ),
+                note=f"对象存储原样归档 job={job_id} src={src_bucket} key={key}",
             )
             session.add(version)
             await session.commit()
             await session.refresh(dataset)
             await session.refresh(version)
             return dataset, version
-        except IngestError:
+        except Exception:
             await session.rollback()
             await self._gc_prefix(cfg, dst_bucket, prefix)
             raise
-        except ExternalStoreError as exc:
-            await session.rollback()
-            await self._gc_prefix(cfg, dst_bucket, prefix)
-            raise IngestError(
-                f"S3 媒体复制写入平台存储失败:{exc}"
-            ) from exc

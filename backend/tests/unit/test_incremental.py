@@ -431,27 +431,14 @@ class TestFilterComputeRoundtrip:
 # ===========================================================================
 
 
-class _FakeTmpPath:
-    """S3 download_to_temp 返回的替身:够 run_ingest 读 suffix / read_bytes / unlink。"""
-
-    def __init__(self, suffix: str = ".jsonl") -> None:
-        self.suffix = suffix
-
-    def read_bytes(self) -> bytes:
-        return b'{"x": 1}\n'
-
-    def unlink(self, missing_ok: bool = False) -> None:  # noqa: ARG002
-        pass
-
-
 @pytest.mark.asyncio
 async def test_s3_partial_failure_watermark_reflects_only_landed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """land_records 在 k1 失败 → task.watermark 只反映 k0(running max of landed),
+    """归档在 k1(b.jsonl)失败 → task.watermark 只反映 k0(running max of landed),
     NOT max(ALL keys)。未落地的 k1/k2 在重试时仍可被采(防 DATA LOSS)。
 
-    C5 评审 Finding 1 的核心断言:部分失败后水位 = max(已成功落地 keys),
+    C5 评审 Finding 1 的核心断言:部分失败后水位 = max(已成功归档 keys),
     不能取 max(全量 keys)——否则 k1/k2 被 `_filter_keys_by_watermark` 过滤掉。
     """
     all_objects = [
@@ -478,50 +465,34 @@ async def test_s3_partial_failure_watermark_reflects_only_landed(
         "app.services.connectors.objectstore.list_objects", _fake_list_objects
     )
 
-    async def _fake_download(cfg: Any, bucket: str, key: str) -> _FakeTmpPath:  # noqa: ANN401
-        return _FakeTmpPath()
+    # 原样归档单文件的整段(下载+上传+建行)用 _ingest_raw_file 作可替换缝;
+    # b.jsonl 处抛 → run_ingest 传播异常,水位只反映此前已成功的 a.jsonl。
+    archived: list[str] = []
 
-    monkeypatch.setattr(
-        "app.services.connectors.objectstore.download_to_temp", _fake_download
-    )
-
-    def _fake_normalize(content: bytes, ext: str) -> list[dict]:  # noqa: ARG001
-        return [{"x": 1}]
-
-    monkeypatch.setattr(
-        "app.services.connectors.objectstore.normalize_to_records",
-        _fake_normalize,
-    )
-
-    landed_names: list[str] = []
-
-    async def _fake_land(session: Any, records: list[dict], **kwargs: Any) -> tuple:  # noqa: ANN401
-        name = kwargs.get("dataset_name", "")
-        landed_names.append(name)
-        if name == "b":  # Path("b.jsonl").stem == "b"
-            raise RuntimeError("simulated landing failure on b.jsonl")
+    async def _fake_raw(self: Any, session: Any, *, key: str, **kwargs: Any) -> tuple:  # noqa: ANN401, ARG001
+        archived.append(key)
+        if key == "b.jsonl":
+            raise RuntimeError("simulated archive failure on b.jsonl")
         return ("DS", "VER")
 
-    monkeypatch.setattr(
-        "app.services.connectors.objectstore.land_records", _fake_land
-    )
+    monkeypatch.setattr(S3Connector, "_ingest_raw_file", _fake_raw)
 
     conn = S3Connector()
     task = _IncTask()
     ds = _S3Ds()
 
-    # land_records 在 b.jsonl 处抛 → run_ingest 传播异常
+    # _ingest_raw_file 在 b.jsonl 处抛 → run_ingest 传播异常
     with pytest.raises(RuntimeError, match="simulated"):
         await conn.run_ingest(object(), task, ds, job_id="job-pf")
 
-    # k0 (a.jsonl) 成功落地, k1 (b.jsonl) 失败 → 水位只反映 k0
-    assert task.watermark is not None, "至少 a.jsonl 落地成功, 水位应被推进"
+    # k0 (a.jsonl) 成功归档, k1 (b.jsonl) 失败 → 水位只反映 k0
+    assert task.watermark is not None, "至少 a.jsonl 归档成功, 水位应被推进"
     assert task.watermark["value"] == "a.jsonl", (
-        "部分失败后水位只能反映已成功落地的 a.jsonl;"
+        "部分失败后水位只能反映已成功归档的 a.jsonl;"
         "若取 max(ALL)=c.jsonl, 则 b/c 在重试时被过滤 → DATA LOSS"
     )
-    # k0 落地, k1 尝试后失败, k2 未被尝试
-    assert landed_names == ["a", "b"]
+    # k0 归档, k1 尝试后失败, k2 未被尝试
+    assert archived == ["a.jsonl", "b.jsonl"]
     # 回归断言:k1/k2 仍可通过过滤(重试可采)——水位 a.jsonl < b.jsonl < c.jsonl
     retry_kept = _filter_keys_by_watermark(
         ["a.jsonl", "b.jsonl", "c.jsonl"],
@@ -535,8 +506,10 @@ async def test_s3_partial_failure_watermark_reflects_only_landed(
 
 
 @pytest.mark.asyncio
-async def test_s3_all_keys_land_advances_to_max() -> None:
-    """全部 key 成功落地 → 水位 = max(ALL keys)(正常路径,与部分失败对照)。"""
+async def test_s3_all_keys_land_advances_to_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全部 key 成功归档 → 水位 = max(ALL keys)(正常路径,与部分失败对照)。"""
     all_objects = [
         {"key": "a.jsonl", "size": 10, "lastModified": None},
         {"key": "b.jsonl", "size": 10, "lastModified": None},
@@ -557,42 +530,22 @@ async def test_s3_all_keys_land_advances_to_max() -> None:
     async def _fake_list_objects(cfg: Any, bucket: str, prefix: str) -> list[dict]:  # noqa: ANN401
         return all_objects
 
-    monkeypatch_proxy = pytest.MonkeyPatch()
-
-    async def _fake_download(cfg: Any, bucket: str, key: str) -> _FakeTmpPath:  # noqa: ANN401
-        return _FakeTmpPath()
-
-    def _fake_normalize(content: bytes, ext: str) -> list[dict]:  # noqa: ARG001
-        return [{"x": 1}]
-
-    async def _fake_land(session: Any, records: list[dict], **kwargs: Any) -> tuple:  # noqa: ANN401
+    async def _fake_raw(self: Any, session: Any, *, key: str, **kwargs: Any) -> tuple:  # noqa: ANN401, ARG001
         return ("DS", "VER")
 
-    monkeypatch_proxy.setattr(
+    monkeypatch.setattr(
         "app.services.connectors.objectstore.list_objects", _fake_list_objects
     )
-    monkeypatch_proxy.setattr(
-        "app.services.connectors.objectstore.download_to_temp", _fake_download
-    )
-    monkeypatch_proxy.setattr(
-        "app.services.connectors.objectstore.normalize_to_records",
-        _fake_normalize,
-    )
-    monkeypatch_proxy.setattr(
-        "app.services.connectors.objectstore.land_records", _fake_land
-    )
+    monkeypatch.setattr(S3Connector, "_ingest_raw_file", _fake_raw)
 
-    try:
-        conn = S3Connector()
-        task = _IncTask()
-        ds = _S3Ds()
-        await conn.run_ingest(object(), task, ds, job_id="job-ok")
-        assert task.watermark is not None
-        assert task.watermark["value"] == "c.jsonl", (
-            "全部成功落地 → 水位 = max(ALL) = c.jsonl"
-        )
-    finally:
-        monkeypatch_proxy.undo()
+    conn = S3Connector()
+    task = _IncTask()
+    ds = _S3Ds()
+    await conn.run_ingest(object(), task, ds, job_id="job-ok")
+    assert task.watermark is not None
+    assert task.watermark["value"] == "c.jsonl", (
+        "全部成功归档 → 水位 = max(ALL) = c.jsonl"
+    )
 
 
 # ===========================================================================
