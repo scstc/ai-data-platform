@@ -25,6 +25,7 @@ import {
   Row,
   Space,
   Spin,
+  Table,
   Tag,
   Tooltip,
   Typography,
@@ -352,6 +353,37 @@ const DatasetDetail: React.FC = () => {
             {renderPipelineLinks(v)}
           </Descriptions.Item>
         </Descriptions>
+        {(v.tables?.length ?? 0) > 1 && (
+          <>
+            <Divider style={{ margin: '12px 0' }}>
+              表成员（{v.tables?.length}）
+            </Divider>
+            <Table<DataPlatform.DatasetTable>
+              size="small"
+              rowKey="tableName"
+              pagination={false}
+              dataSource={v.tables ?? []}
+              columns={[
+                { title: '表名', dataIndex: 'tableName' },
+                {
+                  title: '格式',
+                  dataIndex: 'format',
+                  render: (f: string) => <Tag>{f}</Tag>,
+                },
+                {
+                  title: '行数',
+                  dataIndex: 'rows',
+                  render: (r?: number) => r ?? '-',
+                },
+                {
+                  title: '大小',
+                  dataIndex: 'size',
+                  render: (s?: number) => fmtSize(s),
+                },
+              ]}
+            />
+          </>
+        )}
         <Divider style={{ margin: '12px 0' }} />
         <Space size="small" wrap>
           <Button

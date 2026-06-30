@@ -42,6 +42,7 @@ import {
   ingestTaskStats,
   listCategories,
   listDataSources,
+  listDatasets,
   listDatasourceTables,
   listIngestRuns,
   listIngestTasks,
@@ -330,7 +331,7 @@ const IngestTasksPage: React.FC = () => {
                   name={['extract', 'tables']}
                   label="选择表"
                   mode="multiple"
-                  placeholder="选择一张或多张表（每张表各产一个数据集）"
+                  placeholder="选择一张或多张表（各表作为成员落入目标数据集的一个版本）"
                   rules={[{ required: true, message: '请至少选择一张表' }]}
                   params={{ datasourceId }}
                   request={async () => {
@@ -744,6 +745,25 @@ const IngestTasksPage: React.FC = () => {
                 setDsMap(Object.fromEntries(res.data.map((d) => [d.id, d])));
                 return res.data.map((d) => ({
                   label: `${d.name}（${d.type}${d.dbKind ? `/${d.dbKind}` : ''}）`,
+                  value: d.id,
+                }));
+              }}
+            />
+            <ProFormSelect
+              name="datasetId"
+              label="目标数据集"
+              placeholder="选择采集结果落入的数据集"
+              tooltip="所选表将作为成员落入目标数据集的一个版本(多表 = 一版本多成员)"
+              rules={[{ required: true, message: '请选择目标数据集' }]}
+              showSearch
+              fieldProps={{ filterOption: false }}
+              request={async ({ keyWords }) => {
+                const res = await listDatasets({
+                  name: keyWords || undefined,
+                  pageSize: 50,
+                });
+                return (res.data ?? []).map((d) => ({
+                  label: d.name,
                   value: d.id,
                 }));
               }}

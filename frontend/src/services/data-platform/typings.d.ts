@@ -1024,6 +1024,8 @@ declare namespace DataPlatform {
   type IngestTaskCreate = {
     name: string;
     datasourceId: string;
+    /** 目标数据集(数据集优先):采集结果作表成员落进该数据集的 draft 版本 */
+    datasetId: string;
     schedule: IngestSchedule;
     extract?: IngestExtract;
     categoryId?: string;
