@@ -20,7 +20,7 @@
 | `data-governance-flow.md` | 多格式数据治理流程:异构文件(文本+多媒体)→统一数据集→训练平台的端到端方案;接入层(landing)、治理层(data-juicer)、交付层(parquet)三层架构;纯文本/CSV/图片/视频四场景实施方案;后端扩展(媒体批量接入+manifest物化)、前端改造(列映射+算子筛选)、典型用户故事、技术决策、实施路线图(2026-06-30) |
 | `data-governance-flow-summary.md` | 上文的快速参考版:一分钟速览、文件格式处理速查表、核心约束与解法,完整内容见 `data-governance-flow.md`(2026-06-30) |
 | `architecture.md` | 系统架构说明:运行时架构总览(单机 Docker Compose 拓扑、组件职责、技术栈、三层数据流);偏部署后实际形态,与 `plan/03-架构设计.md`(领域模型)、`data-governance-flow.md`(数据流)互补(2026-06-30) |
-| `poc-hardware-sizing-b.md` | POC 硬件资源清单(档位 B):16C/64G/1TB NVMe/1× 24G GPU 推荐配置 + 云规格对照(2026-06-30) |
+| `poc-hardware-sizing-b.md` | POC 硬件资源清单(档位 B):部署拓扑 + 16C/64G/1TB NVMe/1× 24G GPU 推荐配置 + 云规格对照(2026-06-30) |
 
 ## 项目级文档(根目录)
 
