@@ -225,6 +225,13 @@ def _new_member_id() -> str:
     return f"dvt-{secrets.token_hex(3)}"
 
 
+def _safe_table_name(filename: str) -> str:
+    """由文件名派生成员表名:去路径与扩展名,非法字符替 ``_``,空则 ``data``。"""
+    stem = Path(filename).stem or "data"
+    cleaned = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in stem)
+    return cleaned.strip("_") or "data"
+
+
 def _xlsx_to_records(content: bytes) -> list[dict]:
     """xlsx → 记录列表:首行为表头,其余每行一条(空行跳过)。"""
     try:
@@ -670,7 +677,12 @@ async def _recompute_version_rollup(
             .order_by(DatasetVersionTable.table_name)
         )
     ).scalars().all()
-    version.rows = sum((m.rows or 0) for m in members)
+    # rows:全部成员 rows 均为 None(纯二进制/原样存,行数未知)→ 版本 rows 保持 None;
+    # 否则求和(把未知项当 0)。size 同理但二进制有真实字节数,直接求和。
+    if members and all(m.rows is None for m in members):
+        version.rows = None
+    else:
+        version.rows = sum((m.rows or 0) for m in members)
     version.size = sum((m.size or 0) for m in members)
     formats = {m.format for m in members}
     version.format = formats.pop() if len(formats) == 1 else "multi"
@@ -1008,6 +1020,7 @@ async def land_upload(
     content: bytes,
     filename: str,
     source_format: str,
+    dataset_id: str | None = None,
     dataset_name: str | None = None,
     data_type: str | None = None,
     semantic_type: str | None = None,
@@ -1017,6 +1030,8 @@ async def land_upload(
 ) -> tuple[Dataset, DatasetVersion]:
     """本地上传连接器:规范化 → 注入逐条血缘 → 落地。
 
+    `dataset_id` 传入(数据集优先流程)→ 作为表成员落进该数据集的 draft 版本
+    (table_name 由文件名派生);不传 → 旧行为(新建 Dataset+v1,向后兼容)。
     解析失败抛 LandingError,不留脏对象。
     """
     records = normalize_to_records(content, source_format)
@@ -1026,6 +1041,20 @@ async def land_upload(
         doc_id=f"sha256:{hashlib.sha256(content).hexdigest()}",
         ingest_batch=datetime.now(UTC).isoformat(),
     )
+    if dataset_id is not None:
+        version, _member = await add_table_member(
+            session,
+            dataset_id,
+            records,
+            table_name=_safe_table_name(filename),
+            storage_format="jsonl",
+            semantic_type=semantic_type,
+            source_format=source_format.lower(),
+            strict_semantic=strict_semantic,
+            note=f"本地上传落地:{filename}",
+        )
+        dataset = await session.get(Dataset, dataset_id)
+        return dataset, version
     return await land_records(
         session,
         records,
@@ -1041,12 +1070,80 @@ async def land_upload(
     )
 
 
+async def _land_raw_member(
+    session: AsyncSession,
+    dataset_id: str,
+    *,
+    content: bytes,
+    filename: str,
+    source_format: str,
+) -> tuple[Dataset, DatasetVersion]:
+    """二进制原样存为目标数据集 draft 版本的一个 raw 表成员(不解析)。
+
+    key=``<dataset_id>/v<n>/<table>.<ext>``;成员 format=源扩展名,rows=None。
+    平台未配置/上传失败 → 回滚并抛 LandingError。
+    """
+    from app.services.external_store import (
+        ExternalStoreError,
+        platform_config,
+        upload_object,
+    )
+
+    version = await _target_draft_version(session, dataset_id)
+    table_name = _safe_table_name(filename)
+    ext = source_format.lower()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version.version_no}/{table_name}.{ext}"
+    try:
+        await upload_object(
+            platform_config(), bucket, key, io.BytesIO(content), len(content)
+        )
+    except ExternalStoreError as exc:
+        await session.rollback()
+        raise LandingError(f"原样存储失败:{exc}") from exc
+    uri = f"s3://{bucket}/{key}"
+
+    existing = (
+        await session.execute(
+            select(DatasetVersionTable).where(
+                DatasetVersionTable.dataset_version_id == version.id,
+                DatasetVersionTable.table_name == table_name,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.storage_uri = uri
+        existing.format = ext
+        existing.rows = None
+        existing.size = len(content)
+        member = existing
+    else:
+        member = DatasetVersionTable(
+            id=_new_member_id(),
+            dataset_version_id=version.id,
+            table_name=table_name,
+            storage_uri=uri,
+            format=ext,
+            rows=None,
+            size=len(content),
+        )
+        session.add(member)
+    if version.note is None:
+        version.note = f"本地上传(原样存):{filename}"
+    await session.commit()
+    await _recompute_version_rollup(session, version)
+    await session.refresh(version)
+    dataset = await session.get(Dataset, dataset_id)
+    return dataset, version
+
+
 async def land_upload_raw(
     session: AsyncSession,
     *,
     content: bytes,
     filename: str,
     source_format: str,
+    dataset_id: str | None = None,
     dataset_name: str | None = None,
     data_type: str | None = None,
     semantic_type: str | None = None,
@@ -1055,9 +1152,19 @@ async def land_upload_raw(
 ) -> tuple[Dataset, DatasetVersion]:
     """二进制本地上传:原样存储,不解析。版本 rows=None,format=源扩展名。
 
+    `dataset_id` 传入(数据集优先流程)→ 原字节作为 raw 表成员落进该数据集的
+    draft 版本(table_name 由文件名派生);不传 → 旧行为(新建 Dataset+v1)。
     二进制无 dict 行 → 不经 apply_semantic_spec(见 docs/plan/14 §3.6);仅按
     显式 semantic_type 或 data_type 默认映射打**版本/数据集级标签**(结构就绪)。
     """
+    if dataset_id is not None:
+        return await _land_raw_member(
+            session,
+            dataset_id,
+            content=content,
+            filename=filename,
+            source_format=source_format,
+        )
     explicit = coerce_semantic_type(semantic_type)
     if explicit is not None:
         effective_semantic: str | None = explicit.value

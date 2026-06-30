@@ -11,6 +11,17 @@ from app.schemas.common import CamelModel, UtcDateTime, format_version_label
 from app.services.semantic_registry import SemanticType
 
 
+class DatasetTableRead(CamelModel):
+    """版本内的一个表成员读模型(多 parquet:一行一表/文件)。"""
+
+    table_name: str
+    storage_uri: str
+    format: str
+    rows: int | None = None
+    size: int | None = None
+    schema_variant: str | None = None
+
+
 class DatasetVersionRead(CamelModel):
     """数据集版本读模型(不可变快照)。"""
 
@@ -41,6 +52,9 @@ class DatasetVersionRead(CamelModel):
     publish_status: str = "draft"
     published_at: UtcDateTime | None = None
     created_at: UtcDateTime
+    # 表成员数组(数据集优先/多表):非 ORM 字段,由路由按 dataset_version_tables 填充。
+    # 单表数据集 = 恰好一个成员(回填后的存量版本亦然);多表 = 各表一个成员。
+    tables: list[DatasetTableRead] = []
 
     @computed_field  # 展示标签 versionLabel:v2026.6.16 (#5)
     @property
@@ -144,6 +158,23 @@ class DatasetDetailRead(DatasetRead):
     versions: list[DatasetVersionRead] = []
     # 当前用户对该数据集的生效级别(view/edit/admin/None),供前端按钮门控
     my_level: str | None = None
+
+
+class DatasetCreate(CamelModel):
+    """新建空数据集入参(数据集优先流程):建集后再由上传/采集往里加表成员。"""
+
+    name: str
+    # 分类(#15):受控分类库引用 id,可空
+    category_id: str | None = None
+    # data_type 保持 free-string,不收紧(与列表分栏过滤一致)
+    data_type: str | None = None
+    # semantic_type 校验为枚举:非法值 422;None 放行
+    semantic_type: SemanticType | None = None
+    # 训练用途元数据(G1)默认模板:落首个成员时写入版本级(版本不可变)
+    train_type: str | None = None
+    schema_variant: str | None = None
+    # 标签名列表(多对多);建集时一并写入
+    tags: list[str] = []
 
 
 class DatasetUpdate(CamelModel):

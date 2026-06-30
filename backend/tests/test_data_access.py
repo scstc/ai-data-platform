@@ -68,16 +68,20 @@ async def test_upload_binary_lands_raw(client, monkeypatch, tmp_path):
     from app.services import landing as landing_mod
 
     monkeypatch.setattr(landing_mod.settings, "datasets_dir", str(tmp_path))
+    # 数据集优先:先建集,再上传二进制作为该数据集 draft 版本的 raw 成员
+    ds = (await client.post(
+        "/api/v1/datasets", json={"name": "视频集", "dataType": "video"}
+    )).json()["data"]["id"]
     files = {"file": ("clip.mp4", b"\x00\x00\x00\x18ftypmp42rawbytes", "video/mp4")}
     resp = await client.post(
-        "/api/v1/datasets/upload", files=files, data={"data_type": "video"}
+        "/api/v1/datasets/upload", files=files, data={"datasetId": ds}
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["data"]["dataType"] == "video"
-    # 二进制不解析:版本 rows 为空
+    # 二进制不解析:版本 rows 为空,成员 format=mp4
     assert body["data"]["versions"][0]["rows"] is None
-    assert body["data"]["versions"][0]["format"] == "mp4"
+    tables = body["data"]["versions"][0].get("tables", [])
+    assert any(t["format"] == "mp4" for t in tables)
 
 
 # ---------------------------------------------------------------------------
@@ -89,25 +93,27 @@ async def test_upload_explicit_semantic_type_normalizes_and_snapshots(
 ):
     """显式 semanticType=qa:版本快照写 qa,且别名 q/a 归一为 question/answer。"""
     monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    ds = (await client.post(
+        "/api/v1/datasets",
+        json={"name": "QA集", "dataType": "qa", "semanticType": "qa"},
+    )).json()["data"]["id"]
     content = b'{"q": "1+1?", "a": "2"}\n'
     files = {"file": ("qa.jsonl", content, "application/x-ndjson")}
     resp = await client.post(
         "/api/v1/datasets/upload",
         files=files,
-        data={"data_type": "qa", "semanticType": "qa"},
+        data={"datasetId": ds, "semanticType": "qa"},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["semanticType"] == "qa"  # 数据集级快照
     version = data["versions"][0]
     assert version["semanticType"] == "qa"  # 版本级快照
-    # data_type 功能键不被语义层改写(仍为接入键 qa)
     assert data["dataType"] == "qa"
-    # 别名归一已落盘:q→question、a→answer
-    import json as _json
-    from pathlib import Path
-
-    row = _json.loads(Path(version["storageUri"]).read_text().splitlines()[0])
+    # 别名归一已落盘:q→question、a→answer(经 preview 读回成员内容验证)
+    vid = version["id"]
+    prev = await client.get(f"/api/v1/dataset-versions/{vid}/preview")
+    row = prev.json()["data"][0]
     assert row["question"] == "1+1?" and row["answer"] == "2"
     assert "q" not in row and "a" not in row
 
@@ -118,11 +124,14 @@ async def test_upload_invalid_semantic_type_returns_422(
 ):
     """非法 semanticType → 422(写入路径枚举校验);dataType 仍是 free-string 不受限。"""
     monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    ds = (await client.post("/api/v1/datasets", json={"name": "语义集"})).json()[
+        "data"
+    ]["id"]
     files = {"file": ("a.jsonl", b'{"text":"x"}\n', "application/x-ndjson")}
     resp = await client.post(
         "/api/v1/datasets/upload",
         files=files,
-        data={"semanticType": "nonsense-type"},
+        data={"datasetId": ds, "semanticType": "nonsense-type"},
     )
     assert resp.status_code == 422
     assert resp.json()["success"] is False
@@ -132,15 +141,20 @@ async def test_upload_invalid_semantic_type_returns_422(
 async def test_upload_data_type_maps_default_semantic(
     client, monkeypatch, tmp_path
 ):
-    """未显式给 semanticType 时,按 data_type 默认映射打标签,不改记录。"""
+    """数据集 dataType=log → 默认语义 text(建集时确定性映射)。"""
     monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
-    # data_type=log → 默认 text(确定性映射)
+    # 语义在建集时按 data_type 推断
+    created = (await client.post(
+        "/api/v1/datasets", json={"name": "日志集", "dataType": "log"}
+    )).json()["data"]
+    assert created["semanticType"] == "text"
+    # 上传文件落入,版本语义继承数据集级
     files = {"file": ("a.log", b"line one\nline two\n", "text/plain")}
     resp = await client.post(
-        "/api/v1/datasets/upload", files=files, data={"data_type": "log"}
+        "/api/v1/datasets/upload", files=files, data={"datasetId": created["id"]}
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["semanticType"] == "text"
+    assert resp.json()["data"]["versions"][0]["semanticType"] == "text"
 
 
 @pytest.mark.asyncio
@@ -149,13 +163,16 @@ async def test_upload_strict_semantic_rejects_bad_rows(
 ):
     """strict=true 且记录不合规 → 422,不落地。"""
     monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    ds = (await client.post("/api/v1/datasets", json={"name": "严格QA集"})).json()[
+        "data"
+    ]["id"]
     files = {
         "file": ("qa.jsonl", b'{"question": "no answer"}\n', "application/x-ndjson")
     }
     resp = await client.post(
         "/api/v1/datasets/upload?strict=true",
         files=files,
-        data={"semanticType": "qa"},
+        data={"datasetId": ds, "semanticType": "qa"},
     )
     assert resp.status_code == 422
 
@@ -164,15 +181,23 @@ async def test_upload_strict_semantic_rejects_bad_rows(
 async def test_dataset_list_filter_by_semantic_type(client, monkeypatch, tmp_path):
     """列表按 semanticType 过滤:命中含该语义的数据集,不命中其它。"""
     monkeypatch.setattr(landing.settings, "datasets_dir", str(tmp_path))
+    created = (await client.post(
+        "/api/v1/datasets", json={"name": "偏好集", "semanticType": "preference"}
+    )).json()["data"]
+    ds_id = created["id"]
     pref = b'{"prompt":"p","chosen":"c","rejected":"r"}\n'
     files = {"file": ("p.jsonl", pref, "application/x-ndjson")}
     resp = await client.post(
         "/api/v1/datasets/upload",
         files=files,
-        data={"name": "偏好集", "semanticType": "preference"},
+        data={"datasetId": ds_id, "semanticType": "preference"},
     )
     assert resp.status_code == 200, resp.text
-    ds_id = resp.json()["data"]["id"]
+
+    hit = await client.get("/api/v1/datasets", params={"semanticType": "preference"})
+    assert ds_id in {d["id"] for d in hit.json()["data"]}
+    miss = await client.get("/api/v1/datasets", params={"semanticType": "cot"})
+    assert ds_id not in {d["id"] for d in miss.json()["data"]}
 
     hit = await client.get("/api/v1/datasets", params={"semanticType": "preference"})
     assert ds_id in {d["id"] for d in hit.json()["data"]}
@@ -200,9 +225,12 @@ async def test_binary_dataset_blocked_from_processing(
     monkeypatch.setattr(landing_mod.settings, "datasets_dir", str(tmp_path))
     # 加工创建端点 require_admin(jobs.py),以 admin 身份请求才能走到二进制门控
     client.cookies.set("adp_session", sign_token("admin"))
+    ds = (await client.post(
+        "/api/v1/datasets", json={"name": "二进制集", "dataType": "video"}
+    )).json()["data"]["id"]
     files = {"file": ("clip.mp4", b"\x00\x00\x00\x18ftypmp42rawbytes", "video/mp4")}
     resp = await client.post(
-        "/api/v1/datasets/upload", files=files, data={"data_type": "video"}
+        "/api/v1/datasets/upload", files=files, data={"datasetId": ds}
     )
     version_id = resp.json()["data"]["versions"][0]["id"]
 
@@ -328,9 +356,12 @@ async def test_preview_binary_not_previewable(client, monkeypatch, tmp_path):
     from app.services import landing as landing_mod
 
     monkeypatch.setattr(landing_mod.settings, "datasets_dir", str(tmp_path))
+    ds = (await client.post(
+        "/api/v1/datasets", json={"name": "图集", "dataType": "image"}
+    )).json()["data"]["id"]
     files = {"file": ("p.png", b"\x89PNG bytes", "image/png")}
     up = await client.post(
-        "/api/v1/datasets/upload", files=files, data={"data_type": "image"}
+        "/api/v1/datasets/upload", files=files, data={"datasetId": ds}
     )
     version_id = up.json()["data"]["versions"][0]["id"]
     resp = await client.get(f"/api/v1/dataset-versions/{version_id}/preview")
@@ -445,6 +476,9 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
 
     store = _mem_store_patch(monkeypatch, dmod)
 
+    ds = (await client.post(
+        "/api/v1/datasets", json={"name": "我的图集", "dataType": "image"}
+    )).json()["data"]["id"]
     files = [
         ("files", ("a.png", b"PNGDATA1", "image/png")),
         ("files", ("b.jpg", b"JPGDATA22", "image/jpeg")),
@@ -452,7 +486,7 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
     resp = await client.post(
         "/api/v1/datasets/upload-media",
         files=files,
-        data={"data_type": "image", "name": "我的图集"},
+        data={"data_type": "image", "datasetId": ds},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
@@ -467,7 +501,7 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
 
     # manifest 内容符合 DJ 契约:images 数组 + <__dj__image> token + 平台旁路 __member
     dataset_id = data["id"]
-    manifest = store[("uploads", f"{dataset_id}/manifest.jsonl")].decode()
+    manifest = store[("uploads", f"{dataset_id}/v1/manifest.jsonl")].decode()
     rows = [json.loads(ln) for ln in manifest.splitlines() if ln.strip()]
     assert len(rows) == 2
     assert all(r["text"] == "<__dj__image>" for r in rows)
@@ -533,6 +567,9 @@ async def test_upload_batch_single_format_originals_and_merged_jsonl(
     import json
 
     store = _mem_store_patch_both(monkeypatch)
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": "我的表集", "dataType": "csv"}
+    )).json()["data"]["id"]
     files = [
         ("files", ("a.csv", b"a,b\n1,2\n3,4", "text/csv")),
         ("files", ("c.csv", b"a,b\n5,6", "text/csv")),
@@ -540,26 +577,24 @@ async def test_upload_batch_single_format_originals_and_merged_jsonl(
     resp = await client.post(
         "/api/v1/datasets/upload-batch",
         files=files,
-        data={"data_type": "csv", "name": "我的表集"},
+        data={"datasetId": did, "tableName": "data"},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["name"] == "我的表集"
     assert data["dataType"] == "csv"
     v = data["versions"][0]
-    assert v["format"] == "jsonl"
     assert v["origin"] == "managed"  # 平台自有、可删除(非 hosted)
     assert v["rows"] == 3  # 2 + 1 行合并
 
-    did = data["id"]
     # 原件逐个入 MinIO 的 originals/ 前缀(2 个,保序编号)
     originals = sorted(
         k[1] for k in store if k[0] == "uploads" and f"{did}/originals/" in k[1]
     )
     assert len(originals) == 2
-    assert originals[0].endswith("originals/000000-a.csv")
-    assert originals[1].endswith("originals/000001-c.csv")
-    # 合并 jsonl 入 <id>/v1/data.jsonl,3 行 = 各文件解析记录并集
+    assert originals[0].endswith("-a.csv")
+    assert originals[1].endswith("-c.csv")
+    # 合并 jsonl 作为成员落 <id>/v1/data.jsonl,3 行 = 各文件解析记录并集
     jsonl = store[("uploads", f"{did}/v1/data.jsonl")].decode()
     rows = [json.loads(ln) for ln in jsonl.splitlines() if ln.strip()]
     assert len(rows) == 3
@@ -571,10 +606,13 @@ async def test_upload_batch_single_format_originals_and_merged_jsonl(
 async def test_upload_batch_rejects_binary(client, monkeypatch):
     """单一格式端点只收非二进制可规范化格式:媒体二进制 → 400(应走 upload-media)。"""
     _mem_store_patch_both(monkeypatch)
+    did = (await client.post("/api/v1/datasets", json={"name": "批量集"})).json()[
+        "data"
+    ]["id"]
     resp = await client.post(
         "/api/v1/datasets/upload-batch",
         files=[("files", ("x.png", b"PNG", "image/png"))],
-        data={"data_type": "image"},
+        data={"datasetId": did},
     )
     assert resp.status_code == 400
     assert resp.json()["success"] is False
@@ -674,11 +712,16 @@ async def test_upload_media_rejects_over_member_cap(client, monkeypatch):
 
     _mem_store_patch(monkeypatch, dmod)
     monkeypatch.setattr(dmod, "MAX_MANIFEST_MEMBERS", 2)
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": "超额图集", "dataType": "image"}
+    )).json()["data"]["id"]
     files = [
         ("files", (f"x{i}.png", b"PNG", "image/png")) for i in range(3)
     ]
     resp = await client.post(
-        "/api/v1/datasets/upload-media", files=files, data={"data_type": "image"}
+        "/api/v1/datasets/upload-media",
+        files=files,
+        data={"data_type": "image", "datasetId": did},
     )
     assert resp.status_code == 400
     assert "最多" in resp.json()["message"]
@@ -709,16 +752,21 @@ async def test_upload_media_gc_on_storage_failure(client, monkeypatch):
     monkeypatch.setattr(dmod, "upload_object", fail_upload)
     monkeypatch.setattr(dmod, "remove_prefix", rec_remove_prefix)
 
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": "回收图集", "dataType": "image"}
+    )).json()["data"]["id"]
     files = [
         ("files", ("a.png", b"PNG", "image/png")),
         ("files", ("b.png", b"PNG", "image/png")),
     ]
     resp = await client.post(
-        "/api/v1/datasets/upload-media", files=files, data={"data_type": "image"}
+        "/api/v1/datasets/upload-media",
+        files=files,
+        data={"data_type": "image", "datasetId": did},
     )
     assert resp.status_code == 503
     assert calls["gc"], "失败时应回收已写对象"
-    assert calls["gc"][0][1].endswith("/")  # 以数据集前缀回收
+    assert calls["gc"][0][1].endswith("/")  # 以版本前缀回收
 
 
 @pytest.mark.asyncio

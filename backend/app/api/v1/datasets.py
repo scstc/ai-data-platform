@@ -37,18 +37,20 @@ from app.models.role import Role
 from app.models.tag import DatasetTag, Tag
 from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse, format_version_label
-from app.schemas.dataset_acl import AclCreate, AclRead, AclUpdate
-from app.services import dataset_acl
 from app.schemas.dataset import (
+    DatasetCreate,
     DatasetDetailRead,
     DatasetMemberRead,
     DatasetRead,
+    DatasetTableRead,
     DatasetUpdate,
     DatasetVersionRead,
     ExportS3Request,
     HostS3Request,
     PlatformHostRequest,
 )
+from app.schemas.dataset_acl import AclCreate, AclRead, AclUpdate
+from app.services import dataset_acl
 from app.services.ai import get_ai_provider
 from app.services.engine import _semaphore
 from app.services.external_store import (
@@ -66,7 +68,6 @@ from app.services.external_store import (
     remove_prefix,
     s3_settings_for_duckdb,
     stat_object,
-    upload_jsonl_to_uploads,
     upload_object,
 )
 from app.services.landing import (
@@ -77,20 +78,19 @@ from app.services.landing import (
     LandingError,
     ParseError,
     UnsupportedFormatError,
+    _safe_table_name,
+    add_table_member,
+    create_dataset,
     land_upload,
     land_upload_raw,
     normalize_to_records,
-    records_to_jsonl_bytes,
 )
 from app.services.review import precheck_records
 from app.services.semantic_registry import (
-    SemanticType,
     SemanticValidationError,
     apply_semantic_spec,
     classify_modalities,
-    collect_modalities,
     coerce_semantic_type,
-    infer_semantic_from_data_type,
     modalities_for_subtype,
     parse_semantic_type,
     semantic_type_catalog,
@@ -141,6 +141,41 @@ def _to_detail(
     detail = DatasetDetailRead.model_validate(dataset)
     detail.versions = [DatasetVersionRead.model_validate(v) for v in versions]
     detail.hosted = any(v.origin == "hosted" for v in versions)
+    return detail
+
+
+async def _attach_tables(
+    session: AsyncSession, detail: DatasetDetailRead
+) -> DatasetDetailRead:
+    """按 dataset_version_tables 批量回填各版本的 tables 数组(多表/多 parquet)。
+
+    单表数据集 = 恰好一个成员(回填后存量版本亦然);多表 = 各表一个成员。
+    无成员行的版本(理论上不应有,防御)保持空 tables。
+    """
+    vids = [v.id for v in detail.versions]
+    if not vids:
+        return detail
+    rows = (
+        await session.execute(
+            select(DatasetVersionTable)
+            .where(DatasetVersionTable.dataset_version_id.in_(vids))
+            .order_by(DatasetVersionTable.table_name)
+        )
+    ).scalars().all()
+    by_ver: dict[str, list[DatasetTableRead]] = {}
+    for m in rows:
+        by_ver.setdefault(m.dataset_version_id, []).append(
+            DatasetTableRead(
+                table_name=m.table_name,
+                storage_uri=m.storage_uri,
+                format=m.format,
+                rows=m.rows,
+                size=m.size,
+                schema_variant=m.schema_variant,
+            )
+        )
+    for v in detail.versions:
+        v.tables = by_ver.get(v.id, [])
     return detail
 
 
@@ -201,20 +236,56 @@ async def _sync_dataset_tags(
         session.add(DatasetTag(dataset_id=dataset_id, tag_id=existing[n]))
 
 
+@router.post("/datasets")
+async def create_dataset_endpoint(
+    payload: DatasetCreate,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """建空数据集(不含任何版本);上传/采集随后往里加表成员(数据集优先流程)。"""
+    actor = user.id if user else "admin"
+    dataset = await create_dataset(
+        session,
+        name=payload.name,
+        data_type=payload.data_type,
+        semantic_type=payload.semantic_type.value if payload.semantic_type else None,
+        creator=actor,
+    )
+    # 训练用途默认模板挂到数据集级(落首个成员时由 add_table_member 写入版本级);
+    # 暂存于内存详情返回,不入 Dataset 列(版本级不变量,见 spec §4.3)。
+    if payload.category_id:
+        dataset.category_id = payload.category_id
+        await session.commit()
+        await session.refresh(dataset)
+    if payload.tags:
+        await _sync_dataset_tags(session, dataset.id, payload.tags)
+        await session.commit()
+    detail = _to_detail(dataset, [])
+    detail.tags = (await _dataset_tags_map(session, [dataset.id])).get(dataset.id, [])
+    if payload.train_type:
+        detail.train_type = payload.train_type
+    if payload.schema_variant:
+        detail.schema_variant = payload.schema_variant
+    if dataset.category_id:
+        names = await build_category_name_map(session, [dataset.category_id])
+        detail.category_name = names.get(dataset.category_id)
+    return JSONResponse(
+        content=DatasetResult(data=detail).model_dump(by_alias=True, mode="json")
+    )
+
+
 @router.post("/datasets/upload")
 async def upload_as_dataset(
     file: UploadFileDep,
     session: SessionDep,
+    dataset_id: Annotated[str, Form(alias="datasetId")],
     user: Annotated[User | None, Depends(current_user)] = None,
-    name: NameForm = None,
-    data_type: DataTypeForm = None,
     semantic_type: SemanticTypeForm = None,
-    description: DescForm = None,
-    category_id: CategoryIdForm = None,
     strict: StrictQuery = False,
 ) -> JSONResponse:
-    """本地上传连接器:文件 → 规范化 jsonl → 受管 Dataset(v1) + DatasetVersion。
+    """本地上传连接器(数据集优先):文件 → 表成员落进所选数据集的 draft 版本。
 
+    必选 `datasetId`(缺失 422);需对该数据集有写权(否则 403)。
     可选 `semanticType`(与 dataType 正交):传则按其标准 schema 归一+校验;
     `?strict=true` 时不合规整单 422,否则只计数不阻断(见 docs/plan/14)。
     """
@@ -226,13 +297,22 @@ async def upload_as_dataset(
             status_code=422,
             content={"success": False, "message": str(exc)},
         )
+    # 目标数据集存在性 + 写权校验
+    dataset = await session.get(Dataset, dataset_id)
+    if dataset is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "目标数据集不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无该数据集写入权限"},
+        )
     filename = file.filename or ""
     fmt = _file_ext(filename)
     content = await file.read()
-    # 归属:登录用户固化为其 id(数据集默认私有),匿名落 'admin'(兼容现状)
-    actor = user.id if user else "admin"
-    # 二进制类原样存(land_upload_raw),其余规范化落地(land_upload);
-    # 两条路径的落地失败都收敛为 LandingError → 400(磁盘写失败/解析失败均不冒 500)
+    # 二进制类原样存(land_upload_raw),其余规范化落地(land_upload);均落进所选数据集
     try:
         if fmt in BINARY_FORMATS:
             dataset, version = await land_upload_raw(
@@ -240,11 +320,7 @@ async def upload_as_dataset(
                 content=content,
                 filename=filename,
                 source_format=fmt,
-                dataset_name=name,
-                data_type=data_type,
-                semantic_type=semantic_type,
-                description=description,
-                creator=actor,
+                dataset_id=dataset_id,
             )
         else:
             dataset, version = await land_upload(
@@ -252,12 +328,9 @@ async def upload_as_dataset(
                 content=content,
                 filename=filename,
                 source_format=fmt,
-                dataset_name=name,
-                data_type=data_type,
+                dataset_id=dataset_id,
                 semantic_type=semantic_type,
-                description=description,
                 strict_semantic=strict,
-                creator=actor,
             )
     except SemanticValidationError as exc:
         return JSONResponse(
@@ -280,16 +353,20 @@ async def upload_as_dataset(
             content={"success": False, "message": f"落地失败:{exc}"},
         )
 
-    # 上传后挂分类(可空):land_upload 已 commit,这里补一次更新
-    if category_id:
-        dataset.category_id = category_id
-        await session.commit()
-        await session.refresh(dataset)
-
-    detail = _to_detail(dataset, [version])
+    # 重取该数据集全部版本,返回完整详情(成员落在 draft 版本)
+    versions = (
+        await session.execute(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == dataset.id)
+            .order_by(DatasetVersion.version_no)
+        )
+    ).scalars().all()
+    detail = _to_detail(dataset, list(versions))
+    await _attach_tables(session, detail)
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
+    detail.tags = (await _dataset_tags_map(session, [dataset.id])).get(dataset.id, [])
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
@@ -367,22 +444,17 @@ async def _manifest_version_of(
 async def upload_media_as_dataset(
     files: MediaFilesDep,
     session: SessionDep,
-    user: Annotated[User | None, Depends(current_user)] = None,
-    name: NameForm = None,
+    dataset_id: Annotated[str, Form(alias="datasetId")],
     data_type: DataTypeForm = None,
-    category_id: CategoryIdForm = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
-    """媒体批量接入:一批文件 → 传平台 MinIO → 生成**一个** manifest 数据集(一文件一行)。
+    """媒体批量接入(数据集优先):一批文件 → 传平台 MinIO → 作为一个 **manifest 版本**
+    落进所选数据集(一文件一行)。
 
-    与 /datasets/upload(一文件一集)不同:整批只建一个数据集,版本是 manifest jsonl,
-    可进 dj-process(物化时下载成员)。仅图/音/视频(同模态)。
+    必选 `datasetId`(缺失 422、不存在 404、无写权 403)。manifest 是整版本形态
+    (非表成员),故每次媒体接入在该数据集追加一个新版本(version_no=max+1),
+    keys 落在 v<n>/ 下,避免与其它版本的 manifest 冲突。仅图/音/视频(同模态)。
     """
-    # 数据集名称必填校验(统一上传入口策略,不再自动派生)
-    if not name or not name.strip():
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "数据集名称不能为空"},
-        )
     field = _MEDIA_FIELD.get(data_type or "")
     token = _MEDIA_TOKEN.get(data_type or "")
     if field is None or token is None:
@@ -392,6 +464,18 @@ async def upload_media_as_dataset(
                 "success": False,
                 "message": "媒体批量接入仅支持 image / audio / video 类型",
             },
+        )
+    # 目标数据集存在性 + 写权
+    dataset = await session.get(Dataset, dataset_id)
+    if dataset is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "目标数据集不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无该数据集写入权限"},
         )
     if not files:
         return JSONResponse(
@@ -424,9 +508,17 @@ async def upload_media_as_dataset(
         )
 
     bucket = settings.storage_minio_upload_bucket
-    dataset_id = _new_dataset_id()
-    actor = user.id if user else "admin"
-    # 任一步失败(对象写入/落库)都回收本数据集前缀,绝不留孤儿对象
+    # 数据集已存在:追加 manifest 版本(version_no=max+1),keys 落 v<n>/ 下,
+    # 失败仅回收本版本前缀,绝不动该数据集已有的其它版本对象。
+    max_no = (
+        await session.execute(
+            select(func.max(DatasetVersion.version_no)).where(
+                DatasetVersion.dataset_id == dataset_id
+            )
+        )
+    ).scalar()
+    version_no = (max_no or 0) + 1
+    ver_prefix = f"{dataset_id}/v{version_no}/"
     try:
         manifest_rows: list[dict] = []
         total_size = 0
@@ -439,7 +531,7 @@ async def upload_media_as_dataset(
                 raise ValueError("本批文件总体积超过上限,无法加工")
             fmt = _file_ext(f.filename or "")
             base = Path(f.filename or f"file{idx}").name  # 去路径,防 key 注入
-            member_key = f"{dataset_id}/{idx:06d}-{base}"
+            member_key = f"{ver_prefix}{idx:06d}-{base}"
             await upload_object(
                 cfg,
                 bucket,
@@ -462,7 +554,7 @@ async def upload_media_as_dataset(
                 }
             )
         manifest_bytes = _manifest_bytes(manifest_rows)
-        manifest_key = f"{dataset_id}/manifest.jsonl"
+        manifest_key = f"{ver_prefix}manifest.jsonl"
         await upload_object(
             cfg,
             bucket,
@@ -472,21 +564,12 @@ async def upload_media_as_dataset(
             content_type="application/x-ndjson",
         )
 
-        dataset = Dataset(
-            id=dataset_id,
-            name=name.strip(),
-            data_type=data_type,
-            category_id=category_id,
-            owner=actor,
-            creator=actor,
-        )
-        session.add(dataset)
         # manifest 媒体集:单模态(每行 text 是 dj 占位 token,非真实文本 → 单模态子标签)
         media_modalities = [_MEDIA_FIELD[data_type]] if data_type else None
         version = DatasetVersion(
             id=_new_version_id(),
             dataset_id=dataset_id,
-            version_no=1,
+            version_no=version_no,
             storage_uri=f"s3://{bucket}/{manifest_key}",
             format=MANIFEST_FORMAT,
             rows=len(files),
@@ -494,6 +577,7 @@ async def upload_media_as_dataset(
             origin="managed",
             source_datasource_id=None,
             modalities=media_modalities,
+            publish_status="draft",
             note=f"媒体批量接入:{len(files)} 个文件",
         )
         session.add(version)
@@ -501,25 +585,34 @@ async def upload_media_as_dataset(
         await session.refresh(dataset)
         await session.refresh(version)
     except ValueError as exc:
-        await _gc_manifest_objects((bucket, f"{dataset_id}/"))
+        await _gc_manifest_objects((bucket, ver_prefix))
         return JSONResponse(
             status_code=400, content={"success": False, "message": str(exc)}
         )
     except ExternalStoreError as exc:
-        await _gc_manifest_objects((bucket, f"{dataset_id}/"))
+        await _gc_manifest_objects((bucket, ver_prefix))
         return JSONResponse(
             status_code=503,
             content={"success": False, "message": f"对象写入失败:{exc}"},
         )
     except Exception:
         await session.rollback()
-        await _gc_manifest_objects((bucket, f"{dataset_id}/"))
+        await _gc_manifest_objects((bucket, ver_prefix))
         raise
 
-    detail = _to_detail(dataset, [version])
+    versions = (
+        await session.execute(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == dataset.id)
+            .order_by(DatasetVersion.version_no)
+        )
+    ).scalars().all()
+    detail = _to_detail(dataset, list(versions))
+    await _attach_tables(session, detail)
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
+    detail.tags = (await _dataset_tags_map(session, [dataset.id])).get(dataset.id, [])
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
@@ -528,43 +621,38 @@ async def upload_media_as_dataset(
 async def upload_batch_as_dataset(
     files: MediaFilesDep,
     session: SessionDep,
+    dataset_id: Annotated[str, Form(alias="datasetId")],
     user: Annotated[User | None, Depends(current_user)] = None,
-    name: NameForm = None,
-    data_type: DataTypeForm = None,
     semantic_type: SemanticTypeForm = None,
-    category_id: CategoryIdForm = None,
+    table_name: Annotated[str | None, Form(alias="tableName")] = None,
     safety_check: SafetyCheckForm = True,
     safety_use_llm: SafetyUseLlmForm = False,
 ) -> JSONResponse:
-    """单一格式批量本地上传:一批同格式文本/结构化文件 → 原文件复制进平台内置 MinIO
-    + 合并解析为一个 data.jsonl(也存 MinIO)→ 生成一个受管数据集。
+    """单一格式批量本地上传(数据集优先):一批同格式文件 → 原件留存 + 合并解析为
+    一个表成员,落进所选数据集的 draft 版本。
 
-    与 /datasets/upload(单文件一集、落本地盘)、/datasets/upload-media(媒体→manifest)
-    互补:本端点面向**非二进制、可规范化**格式(csv/tsv/txt/log/json/jsonl/xlsx/xls/
-    pdf/doc/docx/ppt/pptx/html),一批文件合成**一个**数据集:
-      - 原件逐个 upload_object 到 uploads/<id>/originals/<idx>-<name>(留存可下载);
-      - 各文件 normalize_to_records 合并 → records_to_jsonl_bytes → 传
-        uploads/<dataset_id>/v1/data.jsonl;
-      - 登记 DatasetVersion(format='jsonl', origin='managed', storage_uri=s3://…)。
-        origin='managed'(非 'hosted'):平台自有、可正常删除(删除回收整个 <id>/ 前缀);
-        预览/物化按 storage_uri 的 s3:// scheme 走平台 MinIO(见 preview_version /
-        external_store.materialized_version),不再凭 origin 二分。
-
-    多模态(COT/GIS 等)接入逻辑后续单独处理;本端点只收非二进制单一格式。
-    任一步失败回滚 DB + 回收整个 <id>/ 前缀,绝不留孤儿对象。
+    必选 `datasetId`(缺失 422、不存在 404、无写权 403)。可选 `tableName`(默认
+    由首个文件名派生)。原件逐个存 uploads/<id>/originals/;合并 jsonl 作为该
+    版本一个成员(table_name)。
     """
-    # 数据集名称必填校验(统一上传入口策略,不再自动派生)
-    if not name or not name.strip():
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "数据集名称不能为空"},
-        )
     # 语义类型合法性(可选;与 data_type 正交,非法值 422)
     try:
         parse_semantic_type(semantic_type)
     except SemanticValidationError as exc:
         return JSONResponse(
             status_code=422, content={"success": False, "message": str(exc)}
+        )
+    # 目标数据集存在性 + 写权
+    dataset = await session.get(Dataset, dataset_id)
+    if dataset is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "目标数据集不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无该数据集写入权限"},
         )
     if not files:
         return JSONResponse(
@@ -606,10 +694,12 @@ async def upload_batch_as_dataset(
         )
 
     bucket = settings.storage_minio_upload_bucket
-    dataset_id = _new_dataset_id()
-    prefix = f"{dataset_id}/"
-    actor = user.id if user else "admin"
-    # 任一步失败(体积/解析/对象写入/落库)都回收本数据集前缀,绝不留孤儿对象
+    # 数据集已存在(数据集优先);本批原件归到独立子前缀,失败仅回收本批,绝不动
+    # 该数据集已有的其它成员/版本对象。
+    batch_token = secrets.token_hex(3)
+    orig_prefix = f"{dataset_id}/originals/{batch_token}/"
+    eff_table = _safe_table_name(table_name or (files[0].filename or "data"))
+    # 任一步失败(体积/解析/对象写入/落库)都回收本批原件前缀,绝不留孤儿对象
     try:
         all_records: list[dict] = []
         total_size = 0
@@ -622,28 +712,20 @@ async def upload_batch_as_dataset(
                 raise ValueError("本批文件总体积超过上限")
             fmt = _file_ext(f.filename or "")
             base = Path(f.filename or f"file{idx}").name  # 去路径,防 key 注入
-            orig_key = f"{prefix}originals/{idx:06d}-{base}"
+            orig_key = f"{orig_prefix}{idx:06d}-{base}"
             await upload_object(
                 cfg, bucket, orig_key, io.BytesIO(content), len(content),
                 content_type=f.content_type or "application/octet-stream",
             )
             all_records.extend(normalize_to_records(content, fmt))
 
-        # 语义维度(与 data_type 正交):显式→归一+校验(非严格只计数);否则按 data_type 推断
+        # 语义维度(与 data_type 正交):显式→归一+校验(非严格只计数)。
+        # data_type 归数据集级(建集时已定),批量上传不再单独传。
         explicit = coerce_semantic_type(semantic_type)
-        batch_modalities: list[str] | None = None
         if explicit is not None:
-            all_records, report = apply_semantic_spec(
+            all_records, _report = apply_semantic_spec(
                 all_records, explicit, strict=False
             )
-            effective_semantic: str | None = explicit.value
-            if effective_semantic == SemanticType.MULTIMODAL.value:
-                batch_modalities = report.modalities or None
-        else:
-            inferred = infer_semantic_from_data_type(data_type)
-            effective_semantic = inferred.value if inferred else None
-            if effective_semantic == SemanticType.MULTIMODAL.value:
-                batch_modalities = collect_modalities(all_records) or None
 
         # 内容安全前置预检(#4):数据集落库前对全量解析文本跑审核,违规则回滚 + 回收
         # MinIO 原件,绝不创建脏数据集。默认敏感词 + PII(秒级),LLM 可选(默认关)。
@@ -662,7 +744,7 @@ async def upload_batch_as_dataset(
                 )
             if pre["blocked"]:
                 await session.rollback()
-                await _gc_manifest_objects((bucket, prefix))
+                await _gc_manifest_objects((bucket, orig_prefix))
                 return JSONResponse(
                     status_code=422,
                     content={
@@ -675,62 +757,51 @@ async def upload_batch_as_dataset(
                     },
                 )
 
-        jsonl_bytes = records_to_jsonl_bytes(all_records)
-        storage_uri = await upload_jsonl_to_uploads(dataset_id, 1, jsonl_bytes)
-
-        dataset = Dataset(
-            id=dataset_id,
-            name=name.strip(),
-            data_type=data_type,
-            semantic_type=effective_semantic,
-            category_id=category_id,
-            owner=actor,
-            creator=actor,
-        )
-        session.add(dataset)
-        version = DatasetVersion(
-            id=_new_version_id(),
-            dataset_id=dataset_id,
-            version_no=1,
-            storage_uri=storage_uri,
-            format="jsonl",
-            rows=len(all_records),
-            size=len(jsonl_bytes),
-            origin="managed",
-            source_datasource_id=None,
-            semantic_type=effective_semantic,
-            modalities=batch_modalities,
+        # 合并记录作为目标数据集 draft 版本的一个成员(table_name)
+        version, _member = await add_table_member(
+            session,
+            dataset_id,
+            all_records,
+            table_name=eff_table,
+            storage_format="jsonl",
+            semantic_type=semantic_type,
             note=(
                 f"单一格式批量上传:{len(files)} 个文件"
-                f"(原件存 {prefix}originals/)"
+                f"(原件存 {orig_prefix})"
             ),
         )
-        session.add(version)
-        await session.commit()
-        await session.refresh(dataset)
-        await session.refresh(version)
+        dataset = await session.get(Dataset, dataset_id)
     except (ValueError, UnsupportedFormatError, ParseError) as exc:
         await session.rollback()
-        await _gc_manifest_objects((bucket, prefix))
+        await _gc_manifest_objects((bucket, orig_prefix))
         return JSONResponse(
             status_code=400, content={"success": False, "message": str(exc)}
         )
     except ExternalStoreError as exc:
         await session.rollback()
-        await _gc_manifest_objects((bucket, prefix))
+        await _gc_manifest_objects((bucket, orig_prefix))
         return JSONResponse(
             status_code=503,
             content={"success": False, "message": f"对象写入失败:{exc}"},
         )
     except Exception:
         await session.rollback()
-        await _gc_manifest_objects((bucket, prefix))
+        await _gc_manifest_objects((bucket, orig_prefix))
         raise
 
-    detail = _to_detail(dataset, [version])
+    versions = (
+        await session.execute(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == dataset.id)
+            .order_by(DatasetVersion.version_no)
+        )
+    ).scalars().all()
+    detail = _to_detail(dataset, list(versions))
+    await _attach_tables(session, detail)
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
+    detail.tags = (await _dataset_tags_map(session, [dataset.id])).get(dataset.id, [])
     payload = DatasetResult(data=detail)
     return JSONResponse(content=payload.model_dump(by_alias=True, mode="json"))
 
@@ -1501,6 +1572,7 @@ async def get_dataset(
         )
     ).all()
     detail = _to_detail(dataset, list(versions))
+    await _attach_tables(session, detail)
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
@@ -1561,6 +1633,7 @@ async def update_dataset(
         )
     ).all()
     detail = _to_detail(dataset, list(versions))
+    await _attach_tables(session, detail)
     if dataset.category_id:
         names = await build_category_name_map(session, [dataset.category_id])
         detail.category_name = names.get(dataset.category_id)
