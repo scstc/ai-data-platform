@@ -26,6 +26,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CategoryManager } from '@/components';
 import {
   batchDeleteDatasets,
+  createDataset,
   deleteDataset,
   hostS3,
   listBuckets,
@@ -123,6 +124,7 @@ const DatasetsList: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Dataset[]>([]);
   const [hostOpen, setHostOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
@@ -578,8 +580,14 @@ const DatasetsList: React.FC = () => {
             <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
           </Access>,
           <Button
-            key="host-s3"
+            key="create"
             type="primary"
+            onClick={() => setCreateOpen(true)}
+          >
+            新建数据集
+          </Button>,
+          <Button
+            key="host-s3"
             onClick={() => setHostOpen(true)}
           >
             托管 S3 数据
@@ -619,6 +627,69 @@ const DatasetsList: React.FC = () => {
         }}
         columns={columns}
       />
+
+      <ModalForm<DataPlatform.DatasetCreateParams>
+        title="新建数据集"
+        width={640}
+        open={createOpen}
+        modalProps={{ destroyOnHidden: true }}
+        onOpenChange={setCreateOpen}
+        onFinish={async (values) => {
+          try {
+            const res = await createDataset(values);
+            message.success(
+              `数据集「${res?.data?.name ?? values.name}」已创建,去详情页添加数据`,
+            );
+            actionRef.current?.reload();
+            return true;
+          } catch {
+            message.error('创建失败,请重试');
+            return false;
+          }
+        }}
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+          先创建一个空数据集,随后通过「本地上传」或「采集任务」往其中添加表成员
+          (多表 = 同一版本下的多个 parquet 文件)。
+        </Typography.Paragraph>
+        <ProFormText
+          name="name"
+          label="数据集名称"
+          rules={[{ required: true, message: '请输入数据集名称' }]}
+          placeholder="如:风控训练样本集"
+        />
+        <ProFormSelect
+          name="dataType"
+          label="数据类型"
+          placeholder="选择接入/格式功能键(可选)"
+          valueEnum={DATA_TYPE_ENUM}
+        />
+        <ProFormSelect
+          name="semanticType"
+          label="语义类型"
+          placeholder="选择语义类型(可选)"
+          valueEnum={SEMANTIC_TYPE_ENUM}
+        />
+        <ProFormTreeSelect
+          name="categoryId"
+          label="分类"
+          placeholder="选择分类(可选)"
+          allowClear
+          fieldProps={{
+            treeData: categoryTreeData,
+            showSearch: true,
+            treeNodeFilterProp: 'title',
+            treeDefaultExpandAll: true,
+          }}
+        />
+        <ProFormSelect
+          name="tags"
+          label="标签"
+          mode="tags"
+          placeholder="输入或选择标签(可选)"
+          options={tagOptions}
+        />
+      </ModalForm>
 
       <ModalForm<DataPlatform.HostS3Params>
         title="托管 S3 数据"
