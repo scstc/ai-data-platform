@@ -29,6 +29,7 @@ from app.core.db import get_session
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
+from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
 from app.models.job import Job
 from app.models.job_input import JobInput
@@ -881,8 +882,37 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
 async def _members_of(
     version: DatasetVersion, session: AsyncSession
 ) -> list[DatasetMemberRead]:
-    """枚举版本的成员文件(manifest → __member;受管批量上传 s3 → originals/;其余 → 单一成员)。
+    """枚举版本的成员文件(优先 dataset_version_tables 表成员 → manifest → originals/ → 单一成员)。
     复用于 members 端点与多文件 zip 下载。存储错误抛 ExternalStoreError。"""
+    # 数据集优先改造:优先按显式表成员(dataset_version_tables)枚举。
+    # 单表数据集 = 恰好一个 "data" 成员;多表 = 各表一个成员。回填后的存量版本
+    # 也有一行 "data" 成员,故新旧版本统一走此路径。
+    table_members = (
+        await session.execute(
+            select(DatasetVersionTable)
+            .where(DatasetVersionTable.dataset_version_id == version.id)
+            .order_by(DatasetVersionTable.table_name)
+        )
+    ).scalars().all()
+    if table_members:
+        out: list[DatasetMemberRead] = []
+        for tm in table_members:
+            bucket, key = "", tm.storage_uri
+            if str(tm.storage_uri).startswith("s3://"):
+                try:
+                    bucket, key = parse_s3_uri(tm.storage_uri)
+                except ExternalStoreError:
+                    bucket, key = "", tm.storage_uri
+            out.append(
+                DatasetMemberRead(
+                    name=tm.table_name,
+                    key=key,
+                    bucket=bucket,
+                    format=tm.format,
+                    size=tm.size,
+                )
+            )
+        return out
     if version.format != MANIFEST_FORMAT:
         # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件。
         # 仅限批量上传落地版本(produced_by_job_id 为空);加工/采集等 job 产出是
