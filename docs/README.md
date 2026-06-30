@@ -21,6 +21,7 @@
 | `data-governance-flow-summary.md` | 上文的快速参考版:一分钟速览、文件格式处理速查表、核心约束与解法,完整内容见 `data-governance-flow.md`(2026-06-30) |
 | `architecture.md` | 系统架构说明:运行时架构总览(单机 Docker Compose 拓扑、组件职责、技术栈、三层数据流);偏部署后实际形态,与 `plan/03-架构设计.md`(领域模型)、`data-governance-flow.md`(数据流)互补(2026-06-30) |
 | `poc-hardware-sizing-b.md` | POC 硬件资源清单(档位 B):部署拓扑 + 16C/64G/1TB NVMe/1× 24G GPU 推荐配置 + 云规格对照(2026-06-30) |
+| `training-dataset-format-spec.md` | 训练数据集格式规范:数据治理平台→训练/推理平台的格式契约;8 种训练方式各自的数据集 schema(预训练`text`/SFT`messages`/DPO`prompt,chosen,rejected`/评估`prompt,response`≥300条等)、**蒸馏区分**(模型蒸馏=训练方式 vs 数据蒸馏=Selector选子集/Mapper合成)、**多模态变体**(图文/音频/视频走 `images/audios/videos` 路径+`<image>`占位符,媒体存OBS不嵌入)、数据集元数据(train_type 过滤)、数据集构造层(原始列→训练字段,当前缺口)、交付三件套、优先级建议(P0:SFT+评估);承接 `data-governance-flow.md` 下游(2026-06-30) |
 
 ## 项目级文档(根目录)
 

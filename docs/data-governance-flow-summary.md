@@ -9,9 +9,9 @@
     ↓ 
 【接入层】landing.py → 统一 jsonl + OBS 归档
     ↓
-【治理层】data-juicer 流水线 → 质量过滤/去重/合规
+【治理层】data-juicer 流水线 → 过滤/去重/合规/增强/选择(五类算子)
     ↓
-【交付层】导出 parquet + OBS 媒体目录 → 训练平台
+【交付层】构造训练 schema → parquet/jsonl + OBS 媒体 → 训练平台
 ```
 
 ---

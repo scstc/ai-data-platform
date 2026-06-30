@@ -8,7 +8,7 @@
 
 ### 设计原则
 
-1. **分层解耦**:接入层(异构 → 统一格式)、治理层(data-juicer)、交付层(训练友好)三层分离
+1. **分层解耦**:接入层(异构 → 统一格式)、治理层(data-juicer:过滤/去重/合规/增强/选择)、交付层(构造训练 schema)三层分离
 2. **统一数据集**:多文件合并为带血缘的单一数据集,而非逐文件一对一转换
 3. **路径引用**:多媒体内容不进数据集,只存路径,实际文件走对象存储
 4. **可复现**:全程声明式配置,输入 + config → 确定性产出
@@ -114,8 +114,14 @@
 │      - remove_specific_chars_mapper   # PII 清洗                 │
 │      - image_face_blur_mapper         # 人脸打码                 │
 │                                                                  │
-│   4. 增强(可选)                                                  │
+│   4. 增强 / 构造 / 蒸馏(Mapper)                                 │
 │      - video_captioning_mapper        # 视频生成文本描述         │
+│      - (LLM 改写 / 拼 prompt 模板 → 构造训练字段)               │
+│      - (LLM 合成高质量样本 → 数据蒸馏·合成式)                   │
+│                                                                  │
+│   5. 数据选择 / 蒸馏(Selector)                                  │
+│      - 按质量分/分布采样,选 top-k 或子集                        │
+│      - 大数据集→小而精子集(数据蒸馏·筛选式)                    │
 │                                                                  │
 │ 产物:dataset_v1_clean.jsonl + _stats.jsonl                       │
 └──────────────────────────────────────────────────────────────────┘
@@ -127,20 +133,25 @@
 │ 格式转换:jsonl → parquet (列式存储)                              │
 │ 分片策略:export_shard_size=256MB (分布式读)                      │
 │                                                                  │
-│ 交付物清单:                                                       │
-│   ├── corpus-00-of-10.parquet   # 元数据(轻量,GB 级可能几十 MB) │
-│   ├── corpus-01-of-10.parquet                                   │
-│   ├── ...                                                       │
-│   ├── corpus_stats.jsonl        # 质量审计                      │
-│   ├── process.yaml              # 可复现凭证                     │
-│   └── [媒体目录 or OBS bucket]  # 实际的图/音/视频文件           │
+│ ★ 数据集构造:治理后数据 → 训练 schema(按训练方式)               │
+│   预训练 {text} / SFT {messages} / DPO {prompt,chosen,rejected}  │
+│   / 评估 {prompt,response}≥300 / 多模态加 images/audios/videos   │
+│   → 详见《训练数据集格式规范》training-dataset-format-spec.md     │
+│                                                                  │
+│ 交付物清单(三件套):                                             │
+│   ├── train.parquet/jsonl       # 训练数据(对应 train_type)    │
+│   ├── train_stats.jsonl         # 质量审计                      │
+│   ├── dataset_card.md           # 数据集说明(schema/血缘/规模)  │
+│   └── [媒体目录 or OBS bucket]  # 多模态:实际的图/音/视频文件   │
 │                                                                  │
 │ 存储策略:                                                         │
-│   - 元数据(parquet):平台数据库 or S3                             │
-│   - 媒体文件:OBS (10.60.1.60:55433 对应的对象存储)              │
+│   - 元数据(parquet/jsonl):平台数据库 or S3                       │
+│   - 媒体文件:OBS (对象存储,路径引用,训练时懒加载)              │
 │   - 路径格式:obs://bucket/train/media/img_0001.png              │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+> **交付层与训练 schema 的衔接**:本文档的交付层产出统一的 parquet/jsonl + OBS 媒体,但**"构造成哪种训练格式"(SFT/DPO/评估/多模态)由训练方式决定**,详见独立文档《[训练数据集格式规范](./training-dataset-format-spec.md)》。简言之:本文档负责"数据怎么进来+治理干净",该规范负责"治理后怎么构造成训练可用的 schema"。
 
 ### 2.1 PDF 类型识别与处理分流
 
@@ -1629,8 +1640,8 @@ ALTER TABLE job ADD COLUMN resource_usage JSONB;
 
 **解耦理由**:
 - **接入层**:对接多种数据源(上传/S3/DB/API),产出统一格式
-- **治理层**:纯粹的算子流水线,不关心数据从哪来
-- **交付层**:适配不同训练框架(PyTorch/TF/Spark)
+- **治理层**:算子流水线(Filter 过滤 / Deduplicator 去重 / Mapper 变换+增强 / Selector 选择),不关心数据从哪来
+- **交付层**:构造成训练 schema(SFT/DPO/评估/多模态)+ 适配训练框架,详见《[训练数据集格式规范](./training-dataset-format-spec.md)》
 
 好处:中间任一层改动,不影响其他层。
 
@@ -1703,9 +1714,11 @@ ALTER TABLE job ADD COLUMN resource_usage JSONB;
 
 ### Phase 6:训练平台对接(1 周)
 
-- [ ] 编写训练平台数据加载器(PyTorch DataLoader from parquet + OBS)
-- [ ] 文档:《数据集交付规范》(parquet schema / OBS 路径约定)
-- [ ] 示例:CLIP 训练脚本,直接消费平台产出的图文数据集
+- [x] 文档:《[训练数据集格式规范](./training-dataset-format-spec.md)》(各训练方式 schema / 元数据 / 交付三件套)
+- [ ] 实现"数据集构造层":治理后数据 → 训练 schema(优先 SFT `messages` + 评估 `prompt/response`)
+- [ ] 数据集落地写入 `train_type` / `schema` / `record_count` 元数据,供训练平台按类型过滤
+- [ ] 编写训练平台数据加载器(读 jsonl/parquet + OBS 懒加载媒体)
+- [ ] 示例:SFT 微调脚本 + 多模态(图文)训练脚本,直接消费平台产出数据集
 
 ---
 
