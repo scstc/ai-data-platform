@@ -159,7 +159,8 @@ async def run_pg_ingest(
       ``max(当前水位, 本表增量列 max)``;中途某表失败 → 水位只反映此前已落地的表,
       失败表重试时仍被采(防 DATA LOSS)。空批 / 无 incremental / 无 column → 不推进。
     """
-    from app.services.landing import land_records
+    from app.models.dataset import Dataset
+    from app.services.landing import add_table_member
 
     incremental = getattr(task, "incremental", None) or {}
     inc_column: str | None = incremental.get("column") if incremental else None
@@ -169,7 +170,7 @@ async def run_pg_ingest(
         watermark=getattr(task, "watermark", None),
     )
     cfg = datasource.config or {}
-    results: list[tuple[Dataset, DatasetVersion]] = []
+    version: DatasetVersion | None = None
     try:
         conn = await _connect(cfg)
         try:
@@ -179,23 +180,21 @@ async def run_pg_ingest(
                 # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
                 records = await apply_filter_operators(task, records)
 
-                name = f"{task.name} - {suffix}" if suffix else task.name
-                ds, ver = await land_records(
+                # 数据集优先(Task 10):每表作成员落进 task.dataset_id 的 draft 版本
+                # (多表 = 一版本多成员);单查询无 suffix → 成员名 "data";同名表覆盖。
+                table_name = suffix or "data"
+                version, _member = await add_table_member(
                     session,
+                    task.dataset_id,
                     records,
-                    dataset_name=name,
-                    # 采集落地统一归到 SQL 接入栏
-                    # (否则 data_type=NULL,数据接入页任何分栏都看不到)
-                    data_type="sql",
-                    # 语义维度:PG 表结构化数据
+                    table_name=table_name,
+                    # 语义维度:PG 表结构化数据(data_type 归数据集级,连接器不改)
                     semantic_type="structured",
-                    # 三轴:来源=数据库;数据库直连无文件载体,格式留空
-                    source_kind="database",
+                    source_format="db",
                     note=f"采集落地:{task.name}(来源 {datasource.name})",
                     produced_by_job_id=job_id,
                     storage_format="parquet",
                 )
-                results.append((ds, ver))
 
                 # C5 评审 Finding 1 修复:水位推进改为每表成功落地**之后**
                 # running-max(当前水位, 本表增量列 max)。中途某表失败 → 水位
@@ -210,7 +209,10 @@ async def run_pg_ingest(
         raise
     except Exception as exc:  # noqa: BLE001 连接/查询失败统一上报
         raise IngestError(str(exc)) from exc
-    return results
+    if version is None:
+        return []
+    dataset = await session.get(Dataset, task.dataset_id)
+    return [(dataset, version)]
 
 
 # ---------------------------------------------------------------------------

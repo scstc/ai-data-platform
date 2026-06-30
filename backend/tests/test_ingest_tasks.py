@@ -290,7 +290,7 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
         await session.commit()
 
     did = (await client.post(
-        "/api/v1/datasets", json={"name": "PG真实采集-目标集"}
+        "/api/v1/datasets", json={"name": "PG真实采集-目标集", "dataType": "sql"}
     )).json()["data"]["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
