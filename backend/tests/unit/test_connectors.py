@@ -376,11 +376,13 @@ def _install_fake_asyncmy(monkeypatch, rows):
 
 
 class _Task:
-    """最小 IngestTask 替身(只用到 name / extract)。"""
+    """最小 IngestTask 替身(只用到 name / extract / dataset_id)。"""
 
     def __init__(self, extract):
         self.name = "MySQL采集"
         self.extract = extract
+        # 数据集优先:采集任务绑定目标数据集(Task 8/10)
+        self.dataset_id = "dset-test"
 
 
 class _Datasource:
@@ -393,43 +395,49 @@ class _Datasource:
 
 @pytest.mark.asyncio
 async def test_mysql_run_ingest_orchestrates_landing(monkeypatch):
-    """fake asyncmy:run_ingest 取固定行 → land_records,断言落地编排参数。
+    """fake asyncmy:run_ingest 取固定行 → add_table_member,断言落地编排参数。
 
-    意图(§4.5):goldendb 经 MysqlConnector 把 SELECT 结果整形为 dict 行后,
-    统一以 data_type='sql'(接入键不变)+ semantic_type='structured'(语义维度)
-    落地。真落库由集成测覆盖,这里 mock land_records 只验编排,纯 no-DB。
+    意图(§4.5 + 数据集优先 Task 10):goldendb 经 MysqlConnector 把 SELECT 结果整形为
+    dict 行后,作为表成员落进 task.dataset_id 的 draft 版本(semantic_type='structured';
+    data_type 归数据集级,连接器不再传)。真落库由集成测覆盖,这里 mock 只验编排,纯 no-DB。
     """
     _install_fake_asyncmy(monkeypatch, rows=[(1, "alice"), (2, "bob")])
 
     captured: dict = {}
 
-    async def _fake_land_records(session, records, **kwargs):  # noqa: ANN003
+    async def _fake_add_table_member(session, dataset_id, records, **kwargs):  # noqa: ANN003
+        captured["dataset_id"] = dataset_id
         captured["records"] = records
         captured["kwargs"] = kwargs
-        return ("DATASET", "VERSION")
+        return ("VERSION", "MEMBER")
 
-    # land_records 在 run_ingest 内部 lazy import,patch 模块原符号即可拦截
+    class _Session:
+        async def get(self, model, ident):  # noqa: ANN001
+            return "DATASET"
+
+    # add_table_member 在 run_ingest 内部 lazy import,patch 模块原符号即可拦截
     monkeypatch.setattr(
-        "app.services.landing.land_records", _fake_land_records
+        "app.services.landing.add_table_member", _fake_add_table_member
     )
 
     conn = MysqlConnector()
     task = _Task({"mode": "sql", "sql": "SELECT id, name FROM users"})
     ds = _Datasource({"host": "h", "port": 3306, "database": "d"})
 
-    results = await conn.run_ingest(object(), task, ds, job_id="job-7")
+    results = await conn.run_ingest(_Session(), task, ds, job_id="job-7")
 
-    # 编排产物:一条查询 → 一个 (dataset, version) 对
+    # 编排产物:一次运行 → 单个 (dataset, version) 对(收口后不再每表一集)
     assert results == [("DATASET", "VERSION")]
     # 固定行被整形为以列名为键的 dict
     assert captured["records"] == [
         {"id": 1, "name": "alice"},
         {"id": 2, "name": "bob"},
     ]
-    # 接入键不动 + 语义维度正交(铁律:data_type 一字不改)
-    assert captured["kwargs"]["data_type"] == "sql"
+    # 落进绑定数据集;语义维度正交(data_type 归数据集级,连接器不传)
+    assert captured["dataset_id"] == "dset-test"
     assert captured["kwargs"]["semantic_type"] == "structured"
     assert captured["kwargs"]["produced_by_job_id"] == "job-7"
+    assert "data_type" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio
@@ -550,60 +558,63 @@ def test_keys_from_extract_rejects_non_path_mode():
 # ===========================================================================
 @pytest.mark.asyncio
 async def test_doris_run_ingest_landing_kwargs_match_signature(monkeypatch):
-    """Doris(用 asyncmy)走通 run_ingest → land_records,断言落地 kwarg 合法。
+    """Doris(用 asyncmy)走通 run_ingest → add_table_member,断言落地 kwarg 合法。
 
-    桩函数签名与真实 land_records 一致(keyword-only dataset_name 等);若连接器
-    传了不存在的 name=/source_uri=/job_id=,绑定即 TypeError,测试红 → 守住 G-CONN。
-    意图:结构化源统一 parquet + data_type=sql + 血缘走 produced_by_job_id。
+    桩函数签名与真实 add_table_member 一致(keyword-only table_name 等);若连接器
+    传了不存在的 kwarg,绑定即 TypeError,测试红 → 守住 G-CONN(防参数名漂移)。
+    意图(数据集优先 Task 10):结构化源统一 parquet + 落进 task.dataset_id 的成员 +
+    血缘走 produced_by_job_id;data_type 归数据集级,连接器不再传。
     """
     _install_fake_asyncmy(monkeypatch, rows=[(1, "alice"), (2, "bob")])
 
     captured: dict = {}
 
-    # 桩签名刻意镜像 app.services.landing.land_records 的真实形参,
+    # 桩签名刻意镜像 app.services.landing.add_table_member 的真实形参,
     # 多/少/错一个 kwarg 名都会让下面的调用抛 TypeError。
-    async def _stub_land_records(
+    async def _stub_add_table_member(
         session,
+        dataset_id,
         records,
         *,
-        dataset_name: str,
-        data_type=None,
+        table_name: str,
+        storage_format="parquet",
         semantic_type=None,
-        source_kind=None,
         source_format=None,
-        description=None,
-        note=None,
         produced_by_job_id=None,
-        creator="admin",
         strict_semantic=False,
-        storage_format="jsonl",
+        train_type=None,
+        schema_variant=None,
+        note=None,
     ):
         captured.update(
-            dataset_name=dataset_name,
-            data_type=data_type,
+            dataset_id=dataset_id,
+            table_name=table_name,
             semantic_type=semantic_type,
-            source_kind=source_kind,
+            source_format=source_format,
             produced_by_job_id=produced_by_job_id,
             storage_format=storage_format,
             note=note,
         )
-        return ("DATASET", "VERSION")
+        return ("VERSION", "MEMBER")
+
+    class _Session:
+        async def get(self, model, ident):  # noqa: ANN001
+            return "DATASET"
 
     monkeypatch.setattr(
-        "app.services.landing.land_records", _stub_land_records
+        "app.services.landing.add_table_member", _stub_add_table_member
     )
 
     conn = DorisConnector()
     task = _Task({"mode": "sql", "sql": "SELECT id, name FROM t"})
     ds = _Datasource({"host": "h", "port": 9030, "database": "d"})
 
-    results = await conn.run_ingest(object(), task, ds, job_id="job-9")
+    results = await conn.run_ingest(_Session(), task, ds, job_id="job-9")
 
     assert results == [("DATASET", "VERSION")]
-    # 结构化源对齐:parquet + sql + structured;血缘经 produced_by_job_id(非 job_id)
-    assert captured["data_type"] == "sql"
+    # 结构化源对齐:parquet + structured;落进绑定数据集;血缘经 produced_by_job_id
+    assert captured["dataset_id"] == "dset-test"
     assert captured["semantic_type"] == "structured"
-    assert captured["source_kind"] == "database"
     assert captured["storage_format"] == "parquet"
     assert captured["produced_by_job_id"] == "job-9"
     # 来源 URI 信息保留在 note(原 source_uri 的去处)
