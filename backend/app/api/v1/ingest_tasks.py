@@ -30,7 +30,7 @@ from pydantic import Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_perm
+from app.api.deps import current_user, require_perm
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
@@ -39,6 +39,7 @@ from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
+from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.ingest_task import (
     IngestExtract,
@@ -51,6 +52,7 @@ from app.services import operator_catalog as oc
 from app.services import scheduler as scheduler_mod
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
+from app.services.dataset_acl import can_access
 from app.services.external_store import (
     ExternalStoreError,
     upload_jsonl_to_uploads,
@@ -463,11 +465,25 @@ async def ingest_tasks_stats(session: SessionDep) -> IngestTaskStats:
 async def create_ingest_task(
     payload: IngestTaskCreate,
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> Response:
-    """新建采集任务：校验数据源存在并冗余其名称，初始 pending/0。"""
+    """新建采集任务：校验数据源 + 目标数据集存在/可写，冗余数据源名，初始 pending/0。"""
     datasource = await session.get(DataSource, payload.datasource_id)
     if datasource is None:
         return _not_found()
+
+    # 数据集优先:目标数据集必须存在且调用者有写权(采集结果落进其 draft 版本)
+    dataset = await session.get(Dataset, payload.dataset_id)
+    if dataset is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "目标数据集不存在"},
+        )
+    if not await can_access(session, user, payload.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无该数据集写入权限"},
+        )
 
     if reason := _invalid_operator_reason(payload.extract):
         return JSONResponse(
@@ -479,6 +495,7 @@ async def create_ingest_task(
         name=payload.name,
         datasource_id=payload.datasource_id,
         datasource_name=datasource.name,
+        dataset_id=payload.dataset_id,
         schedule=payload.schedule.model_dump(),
         extract=payload.extract.model_dump() if payload.extract else None,
         status="pending",

@@ -31,6 +31,7 @@ def _base_create_payload(cron: str | None, mode: str = "cron") -> dict:
     return {
         "name": "t-cron",
         "datasourceId": "ds-1",
+        "datasetId": "dset-1",
         "schedule": schedule,
     }
 

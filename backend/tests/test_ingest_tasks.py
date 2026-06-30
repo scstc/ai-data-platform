@@ -39,14 +39,21 @@ async def _seed_datasource(
 
 
 async def _create_task(
-    client: AsyncClient, datasource_id: str, name: str = "每日同步任务"
+    client: AsyncClient, datasource_id: str, name: str = "每日同步任务",
+    dataset_id: str | None = None,
 ) -> dict:
-    """创建任务并返回 data 部分。"""
+    """创建任务并返回 data 部分。数据集优先:未给 dataset_id 时先建一个空数据集。"""
+    if dataset_id is None:
+        ds = (await client.post(
+            "/api/v1/datasets", json={"name": f"{name}-目标集"}
+        )).json()["data"]
+        dataset_id = ds["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": name,
             "datasourceId": datasource_id,
+            "datasetId": dataset_id,
             # cron 调度本期未启用(§4.10),创建端会 422;一律用 once。
             "schedule": {"mode": "once"},
         },
@@ -60,11 +67,16 @@ async def _create_task(
 @pytest.mark.asyncio
 async def test_create_validates_datasource_exists(client: AsyncClient) -> None:
     """数据源不存在时创建返回 404 + {success:false, message}。"""
+    # 先建数据集(datasetId 必填);datasource 校验先于 dataset 校验,故走 datasource 404
+    ds = (await client.post("/api/v1/datasets", json={"name": "孤儿目标集"})).json()[
+        "data"
+    ]["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": "孤儿任务",
             "datasourceId": "ds-nope00",
+            "datasetId": ds,
             "schedule": {"mode": "once"},
         },
     )
@@ -277,11 +289,15 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
         )
         await session.commit()
 
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": "PG真实采集-目标集"}
+    )).json()["data"]["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": "PG真实采集",
             "datasourceId": "ds-pg-self",
+            "datasetId": did,
             "schedule": {"mode": "once"},
             "extract": {"mode": "sql", "sql": "SELECT 1 AS num, 'hi' AS text"},
         },
@@ -403,11 +419,15 @@ async def test_pg_family_db_kinds_route_through_pgconnector(
         )
         await session.commit()
 
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": f"{db_kind}采集-目标集"}
+    )).json()["data"]["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": f"{db_kind}采集",
             "datasourceId": ds_id,
+            "datasetId": did,
             "schedule": {"mode": "once"},
             "extract": {"mode": "sql", "sql": "SELECT 42 AS answer"},
         },
@@ -483,11 +503,15 @@ async def test_pg_rerun_lands_parquet(
         )
         await session.commit()
 
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": "parquet采集-目标集"}
+    )).json()["data"]["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": "parquet采集",
             "datasourceId": "ds-pg-parquet",
+            "datasetId": did,
             "schedule": {"mode": "once"},
             "extract": {"mode": "sql", "sql": "SELECT 1 AS n, 'hello' AS s"},
         },
@@ -557,11 +581,15 @@ async def test_pg_rerun_jsonl_fallback_on_codec_error(
         )
         await session.commit()
 
+    did = (await client.post(
+        "/api/v1/datasets", json={"name": "jsonl回退采集-目标集"}
+    )).json()["data"]["id"]
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": "jsonl回退采集",
             "datasourceId": "ds-pg-jsonl-fb",
+            "datasetId": did,
             "schedule": {"mode": "once"},
             "extract": {"mode": "sql", "sql": "SELECT 42 AS x"},
         },

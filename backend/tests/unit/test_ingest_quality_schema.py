@@ -6,6 +6,7 @@ quality_verdict)只落模型/迁移,不通过 schema 暴露——本测只验 py
 """
 
 import pytest
+
 from app.schemas.ingest_task import (
     IngestSchedule,
     IngestTaskCreate,
@@ -20,6 +21,7 @@ def _base_payload() -> dict:
     return {
         "name": "t-q",
         "datasourceId": "ds-1",
+        "datasetId": "dset-1",
         "schedule": {"mode": "once"},
     }
 

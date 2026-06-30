@@ -170,6 +170,8 @@ class IngestTaskRead(CamelModel):
     name: str
     datasource_id: str
     datasource_name: str
+    # 目标数据集(数据集优先):采集结果落进该数据集的 draft 版本
+    dataset_id: str | None = None
     schedule: IngestSchedule
     extract: IngestExtract | None = None
     status: IngestTaskStatus
@@ -216,6 +218,8 @@ class IngestTaskCreate(CamelModel):
 
     name: str
     datasource_id: str
+    # 目标数据集(数据集优先流程):必选,采集结果作表成员落进该数据集的 draft 版本
+    dataset_id: str
     schedule: IngestSchedule
     extract: IngestExtract | None = None
     # 分类(#15):受控分类库引用 id,可空
