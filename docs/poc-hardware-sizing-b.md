@@ -27,7 +27,7 @@
 
 | 维度 | 规格 |
 |---|---|
-| CPU | 16 vCPU(物理 8C16T 起,要求 AVX2) |
+| CPU | 16 CPU |
 | 内存 | 64 GB |
 | 系统盘 | 200 GB SSD |
 | 数据盘 | 1 TB NVMe SSD |
