@@ -17,6 +17,10 @@ from typing import Any, Awaitable, Callable
 PREVIEW_SAMPLE_ROWS = 50
 MAX_MATERIALIZE_BYTES = 64 * 1024 * 1024  # 64 MiB 护栏,与 external_store 对齐
 
+# 预览解析器支持的结构化/表格格式(与 _parse_file / _parse_bytes 的分支一致);
+# 桶内常混装 pptx/doc/pdf/媒体等不可预览格式,采样时只挑这些扩展名的对象。
+_PREVIEWABLE_EXTS = {"csv", "jsonl", "parquet"}
+
 # Python 类型 → 展示标签
 _TYPE_LABELS = {
     bool: "boolean",
@@ -176,7 +180,19 @@ async def _preview_s3(cfg: dict[str, Any], extract: dict[str, Any]) -> dict[str,
     keys = _keys_from_extract(extract, all_objects)
     if not keys:
         raise ValueError("未匹配到任何对象,请检查 paths/glob")
-    key = keys[0]
+    # 取首个**可预览格式**的对象采样(与 run_ingest 跳过不支持格式、继续处理的容错
+    # 策略一致);桶内混装 pptx/doc/pdf/媒体时,不再对 keys[0] 硬失败。
+    previewable = [
+        k for k in keys
+        if (k.rsplit(".", 1)[-1].lower() if "." in k else "") in _PREVIEWABLE_EXTS
+    ]
+    if not previewable:
+        raise ValueError(
+            f"匹配到 {len(keys)} 个对象,但均非可预览格式"
+            f"(预览仅支持 {', '.join(sorted(_PREVIEWABLE_EXTS))});"
+            "不影响落地采集,可直接「下一步」继续"
+        )
+    key = previewable[0]
     try:
         meta = await stat_object(cfg, bucket, key)
     except ExternalStoreError as exc:
@@ -220,7 +236,8 @@ def _parse_file(path: Path, key: str) -> dict[str, Any]:
     if ext == "parquet":
         rows, _ = _parse_parquet_head(path, PREVIEW_SAMPLE_ROWS + 1)
     else:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig:剥除 UTF-8 BOM(否则 csv 首列名会带 ﻿,如 ﻿txn_id)
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
         if ext == "jsonl":
             rows, _ = _parse_jsonl_head(text, PREVIEW_SAMPLE_ROWS + 1)
         elif ext == "csv":
@@ -241,7 +258,8 @@ def _parse_bytes(data: bytes, key: str) -> dict[str, Any]:
             f.flush()
             rows, _ = _parse_parquet_head(Path(f.name), PREVIEW_SAMPLE_ROWS + 1)
     else:
-        text = data.decode("utf-8", errors="replace")
+        # utf-8-sig:剥除 UTF-8 BOM(否则 csv 首列名会带 ﻿,如 ﻿txn_id)
+        text = data.decode("utf-8-sig", errors="replace")
         if ext == "jsonl":
             rows, _ = _parse_jsonl_head(text, PREVIEW_SAMPLE_ROWS + 1)
         elif ext == "csv":

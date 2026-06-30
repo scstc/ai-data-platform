@@ -109,13 +109,41 @@ def client_for(config: dict[str, Any] | None, *, fast_fail: bool = False) -> Min
             timeout=urllib3.Timeout(connect=3.0, read=5.0),
             retries=urllib3.Retry(total=1, connect=1, read=1),
         )
-    return Minio(
+    # 华为云 OBS 适配:OBS 只支持虚拟主机域名寻址(bucket.endpoint/key),不接受
+    # path-style(endpoint/bucket/key),否则以 VirtualHostDomainRequired(403)拒绝。
+    # minio SDK 对 OBS 有两处默认行为会触发该 403,都要绕过:
+    #   1. 默认仅对 AWS / 阿里云 OSS 开虚拟寻址,OBS 落 path-style —— 手动开
+    #      _base_url._virtual_style_flag(SDK 无公开开关)让真正的 List/Get 走虚拟寻址;
+    #   2. 首次访问桶时先发 GetBucketLocation 预检,该请求带 location 查询参数,被
+    #      minio 强制回 path-style(build() 里 location→enforce_path_style),照样被 OBS
+    #      拒 —— 显式传 region(从 obs.<region>.myhuaweicloud.com 解析),令 _get_region
+    #      命中 base_url.region 直接返回、跳过预检。
+    # 注:含 '.' 的桶名在 https 下仍被 minio 强制回 path-style(避免 SSL 证书校验失败),
+    # OBS 桶名通常不含点,如遇此情况需改用不含点的桶名。
+    host = endpoint.split(":", 1)[0].lower()
+    is_obs = "myhuaweicloud" in host
+    region: str | None = None
+    if is_obs:
+        # obs.cn-north-4.myhuaweicloud.com / obs.dualstack.cn-north-4.myhuaweicloud.com
+        left = host.split(".myhuaweicloud", 1)[0]
+        labels = [x for x in left.split(".") if x]
+        if len(labels) >= 2:
+            region = labels[-1]  # cn-north-4
+
+    client = Minio(
         endpoint,
         access_key=str(config.get("accessKey") or ""),
         secret_key=str(config.get("secretKey") or ""),
         secure=secure,
+        region=region,
         http_client=http_client,
     )
+    if is_obs:
+        base_url = getattr(client, "_base_url", None)
+        if base_url is not None:
+            base_url._virtual_style_flag = True
+
+    return client
 
 
 def s3_settings_for_duckdb(

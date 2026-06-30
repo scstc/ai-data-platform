@@ -766,6 +766,22 @@ const IngestTasksPage: React.FC = () => {
             name="object"
             title="采集对象"
             onFinish={async (values) => {
+              // S3 / HDFS 的 path 模式：路径列表与 Glob 至少填一项。两者皆空时后端会以
+              // 「采集对象为空」400 拒绝，这里前置拦截，避免走到预览步才报错。
+              const ds = dsMap[wizardCtx.datasourceId ?? ''];
+              if (ds?.type === 's3' || ds?.type === 'hdfs') {
+                const ex = values.extract ?? {};
+                const paths = (ex.paths ?? []).filter(
+                  (p: string) => p && p.trim(),
+                );
+                const glob = (ex.glob ?? '').trim();
+                if (!paths.length && !glob) {
+                  message.error(
+                    '请至少填写「路径列表」或「Glob 模式」之一（全量请在 Glob 填 *）',
+                  );
+                  return false;
+                }
+              }
               // 把 extract 写入步骤间上下文，供 step-3 SourcePreview 触发预览
               setWizardCtx((c) => ({ ...c, extract: values.extract }));
               return true;

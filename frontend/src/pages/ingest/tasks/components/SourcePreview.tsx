@@ -36,7 +36,15 @@ export function SourcePreview({
       setSelected(all);
       onColumnsChange?.(all);
     } catch (e: any) {
-      setError(e?.data?.message ?? e?.message ?? '预览失败');
+      // 后端 4xx 体为 {success:false, message}，umi/axios 落在 e.response.data.message；
+      // 仅取 e.message 会退化成通用的「Request failed with status code 400」，吞掉真实原因。
+      setError(
+        e?.data?.message ??
+          e?.response?.data?.message ??
+          e?.info?.errorMessage ??
+          e?.message ??
+          '预览失败',
+      );
     } finally {
       setLoading(false);
     }
