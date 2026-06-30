@@ -13,9 +13,13 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # 系统依赖:编译(lz4/zstandard 等) + 媒体算子运行期(ffmpeg / libGL)
+# + 老 .doc 二进制文件解析:antiword(快路径) / libreoffice(兜底 headless 转 .docx)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git ffmpeg libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+        antiword unzip \
+        libreoffice-core libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/lo-home
 
 # --- data-juicer 引擎 venv(变动少,放前面利于层缓存) ---
 # 非 editable 安装:触发 hatch 自定义 build hook 编译 C++/Cython 去重扩展
@@ -31,6 +35,8 @@ ENV VIRTUAL_ENV=/app/.venv PATH="/app/.venv/bin:${PATH}"
 # 先装依赖(pyproject 变动少),再拷源码,加速重建
 COPY backend/pyproject.toml /app/pyproject.toml
 RUN uv pip install -r /app/pyproject.toml
+# 后端 venv 补 mammoth(.doc 解析兜底链 soffice→.docx→mammoth 需要)
+RUN uv pip install --python /app/.venv/bin/python 'mammoth>=1.8.0'
 COPY backend/ /app/
 
 EXPOSE 18003

@@ -8,6 +8,7 @@ import type { UploadFile, UploadProps } from 'antd';
 import {
   Button,
   Card,
+  Input,
   message,
   Segmented,
   Tag,
@@ -80,9 +81,11 @@ const CONFIG: Record<string, TypeConfig> = {
   },
   gis: {
     label: '地理空间',
-    format: 'json',
-    sampleName: 'gis_example.json',
-    sampleUrl: '/samples/gis_example.json',
+    // GeoJSON 是 OGC 标准格式(.geojson),落地比 .json 更不被误识别为通用 JSON;
+    // 同时仍接受 .json(便于把 FeatureCollection 内容重命名上传)。
+    format: 'json,geojson',
+    sampleName: 'gis_example.geojson',
+    sampleUrl: '/samples/gis_example.geojson',
     schemaNote:
       'GeoJSON FeatureCollection:每个 Point 含 [经度,纬度] 坐标与 name/category 属性',
   },
@@ -139,17 +142,24 @@ const ScenarioImportCard: React.FC<Props> = ({
 
   const mod =
     cfg.modalities?.find((m) => m.key === modality) ?? cfg.modalities?.[0];
-  const accept = cfg.media ? mod?.accept : `.${cfg.format}`;
+  // format 可能是 CSV 列表(如 GIS 的 "json,geojson"),让 accept 与校验同步多值
+  const formatList = (cfg.format ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const accept = cfg.media
+    ? mod?.accept
+    : formatList.map((f) => `.${f}`).join(',');
 
   // 仅暂存:校验扩展名 + 单文件 200MB,提交时统一发送
   const beforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
     const ext = getExt(file.name);
-    const ok = cfg.media ? !!mod?.exts.includes(ext) : ext === cfg.format;
+    const ok = cfg.media ? !!mod?.exts.includes(ext) : formatList.includes(ext);
     if (!ok) {
       message.error(
         cfg.media
           ? `「${file.name}」不是${mod?.label}文件,已忽略`
-          : `「${file.name}」不是 .${cfg.format} 文件,已忽略`,
+          : `「${file.name}」不是 ${formatList.map((f) => `.${f}`).join(' / ')} 文件,已忽略`,
       );
       return Upload.LIST_IGNORE;
     }
@@ -177,7 +187,13 @@ const ScenarioImportCard: React.FC<Props> = ({
     if (cfg.media) {
       fd.append('data_type', modality); // image / audio / video
     } else {
-      fd.append('data_type', cfg.format as string);
+      // 多 format(如 GIS 的 "json,geojson"):后端依赖按文件后缀路由解析,
+      // 不能简单把多值塞进 data_type,按首个真实文件扩展名作为 data_type。
+      const firstFile = fileList[0]?.originFileObj as File | undefined;
+      const inferredFormat = firstFile
+        ? getExt(firstFile.name) || (formatList[0] ?? 'json')
+        : (formatList[0] ?? 'json');
+      fd.append('data_type', inferredFormat);
       fd.append('semantic_type', semanticType);
     }
 
@@ -286,7 +302,7 @@ const ScenarioImportCard: React.FC<Props> = ({
         <p className="ant-upload-text">
           {cfg.media
             ? `点击或拖拽${mod?.label}文件到此处导入`
-            : `点击或拖拽 .${cfg.format} 文件到此处导入`}
+            : `点击或拖拽 ${formatList.map((f) => `.${f}`).join(' / ')} 文件到此处导入`}
         </p>
         <p className="ant-upload-hint">
           {cfg.label}数据,单文件最大 200MB;多文件合并生成一个数据集,原件存入内置
