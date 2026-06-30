@@ -17,6 +17,10 @@
 | `research/data-juicer-文件格式支持调研.md` | data-juicer 文件格式支持调研:输入格式全表、Word/Excel/PDF 支持情况(docx/pdf✅、excel❌)、产物导出格式(默认 jsonl)、对照 LAS 需求、归一化算子落地建议(2026-06-24) |
 | `research/LAS竞品复刻可行性调研.md` | 以火山引擎 LAS《数据集管理》为竞品,评估用当前框架(FastAPI+PG+data-juicer+AntD Pro)复刻的可行性:LAS 四层能力拆解(Catalog/双引擎SQL/在线编辑/回流)、Lance 技术依据、本地现状 gap 矩阵、DuckDB+LanceDB 复刻路径、风险与诚实声明(混合调研:本地源码+105-agent deep-research,23/25 claim 验证通过)(2026-06-24) |
 | `dynamic-menu.md` | 动态菜单(RBAC)架构:侧边栏由 `menus` 表经 `getRouters`+`menuDataRender` 按角色驱动、路由仍静态;两个事实源、哪些进表、按角色控可见、新增页面三步流程、图标映射(2026-06-25) |
+| `data-governance-flow.md` | 多格式数据治理流程:异构文件(文本+多媒体)→统一数据集→训练平台的端到端方案;接入层(landing)、治理层(data-juicer)、交付层(parquet)三层架构;纯文本/CSV/图片/视频四场景实施方案;后端扩展(媒体批量接入+manifest物化)、前端改造(列映射+算子筛选)、典型用户故事、技术决策、实施路线图(2026-06-30) |
+| `data-governance-flow-summary.md` | 上文的快速参考版:一分钟速览、文件格式处理速查表、核心约束与解法,完整内容见 `data-governance-flow.md`(2026-06-30) |
+| `architecture.md` | 系统架构说明:运行时架构总览(单机 Docker Compose 拓扑、组件职责、技术栈、三层数据流);偏部署后实际形态,与 `plan/03-架构设计.md`(领域模型)、`data-governance-flow.md`(数据流)互补(2026-06-30) |
+| `poc-hardware-sizing-b.md` | POC 硬件资源清单(档位 B):16C/64G/1TB NVMe/1× 24G GPU 推荐配置 + 云规格对照(2026-06-30) |
 
 ## 项目级文档(根目录)
 
