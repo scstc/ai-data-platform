@@ -459,12 +459,18 @@ def _parse_default(type_str: str, raw: str) -> Any:
     return raw
 
 
-def _ui_field(param: dict[str, Any]) -> dict[str, Any] | None:
-    """把 DJ 参数表的一行转成前端表单字段;无意义的 args/kwargs 跳过。"""
-    name = param["name"]
-    if name in ("args", "kwargs"):
+def _ui_field(param: Any) -> dict[str, Any] | None:
+    """把 DJ 参数表的一行转成前端表单字段;无意义的 args/kwargs 跳过。
+
+    容忍 ``param`` 为 None / 非 dict(数据库列允许 params 为 None 时,
+    list 里偶有混入空元素,迭代 None 会炸)。
+    """
+    if not isinstance(param, dict):
         return None
-    type_str = param.get("type", "")
+    name = param.get("name")
+    if not name or name in ("args", "kwargs"):
+        return None
+    type_str = param.get("type") or ""
     if "bool" in type_str:
         ftype = "switch"
     elif "int" in type_str or "float" in type_str:
@@ -475,15 +481,17 @@ def _ui_field(param: dict[str, Any]) -> dict[str, Any] | None:
         "name": name,
         "label": name,
         "type": ftype,
-        "default": _parse_default(type_str, param.get("default", "")),
-        "desc": param.get("desc", ""),
+        "default": _parse_default(type_str, param.get("default") or ""),
+        "desc": param.get("desc") or "",
     }
 
 
 def _ui_params(op: dict[str, Any]) -> list[dict[str, Any]]:
-    if op["name"] in _CURATED_PARAMS:
+    """算子参数 → 前端表单字段;``op['params']`` 允许为 None(数据库列 nullable)。"""
+    if op.get("name") in _CURATED_PARAMS:
         return _CURATED_PARAMS[op["name"]]
-    return [f for f in (_ui_field(p) for p in op.get("params", [])) if f]
+    # 注意:key 存在但 value=None 时 dict.get 的默认不生效,必须显式 `or []`
+    return [f for f in (_ui_field(p) for p in (op.get("params") or [])) if f]
 
 
 def legacy_operators(
