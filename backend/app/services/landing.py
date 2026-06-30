@@ -31,6 +31,9 @@ from app.services.semantic_registry import (
 
 # 文档类:用 markitdown 提取文本,按段落落地
 DOC_FORMATS = {"pdf", "doc", "docx", "ppt", "pptx", "html"}
+# GIS 行业标准:GeoJSON FeatureCollection(OGC RFC 7946);文件本身是 JSON 文本,
+# 但 .geojson 后缀比 .json 更不容易被误识别为通用 JSON。
+GIS_FORMATS = {"geojson"}
 # 可直接落地的源格式(覆盖需求 #3 列出的全部常见格式)
 LANDABLE_FORMATS = {
     "jsonl",
@@ -42,6 +45,7 @@ LANDABLE_FORMATS = {
     "xlsx",
     "xls",
     *DOC_FORMATS,
+    *GIS_FORMATS,
 }
 
 # 二进制类:原样存储,不规范化(图像 / 音频 / 视频)。
@@ -163,8 +167,92 @@ def _xls_to_records(content: bytes) -> list[dict]:
     return records
 
 
+def _convert_legacy_doc_to_text(content: bytes) -> str:
+    """老 .doc(二进制)→ 纯文本:antiword 优先(快、原生 Word);soffice headless 兜底。
+
+    antiword 0.37 对部分现代生成的 .doc 报 `text stream too small to handle`,此时
+    退到 LibreOffice headless 转 .docx 后用 mammoth 解(.docx → markdown)。
+    antiword / soffice 都不可用时抛 ParseError(让上层正常报错,绝不静默成功)。
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    # 1) antiword 直读(快速路径)
+    if shutil.which("antiword"):
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as f:
+                f.write(content)
+                tmp = f.name
+            try:
+                out = subprocess.run(
+                    ["antiword", tmp],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                if out.returncode == 0 and out.stdout:
+                    return out.stdout.decode("utf-8", errors="replace")
+            finally:
+                os.unlink(tmp)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 2) soffice headless: .doc → .docx,再 mammoth
+    if shutil.which("soffice") or shutil.which("libreoffice"):
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                doc = os.path.join(td, "in.doc")
+                with open(doc, "wb") as f:
+                    f.write(content)
+                env = os.environ.copy()
+                env["HOME"] = td  # soffice 启动需要可写 HOME
+                subprocess.run(
+                    [
+                        soffice,
+                        "--headless",
+                        "--norestore",
+                        "--nologo",
+                        "--nodefault",
+                        "--nofirststartwizard",
+                        "--convert-to",
+                        "docx",
+                        "--outdir",
+                        td,
+                        doc,
+                    ],
+                    capture_output=True,
+                    timeout=120,
+                    check=False,
+                    env=env,
+                )
+                docx = os.path.join(td, "in.docx")
+                if os.path.exists(docx):
+                    import mammoth
+
+                    with open(docx, "rb") as f:
+                        result = mammoth.extract_raw_text(f)
+                    if result.value:
+                        return result.value
+        except Exception:  # noqa: BLE001
+            pass
+
+    raise ParseError("无法解析 .doc:请安装 antiword 或 libreoffice-core")
+
+
 def _doc_to_records(content: bytes, ext: str) -> list[dict]:
-    """文档(pdf/doc/docx/ppt/pptx/html)→ markitdown 提取文本 → 按段落每段一条。"""
+    """文档(pdf/doc/docx/ppt/pptx/html)→ markitdown 提取文本 → 按段落每段一条。
+
+    .doc 走双桥(antiword → soffice→mammoth);其他用 markitdown。
+    """
+    if ext == "doc":
+        text = _convert_legacy_doc_to_text(content).strip()
+        if not text:
+            return []
+        paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+        return [{"text": p} for p in paras] if paras else [{"text": text}]
     try:
         result = _get_markitdown().convert_stream(
             io.BytesIO(content), file_extension=f".{ext}"
@@ -178,6 +266,54 @@ def _doc_to_records(content: bytes, ext: str) -> list[dict]:
     return [{"text": p} for p in paras] if paras else [{"text": text}]
 
 
+def _geojson_to_records(content: bytes) -> list[dict]:
+    """GeoJSON FeatureCollection → 一行一条 record(每 Feature 一条)。
+
+    - 顶层是 FeatureCollection:每个 Feature 展平为一条记录;properties 字段平铺,
+      从 geometry.coordinates(GeoJSON 是 [lon, lat])抽出 lat/lon 并附 geometry_type。
+    - 顶层是单个 Feature:返回 1 条记录
+    - 顶层是普通 JSON object/array:退到通用 JSON 解析(绝不抛错)
+    - 非 dict 类型或解析失败:回退 [] + ParseError
+    """
+    try:
+        # 用 utf-8-sig 兼容 Windows/Excel 工具链保存的 UTF-8 BOM 文件,
+        # 对无 BOM 的标准文件完全等价于 utf-8。
+        data = json.loads(content.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ParseError(str(exc)) from exc
+
+    def _flatten_feature(feat: dict) -> dict:
+        out: dict = {}
+        props = feat.get("properties") or {}
+        if isinstance(props, dict):
+            out.update(props)
+        geom = feat.get("geometry") or {}
+        if isinstance(geom, dict):
+            out["geometry_type"] = geom.get("type")
+            coords = geom.get("coordinates")
+            if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+                try:
+                    out["lon"] = float(coords[0])
+                    out["lat"] = float(coords[1])
+                except (TypeError, ValueError):
+                    pass
+        if "type" in feat and "feature_type" not in out:
+            out["feature_type"] = feat["type"]
+        return out
+
+    if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+        features = data.get("features") or []
+        return [_flatten_feature(f) for f in features if isinstance(f, dict)]
+    if isinstance(data, dict) and data.get("type") == "Feature":
+        return [_flatten_feature(data)]
+    # 非标准 GeoJSON 形状:退到通用 JSON 解析,让上层仍能拿到 1 条记录
+    if isinstance(data, list):
+        return [d if isinstance(d, dict) else {"value": d} for d in data]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
 def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
     """把源文件字节按格式规范化为记录列表(每条 → jsonl 一行)。
 
@@ -185,6 +321,7 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
     - json :顶层 list → 每元素一条;顶层 object → 单条
     - csv/tsv:表头为字段名,每行一条
     - txt :每非空行 → {"text": 行}
+    - geojson:FeatureCollection 每 Feature 一行,自动抽取 lon/lat
     其余格式抛 UnsupportedFormatError。解析失败抛 ParseError。
     """
     fmt = fmt.lower()
@@ -196,8 +333,11 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
         return _xls_to_records(content)
     if fmt in DOC_FORMATS:
         return _doc_to_records(content, fmt)
+    if fmt in GIS_FORMATS:
+        return _geojson_to_records(content)
     try:
-        text = content.decode("utf-8")
+        # utf-8-sig 自动剥离 BOM 头,兼容 Windows/Excel 工具链导出。
+        text = content.decode("utf-8-sig")
         if fmt == "jsonl":
             return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
         if fmt == "json":

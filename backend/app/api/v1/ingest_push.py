@@ -100,7 +100,8 @@ async def _parse_body(request: Request) -> Any:
     raw = await request.body()
     if not raw or not raw.strip():
         raise ValueError("请求体为空")
-    text = raw.decode("utf-8", errors="replace").strip()
+    # utf-8-sig 兼容 BOM,errors="replace" 兜底非法字节。
+    text = raw.decode("utf-8-sig", errors="replace").strip()
     # 先尝试整体 JSON(对象或数组)
     try:
         return json.loads(text)
