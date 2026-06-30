@@ -586,10 +586,7 @@ const DatasetsList: React.FC = () => {
           >
             新建数据集
           </Button>,
-          <Button
-            key="host-s3"
-            onClick={() => setHostOpen(true)}
-          >
+          <Button key="host-s3" onClick={() => setHostOpen(true)}>
             托管 S3 数据
           </Button>,
         ]}
