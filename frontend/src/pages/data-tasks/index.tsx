@@ -97,6 +97,8 @@ const DataTasks: React.FC = () => {
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Job[]>([]);
   const [polling, setPolling] = useState<number | undefined>(undefined);
+  // 当前页 / 页大小:驱动「任务ID」列全局连续编号((current-1)*pageSize + idx + 1)
+  const [pageInfo, setPageInfo] = useState({ current: 1, pageSize: 10 });
   // 页顶概览统计,驱动 Dashboard。随列表 request(含 reload/轮询)一同刷新。
   const [stats, setStats] = useState<DataTaskStatsData>();
   // 数据集列表:供「数据集」搜索项下拉选项
@@ -232,6 +234,25 @@ const DataTasks: React.FC = () => {
   };
 
   const columns: ProColumns<DataPlatform.Job>[] = [
+    {
+      // 全局自增行号:(current-1)*pageSize + index + 1,翻页不重置回 1
+      // 不参与搜索(搜索项由下方 hideInTable 列提供)
+      title: '任务ID',
+      valueType: 'index',
+      width: 80,
+      search: false,
+      render: (_, __, index) =>
+        (pageInfo.current - 1) * pageInfo.pageSize + index + 1,
+    },
+    {
+      // 筛选区占位:按当前页行号过滤(request 中按 idx+1 === params.jobId 过滤)。
+      // 不渲染成表格列——表格列用上面的 index 列展示全局连续编号。
+      title: '任务ID',
+      dataIndex: 'jobId',
+      hideInTable: true,
+      valueType: 'digit',
+      fieldProps: { placeholder: '按当前页行号', allowClear: true },
+    },
     {
       title: '任务名',
       dataIndex: 'name',
@@ -445,7 +466,17 @@ const DataTasks: React.FC = () => {
             state: params.state,
             datasetId: params.datasetId,
           });
-          const rows = res.data ?? [];
+          // 记下当前分页,供「任务ID」列做全局连续编号(params 默认值兜底)
+          setPageInfo({
+            current: params.current ?? 1,
+            pageSize: params.pageSize ?? 10,
+          });
+          let rows = res.data ?? [];
+          // 「任务ID」筛选:按当前页行号(1 起)过滤;仅影响当前页内的可见行
+          if (params.jobId) {
+            const want = Number(params.jobId);
+            rows = rows.filter((_, idx) => idx + 1 === want);
+          }
           setPolling(
             rows.some((j) => j.state === 'running' || j.state === 'pending')
               ? 3000
@@ -453,7 +484,11 @@ const DataTasks: React.FC = () => {
           );
           // 概览统计与列表同源刷新(首次加载、reload、轮询都会带上)
           refreshStats();
-          return { data: rows, total: res.total, success: res.success };
+          return {
+            data: rows,
+            total: params.jobId ? rows.length : res.total,
+            success: res.success,
+          };
         }}
         columns={columns}
       />
