@@ -8,6 +8,7 @@ from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
 from app.models.department import Department
+from app.models.eval_result import EvalResult
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
 from app.models.job_input import JobInput
@@ -32,6 +33,7 @@ __all__ = [
     "DatasetAcl",
     "DatasetVersion",
     "Department",
+    "EvalResult",
     "IngestTask",
     "Job",
     "JobInput",

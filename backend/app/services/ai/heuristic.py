@@ -496,3 +496,28 @@ class HeuristicProvider(AIProvider):
             }
             for _ in texts
         ]
+
+    async def judge_answers(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """无 LLM 时的兜底裁判:用参考答案与模型回答的字符 Jaccard 相似度打分。
+
+        纯本地、确定性,保证未配置 LLM 时裁判仍可跑;judge_runner 会在报告里
+        标注"降级为启发式",让用户知情而非误以为是 LLM 评分。
+        """
+        results: list[dict[str, Any]] = []
+        for it in items:
+            ref = str(it.get("reference") or "")
+            comp = str(it.get("completion") or "")
+            a, b = set(ref), set(comp)
+            union = a | b
+            ratio = (len(a & b) / len(union)) if union else 0.0
+            score = int(ratio * 100)
+            results.append(
+                {
+                    "score": score,
+                    "verdict": "pass" if score >= 60 else "fail",
+                    "reason": "启发式字符相似度(未配置 LLM)",
+                }
+            )
+        return results

@@ -26,15 +26,20 @@ from pydantic import ValidationError
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import async_session_factory
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.schemas.job import JobCreate
 from app.services import engine
 from app.services.augment import run_augment_job
+from app.services.capabilities import get_capabilities, get_dj_version
+from app.services.construct import ConstructError, run_construct_job
 from app.services.distillation import run_distillation_job
 from app.services.engine import EngineError, run_process_job
+from app.services.export_delivery import ExportError, run_export_job
 from app.services.external_store import ExternalStoreError
+from app.services.judge_runner import JudgeError, run_judge
 from app.services.make import run_make_job
 from app.services.quality import QualityError, run_quality_job
 from app.services.review_runner import ReviewError, run_review
@@ -107,6 +112,18 @@ def body_from_spec(job: Job) -> Any:
         from app.schemas.augment import AugmentJobCreate
 
         return AugmentJobCreate.model_validate(spec)
+    if job_type == "construct":
+        from app.schemas.construct import ConstructJobCreate
+
+        return ConstructJobCreate.model_validate(spec)
+    if job_type == "judge":
+        from app.schemas.eval import JudgeJobCreate
+
+        return JudgeJobCreate.model_validate(spec)
+    if job_type == "export":
+        from app.schemas.export import ExportJobCreate
+
+        return ExportJobCreate.model_validate(spec)
     if job_type == "quality":
         from app.schemas.job import QualityJobCreate
 
@@ -212,6 +229,11 @@ async def _run_job(job_id: str) -> None:
                     raise _Paused
                 job.state = "running"
                 job.started_at = _now()
+                # 可复现凭证(G18):记录执行环境;随本次最终 commit 落库(不另起 commit)。
+                _caps = get_capabilities()
+                job.dj_version = get_dj_version()
+                job.image_tag = settings.image_tag
+                job.executor_type = "ray" if _caps.ray else "single"
                 await session.commit()
                 operators = [o.model_dump() for o in getattr(body, "operators", [])]
                 if job.type == "distillation":
@@ -248,6 +270,32 @@ async def _run_job(job_id: str) -> None:
                         input_version=input_version,
                         operators=operators,
                     )
+                elif job.type == "construct":
+                    # 构造层:确定性列映射 → 训练 schema,无 operators
+                    _v, yaml_text, log_path, _report = await run_construct_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        goal=body.goal,
+                        output_dataset_id=body.output_dataset_id,
+                    )
+                elif job.type == "judge":
+                    # 裁判:对待评版本逐行 LLM-as-judge 打分,产 eval_results + 报告
+                    # config 用 snake_case key(judge_runner 按 snake 读)
+                    await run_judge(
+                        session,
+                        job=job,
+                        version=input_version,
+                        config=body.config.model_dump(),
+                    )
+                elif job.type == "export":
+                    # 交付:治理后版本 → 训练三件套落 S3(不产新版本)
+                    log_path, _report = await run_export_job(
+                        session,
+                        job_id=job_id,
+                        version=input_version,
+                        goal=body.goal,
+                    )
                 elif job.type == "review":
                     # review 无 yaml/日志产物;run_review 内部落命中 + 打标版本 + 回写报告
                     await run_review(
@@ -263,6 +311,12 @@ async def _run_job(job_id: str) -> None:
                         input_version=input_version,
                         operators=operators,
                         text_keys=getattr(body, "text_keys", None),
+                        use_ray=getattr(body, "use_ray", False),
+                        media_keys={
+                            "image_key": getattr(body, "image_key", None),
+                            "audio_key": getattr(body, "audio_key", None),
+                            "video_key": getattr(body, "video_key", None),
+                        },
                     )
             job.state = "success"
             job.progress = 100
@@ -284,7 +338,15 @@ async def _run_job(job_id: str) -> None:
             else:
                 job.state = "failed"
                 job.error = "任务被取消"
-        except (EngineError, ExternalStoreError, QualityError, ReviewError) as exc:
+        except (
+            ConstructError,
+            EngineError,
+            ExportError,
+            ExternalStoreError,
+            JudgeError,
+            QualityError,
+            ReviewError,
+        ) as exc:
             if job_id in _cancelled:
                 job.state = "cancelled"
             elif job_id in _paused:

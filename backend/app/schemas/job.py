@@ -26,6 +26,12 @@ class JobCreate(CamelModel):
     # 清洗作用字段(DJ text_keys):留空则后端按字段名优先级自动探测;
     # 显式指定则原样用(可多字段),用于脏字符不在标准字段(如 task)的场景。
     text_keys: list[str] | None = None
+    # G6 分布式:切 DJ ray executor;仅在 capabilities.ray 就绪时放行(_start_job 校验)。
+    use_ray: bool = False
+    # G7 多模态:自定义媒体字段键(默认 images/audios/videos);仅 manifest 输入注入。
+    image_key: str | None = None
+    audio_key: str | None = None
+    video_key: str | None = None
 
 
 class QualityJobCreate(CamelModel):
@@ -49,6 +55,10 @@ class JobRead(CamelModel):
     created_at: UtcDateTime
     started_at: UtcDateTime | None = None
     finished_at: UtcDateTime | None = None
+    # 可复现凭证(G18);执行前 / 早期 job 为空。无数字字段,to_camel 安全。
+    dj_version: str | None = None
+    image_tag: str | None = None
+    executor_type: str | None = None
     # 产物概要：{datasetId, datasetName, versionId, versionNo, rows}
     output: dict[str, Any] | None = None
     # 输入版本概要(经 job_inputs 反查)：{datasetId, datasetName, versionId, versionNo}

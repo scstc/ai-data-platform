@@ -130,6 +130,9 @@ def build_config(
     operators: list[dict[str, Any]],
     text_key: str | None = None,
     text_keys: list[str] | None = None,
+    executor_type: str | None = None,
+    ray_address: str | None = None,
+    media_keys: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """把算子编排序列化为 data-juicer 合法配置(dict)。
 
@@ -143,6 +146,13 @@ def build_config(
     字段时(如新闻用 title)必须显式指定,否则 load_dataset 报 'no key [text]'。
     text_keys(列表、可多字段,用户显式选择)优先于 text_key(单字段,自动探测);
     两者皆空时不写(用 DJ 默认 ['text'])。
+
+    executor_type / ray_address(G6 分布式):仅当 executor_type 为 'ray'/'ray_partitioned'
+    时写入(DJ config.py 合法 choices);'default'/None 不写,保持 DJ 缺省单机。
+    media_keys(G7 多模态):{image_key/audio_key/video_key: 字段名};仅写非空值,
+    供 manifest 加工显式指定媒体字段(默认 images/audios/videos 与本平台 manifest 对齐)。
+    注意:**绝不注入 export_stats**——它不是 DJ 的 jsonargparse 配置键(只是 Exporter
+    构造参数,default 模式恒 True),写进 YAML 会被当未知参数拒绝致 dj-process 崩溃。
     """
     cfg = get_active_llm_config()
     process: list[dict[str, Any]] = []
@@ -172,7 +182,17 @@ def build_config(
     elif text_key:
         # 自动探测的单字段:DJ 默认 ["text"],非 text 字段须显式指定
         result["text_keys"] = [text_key]
+    # G6:仅在切 ray 时写 executor_type(default 不写,保持 DJ 缺省)
+    if executor_type in ("ray", "ray_partitioned"):
+        result["executor_type"] = executor_type
+        result["ray_address"] = ray_address or "auto"
+    # G7:媒体字段键(只写白名单内的非空值)
+    if media_keys:
+        for k in ("image_key", "audio_key", "video_key"):
+            if media_keys.get(k):
+                result[k] = media_keys[k]
     return result
+
 
 
 # 仅运行期有意义、对用户无价值的内部键:中转输入路径(S3 对象的一次性本地副本)、
@@ -440,10 +460,14 @@ async def run_process_job(
     input_version: DatasetVersion,
     operators: list[dict[str, Any]],
     text_keys: list[str] | None = None,
+    use_ray: bool = False,
+    media_keys: dict[str, str] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """对一个输入版本跑算子流水线 → 写回输入数据集,产出新版本。
 
     text_keys:用户显式指定的清洗作用字段(可多字段);留空则按字段名优先级自动探测。
+    use_ray(G6):切 DJ ray executor(调用方须先经 capabilities.ray 门控)。
+    media_keys(G7):{image_key/audio_key/video_key:字段名},仅 manifest 输入注入。
     返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 EngineError。
     """
     dataset_id = input_version.dataset_id
@@ -475,6 +499,11 @@ async def run_process_job(
             operators=operators,
             text_key=detected_key,
             text_keys=text_keys,
+            executor_type="ray" if use_ray else None,
+            # 媒体键仅对 manifest 输入有意义,避免污染纯文本/parquet YAML
+            media_keys=(
+                media_keys if input_version.format == MANIFEST_FORMAT else None
+            ),
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")

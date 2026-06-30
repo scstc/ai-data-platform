@@ -1785,3 +1785,177 @@ export async function changePassword(
     { method: 'PUT', data: body, ...(options || {}) },
   );
 }
+
+// ============ 数据集构造层(治理 G2/G3) ============
+/** 新建构造任务(原始列→训练 schema) POST /api/v1/construct/jobs */
+export async function createConstructJob(
+  body: DataPlatform.ConstructJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/construct/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出构造任务 GET /api/v1/construct/jobs */
+export async function listConstructJobs(
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job[]; total: number; success: boolean }>(
+    '/api/v1/construct/jobs',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
+/** 构造任务报告 GET /api/v1/construct/jobs/:id/report */
+export async function getConstructReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: Record<string, any>; success: boolean }>(
+    `/api/v1/construct/jobs/${jobId}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+// ============ 评估数据集 + 裁判(治理 G4/G5) ============
+/** 上传评估数据集(≥300 条 Fail-loud) POST /api/v1/eval/datasets */
+export async function uploadEvalDataset(
+  body: { file: File; name?: string; description?: string },
+  options?: { [key: string]: any },
+) {
+  const fd = new FormData();
+  fd.append('file', body.file);
+  if (body.name) fd.append('name', body.name);
+  if (body.description) fd.append('description', body.description);
+  return request<{
+    success: boolean;
+    message?: string;
+    data?: {
+      datasetId: string;
+      versionId: string;
+      trainType?: string;
+      schemaVariant?: string;
+      recordCount?: number;
+    };
+  }>('/api/v1/eval/datasets', {
+    method: 'POST',
+    data: fd,
+    requestType: 'form',
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
+/** 新建裁判任务(对 reference vs completion 打分) POST /api/v1/eval/judge/jobs */
+export async function createJudgeJob(
+  body: DataPlatform.JudgeJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/eval/judge/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出裁判任务 GET /api/v1/eval/judge/jobs */
+export async function listJudgeJobs(
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job[]; total: number; success: boolean }>(
+    '/api/v1/eval/judge/jobs',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
+/** 裁判报告 GET /api/v1/eval/judge/jobs/:id/report */
+export async function getJudgeReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: {
+      state: string;
+      error?: string;
+      evalReport?: DataPlatform.EvalReport;
+    };
+    success: boolean;
+  }>(`/api/v1/eval/judge/jobs/${jobId}/report`, {
+    method: 'GET',
+    ...(options || {}),
+  });
+}
+
+/** 裁判逐条结果 GET /api/v1/eval/judge/jobs/:id/results */
+export async function listJudgeResults(
+  jobId: string,
+  params: {
+    current?: number;
+    pageSize?: number;
+    verdict?: string;
+    category?: string;
+  } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.EvalResultRead[];
+    total: number;
+    success: boolean;
+  }>(`/api/v1/eval/judge/jobs/${jobId}/results`, {
+    method: 'GET',
+    params,
+    ...(options || {}),
+  });
+}
+
+// ============ 交付/导出三件套(治理 G8/G9) ============
+/** 新建交付任务(治理后版本→train+stats+card 落 S3) POST /api/v1/export/jobs */
+export async function createExportJob(
+  body: DataPlatform.ExportJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/export/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出交付任务 GET /api/v1/export/jobs */
+export async function listExportJobs(
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job[]; total: number; success: boolean }>(
+    '/api/v1/export/jobs',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
+/** 交付报告 GET /api/v1/export/jobs/:id/report */
+export async function getExportReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.ExportReport; success: boolean }>(
+    `/api/v1/export/jobs/${jobId}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
+}

@@ -65,7 +65,27 @@ declare namespace DataPlatform {
     | 'preference'
     | 'timeseries'
     | 'gis'
-    | 'fusion';
+    | 'fusion'
+    | 'eval';
+
+  /** 训练用途(治理 G1;训练平台据此过滤可用数据集) */
+  type TrainType =
+    | 'pretrain'
+    | 'sft'
+    | 'distill'
+    | 'dpo'
+    | 'rlhf'
+    | 'eval'
+    | 'custom';
+
+  /** 训练 schema 变体(治理 G1/构造层) */
+  type SchemaVariant =
+    | 'text'
+    | 'alpaca'
+    | 'messages'
+    | 'preference'
+    | 'prompt_only'
+    | 'eval';
 
   /** 数据库类型（当 DataSourceType 为 database 时使用） */
   type DbKind =
@@ -439,6 +459,104 @@ declare namespace DataPlatform {
     raw?: Record<string, any>;
   };
 
+  // ---- 数据集构造层(治理 G2/G3) ----
+  /** 训练字段取值来源:列引用 / 模板 / 常量(优先级 column > template > const) */
+  type FieldSource = { column?: string; template?: string; const?: string };
+  type MessageTurnSpec = {
+    role: 'system' | 'user' | 'assistant';
+    content: FieldSource;
+  };
+  type ConstructGoal = {
+    trainType: TrainType;
+    schemaVariant: SchemaVariant;
+    fieldMapping?: Record<string, FieldSource>;
+    messages?: MessageTurnSpec[];
+    note?: string;
+  };
+  type ConstructJobCreate = {
+    name: string;
+    datasetVersionId: string;
+    goal: ConstructGoal;
+    outputDatasetId?: string;
+  };
+
+  // ---- 评估 + 裁判(治理 G4/G5) ----
+  type JudgeJobConfig = {
+    promptField?: string;
+    referenceField?: string;
+    completionField?: string;
+    categoryField?: string;
+    passScore?: number;
+    sampleLimit?: number;
+    useLlm?: boolean;
+  };
+  type JudgeJobCreate = {
+    datasetVersionId: string;
+    name?: string;
+    config?: JudgeJobConfig;
+  };
+  type EvalResultRead = {
+    id: string;
+    jobId: string;
+    versionId: string;
+    rowIndex: number;
+    prompt: string;
+    reference: string;
+    completion: string;
+    score?: number;
+    verdict: string;
+    category?: string;
+    reason?: string;
+    createdAt: string;
+  };
+  type EvalReport = {
+    totalItems: number;
+    scoredItems: number;
+    avgScore?: number;
+    passRate?: number;
+    byCategory: Record<string, any>;
+    scoreBuckets: Record<string, number>;
+    warnings: string[];
+  };
+
+  // ---- 交付/导出三件套(治理 G8/G9) ----
+  type ExportGoal = {
+    exportFormat?: 'parquet' | 'jsonl';
+    exportShardSize?: number;
+    includeStats?: boolean;
+    includeCard?: boolean;
+    targetDatasourceId?: string;
+    targetBucket?: string;
+    targetPrefix?: string;
+    note?: string;
+  };
+  type ExportJobCreate = {
+    name: string;
+    datasetVersionId: string;
+    goal?: ExportGoal;
+  };
+  type ExportFileItem = {
+    name: string;
+    key: string;
+    bucket: string;
+    size: number;
+    presignedUrl?: string;
+  };
+  type ExportReport = {
+    jobId: string;
+    versionId: string;
+    targetUri: string;
+    files: ExportFileItem[];
+    recordCount: number;
+    shardCount: number;
+    trainFormat: string;
+    includedStats: boolean;
+    includedCard: boolean;
+    elapsedSeconds?: number;
+    warnings: string[];
+    errors: string[];
+  };
+
   /** 数据合成(make)目标(任务级参数) */
   type MakeGoal = {
     mode?: 'synthesize' | 'make';
@@ -564,6 +682,12 @@ declare namespace DataPlatform {
     semanticType?: SemanticType;
     /** 多模态模态集合(images/audios/videos/text 子集);仅 multimodal 版本有值 */
     modalities?: string[];
+    /** 训练用途(治理 G1);训练平台据此过滤 */
+    trainType?: TrainType;
+    /** 训练 schema 变体(治理 G1) */
+    schemaVariant?: SchemaVariant;
+    /** 样本条数(=rows 的别名,后端 computed),供训练前预检(如 eval≥300) */
+    recordCount?: number;
     origin: string;
     producedByJobId?: string;
     /** 外部 S3 托管(origin=hosted)版本据此找 S3 凭证；受管版本为空 */
@@ -592,6 +716,10 @@ declare namespace DataPlatform {
     semanticType?: SemanticType;
     /** 展示版本的多模态模态集合(后端聚合填充);前端按其分类显示子标签 + 筛选 */
     modalities?: string[];
+    /** 展示版本的训练用途(治理整改 G1,后端聚合填充) */
+    trainType?: TrainType;
+    /** 展示版本的 Schema 变体(治理整改 G1,后端聚合填充) */
+    schemaVariant?: SchemaVariant;
     /** 来源/接入方式(类型三轴之一):database|object_store|hdfs|local_upload|api_push */
     sourceKind?: string;
     /** 原始格式(类型三轴之一):txt/docx/csv/jsonl/image… */
@@ -758,6 +886,8 @@ declare namespace DataPlatform {
     createdEnd?: string;
     /** 发布状态过滤：publishStatus=published 只返回含已发布版本的数据集（算法工程师消费视图） */
     publishStatus?: 'draft' | 'published' | 'unpublished';
+    /** 训练用途过滤(治理 G1,版本级):只返回含该 train_type 版本的数据集 */
+    trainType?: TrainType;
     /** 标签过滤（逗号分隔，OR：含任一即命中） */
     tags?: string;
   };

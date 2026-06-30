@@ -379,6 +379,14 @@ const DatasetsList: React.FC = () => {
       hideInTable: true, // 仅作查询筛选项,不显示为列
     },
     {
+      title: '训练用途',
+      dataIndex: 'trainType',
+      search: false,
+      width: 120,
+      render: (_, r) =>
+        r.trainType ? <Tag color="blue">{r.trainType}</Tag> : '-',
+    },
+    {
       title: '分类',
       dataIndex: 'categoryId',
       valueType: 'treeSelect',

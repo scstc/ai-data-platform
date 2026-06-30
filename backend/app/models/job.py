@@ -25,7 +25,8 @@ class Job(Base):
     # 主键形如 "job-" + 6 位 hex
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    # 类型:ingest | clean | quality | synth | process | review | annotate | distillation | synthesis(make) | augmentation
+    # 类型:ingest | clean | quality | synth | process | review | annotate |
+    # distillation | synthesis(make) | augmentation | construct | judge
     type: Mapped[str] = mapped_column(String, nullable=False)
     # type=ingest 时回指所属采集任务配置(ingest_tasks.id);其余类型为空
     ingest_task_id: Mapped[str | None] = mapped_column(
@@ -47,6 +48,11 @@ class Job(Base):
     review_report: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True
     )
+    # type=judge 时存裁判汇总报告(治理整改 G5):
+    # {totalItems, scoredItems, avgScore, passRate, byCategory, scoreBuckets, warnings}
+    eval_report: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     # 重跑用:建任务时存原始执行规格(JobCreate:算子 + 输出去向 + 输入版本),
     # POST /jobs/{id}/rerun 据此对原输入版本再跑一次。早于本特性的任务为空。
     spec: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
@@ -63,3 +69,8 @@ class Job(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # 可复现凭证(治理整改 G18,规范 Q9):执行时记录;早于本特性 / 未执行的 job 为空。
+    dj_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    image_tag: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 执行器类型:single(默认单机) | ray(分布式)
+    executor_type: Mapped[str | None] = mapped_column(String, nullable=True)

@@ -1,7 +1,7 @@
 """数据类型语义层(L3):`semantic_type` 枚举 + 每类型标准 schema 校验/字段映射。
 
 与 `data_type`(接入/格式功能键,见 datasets 分栏过滤 + 媒体字段解析)**正交**:
-`data_type` 不动,`semantic_type` 承载 10 类 LLM 语义维度。设计见 docs/plan/14。
+`data_type` 不动,`semantic_type` 承载 11 类 LLM 语义维度。设计见 docs/plan/14。
 
 本模块**纯函数、无 DB/IO 依赖**,可纯单测;在 `normalize_to_records` 之后调用,
 与文件格式无关(输入已是 list[dict])。
@@ -16,7 +16,7 @@ from enum import StrEnum
 
 
 class SemanticType(StrEnum):
-    """10 类 LLM 数据语义类型(覆盖需求"数据类型"8 项)。"""
+    """11 类 LLM 数据语义类型(覆盖需求"数据类型"8 项 + 评估)。"""
 
     TEXT = "text"  # 文本
     STRUCTURED = "structured"  # 需求#2:结构化(表格/库表/csv)
@@ -28,6 +28,7 @@ class SemanticType(StrEnum):
     TIMESERIES = "timeseries"  # 需求#6:时序
     GIS = "gis"  # 需求#7:位置
     FUSION = "fusion"  # 需求#8:融合 / 统一语义
+    EVAL = "eval"  # 评估数据集(prompt/response;治理整改 G16)
 
 
 # 展示用中文名(供 GET /semantic-types 与前端下拉)
@@ -42,6 +43,7 @@ SEMANTIC_LABELS: dict[SemanticType, str] = {
     SemanticType.TIMESERIES: "时序",
     SemanticType.GIS: "GIS 位置",
     SemanticType.FUSION: "融合",
+    SemanticType.EVAL: "评估",
 }
 
 
@@ -132,6 +134,17 @@ SEMANTIC_SCHEMAS: dict[SemanticType, SemanticSpec] = {
         },
     ),
     SemanticType.FUSION: SemanticSpec(),  # 不强校验
+    SemanticType.EVAL: SemanticSpec(
+        required=("prompt", "response"),
+        aliases={
+            "question": "prompt",
+            "query": "prompt",
+            "instruction": "prompt",
+            "answer": "response",
+            "reference": "response",
+            "output": "response",
+        },
+    ),
 }
 
 
@@ -200,6 +213,74 @@ def infer_semantic_from_data_type(data_type: str | None) -> SemanticType | None:
     if not data_type:
         return None
     return _DATA_TYPE_SEMANTIC.get(data_type.lower())
+
+
+class TrainType(StrEnum):
+    """训练用途(治理整改 G1,见 docs/training-dataset-format-spec.md §4)。
+
+    训练平台据此过滤可用数据集;与 SemanticType(语义维度)正交。
+    """
+
+    PRETRAIN = "pretrain"
+    SFT = "sft"
+    DISTILL = "distill"
+    DPO = "dpo"
+    RLHF = "rlhf"
+    EVAL = "eval"
+    CUSTOM = "custom"
+
+
+# semantic_type → 默认训练用途(确定性默认;落地时填充,可被写端点显式覆盖)。
+# 只映射语义明确对应训练方式的几类;其余(structured/gis/timeseries/...)→ None。
+_SEMANTIC_TO_TRAIN_TYPE: dict[SemanticType, TrainType] = {
+    SemanticType.QA: TrainType.SFT,
+    SemanticType.COT: TrainType.SFT,
+    SemanticType.PREFERENCE: TrainType.DPO,
+    SemanticType.TEXT: TrainType.PRETRAIN,
+    SemanticType.EVAL: TrainType.EVAL,
+}
+
+# 训练用途 → 默认 schema 变体;distill/rlhf/custom 无固定变体 → None。
+_TRAIN_TYPE_TO_VARIANT: dict[TrainType, str] = {
+    TrainType.PRETRAIN: "text",
+    TrainType.SFT: "messages",
+    TrainType.DPO: "preference",
+    TrainType.RLHF: "prompt_only",
+    TrainType.EVAL: "eval",
+}
+
+
+def infer_train_type(semantic_type: str | None) -> str | None:
+    """由 semantic_type 推断默认训练用途(确定性);未知/None → None。"""
+    st = coerce_semantic_type(semantic_type)
+    if st is None:
+        return None
+    tt = _SEMANTIC_TO_TRAIN_TYPE.get(st)
+    return tt.value if tt else None
+
+
+def default_schema_variant(train_type: str | None) -> str | None:
+    """由训练用途取默认 schema 变体;未知/None/无固定变体 → None。"""
+    if not train_type:
+        return None
+    try:
+        tt = TrainType(train_type)
+    except ValueError:
+        return None
+    return _TRAIN_TYPE_TO_VARIANT.get(tt)
+
+
+def parse_train_type(value: str | None) -> str | None:
+    """写入路径用:None 放行,非法值抛 SemanticValidationError(转 422)。"""
+    if not value:
+        return None
+    try:
+        return TrainType(value).value
+    except ValueError as exc:
+        allowed = ", ".join(t.value for t in TrainType)
+        raise SemanticValidationError(
+            f"非法 trainType={value!r};允许:{allowed}"
+        ) from exc
 
 
 def infer_semantic(records: Sequence[dict]) -> SemanticType | None:

@@ -22,6 +22,7 @@ from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.job import JobCreate, JobRead, OperatorSpec
 from app.services import job_runner
 from app.services import operator_catalog as oc
+from app.services.capabilities import get_capabilities
 from app.services.engine import (
     EngineError,
     multimodal_ready,
@@ -269,6 +270,17 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
     # media_ok:输入是 manifest 媒体集(_multimodal_block 已确保此时 torch 就绪)。
     if (blocked_resp := _operator_block(body.operators, input_version)) is not None:
         return blocked_resp
+
+    # G6:请求 Ray 分布式但环境未就绪(未开启 / DJ venv 未装 ray)→ 提前 400,
+    # 不让任务跑起来才在运行期失败(诚实失败,Rule 12)。
+    if getattr(body, "use_ray", False) and not get_capabilities().ray:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "当前环境未就绪 Ray 分布式(需 RAY_ENABLED + DJ venv 装 ray)",
+            },
+        )
 
     job = Job(
         id=_new_job_id(),

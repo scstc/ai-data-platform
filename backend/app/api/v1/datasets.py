@@ -1283,6 +1283,11 @@ async def list_datasets(
     created_start: CreatedStartQuery = None,
     created_end: CreatedEndQuery = None,
     publish_status: str | None = Query(None, alias="publishStatus"),
+    train_type: str | None = Query(
+        None,
+        alias="trainType",
+        description="按训练用途过滤(版本级):pretrain|sft|distill|dpo|rlhf|eval|custom",
+    ),
     modality: str | None = Query(
         None,
         description="多模态子分类筛选:image|video|audio|cross(按展示版本 modalities 分类)",
@@ -1334,6 +1339,17 @@ async def list_datasets(
             )
         ).all()
         conds.append(Dataset.id.in_(published_ds_ids))
+    # 训练用途过滤(train_type 是版本级字段,走 DatasetVersion 子查询取 dataset_id):
+    # 数据集存在任一版本 train_type==X 即命中(与 publishStatus 同口径)。
+    if train_type:
+        tt_ds_ids = (
+            await session.scalars(
+                select(DatasetVersion.dataset_id)
+                .where(DatasetVersion.train_type == train_type)
+                .distinct()
+            )
+        ).all()
+        conds.append(Dataset.id.in_(tt_ds_ids))
     # 数据集 ACL:匿名沿用现状(不过滤)、登录用户按 owner+超管+授权过滤
     base = await dataset_acl.visible_dataset_filter(
         select(Dataset).where(*conds), session, user
@@ -1374,7 +1390,10 @@ async def list_datasets(
     # (publish_version 不变量保证同数据集至多一个 published——算法侧消费的唯一当前
     # 发布版);无已发布版本时回退最新版本(version_no 最大者,供纯草稿数据集展示)。
     # 否则会把更新的草稿版本号当成"已发布版本号"显示,与详情页对不上。
+    # 治理整改 G1:同时取 train_type、schema_variant 回填列表展示。
     latest_label: dict[str, str] = {}
+    showcase_train_type: dict[str, str | None] = {}
+    showcase_schema_variant: dict[str, str | None] = {}
     if page_ids:
         ver_rows = (
             await session.execute(
@@ -1383,23 +1402,29 @@ async def list_datasets(
                     DatasetVersion.version_no,
                     DatasetVersion.created_at,
                     DatasetVersion.publish_status,
+                    DatasetVersion.train_type,
+                    DatasetVersion.schema_variant,
                 ).where(DatasetVersion.dataset_id.in_(page_ids))
             )
         ).all()
-        published: dict[str, tuple[int, object]] = {}
-        latest: dict[str, tuple[int, object]] = {}
-        for ds_id, vno, created, status in ver_rows:
+        published: dict[str, tuple[int, object, str | None, str | None]] = {}
+        latest: dict[str, tuple[int, object, str | None, str | None]] = {}
+        for ds_id, vno, created, status, tt, sv in ver_rows:
             if status == "published":
-                published[ds_id] = (vno, created)
+                published[ds_id] = (vno, created, tt, sv)
             cur = latest.get(ds_id)
             if cur is None or vno > cur[0]:
-                latest[ds_id] = (vno, created)
-        for ds_id, (vno, created) in latest.items():
+                latest[ds_id] = (vno, created, tt, sv)
+        for ds_id, (vno, created, tt, sv) in latest.items():
             # 已发布版本优先;无则用最新版本
-            pick_vno, pick_created = published.get(ds_id, (vno, created))
+            pick_vno, pick_created, pick_tt, pick_sv = published.get(
+                ds_id, (vno, created, tt, sv)
+            )
             latest_label[ds_id] = format_version_label(
                 pick_vno, pick_created  # type: ignore[arg-type]
             )
+            showcase_train_type[ds_id] = pick_tt
+            showcase_schema_variant[ds_id] = pick_sv
     # 展示版本(优先 published,否则最新)的多模态模态集合,回填 modalities(子标签)
     showcase_mods = await _showcase_modalities(session, page_ids)
     # 批量取本页分类名(避免 N+1),回填 categoryName
@@ -1414,6 +1439,8 @@ async def list_datasets(
         item.hosted = r.id in hosted_ids
         item.latest_version_label = latest_label.get(r.id)
         item.modalities = showcase_mods.get(r.id)
+        item.train_type = showcase_train_type.get(r.id)
+        item.schema_variant = showcase_schema_variant.get(r.id)
         if r.category_id:
             item.category_name = cat_names.get(r.category_id)
         item.tags = tags_map.get(r.id, [])

@@ -537,3 +537,74 @@ def test_keys_from_extract_rejects_non_path_mode():
     """S3 连接器只吃 mode=path;table/sql 走数据库连接器,这里防御性拒绝。"""
     with pytest.raises(IngestError):
         _keys_from_extract({"mode": "table"}, [])
+
+
+# ===========================================================================
+# G-CONN(治理整改):proprietary 连接器落地调用签名守卫
+#
+# 历史 bug:Dameng/Sequoia/Hive/Doris.run_ingest 曾用 land_records(name=,
+# source_uri=, job_id=) —— 这些 kwarg 在 land_records 真实签名里不存在(应为
+# dataset_name= / produced_by_job_id=,且无 source_uri),真库激活即 TypeError,
+# 被未装驱动的 ConnectorNotReady 掩盖。本测用真实 land_records 签名做"桩",
+# 任何参数名漂移都会触发 TypeError 而非静默通过,防回归。
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_doris_run_ingest_landing_kwargs_match_signature(monkeypatch):
+    """Doris(用 asyncmy)走通 run_ingest → land_records,断言落地 kwarg 合法。
+
+    桩函数签名与真实 land_records 一致(keyword-only dataset_name 等);若连接器
+    传了不存在的 name=/source_uri=/job_id=,绑定即 TypeError,测试红 → 守住 G-CONN。
+    意图:结构化源统一 parquet + data_type=sql + 血缘走 produced_by_job_id。
+    """
+    _install_fake_asyncmy(monkeypatch, rows=[(1, "alice"), (2, "bob")])
+
+    captured: dict = {}
+
+    # 桩签名刻意镜像 app.services.landing.land_records 的真实形参,
+    # 多/少/错一个 kwarg 名都会让下面的调用抛 TypeError。
+    async def _stub_land_records(
+        session,
+        records,
+        *,
+        dataset_name: str,
+        data_type=None,
+        semantic_type=None,
+        source_kind=None,
+        source_format=None,
+        description=None,
+        note=None,
+        produced_by_job_id=None,
+        creator="admin",
+        strict_semantic=False,
+        storage_format="jsonl",
+    ):
+        captured.update(
+            dataset_name=dataset_name,
+            data_type=data_type,
+            semantic_type=semantic_type,
+            source_kind=source_kind,
+            produced_by_job_id=produced_by_job_id,
+            storage_format=storage_format,
+            note=note,
+        )
+        return ("DATASET", "VERSION")
+
+    monkeypatch.setattr(
+        "app.services.landing.land_records", _stub_land_records
+    )
+
+    conn = DorisConnector()
+    task = _Task({"mode": "sql", "sql": "SELECT id, name FROM t"})
+    ds = _Datasource({"host": "h", "port": 9030, "database": "d"})
+
+    results = await conn.run_ingest(object(), task, ds, job_id="job-9")
+
+    assert results == [("DATASET", "VERSION")]
+    # 结构化源对齐:parquet + sql + structured;血缘经 produced_by_job_id(非 job_id)
+    assert captured["data_type"] == "sql"
+    assert captured["semantic_type"] == "structured"
+    assert captured["source_kind"] == "database"
+    assert captured["storage_format"] == "parquet"
+    assert captured["produced_by_job_id"] == "job-9"
+    # 来源 URI 信息保留在 note(原 source_uri 的去处)
+    assert "doris://" in (captured["note"] or "")

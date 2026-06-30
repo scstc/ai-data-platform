@@ -72,6 +72,21 @@ _MODERATE_SYSTEM_PROMPT = (
 _MODERATE_BATCH = 20
 # 审核单批超时(秒):比通用 timeout 略宽,但仍有界,失败即降级
 _MODERATE_TIMEOUT = 60.0
+
+# 裁判员(治理整改 G5):对比参考答案与模型回答打分
+_JUDGE_SYSTEM_PROMPT = (
+    "你是严格的评估裁判员。给定每条的问题(prompt)、参考答案(reference)、"
+    "模型回答(completion),判断模型回答相对参考答案的质量,按 0-100 打分"
+    "(100=完全正确且完整,0=完全错误/答非所问)。"
+    "严格只输出一个 JSON 对象:"
+    '{"results":[{"index":<编号>,"score":<0-100整数>,'
+    '"verdict":"pass|fail","reason":"<简短中文理由>"}]}。'
+    "results 必须覆盖每个输入编号。不要任何额外解释或 markdown 代码块。"
+)
+# 裁判单批条数(提示比审核更长,批小一些)
+_JUDGE_BATCH = 10
+# 裁判单批超时(秒)
+_JUDGE_TIMEOUT = 60.0
 # 合法 category 枚举(LLM 越界回退 other)
 _MODERATE_CATEGORIES = {
     "porn",
@@ -343,3 +358,113 @@ class OpenAICompatProvider(AIProvider):
             batch = texts[start : start + _MODERATE_BATCH]
             out.extend(await self._moderate_batch(batch))
         return out
+
+    @staticmethod
+    def _normalize_judgment(item: dict[str, Any] | None) -> dict[str, Any]:
+        """规整单条裁判:score clamp 到 [0,100],verdict 越界按 score 兜底。"""
+        if not isinstance(item, dict):
+            return {"score": None, "verdict": "unscored", "reason": "LLM 未返回该条"}
+        raw_score = item.get("score")
+        score: int | None
+        try:
+            score = max(0, min(100, int(raw_score)))
+        except (TypeError, ValueError):
+            score = None
+        verdict = item.get("verdict")
+        if verdict not in ("pass", "fail"):
+            verdict = (
+                "unscored" if score is None else ("pass" if score >= 60 else "fail")
+            )
+        reason = item.get("reason")
+        return {
+            "score": score,
+            "verdict": verdict,
+            "reason": str(reason) if reason is not None else "",
+        }
+
+    async def _judge_batch(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """裁判一批(<=_JUDGE_BATCH 条),返回与 batch 等长、按下标对齐的结果。
+
+        任一环节失败直接抛,交 judge_answers 处理(降级回退启发式)。
+        """
+        from app.services.llm_config import record_usage  # 延迟导入避免循环
+
+        numbered = "\n".join(
+            f"[{i}] 问题:{it.get('prompt', '')}\n参考答案:{it.get('reference', '')}\n"
+            f"模型回答:{it.get('completion', '')}"
+            for i, it in enumerate(batch)
+        )
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": numbered},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=_JUDGE_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            t1 = time.monotonic()
+            usage = data.get("usage") or {}
+            await record_usage(
+                feature="judge",
+                model=self._model,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                success=True,
+                latency_ms=int((t1 - t0) * 1000),
+            )
+        except Exception:
+            t1 = time.monotonic()
+            await record_usage(
+                feature="judge",
+                model=self._model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                success=False,
+                latency_ms=int((t1 - t0) * 1000),
+            )
+            raise
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        results = parsed.get("results") if isinstance(parsed, dict) else parsed
+        if not isinstance(results, list):
+            raise ValueError("LLM judge 返回缺少 results 数组")
+        by_index: dict[int, dict[str, Any]] = {}
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            if not isinstance(idx, int) or not 0 <= idx < len(batch):
+                continue
+            by_index[idx] = item
+        return [self._normalize_judgment(by_index.get(i)) for i in range(len(batch))]
+
+    async def judge_answers(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """分批裁判全部条目;任一批失败整体回退启发式(降级,不让 job 500)。"""
+        if not items:
+            return []
+        try:
+            out: list[dict[str, Any]] = []
+            for start in range(0, len(items), _JUDGE_BATCH):
+                batch = items[start : start + _JUDGE_BATCH]
+                out.extend(await self._judge_batch(batch))
+            return out
+        except Exception as exc:  # noqa: BLE001 — 任何失败都回退,保证可用性
+            logger.warning("LLM judge_answers 失败,回退启发式:%s", exc)
+            return await self._heuristic.judge_answers(items)

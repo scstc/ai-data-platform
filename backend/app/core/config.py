@@ -67,6 +67,22 @@ class Settings(BaseSettings):
     # 单个加工任务超时(秒);超时杀子进程并标记失败。0/负 = 不限时
     engine_job_timeout: int = 3600
 
+    # 评估数据集硬指标(治理整改 G4,规范 §3.7):每集 ≥N 条,落地前 Fail-loud 校验。
+    # 可配但默认 300(统计显著性下限);测试可 monkeypatch 调小验证逻辑。
+    eval_min_records: int = 300
+
+    # 部署镜像 tag(治理整改 G18 可复现,env IMAGE_TAG):容器化部署由 entrypoint /
+    # docker run -e IMAGE_TAG=xxx 注入;本地开发为 None。随 job 记录,供一键复现。
+    image_tag: str | None = None
+
+    # 扫描型 PDF OCR(治理整改 G10):引擎本体为独立 OCR service(Unlimited-OCR/
+    # paddleocr,~1GB 模型 + 理想 GPU),平台仅作 HTTP 客户端调用。默认关闭 → 零行为变化
+    # (扫描件仍 Fail-loud 抛错);开启需配 ocr_endpoint。
+    ocr_enabled: bool = False
+    ocr_endpoint: str | None = None  # 独立 OCR service,如 http://10.60.1.x:xxxx/ocr/pdf
+    ocr_timeout: int = 300  # OCR 单次超时(秒);CPU 模式 10 页约 2-5 分钟
+    ocr_lang: str = "ch"  # OCR 语言(中文)
+
     # 运行时能力(算子有效可运行状态的事实来源,见 services/capabilities.py)
     # vLLM 推理服务地址(配置后探测其 /v1/models 决定 vllm 类算子是否可用)
     vllm_base_url: str | None = None

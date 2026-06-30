@@ -92,3 +92,13 @@ class DatasetVersion(Base):
     quality_verdict: Mapped[str] = mapped_column(
         String, nullable=False, server_default="skipped"
     )
+    # 训练用途(治理整改 G1,见 docs/data-governance-remediation-plan.md 阶段1 /
+    # docs/training-dataset-format-spec.md §4):
+    # pretrain/sft/distill/dpo/rlhf/eval/custom。训练平台据此过滤可用数据集;
+    # 校验在 Pydantic 层,DB 留 free-string。存量行为空。
+    # record_count 复用 rows 列(语义等价),不另设冗余列。
+    train_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 该 train_type 的具体 schema 变体(§4):
+    # text/alpaca/messages/preference/prompt_only/eval。
+    # 供下游构造层/训练侧校验字段结构。
+    schema_variant: Mapped[str | None] = mapped_column(String, nullable=True)

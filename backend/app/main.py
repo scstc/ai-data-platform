@@ -15,11 +15,14 @@ from app.api.v1 import (
     audit,
     augment,
     categories,
+    construct,
     content_safety,
     data_tasks,
     datasets,
     datasources,
     distillation,
+    evaluation,
+    export,
     files,
     ingest_push,
     ingest_tasks,
@@ -118,7 +121,10 @@ def create_app() -> FastAPI:
     app.include_router(distillation.router, prefix="/api/v1")
     app.include_router(make.router, prefix="/api/v1")
     app.include_router(augment.router, prefix="/api/v1")
+    app.include_router(construct.router, prefix="/api/v1")
     app.include_router(content_safety.router, prefix="/api/v1")
+    app.include_router(evaluation.router, prefix="/api/v1")
+    app.include_router(export.router, prefix="/api/v1")
     app.include_router(ingest_tasks.router, prefix="/api/v1")
     app.include_router(ingest_push.router, prefix="/api/v1")
     app.include_router(uploads.router, prefix="/api/v1")

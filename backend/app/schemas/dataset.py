@@ -24,6 +24,9 @@ class DatasetVersionRead(CamelModel):
     size: int | None = None
     # 语义类型快照(与 data_type 正交,#1/#2/#8);读模型宽松为 str(防御历史值)
     semantic_type: str | None = None
+    # 训练用途元数据(治理整改 G1):训练平台据此过滤。读模型宽松为 str(防御历史值)。
+    train_type: str | None = None
+    schema_variant: str | None = None
     # 多模态模态快照(images/audios/videos/text 子集);仅 multimodal 版本有值
     modalities: list[str] | None = None
     origin: str
@@ -43,6 +46,13 @@ class DatasetVersionRead(CamelModel):
     @property
     def version_label(self) -> str:
         return format_version_label(self.version_no, self.created_at)
+
+    # 样本条数(G1):复用 rows 列;显式钉 alias=recordCount(属性名与 ORM 列名不一致,
+    # 不能靠 alias_generator 对 computed_field 自动生效)。供训练平台预检(如 eval≥300)。
+    @computed_field(alias="recordCount")
+    @property
+    def record_count(self) -> int | None:
+        return self.rows
 
 
 class DatasetRead(CamelModel):
@@ -77,6 +87,9 @@ class DatasetRead(CamelModel):
     # 展示版本(优先 published,否则最新)的多模态模态集合;非 ORM,路由聚合填充。
     # 前端按其分类显示"图片/视频/音频/跨模态"子标签 + 列表筛选。非多模态/存量为 None。
     modalities: list[str] | None = None
+    # 展示版本的训练用途元数据(治理整改 G1);非 ORM,路由聚合填充。
+    train_type: str | None = None
+    schema_variant: str | None = None
     # 标签名列表(多对多);非 ORM 字段,由路由批量聚合填充。
     tags: list[str] = []
 

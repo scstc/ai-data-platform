@@ -86,6 +86,42 @@ def operator_names() -> set[str]:
     return {op["name"] for op in all_operators()}
 
 
+# DJ OPERATORS 注册表不含的类别(formatter/pipeline 不经算子注册表)
+_NON_OPERATOR_CATEGORIES = frozenset({"formatter", "pipeline"})
+
+
+def detect_operator_drift() -> dict[str, Any]:
+    """对比 DB 算子快照与 DJ venv 真实安装的算子集(治理整改 G15)。
+
+    DB 有 DJ 无(missingInDj):删/改名算子——守门校验会放行实际不存在的算子(危险)。
+    DJ 有快照无(newInDj):DJ 升级后新增、快照未收录。
+    DJ venv 不可探测 → status='unavailable'(降级,不误报漂移)。
+    """
+    from app.services.capabilities import probe_dj_operator_names
+
+    dj = probe_dj_operator_names()
+    if dj is None:
+        return {
+            "status": "unavailable",
+            "reason": "DJ venv 不可探测(本环境未装 data-juicer)",
+            "snapshotTotal": len(all_operators()),
+        }
+    db_names = {
+        op["name"]
+        for op in all_operators()
+        if op["category"] not in _NON_OPERATOR_CATEGORIES
+    }
+    missing_in_dj = sorted(db_names - dj)
+    new_in_dj = sorted(dj - db_names)
+    return {
+        "status": "ok" if not (missing_in_dj or new_in_dj) else "drift",
+        "snapshotTotal": len(db_names),
+        "djTotal": len(dj),
+        "missingInDj": missing_in_dj,
+        "newInDj": new_in_dj,
+    }
+
+
 def catalog_meta() -> dict[str, Any]:
     """目录概览(总数/各维度分布/推荐数)。"""
     ops = all_operators()

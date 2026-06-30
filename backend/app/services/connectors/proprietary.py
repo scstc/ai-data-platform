@@ -159,11 +159,14 @@ class DamengConnector(StructuralStub):
                 target = suffix or "query"
                 pair = await land_records(
                     session=session,
-                    name=ds_name,
                     records=rows,
+                    dataset_name=ds_name,
                     data_type="sql",
-                    source_uri=f"dameng://{host}:{port}/{target}",
-                    job_id=job_id,
+                    semantic_type="structured",
+                    source_kind="database",
+                    note=f"dameng://{host}:{port}/{target}",
+                    produced_by_job_id=job_id,
+                    storage_format="parquet",
                 )
                 results.append(pair)
         except (ConnectorNotReady, IngestError):
@@ -323,11 +326,14 @@ class SequoiaConnector(StructuralStub):
                 ds_name = f"{datasource.name}_{safe_name}"
                 pair = await land_records(
                     session=session,
-                    name=ds_name,
                     records=rows,
+                    dataset_name=ds_name,
                     data_type="sql",
-                    source_uri=f"sequoiadb://{host}:{port}/{full_name}",
-                    job_id=job_id,
+                    semantic_type="structured",
+                    source_kind="database",
+                    note=f"sequoiadb://{host}:{port}/{full_name}",
+                    produced_by_job_id=job_id,
+                    storage_format="parquet",
                 )
                 results.append(pair)
         except (ConnectorNotReady, IngestError):
@@ -459,11 +465,14 @@ class HiveConnector(StructuralStub):
                 target = suffix or "query"
                 pair = await land_records(
                     session=session,
-                    name=ds_name,
                     records=rows,
+                    dataset_name=ds_name,
                     data_type="sql",
-                    source_uri=f"hive://{host}:{port}/{db}/{target}",
-                    job_id=job_id,
+                    semantic_type="structured",
+                    source_kind="database",
+                    note=f"hive://{host}:{port}/{db}/{target}",
+                    produced_by_job_id=job_id,
+                    storage_format="parquet",
                 )
                 results.append(pair)
         except (ConnectorNotReady, IngestError):
@@ -622,11 +631,14 @@ class DorisConnector(StructuralStub):
                 target = suffix or "query"
                 pair = await land_records(
                     session=session,
-                    name=ds_name,
                     records=rows,
+                    dataset_name=ds_name,
                     data_type="sql",
-                    source_uri=f"doris://{host}:{port}/{db}/{target}",
-                    job_id=job_id,
+                    semantic_type="structured",
+                    source_kind="database",
+                    note=f"doris://{host}:{port}/{db}/{target}",
+                    produced_by_job_id=job_id,
+                    storage_format="parquet",
                 )
                 results.append(pair)
         except (ConnectorNotReady, IngestError):

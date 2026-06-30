@@ -62,3 +62,15 @@ class AIProvider(ABC):
         失败(超时/解析失败)由实现抛异常或返回空,交 review.py 降级处理。
         """
         raise NotImplementedError
+
+    @abstractmethod
+    async def judge_answers(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """裁判员(治理整改 G5):对比参考答案与模型回答打分。
+
+        items=[{"prompt":str,"reference":str,"completion":str}],返回等长、按下标
+        对齐的列表,每元素 {"score":int(0-100),"verdict":"pass"|"fail","reason":str}。
+        失败(超时/解析失败)由实现抛异常或回退启发式,交 judge_runner 降级处理。
+        """
+        raise NotImplementedError

@@ -39,6 +39,8 @@ ALLOWED_EXTENSIONS = {
     "tsv",
     "html",
     "jsonl",
+    "md",
+    "markdown",
 }
 
 # 单文件大小上限：200 MB

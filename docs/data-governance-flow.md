@@ -115,7 +115,7 @@
 │      - image_face_blur_mapper         # 人脸打码                 │
 │                                                                  │
 │   4. 增强 / 构造 / 蒸馏(Mapper)                                 │
-│      - video_captioning_mapper        # 视频生成文本描述         │
+│      - video_captioning_from_frames_mapper  # 视频关键帧生成文本描述 │
 │      - (LLM 改写 / 拼 prompt 模板 → 构造训练字段)               │
 │      - (LLM 合成高质量样本 → 数据蒸馏·合成式)                   │
 │                                                                  │
@@ -872,10 +872,11 @@ export_stats: true
 **治理层**:同场景 A,但可能需要额外算子:
 ```yaml
 process:
-  # CSV 专属:列选择(只保留需要的列)
-  - columns_selector:
-      retain_columns: [text, user_id, rating, source_file]
-  
+  # CSV 专属:列保留。注意 data-juicer 无 columns_selector 算子(Selector 类是"按值
+  # 选行"非"选列")。列保留应在接入层(land_records 前)做,或用 general_field_filter;
+  # 此处仅示意"保留需要的列"这一意图,非可直接运行的算子名。
+  # （接入层列保留见 §5.2 方式A 字段映射）
+
   # 后续跟纯文本一样:语言过滤、去重等
   - ...
 ```
@@ -971,11 +972,11 @@ export_path: /tmp/job_xyz/output.parquet
 video_key: videos
 
 process:
-  # 1. 从 OBS 下载到本地临时目录
-  - obs_download_file_mapper:
+  # 1. 从对象存储下载到本地临时目录(OBS 是 S3 兼容,用 s3_download_file_mapper)
+  - s3_download_file_mapper:
       download_field: videos
       save_dir: /tmp/dj_videos
-      endpoint_url: http://10.60.1.60:9000  # 你们的 OBS endpoint
+      endpoint_url: http://10.60.1.60:9000  # OBS/MinIO endpoint(S3 兼容)
   
   # 2. 时长过滤
   - video_duration_filter:
@@ -999,11 +1000,12 @@ process:
       frame_num: 3  # 每段采 3 帧
       hf_img2seq: Salesforce/blip-image-captioning-base
   
-  # 6. 上传处理后的视频到 OBS 新目录
-  - obs_upload_file_mapper:
+  # 6. 上传处理后的视频到对象存储新目录(OBS=S3 兼容,用 s3_upload_file_mapper)
+  - s3_upload_file_mapper:
       upload_field: videos
-      obs_bucket: adp-media
-      obs_prefix: train/processed_videos/
+      bucket: adp-media
+      prefix: train/processed_videos/
+      endpoint_url: http://10.60.1.60:9000
       remove_local: true  # 上传后删本地,省空间
 
 export_shard_size: 536870912  # 512MB
@@ -1148,13 +1150,16 @@ process:
 text_keys: content   # 指定文本字段
 process:
   # 1. 按严重程度过滤(只保留 critical 和 warning)
-  - python_lambda_filter:
-      lambda_fn: "lambda row: row.get('severity') in ['critical', 'warning']"
-  
-  # 2. 去重(相同告警只保留一次)
-  - document_deduplicator:
-      method: "simhash"
-      threshold: 2
+  # 注意:data-juicer 无 python_lambda_filter(只有 python_lambda_mapper)。
+  # 按字段值过滤用 general_field_filter,或先用 python_lambda_mapper 打标再过滤。
+  - general_field_filter:
+      filter_condition: "severity in ['critical', 'warning']"
+
+  # 2. 去重(相同告警只保留一次)。document_deduplicator 是 MD5 精确哈希、无 method
+  # 参数;要 simhash 近似去重用独立算子 document_simhash_deduplicator。
+  - document_simhash_deduplicator:
+      tokenization: character
+      hamming_distance: 4
 ```
 
 **交付**:
@@ -1609,7 +1614,7 @@ ALTER TABLE job ADD COLUMN resource_usage JSONB;
    - `video_duration_filter`(只保留 5~30 分钟的)
    - `video_split_by_duration_mapper`(切成 10 秒片段)
    - `video_captioning_from_frames_mapper`(关键帧 → 生成描述)
-   - `obs_upload_file_mapper`(处理后的片段上传回 OBS)
+   - `s3_upload_file_mapper`(处理后的片段上传回 OBS;OBS=S3 兼容)
 3. **执行**:
    - 环境:Ray 集群(4 台 GPU 机,每台 2 卡)
    - 耗时:3 小时

@@ -134,3 +134,78 @@ def reset_cache() -> None:
     """清空探测缓存(测试 / 手动刷新用)。"""
     global _cuda, _ray, _vllm_cache
     _cuda = _ray = _vllm_cache = None
+
+
+# DJ 版本探测缓存:用哨兵区分"未探测"与"探测过但失败(None)"。
+_DJ_VERSION_SENTINEL = object()
+_dj_version: object | str | None = _DJ_VERSION_SENTINEL
+
+
+def get_dj_version() -> str | None:
+    """探测 DJ venv 的 data_juicer 包版本(治理整改 G18 可复现凭证)。
+
+    用 importlib.metadata 查发行版本;未装 / DJ venv 不存在 / 探测失败 → None。
+    结果缓存进程生命周期(DJ venv 进程内不变);绝不抛出——凭证缺失不应阻断任务。
+    """
+    global _dj_version
+    if _dj_version is not _DJ_VERSION_SENTINEL:
+        return _dj_version  # type: ignore[return-value]
+    py = _dj_python()
+    if not py.exists():
+        _dj_version = None
+        return None
+    try:
+        out = subprocess.run(
+            [
+                str(py),
+                "-c",
+                "import importlib.metadata,sys;"
+                "sys.stdout.write(importlib.metadata.version('data_juicer'))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+        _dj_version = (out.stdout.strip() or None) if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        _dj_version = None
+    return _dj_version  # type: ignore[return-value]
+
+
+# DJ 算子名探测缓存(同哨兵语义)。
+_dj_ops_sentinel = object()
+_dj_ops: object | set[str] | None = _dj_ops_sentinel
+
+
+def probe_dj_operator_names() -> set[str] | None:
+    """探测 DJ venv 真实注册的算子名集合(治理整改 G15 漂移检测)。
+
+    跑 DJ venv 子进程读 OPERATORS 注册表(不含 formatter/pipeline)。DJ venv 缺失 /
+    探测失败 → None(区别于空 set:表示"无法判定"而非"零算子")。结果缓存,绝不抛。
+    """
+    global _dj_ops
+    if _dj_ops is not _dj_ops_sentinel:
+        return _dj_ops  # type: ignore[return-value]
+    py = _dj_python()
+    if not py.exists():
+        _dj_ops = None
+        return None
+    try:
+        out = subprocess.run(
+            [
+                str(py),
+                "-c",
+                "from data_juicer.ops import OPERATORS;import sys;"
+                "sys.stdout.write(chr(10).join(OPERATORS.list()))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+        if out.returncode == 0:
+            _dj_ops = {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
+        else:
+            _dj_ops = None
+    except (OSError, subprocess.SubprocessError):
+        _dj_ops = None
+    return _dj_ops  # type: ignore[return-value]

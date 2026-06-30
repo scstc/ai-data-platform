@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import secrets
+from datetime import UTC, datetime
 from pathlib import Path
 
 import openpyxl
@@ -19,14 +21,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+
 # 注意:external_store 反向 import 本模块的 BINARY_FORMATS,故此处用函数内延迟
 # import(见 land_records / land_upload_raw),避免模块加载期循环导入。
 from app.services.semantic_registry import (
     SemanticType,
     apply_semantic_spec,
-    collect_modalities,
     coerce_semantic_type,
+    collect_modalities,
+    default_schema_variant,
     infer_semantic_from_data_type,
+    infer_train_type,
 )
 
 # 文档类:用 markitdown 提取文本,按段落落地
@@ -42,6 +47,8 @@ LANDABLE_FORMATS = {
     "tsv",
     "txt",
     "log",
+    "md",
+    "markdown",
     "xlsx",
     "xls",
     *DOC_FORMATS,
@@ -103,6 +110,102 @@ class UnsupportedFormatError(LandingError):
 
 class ParseError(LandingError):
     """源文件内容无法按其格式解析。"""
+
+
+class OcrUnavailableError(LandingError):
+    """OCR 未启用 / OCR service 不可达(治理整改 G10)。"""
+
+
+# 扫描型 PDF 判定阈值:每页平均非空白字符数低于此值 → 疑似扫描件(需 OCR)
+_SCANNED_CHAR_PER_PAGE = 50
+
+
+def _markdown_to_plain_text(text: str) -> str:
+    """markitdown 输出的 markdown → 纯文本(治理整改 G12)。
+
+    去除 #/**/[]()/表格分隔/列表前缀等标记,避免干扰 data-juicer 的语言检测/长度/
+    去重算子统计。纯函数(仅标准库 re),可单测。
+    """
+    import re
+
+    lines: list[str] = []
+    for raw in text.splitlines():
+        ln = raw
+        # 围栏代码块标记行 ``` → 删
+        if re.match(r"^\s*```", ln):
+            continue
+        # 表格分隔行 |---|---| → 删
+        if re.match(r"^\s*\|?\s*:?-{2,}.*$", ln) and "|" in ln and set(
+            ln.strip()
+        ) <= set("|:- "):
+            continue
+        # 水平分割线 ---/***/___ → 删
+        if re.match(r"^\s*([-*_])\1{2,}\s*$", ln):
+            continue
+        # 图片 ![alt](url) → 空(先于链接,避免吃掉 alt)
+        ln = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", ln)
+        # 行内链接 [text](url) → text
+        ln = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", ln)
+        # 标题前缀 #{1,6}
+        ln = re.sub(r"^\s*#{1,6}\s+", "", ln)
+        # 引用前缀 >
+        ln = re.sub(r"^\s*>\s?", "", ln)
+        # 列表项前缀(保留缩进)
+        ln = re.sub(r"^(\s*)([*+-]|\d+\.)\s+", r"\1", ln)
+        # 表格行:|A|B| → A B
+        stripped = ln.strip()
+        if stripped.startswith("|") or stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            ln = " ".join(c for c in cells if c)
+        # 强调/行内代码标记 **/__/*/_/`
+        ln = re.sub(r"(\*\*|__|\*|_|`)", "", ln)
+        lines.append(ln)
+    out = "\n".join(lines)
+    # 收敛多余空行
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _pdf_page_count(content: bytes) -> int:
+    """PDF 页数;取不到(损坏/无 pypdf)退化为 1(按总字符判定,绝不中断主流程)。"""
+    try:
+        import io as _io
+
+        from pypdf import PdfReader
+
+        return len(PdfReader(_io.BytesIO(content)).pages)
+    except Exception:  # noqa: BLE001 取页数失败不应中断接入
+        return 1
+
+
+def _detect_pdf_type(text: str, page_count: int = 1) -> bool:
+    """判断 PDF 是否扫描型(需 OCR)。纯函数:每页平均非空白字符 < 阈值 → True。"""
+    chars = len("".join(text.split()))
+    return (chars / max(page_count, 1)) < _SCANNED_CHAR_PER_PAGE
+
+
+def _ocr_pdf(content: bytes) -> str:
+    """调用独立 OCR service 识别扫描型 PDF(治理整改 G10)。
+
+    引擎本体(Unlimited-OCR/paddleocr,~1GB 模型 + GPU)是独立 service,平台仅作
+    HTTP 客户端。未启用 → OcrUnavailableError;调用失败/超时 → ParseError
+    (点名原因,绝不静默返回 '' —— 守 D2 红线 + Rule 12 Fail loud)。
+    """
+    if not settings.ocr_enabled or not settings.ocr_endpoint:
+        raise OcrUnavailableError("OCR 未启用(设 OCR_ENABLED + OCR_ENDPOINT)")
+    import httpx
+
+    try:
+        resp = httpx.post(
+            settings.ocr_endpoint,
+            files={"file": ("doc.pdf", content, "application/pdf")},
+            data={"lang": settings.ocr_lang},
+            timeout=settings.ocr_timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("text", "")
+    except httpx.HTTPError as exc:
+        raise ParseError(f"OCR service 调用失败:{exc}") from exc
 
 
 def _new_dataset_id() -> str:
@@ -243,14 +346,20 @@ def _convert_legacy_doc_to_text(content: bytes) -> str:
 
 
 def _doc_to_records(content: bytes, ext: str) -> list[dict]:
-    """文档(pdf/doc/docx/ppt/pptx/html)→ markitdown 提取文本 → 按段落每段一条。
+    """文档(pdf/doc/docx/ppt/pptx/html)→ markitdown 提取 → 去格式 → 按段落每段一条。
 
     .doc 走双桥(antiword → soffice→mammoth);其他用 markitdown。
+
+    pdf 扫描型识别(G10):提取空或字符密度过低 → 疑似扫描件,OCR 启用则调 OCR,
+    否则 Fail-loud 抛错(不静默落 0 行,守 D2 红线)。
+    markdown 去格式(G12):markitdown 输出含 #/**/[]() 等标记,去格式为纯文本,
+    避免干扰 data-juicer 算子统计。
     """
     if ext == "doc":
+        # .doc 双桥产出已是纯文本,不经 markitdown / 去格式
         text = _convert_legacy_doc_to_text(content).strip()
         if not text:
-            return []
+            raise ParseError(".doc 提取为空(可能是空文档或转换失败)")
         paras = [p.strip() for p in text.split("\n\n") if p.strip()]
         return [{"text": p} for p in paras] if paras else [{"text": text}]
     try:
@@ -260,8 +369,28 @@ def _doc_to_records(content: bytes, ext: str) -> list[dict]:
     except Exception as exc:  # noqa: BLE001 解析失败统一上报
         raise ParseError(f"{ext} 解析失败:{exc}") from exc
     text = (result.text_content or "").strip()
+
+    # PDF 扫描型分流(G10):空 / 字符密度过低 → OCR(启用时)或 Fail-loud
+    if ext == "pdf":
+        page_count = _pdf_page_count(content)
+        if not text or _detect_pdf_type(text, page_count):
+            if settings.ocr_enabled:
+                ocr_text = _ocr_pdf(content).strip()
+                # 取更长结果(呼应设计 §2.1.2:OCR 与直提取对比取优)
+                if len(ocr_text) > len(text):
+                    text = ocr_text
+            if not text:
+                raise ParseError(
+                    "PDF 提取为空,疑似扫描型 PDF(需 OCR);"
+                    "请开启 OCR(OCR_ENABLED)或改用文本型 PDF"
+                )
+    elif not text:
+        raise ParseError(f"{ext} 提取为空(文档无可提取文本)")
+
+    # G12:去 markdown 格式标记 → 纯文本
+    text = _markdown_to_plain_text(text)
     if not text:
-        return []
+        raise ParseError(f"{ext} 去格式后为空")
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
     return [{"text": p} for p in paras] if paras else [{"text": text}]
 
@@ -320,7 +449,7 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
     - jsonl:逐行 JSON
     - json :顶层 list → 每元素一条;顶层 object → 单条
     - csv/tsv:表头为字段名,每行一条
-    - txt :每非空行 → {"text": 行}
+    - txt/log/md/markdown:每非空行 → {"text": 行}
     - geojson:FeatureCollection 每 Feature 一行,自动抽取 lon/lat
     其余格式抛 UnsupportedFormatError。解析失败抛 ParseError。
     """
@@ -349,7 +478,7 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
             delimiter = "," if fmt == "csv" else "\t"
             reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
             return [dict(row) for row in reader]
-        # txt
+        # txt / log / md / markdown:逐行落地为 {"text": 行}
         return [{"text": ln} for ln in text.splitlines() if ln.strip()]
     except (json.JSONDecodeError, UnicodeDecodeError, csv.Error) as exc:
         raise ParseError(str(exc)) from exc
@@ -427,6 +556,8 @@ async def land_records(
     creator: str = "admin",
     strict_semantic: bool = False,
     storage_format: str = "jsonl",
+    train_type: str | None = None,
+    schema_variant: str | None = None,
 ) -> tuple[Dataset, DatasetVersion]:
     """统一落地出口:把规范化记录写 jsonl → 建 Dataset(v1) + DatasetVersion。
 
@@ -520,6 +651,13 @@ async def land_records(
     quality_stats = compute_quality_stats(records)
     snapshot = schema_snapshot(quality_stats)
 
+    # 训练用途元数据(G1):显式传入优先,否则按 semantic_type 推断默认。
+    # 版本不可变,一次写定。
+    effective_train_type = train_type or infer_train_type(effective_semantic)
+    effective_schema_variant = schema_variant or default_schema_variant(
+        effective_train_type
+    )
+
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset.id,
@@ -535,12 +673,32 @@ async def land_records(
         note=note,
         quality_stats=quality_stats,
         schema_snapshot=snapshot,
+        train_type=effective_train_type,
+        schema_variant=effective_schema_variant,
     )
     session.add(version)
     await session.commit()
     await session.refresh(dataset)
     await session.refresh(version)
     return dataset, version
+
+
+def _stamp_lineage(
+    records: list[dict], *, source_file: str, doc_id: str, ingest_batch: str
+) -> list[dict]:
+    """为每条记录注入逐条血缘字段(治理整改 G14)。
+
+    source_file(原始文件名)/ doc_id(文件内容 sha256)/ ingest_batch(落地时间戳)。
+    不覆盖记录已有的同名字段(连接器/上游已注入时尊重其值),非 dict 行原样跳过。
+    兑现血缘溯源:跨文件合并到一个数据集后仍可回溯单条样本来自哪个原始文件。
+    """
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rec.setdefault("source_file", source_file)
+        rec.setdefault("doc_id", doc_id)
+        rec.setdefault("ingest_batch", ingest_batch)
+    return records
 
 
 async def land_upload(
@@ -556,8 +714,17 @@ async def land_upload(
     creator: str = "admin",
     strict_semantic: bool = False,
 ) -> tuple[Dataset, DatasetVersion]:
-    """本地上传连接器:规范化 → 落地。解析失败抛 LandingError,不留脏对象。"""
+    """本地上传连接器:规范化 → 注入逐条血缘 → 落地。
+
+    解析失败抛 LandingError,不留脏对象。
+    """
     records = normalize_to_records(content, source_format)
+    _stamp_lineage(
+        records,
+        source_file=filename,
+        doc_id=f"sha256:{hashlib.sha256(content).hexdigest()}",
+        ingest_batch=datetime.now(UTC).isoformat(),
+    )
     return await land_records(
         session,
         records,

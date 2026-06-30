@@ -40,6 +40,16 @@ async def list_operators() -> JSONResponse:
 
 # 注意:/operators/catalog* 必须声明在 /operators/{name} 之前,
 # 否则 "catalog" 会被当成 name 命中详情路由。
+@router.get("/operators/catalog/drift")
+async def catalog_drift() -> JSONResponse:
+    """算子快照漂移检测(G15):对比 DB 快照与 DJ venv 真实安装。
+
+    运维/CI 用。status=unavailable 表示本环境无 DJ venv 无法判定;首次探测约数十秒
+    (import data_juicer 慢),结果进程内缓存后续秒回。
+    """
+    return JSONResponse(content={"data": oc.detect_operator_drift(), "success": True})
+
+
 @router.get("/operators/catalog/meta")
 async def catalog_meta() -> JSONResponse:
     """算子目录概览(总数/各维度分布/推荐数),驱动市场筛选项与统计卡。"""

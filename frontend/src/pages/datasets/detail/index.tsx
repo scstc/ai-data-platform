@@ -324,6 +324,16 @@ const DatasetDetail: React.FC = () => {
         <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
           <Descriptions.Item label="行数">{v.rows ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="大小">{fmtSize(v.size)}</Descriptions.Item>
+          {v.trainType && (
+            <Descriptions.Item label="训练用途">
+              <Tag color="blue">{v.trainType}</Tag>
+            </Descriptions.Item>
+          )}
+          {v.schemaVariant && (
+            <Descriptions.Item label="Schema 变体">
+              <Tag color="cyan">{v.schemaVariant}</Tag>
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="扫描结论">
             <Tooltip title={v.verdictNote}>
               <Tag color={scan.color}>
