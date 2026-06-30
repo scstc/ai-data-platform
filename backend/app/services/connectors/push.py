@@ -149,11 +149,13 @@ async def land_push_records(
     bound_id: str | None = cfg.get("boundDatasetId")
 
     if bound_id:
-        # 已绑定:加载现有 dataset(不存在则重建,避免脏 config 导致崩溃)
+        # 已绑定:加载现有 dataset。数据集优先流程(Task 11):绑定 id 指向不存在的
+        # 数据集 → fail loud,不再隐式重建(避免脏 config 静默创建意外数据集)。
         dataset = await session.get(Dataset, bound_id)
         if dataset is None:
-            # 绑定 id 失效(数据集被删):重建并清空绑定
-            bound_id = None
+            raise LandingError(
+                f"api 推送数据源绑定的数据集 {bound_id} 不存在,拒绝落地"
+            )
 
     if not bound_id:
         # 首次推送:创建新 Dataset 并写回 boundDatasetId
