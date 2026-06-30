@@ -16,11 +16,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import openpyxl
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+from app.models.dataset_version_table import DatasetVersionTable
 
 # 注意:external_store 反向 import 本模块的 BINARY_FORMATS,故此处用函数内延迟
 # import(见 land_records / land_upload_raw),避免模块加载期循环导入。
@@ -216,6 +218,11 @@ def _new_dataset_id() -> str:
 def _new_version_id() -> str:
     """形如 ``dsv-`` + 6 位 hex。"""
     return f"dsv-{secrets.token_hex(3)}"
+
+
+def _new_member_id() -> str:
+    """形如 ``dvt-`` + 6 位 hex(版本-表成员主键)。"""
+    return f"dvt-{secrets.token_hex(3)}"
 
 
 def _xlsx_to_records(content: bytes) -> list[dict]:
@@ -541,6 +548,281 @@ def parquet_bytes_to_records(content: bytes, limit: int = 0) -> list[dict]:
     return table.to_pylist()
 
 
+async def create_dataset(
+    session: AsyncSession,
+    *,
+    name: str,
+    data_type: str | None = None,
+    semantic_type: str | None = None,
+    source_kind: str | None = None,
+    source_format: str | None = None,
+    description: str | None = None,
+    creator: str = "admin",
+) -> Dataset:
+    """建一个**空**数据集(不建任何版本)。数据集优先流程的入口。
+
+    semantic_type 显式传则归一为枚举值;否则按 data_type 推断默认。
+    train_type/schema_variant 是**版本级**元数据(见 docs spec §4.3),不落在
+    Dataset 上——在首个表成员落地时(add_table_member)写定。
+    """
+    explicit = coerce_semantic_type(semantic_type)
+    if explicit is not None:
+        effective_semantic: str | None = explicit.value
+    else:
+        inferred = infer_semantic_from_data_type(data_type)
+        effective_semantic = inferred.value if inferred else None
+
+    dataset = Dataset(
+        id=_new_dataset_id(),
+        name=name or "未命名数据集",
+        description=description,
+        data_type=data_type,
+        semantic_type=effective_semantic,
+        source_kind=source_kind,
+        source_format=source_format,
+        owner=creator,
+        creator=creator,
+    )
+    session.add(dataset)
+    await session.commit()
+    await session.refresh(dataset)
+    return dataset
+
+
+async def _target_draft_version(
+    session: AsyncSession, dataset_id: str
+) -> DatasetVersion:
+    """定位可写 draft 版本(版本不可变约束的调和,见 spec §3):
+
+    - 无版本 → 建 v1 draft。
+    - 最新版本是 draft → 复用(在其内增/覆盖成员)。
+    - 最新版本已 published → 建 v+1 draft,并**克隆**上一版成员(续接语义)。
+    """
+    latest = (
+        await session.execute(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == dataset_id)
+            .order_by(DatasetVersion.version_no.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if latest is not None and latest.publish_status == "draft":
+        return latest
+
+    next_no = (latest.version_no + 1) if latest is not None else 1
+    ver = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset_id,
+        version_no=next_no,
+        storage_uri=f"pending://{dataset_id}/v{next_no}/",
+        format="jsonl",
+        rows=0,
+        size=0,
+        origin="managed",
+        publish_status="draft",
+    )
+    session.add(ver)
+    await session.flush()
+    # published → 新 draft:克隆上一版成员(指向同一旧文件,不复制数据)
+    if latest is not None:
+        prev = (
+            await session.execute(
+                select(DatasetVersionTable).where(
+                    DatasetVersionTable.dataset_version_id == latest.id
+                )
+            )
+        ).scalars().all()
+        for pm in prev:
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(),
+                    dataset_version_id=ver.id,
+                    table_name=pm.table_name,
+                    storage_uri=pm.storage_uri,
+                    format=pm.format,
+                    rows=pm.rows,
+                    size=pm.size,
+                    schema_snapshot=pm.schema_snapshot,
+                    schema_variant=pm.schema_variant,
+                )
+            )
+    await session.commit()
+    await session.refresh(ver)
+    return ver
+
+
+async def _recompute_version_rollup(
+    session: AsyncSession, version: DatasetVersion
+) -> None:
+    """按成员重算版本级 rollup 字段。
+
+    rows/size = 各成员之和;format = 唯一成员格式,混合则 "multi"。
+    storage_uri **保持单文件指针语义**(spec §3 裁决):指向首个成员文件,
+    使 download/export/materialize 及既有断言(test_landing_parquet 的
+    endswith("data.parquet"))在单表数据集上继续成立;多文件枚举走 _members_of。
+    成员按 table_name 排序取首个,保证确定性。
+    """
+    members = (
+        await session.execute(
+            select(DatasetVersionTable)
+            .where(DatasetVersionTable.dataset_version_id == version.id)
+            .order_by(DatasetVersionTable.table_name)
+        )
+    ).scalars().all()
+    version.rows = sum((m.rows or 0) for m in members)
+    version.size = sum((m.size or 0) for m in members)
+    formats = {m.format for m in members}
+    version.format = formats.pop() if len(formats) == 1 else "multi"
+    if members:
+        version.storage_uri = members[0].storage_uri
+    await session.commit()
+
+
+async def add_table_member(
+    session: AsyncSession,
+    dataset_id: str,
+    records: list[dict],
+    *,
+    table_name: str,
+    storage_format: str = "parquet",
+    semantic_type: str | None = None,
+    source_format: str | None = None,
+    produced_by_job_id: str | None = None,
+    strict_semantic: bool = False,
+    train_type: str | None = None,
+    schema_variant: str | None = None,
+    note: str | None = None,
+) -> tuple[DatasetVersion, DatasetVersionTable]:
+    """把一张表的记录落成当前 draft 版本的一个成员(同名覆盖)。
+
+    数据集优先流程的落地出口:定位/新建 draft 版本(_target_draft_version),
+    写成员文件(parquet 失败回退 jsonl),upsert 成员行,刷新版本 rollup。
+    首个成员定调版本级 train_type/schema_variant/semantic_type/modalities。
+    """
+    from app.services.external_store import (  # 延迟 import 避免循环
+        ExternalStoreError,
+        upload_jsonl_member,
+        upload_parquet_member,
+    )
+    from app.services.ingest_quality import compute_quality_stats, schema_snapshot
+
+    # 语义归一(与 land_records 同逻辑):显式传则归一+校验,否则按 data_type 推断
+    explicit = coerce_semantic_type(semantic_type)
+    version_modalities: list[str] | None = None
+    if explicit is not None:
+        records, report = apply_semantic_spec(
+            records, explicit, strict=strict_semantic
+        )
+        effective_semantic: str | None = explicit.value
+        if effective_semantic == SemanticType.MULTIMODAL.value:
+            version_modalities = report.modalities or None
+    else:
+        effective_semantic = None
+
+    version = await _target_draft_version(session, dataset_id)
+
+    # 版本 semantic 缺省继承数据集级(create_dataset 已按 data_type 推断写定),
+    # 保证新流程(建集→落成员)与旧 land_records 的版本级 semantic 行为一致。
+    if effective_semantic is None:
+        ds = await session.get(Dataset, dataset_id)
+        if ds is not None:
+            effective_semantic = ds.semantic_type
+
+    # 写成员文件:parquet 优先,无法编码(空/嵌套/异构)回退 jsonl
+    fmt = "parquet"
+    if storage_format == "parquet":
+        try:
+            blob = records_to_parquet_bytes(records)
+            uri = await upload_parquet_member(
+                dataset_id, version.version_no, table_name, blob
+            )
+            size = len(blob)
+        except ParquetCodecError:
+            blob = records_to_jsonl_bytes(records)
+            try:
+                uri = await upload_jsonl_member(
+                    dataset_id, version.version_no, table_name, blob
+                )
+            except ExternalStoreError:
+                await session.rollback()
+                raise
+            fmt = "jsonl"
+            size = len(blob)
+        except ExternalStoreError:
+            await session.rollback()
+            raise
+    else:
+        blob = records_to_jsonl_bytes(records)
+        try:
+            uri = await upload_jsonl_member(
+                dataset_id, version.version_no, table_name, blob
+            )
+        except ExternalStoreError:
+            await session.rollback()
+            raise
+        fmt = "jsonl"
+        size = len(blob)
+
+    stats = compute_quality_stats(records)
+    snap = schema_snapshot(stats)
+    eff_train = train_type or infer_train_type(effective_semantic)
+    eff_variant = schema_variant or default_schema_variant(eff_train)
+
+    # upsert 成员(同名覆盖,靠 uq_dvt_version_table 保证版本内唯一)
+    existing = (
+        await session.execute(
+            select(DatasetVersionTable).where(
+                DatasetVersionTable.dataset_version_id == version.id,
+                DatasetVersionTable.table_name == table_name,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.storage_uri = uri
+        existing.format = fmt
+        existing.rows = len(records)
+        existing.size = size
+        existing.schema_snapshot = snap
+        existing.schema_variant = eff_variant
+        member = existing
+    else:
+        member = DatasetVersionTable(
+            id=_new_member_id(),
+            dataset_version_id=version.id,
+            table_name=table_name,
+            storage_uri=uri,
+            format=fmt,
+            rows=len(records),
+            size=size,
+            schema_snapshot=snap,
+            schema_variant=eff_variant,
+        )
+        session.add(member)
+
+    # 首个成员定调版本级元数据(版本不可变:仅在尚未写定时填)。
+    # source_kind/source_format 归数据集级(create_dataset 时写),不落版本。
+    if version.train_type is None:
+        version.train_type = eff_train
+        version.schema_variant = eff_variant
+    if version.semantic_type is None and effective_semantic is not None:
+        version.semantic_type = effective_semantic
+    if version_modalities is not None and version.modalities is None:
+        version.modalities = version_modalities
+    if produced_by_job_id and version.produced_by_job_id is None:
+        version.produced_by_job_id = produced_by_job_id
+    if note:
+        version.note = note
+    if version.quality_stats is None:
+        version.quality_stats = stats
+        version.schema_snapshot = snap
+    await session.commit()
+    await session.refresh(member)
+    await _recompute_version_rollup(session, version)
+    await session.refresh(version)
+    return version, member
+
+
 async def land_records(
     session: AsyncSession,
     records: list[dict],
@@ -679,6 +961,25 @@ async def land_records(
     session.add(version)
     await session.commit()
     await session.refresh(dataset)
+    await session.refresh(version)
+    # 数据集优先改造:为该版本补一行表成员(table_name="data"),镜像版本级
+    # storage_uri/format/rows/schema,使读路径(_members_of/materialized_version)
+    # 统一走成员模型。单表数据集 = 恰好一个 "data" 成员;版本级 storage_uri 仍
+    # 指向该文件(单文件指针语义不变,见 spec §3)。
+    session.add(
+        DatasetVersionTable(
+            id=_new_member_id(),
+            dataset_version_id=version.id,
+            table_name="data",
+            storage_uri=storage_uri,
+            format=effective_format,
+            rows=len(records),
+            size=size,
+            schema_snapshot=snapshot,
+            schema_variant=effective_schema_variant,
+        )
+    )
+    await session.commit()
     await session.refresh(version)
     return dataset, version
 
