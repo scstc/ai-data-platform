@@ -51,6 +51,12 @@ export default [
     icon: 'block',
     component: './processing/market',
   },
+  // 算子详情(从市场卡片进入,不进左侧菜单)
+  {
+    path: '/operators/:name',
+    component: './processing/market/detail',
+    hideInMenu: true,
+  },
   // 个人设置(头像下拉进入,不进左侧菜单)
   {
     path: '/account/settings',

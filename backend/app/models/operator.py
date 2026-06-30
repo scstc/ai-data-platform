@@ -61,6 +61,9 @@ class Operator(Base):
     # 用法示例（YAML 代码块）
     example: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 效果展示：处理前/后样例 [{"before": str, "after": str}, ...]（详情页展示，LLM 批量生成）
+    effect_demo: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+
     # 详情页链接（data-juicer 文档 URL）
     detail_page: Mapped[str | None] = mapped_column(String(256), nullable=True)
 

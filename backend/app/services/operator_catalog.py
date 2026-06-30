@@ -60,6 +60,7 @@ def _operator_to_dict(op: Operator) -> dict[str, Any]:
         "frameworks": op.frameworks,
         "params": op.params,
         "example": op.example,
+        "effect_demo": op.effect_demo,
         "detail_page": op.detail_page,
         "recommend": op.recommend,
         "runnable": op.runnable,
@@ -267,6 +268,7 @@ _OP_KEY_MAP = {
     "zh_label": "zhLabel",
     "zh_usage_tip": "zhUsageTip",
     "detail_page": "detailPage",
+    "effect_demo": "effectDemo",
 }
 _META_KEY_MAP = {
     "with_detail_page": "withDetailPage",
@@ -276,6 +278,31 @@ _META_KEY_MAP = {
     "by_scenario": "byScenario",
     "by_runnable": "byRunnable",
 }
+
+
+# 详情页展示用补充字段:
+# - usageMode 使用方式:data-juicer 算子均为离线批处理,固定"离线"(随接口下发,非 DB 列)
+# - tags 标签:由 scenarioGroup + 类别派生(我们无语义标签源,best-effort;随接口下发)
+# - effectDemo 效果展示:处理前/后样例,存 DB effect_demo 列(LLM 批量生成);无则为空,前端隐藏该块
+_CATEGORY_LABEL = {
+    "mapper": "数据编辑",
+    "filter": "规则过滤",
+    "deduplicator": "去重",
+    "selector": "数据选择",
+    "formatter": "格式转换",
+    "grouper": "分组",
+    "aggregator": "聚合",
+}
+
+
+def _derive_tags(op: dict[str, Any]) -> list[str]:
+    """标签:场景分组 + 类别中文,去空去重(保序)。"""
+    cands = [op.get("scenario_group"), _CATEGORY_LABEL.get(op.get("category", ""))]
+    seen: dict[str, None] = {}
+    for t in cands:
+        if t:
+            seen.setdefault(t, None)
+    return list(seen)
 
 
 def to_api(op: dict[str, Any]) -> dict[str, Any]:
@@ -290,6 +317,10 @@ def to_api(op: dict[str, Any]) -> dict[str, Any]:
     # 市场/编辑器口径:只看环境能力(media_ok=True),不预判数据集格式——
     # 媒体算子按环境(GPU/LLM/...)判 ready,数据集适配留到提交期 runnable_reason。
     out["runnable"] = effective_runnable(op, media_ok=True)
+    # 详情页补充字段(见上)
+    out["usageMode"] = "离线"
+    out["tags"] = _derive_tags(op)
+    out["effectDemo"] = out.get("effectDemo") or []
     return out
 
 

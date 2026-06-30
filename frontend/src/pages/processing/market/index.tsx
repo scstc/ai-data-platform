@@ -392,9 +392,7 @@ const Market: React.FC = () => {
                           },
                         }}
                         style={{ height: '100%' }}
-                        onClick={() =>
-                          history.push(`/processing/market/${op.name}`)
-                        }
+                        onClick={() => history.push(`/operators/${op.name}`)}
                       >
                         <div
                           style={{

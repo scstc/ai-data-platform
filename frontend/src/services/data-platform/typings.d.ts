@@ -271,6 +271,12 @@ declare namespace DataPlatform {
     recommend: boolean;
     runnable: 'ready' | 'needs_api' | 'needs_media' | 'needs_compute';
     usageCount?: number;
+    /** 使用方式(离线/在线);data-juicer 算子均为离线批处理 */
+    usageMode?: string;
+    /** 标签(由场景分组 + 类别派生) */
+    tags?: string[];
+    /** 效果展示:处理前/处理后样例(仅部分算子有,无则不展示) */
+    effectDemo?: { before: string; after: string }[];
   };
 
   /** 当前环境探测到的执行能力(决定 GPU/LLM/vLLM/Ray 类算子是否可运行) */
