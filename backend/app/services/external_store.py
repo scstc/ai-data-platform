@@ -728,6 +728,33 @@ async def upload_parquet_to_uploads(
     return f"s3://{bucket}/{key}"
 
 
+async def upload_parquet_member(
+    dataset_id: str, version_no: int, table_name: str, parquet_bytes: bytes
+) -> str:
+    """上传一个表成员 parquet,键 = ``<dataset_id>/v<n>/<table>.parquet``。"""
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/{table_name}.parquet"
+    await upload_object(
+        cfg, bucket, key, io.BytesIO(parquet_bytes), len(parquet_bytes)
+    )
+    return f"s3://{bucket}/{key}"
+
+
+async def upload_jsonl_member(
+    dataset_id: str, version_no: int, table_name: str, jsonl_bytes: bytes
+) -> str:
+    """上传一个表成员 jsonl,键 = ``<dataset_id>/v<n>/<table>.jsonl``。"""
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/{table_name}.jsonl"
+    await upload_object(
+        cfg, bucket, key, io.BytesIO(jsonl_bytes), len(jsonl_bytes),
+        content_type="application/x-ndjson",
+    )
+    return f"s3://{bucket}/{key}"
+
+
 async def upload_file_to_uploads(
     dataset_id: str, version_no: int, path: Path
 ) -> str:
