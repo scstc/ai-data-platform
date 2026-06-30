@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from app.services.connectors.base import ConnectorNotReady
-from app.services.landing import land_records, normalize_to_records
+from app.services.landing import normalize_to_records
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -295,6 +295,9 @@ class HdfsConnector:
         nn = self._namenode(config)
         extra = self._extra_params(config)
 
+        from app.models.dataset import Dataset  # noqa: PLC0415
+        from app.services.landing import add_table_member  # noqa: PLC0415
+
         extract: dict = task.extract or {}
         paths: list[str] = [
             p.strip() for p in (extract.get("paths") or []) if str(p).strip()
@@ -320,7 +323,7 @@ class HdfsConnector:
             if wm_value is not None:
                 paths = [p for p in paths if p > wm_value]
 
-        results: list[tuple[Dataset, DatasetVersion]] = []
+        version: DatasetVersion | None = None
 
         for hdfs_path in paths:
             url = _build_webhdfs_url(nn, hdfs_path, "OPEN", **extra)
@@ -339,25 +342,20 @@ class HdfsConnector:
 
             records = normalize_to_records(content, ext)
 
-            dataset_name = (
-                f"{datasource.name}/{filename}"
-                if datasource.name
-                else filename
-            )
-
-            ds, ver = await land_records(
+            # 数据集优先(Task 10):每个文件作成员落进 task.dataset_id 的 draft
+            # 版本;成员名 = 文件名(去路径),空则兜底 "data"。
+            table_name = filename or "data"
+            version, _member = await add_table_member(
                 session,
+                task.dataset_id,
                 records,
-                dataset_name=dataset_name,
-                data_type=config.get("data_type"),
+                table_name=table_name,
                 semantic_type=config.get("semantic_type"),
                 # 三轴:来源=HDFS;格式=拉取对象原始扩展名
-                source_kind="hdfs",
                 source_format=ext,
                 note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
                 produced_by_job_id=job_id,
             )
-            results.append((ds, ver))
 
             # C5 评审 Finding 1 修复:水位推进改为每路径成功落地**之后**
             # running-max(当前水位, 本路径名)。中途失败 → 水位只反映此前已成功
@@ -377,4 +375,7 @@ class HdfsConnector:
                     "updatedAt": datetime.now(UTC).isoformat(),
                 }
 
-        return results
+        if version is None:
+            return []
+        dataset = await session.get(Dataset, task.dataset_id)
+        return [(dataset, version)]

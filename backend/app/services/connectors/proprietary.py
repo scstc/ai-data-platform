@@ -128,11 +128,12 @@ class DamengConnector(StructuralStub):
         except ImportError:
             raise ConnectorNotReady(self._not_ready_msg) from None
 
-        from app.services.landing import land_records
+        from app.models.dataset import Dataset
+        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         queries = _build_queries(task.extract)
-        results: list[tuple[Dataset, DatasetVersion]] = []
+        version: DatasetVersion | None = None
         conn = None
         try:
             conn = dmPython.connect(
@@ -149,26 +150,21 @@ class DamengConnector(StructuralStub):
                     dict(zip(cols, row, strict=False))
                     for row in cur.fetchall()
                 ]
-                ds_name = (
-                    f"{datasource.name}_{suffix}"
-                    if suffix
-                    else datasource.name
-                )
                 host = config.get("host", "")
                 port = config.get("port", 5236)
                 target = suffix or "query"
-                pair = await land_records(
-                    session=session,
-                    records=rows,
-                    dataset_name=ds_name,
-                    data_type="sql",
+                table_name = suffix or "data"
+                version, _member = await add_table_member(
+                    session,
+                    task.dataset_id,
+                    rows,
+                    table_name=table_name,
                     semantic_type="structured",
-                    source_kind="database",
+                    source_format="db",
                     note=f"dameng://{host}:{port}/{target}",
                     produced_by_job_id=job_id,
                     storage_format="parquet",
                 )
-                results.append(pair)
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -179,7 +175,10 @@ class DamengConnector(StructuralStub):
                     conn.close()
                 except Exception:  # noqa: BLE001
                     pass
-        return results
+        if version is None:
+            return []
+        dataset = await session.get(Dataset, task.dataset_id)
+        return [(dataset, version)]
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +280,8 @@ class SequoiaConnector(StructuralStub):
         except ImportError:
             raise ConnectorNotReady(self._not_ready_msg) from None
 
-        from app.services.landing import land_records
+        from app.models.dataset import Dataset
+        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         extract = task.extract or {}
@@ -296,7 +296,7 @@ class SequoiaConnector(StructuralStub):
             )
 
         conn = None
-        results: list[tuple[Dataset, DatasetVersion]] = []
+        version: DatasetVersion | None = None
         try:
             host = config.get("host", "localhost")
             port = int(config.get("port") or 11810)
@@ -322,20 +322,18 @@ class SequoiaConnector(StructuralStub):
                     rows.append(rec)
                     rec = cursor.next()
 
-                safe_name = full_name.replace(".", "_")
-                ds_name = f"{datasource.name}_{safe_name}"
-                pair = await land_records(
-                    session=session,
-                    records=rows,
-                    dataset_name=ds_name,
-                    data_type="sql",
+                table_name = full_name or "data"
+                version, _member = await add_table_member(
+                    session,
+                    task.dataset_id,
+                    rows,
+                    table_name=table_name,
                     semantic_type="structured",
-                    source_kind="database",
+                    source_format="db",
                     note=f"sequoiadb://{host}:{port}/{full_name}",
                     produced_by_job_id=job_id,
                     storage_format="parquet",
                 )
-                results.append(pair)
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -346,7 +344,10 @@ class SequoiaConnector(StructuralStub):
                     conn.disconnect()
                 except Exception:  # noqa: BLE001
                     pass
-        return results
+        if version is None:
+            return []
+        dataset = await session.get(Dataset, task.dataset_id)
+        return [(dataset, version)]
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +438,12 @@ class HiveConnector(StructuralStub):
         except ImportError:
             raise ConnectorNotReady(self._not_ready_msg) from None
 
-        from app.services.landing import land_records
+        from app.models.dataset import Dataset
+        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         queries = _build_queries(task.extract)
-        results: list[tuple[Dataset, DatasetVersion]] = []
+        version: DatasetVersion | None = None
         conn = None
         try:
             conn = self._hive_connect(config)
@@ -454,27 +456,22 @@ class HiveConnector(StructuralStub):
                     dict(zip(cols, row, strict=False))
                     for row in cur.fetchall()
                 ]
-                ds_name = (
-                    f"{datasource.name}_{suffix}"
-                    if suffix
-                    else datasource.name
-                )
                 host = config.get("host", "localhost")
                 port = config.get("port", 10000)
                 db = config.get("database", "default")
                 target = suffix or "query"
-                pair = await land_records(
-                    session=session,
-                    records=rows,
-                    dataset_name=ds_name,
-                    data_type="sql",
+                table_name = suffix or "data"
+                version, _member = await add_table_member(
+                    session,
+                    task.dataset_id,
+                    rows,
+                    table_name=table_name,
                     semantic_type="structured",
-                    source_kind="database",
+                    source_format="db",
                     note=f"hive://{host}:{port}/{db}/{target}",
                     produced_by_job_id=job_id,
                     storage_format="parquet",
                 )
-                results.append(pair)
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -485,7 +482,10 @@ class HiveConnector(StructuralStub):
                     conn.close()
                 except Exception:  # noqa: BLE001
                     pass
-        return results
+        if version is None:
+            return []
+        dataset = await session.get(Dataset, task.dataset_id)
+        return [(dataset, version)]
 
 
 # ---------------------------------------------------------------------------
@@ -597,11 +597,12 @@ class DorisConnector(StructuralStub):
         except ImportError:
             raise ConnectorNotReady(self._not_ready_msg) from None
 
-        from app.services.landing import land_records
+        from app.models.dataset import Dataset
+        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         queries = _build_queries(task.extract)
-        results: list[tuple[Dataset, DatasetVersion]] = []
+        version: DatasetVersion | None = None
         conn = None
         try:
             conn = await asyncmy.connect(
@@ -620,27 +621,22 @@ class DorisConnector(StructuralStub):
                         dict(zip(cols, row, strict=False))
                         for row in await cur.fetchall()
                     ]
-                ds_name = (
-                    f"{datasource.name}_{suffix}"
-                    if suffix
-                    else datasource.name
-                )
                 host = config.get("host", "localhost")
                 port = config.get("port", self._DEFAULT_PORT)
                 db = config.get("database", "")
                 target = suffix or "query"
-                pair = await land_records(
-                    session=session,
-                    records=rows,
-                    dataset_name=ds_name,
-                    data_type="sql",
+                table_name = suffix or "data"
+                version, _member = await add_table_member(
+                    session,
+                    task.dataset_id,
+                    rows,
+                    table_name=table_name,
                     semantic_type="structured",
-                    source_kind="database",
+                    source_format="db",
                     note=f"doris://{host}:{port}/{db}/{target}",
                     produced_by_job_id=job_id,
                     storage_format="parquet",
                 )
-                results.append(pair)
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -653,4 +649,7 @@ class DorisConnector(StructuralStub):
                     conn.close()
                 except Exception:  # noqa: BLE001
                     pass
-        return results
+        if version is None:
+            return []
+        dataset = await session.get(Dataset, task.dataset_id)
+        return [(dataset, version)]

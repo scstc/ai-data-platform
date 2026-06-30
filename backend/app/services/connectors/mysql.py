@@ -186,7 +186,8 @@ class MysqlConnector:
         MySQL 连接器未接增量 WHERE / 水位推进,配置 incremental 却静默走全量
         = silent wrong behavior。Rule 12 要求显式报错。
         """
-        from app.services.landing import land_records  # noqa: PLC0415
+        from app.models.dataset import Dataset  # noqa: PLC0415
+        from app.services.landing import add_table_member  # noqa: PLC0415
 
         # C5 评审 Finding 2:MySQL(goldendb)暂不支持增量采集——fail loud(Rule 12),
         # 不静默降级为全量(用户以为增量,实际全量采 = silent wrong behavior)。
@@ -199,7 +200,7 @@ class MysqlConnector:
 
         queries = _build_queries(task.extract)
         cfg = datasource.config or {}
-        results: list[tuple[Dataset, DatasetVersion]] = []
+        version: DatasetVersion | None = None
 
         try:
             conn = await _connect(cfg)
@@ -215,22 +216,21 @@ class MysqlConnector:
                     ]
                     # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
                     records = await apply_filter_operators(task, records)
-                    name = f"{task.name} - {suffix}" if suffix else task.name
-                    ds, ver = await land_records(
+                    # 数据集优先(Task 10):每表作成员落进 task.dataset_id 的 draft
+                    # 版本(多表 = 一版本多成员);单查询无 suffix → 成员名 "data"。
+                    table_name = suffix or "data"
+                    version, _member = await add_table_member(
                         session,
+                        task.dataset_id,
                         records,
-                        dataset_name=name,
-                        # 采集落地统一归到 SQL 接入栏(data_type 是功能键,不改)
-                        data_type="sql",
+                        table_name=table_name,
                         # 语义维度:结构化(§4.5)
                         semantic_type="structured",
-                        # 三轴:来源=数据库;数据库直连无文件载体,格式留空
-                        source_kind="database",
+                        source_format="db",
                         note=f"采集落地:{task.name}(来源 {datasource.name})",
                         produced_by_job_id=job_id,
                         storage_format="parquet",
                     )
-                    results.append((ds, ver))
             finally:
                 conn.close()
         except (ConnectorNotReady, IngestError):
@@ -238,4 +238,7 @@ class MysqlConnector:
         except Exception as exc:  # noqa: BLE001
             raise IngestError(str(exc)) from exc
 
-        return results
+        if version is None:
+            return []
+        dataset = await session.get(Dataset, task.dataset_id)
+        return [(dataset, version)]
