@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column("schema_snapshot", postgresql.JSONB(), nullable=True),
         sa.Column("schema_variant", sa.String(), nullable=True),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
+            "created_at", sa.DateTime(),
             server_default=sa.func.now(), nullable=False,
         ),
         sa.UniqueConstraint(
