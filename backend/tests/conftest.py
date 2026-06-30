@@ -83,6 +83,13 @@ async def session_factory(engine) -> async_sessionmaker[AsyncSession]:
 
 
 @pytest_asyncio.fixture
+async def db_session(session_factory):
+    """函数级 async session(基于测试 engine);服务层单测用。"""
+    async with session_factory() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
 async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     """覆盖 get_session 依赖、指向测试库的 httpx AsyncClient。"""
     from app.core.db import get_session
