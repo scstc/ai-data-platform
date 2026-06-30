@@ -6,6 +6,7 @@ from app.models.category import Category
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
+from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
 from app.models.department import Department
 from app.models.eval_result import EvalResult
@@ -32,6 +33,7 @@ __all__ = [
     "Dataset",
     "DatasetAcl",
     "DatasetVersion",
+    "DatasetVersionTable",
     "Department",
     "EvalResult",
     "IngestTask",
