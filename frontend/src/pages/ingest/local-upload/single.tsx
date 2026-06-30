@@ -6,44 +6,32 @@ import {
   FileTextOutlined,
   FileWordOutlined,
   InboxOutlined,
-  RobotOutlined,
   TableOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useAccess } from '@umijs/max';
+import { history } from '@umijs/max';
 import type { UploadFile, UploadProps } from 'antd';
 import {
   Alert,
   Button,
   Card,
   Col,
-  Input,
   Modal,
   message,
   Row,
+  Select,
   Space,
   Statistic,
   Switch,
   Table,
   Tag,
-  TreeSelect,
   Typography,
   theme,
   Upload,
 } from 'antd';
-import { type ReactNode, useCallback, useEffect, useState } from 'react';
-import { CategoryManager } from '@/components';
-import {
-  listCategories,
-  suggestDatasetName,
-  uploadBatchDataset,
-} from '@/services/data-platform';
+import { type ReactNode, useCallback, useState } from 'react';
+import { listDatasets, uploadBatchDataset } from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
-import {
-  type CategoryTreeNode,
-  findCategoryPath,
-  toCategoryTreeData,
-} from '@/utils/categoryTree';
 
 const { Text } = Typography;
 const { Dragger } = Upload;
@@ -183,37 +171,37 @@ const getExt = (filename: string): string => {
 /** 单一数据接入:一批同格式文件 → 原件存内置 MinIO + 合并生成一个 jsonl 数据集。 */
 const SingleUploadPage: React.FC = () => {
   const [format, setFormat] = useState<string>();
-  const [name, setName] = useState('');
-  const [categoryId, setCategoryId] = useState<string>();
-  const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
-    [],
-  );
+  const [datasetId, setDatasetId] = useState<string>();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [naming, setNaming] = useState(false);
-  const [catMgrOpen, setCatMgrOpen] = useState(false);
   const [safetyCheck, setSafetyCheck] = useState(true);
   const [safetyUseLlm, setSafetyUseLlm] = useState(false);
+  const [datasetOptions, setDatasetOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+  const [datasetLoading, setDatasetLoading] = useState(false);
+
+  // 目标数据集下拉:按关键词拉取已有数据集(数据集优先流程,上传落入其 draft 版本)
+  const loadDatasetOptions = useCallback((keyword?: string) => {
+    setDatasetLoading(true);
+    listDatasets({ name: keyword || undefined, pageSize: 50 })
+      .then((res) =>
+        setDatasetOptions(
+          (res.data ?? []).map((d) => ({ label: d.name, value: d.id })),
+        ),
+      )
+      .catch(() => {
+        /* 拉取失败不阻断,留空列表 */
+      })
+      .finally(() => setDatasetLoading(false));
+  }, []);
   const [blockReport, setBlockReport] = useState<{
     report: DataPlatform.ReviewReportBody;
     findings: DataPlatform.ReviewFinding[];
     ratio: number;
     highSeverity: number;
   } | null>(null);
-  const access = useAccess();
   const { token } = theme.useToken();
-
-  const loadCategories = useCallback(() => {
-    listCategories()
-      .then((res) => setCategoryTreeData(toCategoryTreeData(res.data)))
-      .catch(() => {
-        /* 分类拉取失败不阻断上传 */
-      });
-  }, []);
-
-  useEffect(() => {
-    loadCategories();
-  }, [loadCategories]);
 
   // 切换格式时清空已选文件(accept 与扩展名校验随之变化)
   const onFormatChange = (value: string) => {
@@ -238,24 +226,6 @@ const SingleUploadPage: React.FC = () => {
     return false;
   };
 
-  // AI 命名:据已选文件名 + 格式 + 分类生成一个数据集名(后端 LLM/启发式)
-  const onAiName = async () => {
-    if (fileList.length === 0) return;
-    setNaming(true);
-    try {
-      const res = await suggestDatasetName({
-        filenames: fileList.map((f) => f.name),
-        dataType: format ?? '',
-        category: findCategoryPath(categoryTreeData, categoryId),
-      });
-      if (res.success && res.data.name) setName(res.data.name);
-    } catch (e: any) {
-      message.error(e?.data?.message ?? e?.message ?? 'AI 命名失败');
-    } finally {
-      setNaming(false);
-    }
-  };
-
   const onSubmit = async () => {
     if (!format) {
       message.warning('请选择数据格式');
@@ -265,34 +235,31 @@ const SingleUploadPage: React.FC = () => {
       message.warning('请至少添加一个文件');
       return;
     }
-    if (!name.trim()) {
-      message.warning('请输入数据集名称');
+    if (!datasetId) {
+      message.warning('请选择目标数据集');
       return;
     }
     const fd = new FormData();
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
-    fd.append('data_type', format);
-    fd.append('name', name.trim());
-    if (categoryId) fd.append('categoryId', categoryId);
+    fd.append('datasetId', datasetId);
     fd.append('safety_check', String(safetyCheck));
     fd.append('safety_use_llm', String(safetyUseLlm));
 
     setSubmitting(true);
     const hide = message.loading(
-      safetyCheck ? '正在上传并审核内容安全…' : '正在上传并生成数据集…',
+      safetyCheck ? '正在上传并审核内容安全…' : '正在上传并落入数据集…',
       0,
     );
     try {
       const res = await uploadBatchDataset(fd, { skipErrorHandler: true });
       hide();
       message.success(
-        `已生成数据集「${res.data?.name ?? name}」,原件与 jsonl 已存入 MinIO`,
+        `已上传并作为表成员落入数据集「${res.data?.name ?? ''}」`,
       );
       setFileList([]);
-      setName('');
-      history.push('/datasets/list');
+      history.push(`/datasets/detail?id=${datasetId}`);
     } catch (e: any) {
       hide();
       const body = e?.response?.data ?? e?.data;
@@ -393,47 +360,27 @@ const SingleUploadPage: React.FC = () => {
           </div>
           <div>
             <Text strong>
-              数据集名称 <Text type="danger">*</Text>
+              目标数据集 <Text type="danger">*</Text>
             </Text>
-            <Space.Compact style={{ width: '100%', marginTop: 8 }}>
-              <Input
-                placeholder="请输入数据集名称"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+            <div style={{ marginTop: 8 }}>
+              <Select
+                style={{ width: '100%' }}
+                placeholder="选择已有数据集(上传的文件将作为表成员加入)"
+                value={datasetId}
+                onChange={setDatasetId}
+                showSearch
                 allowClear
+                filterOption={false}
+                onSearch={(kw) => loadDatasetOptions(kw)}
+                onFocus={() => loadDatasetOptions()}
+                options={datasetOptions}
+                notFoundContent={
+                  datasetLoading
+                    ? '加载中…'
+                    : '无匹配数据集,请先到「数据集」页新建'
+                }
               />
-              <Button
-                icon={<RobotOutlined />}
-                loading={naming}
-                disabled={fileList.length === 0}
-                onClick={onAiName}
-              >
-                AI 命名
-              </Button>
-            </Space.Compact>
-          </div>
-          <div>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <Text strong>分类</Text>
-              <a onClick={() => setCatMgrOpen(true)}>管理分类</a>
             </div>
-            <TreeSelect
-              style={{ width: '100%', marginTop: 8 }}
-              placeholder="可选"
-              value={categoryId}
-              onChange={setCategoryId}
-              treeData={categoryTreeData}
-              allowClear
-              showSearch
-              treeNodeFilterProp="title"
-              treeDefaultExpandAll
-            />
           </div>
           <Dragger
             multiple
@@ -586,12 +533,6 @@ const SingleUploadPage: React.FC = () => {
           </Space>
         )}
       </Modal>
-      <CategoryManager
-        open={catMgrOpen}
-        canAdmin={!!access.canAdmin}
-        onClose={() => setCatMgrOpen(false)}
-        onChanged={loadCategories}
-      />
     </PageContainer>
   );
 };

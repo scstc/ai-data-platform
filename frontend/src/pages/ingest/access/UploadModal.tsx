@@ -3,18 +3,19 @@ import type { UploadFile, UploadProps } from 'antd';
 import {
   Alert,
   Button,
-  Input,
   Modal,
   message,
   Radio,
+  Select,
   Space,
   TreeSelect,
   Upload,
 } from 'antd';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   hostPlatformFiles,
   listCategories,
+  listDatasets,
   uploadDataset,
   uploadMediaDataset,
 } from '@/services/data-platform';
@@ -57,22 +58,37 @@ const UploadModal: React.FC<Props> = ({
   const [mode, setMode] = useState<'local' | 'platform'>('local');
   const [sel, setSel] = useState<PlatformSelection>({ bucket: '', keys: [] });
   const [submitting, setSubmitting] = useState(false);
-  // 媒体批量接入(图/音/视频):暂存文件 + 接入名称 → 一次建一个 manifest 数据集
+  // 媒体批量接入(图/音/视频):暂存文件 → 落入所选数据集的 manifest 版本
   const isMediaBatch = accessType.binary;
-  const [mediaName, setMediaName] = useState('');
+  const [datasetId, setDatasetId] = useState<string>();
+  const [datasetOptions, setDatasetOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+
+  // 目标数据集下拉:按关键词拉取(数据集优先,上传落入其 draft 版本)
+  const loadDatasetOptions = useCallback((keyword?: string) => {
+    listDatasets({ name: keyword || undefined, pageSize: 50 })
+      .then((res) =>
+        setDatasetOptions(
+          (res.data ?? []).map((d) => ({ label: d.name, value: d.id })),
+        ),
+      )
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
     setMode('local');
     setSel({ bucket: '', keys: [] });
     setCategoryId(undefined);
-    setMediaName('');
+    setDatasetId(undefined);
     setFileList([]);
+    loadDatasetOptions();
     listCategories()
       .then((res) => setCategoryTreeData(toCategoryTreeData(res.data)))
       .catch(() => undefined);
-  }, [open]);
+  }, [open, loadDatasetOptions]);
 
   const beforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
     if (!isExtAllowed(file.name, accessType)) {
@@ -92,15 +108,19 @@ const UploadModal: React.FC<Props> = ({
     opts,
   ) => {
     const { file, onSuccess, onError } = opts;
+    if (!datasetId) {
+      messageApi.error('请先选择目标数据集');
+      onError?.(new Error('no dataset'));
+      return;
+    }
     const formData = new FormData();
     formData.append('file', file as File);
-    formData.append('data_type', accessType.key);
-    if (categoryId) formData.append('categoryId', categoryId);
+    formData.append('datasetId', datasetId);
     try {
       const res = await uploadDataset(formData);
       onSuccess?.(res);
       messageApi.success(
-        `${(file as File).name} 已接入为数据集「${res.data.name}」`,
+        `${(file as File).name} 已作为表成员落入数据集「${res.data.name}」`,
       );
       onDone();
     } catch (err) {
@@ -146,8 +166,8 @@ const UploadModal: React.FC<Props> = ({
       messageApi.error('请先选择至少一个文件');
       return;
     }
-    if (!mediaName.trim()) {
-      messageApi.error('请输入数据集名称');
+    if (!datasetId) {
+      messageApi.error('请先选择目标数据集');
       return;
     }
     setSubmitting(true);
@@ -155,11 +175,10 @@ const UploadModal: React.FC<Props> = ({
       const formData = new FormData();
       for (const f of files) formData.append('files', f);
       formData.append('data_type', accessType.key);
-      formData.append('name', mediaName.trim());
-      if (categoryId) formData.append('categoryId', categoryId);
+      formData.append('datasetId', datasetId);
       const res = await uploadMediaDataset(formData);
       messageApi.success(
-        `已接入 ${files.length} 个文件为数据集「${res.data.name}」`,
+        `已接入 ${files.length} 个文件为数据集「${res.data.name}」的成员版本`,
       );
       onDone();
       onClose();
@@ -260,24 +279,33 @@ const UploadModal: React.FC<Props> = ({
           />
         </Space>
 
+        {mode === 'local' && (
+          <Space>
+            <span>
+              目标数据集 <span style={{ color: '#ff4d4f' }}>*</span>:
+            </span>
+            <Select
+              style={{ width: 360 }}
+              placeholder="选择已有数据集(上传文件作为表成员加入)"
+              value={datasetId}
+              onChange={setDatasetId}
+              showSearch
+              allowClear
+              filterOption={false}
+              onSearch={(kw) => loadDatasetOptions(kw)}
+              options={datasetOptions}
+              notFoundContent="无匹配数据集,请先到「数据集」页新建"
+            />
+          </Space>
+        )}
+
         {mode === 'local' && isMediaBatch ? (
           <>
             <Alert
               type="info"
               showIcon
-              title={`一批${accessType.label.replace('接入', '')}将合并为一个数据集(清单形式),可直接用于数据加工。`}
+              title={`一批${accessType.label.replace('接入', '')}将作为一个清单版本落入所选数据集,可直接用于数据加工。`}
             />
-            <Space>
-              <span>
-                接入名称 <Text type="danger">*</Text>:
-              </span>
-              <Input
-                placeholder="请输入数据集名称"
-                style={{ width: 360 }}
-                value={mediaName}
-                onChange={(e) => setMediaName(e.target.value)}
-              />
-            </Space>
             <Upload
               multiple
               accept={acceptOf(accessType)}
