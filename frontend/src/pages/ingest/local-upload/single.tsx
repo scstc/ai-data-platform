@@ -317,7 +317,7 @@ const SingleUploadPage: React.FC = () => {
     try {
       if (hasMedia) {
         const dataType = [...mediaTypes][0] as string;
-        fd.append('dataType', dataType);
+        fd.append('data_type', dataType);
         const res = await uploadMediaDataset(fd, { skipErrorHandler: true });
         hide();
         message.success(
