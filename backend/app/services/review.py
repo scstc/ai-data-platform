@@ -245,7 +245,11 @@ async def scan_version(
     useFlaggedWords, sampleLimit。LLM 失败时整体跳过 llm source(降级)。
     """
     total = len(rows)
+    # 同时容忍 camelCase (sampleLimit) 与 snake_case (sample_limit):
+    # 上游链路(Pydantic model_dump)是否 by_alias 决定落库形态,任一形式都应生效
     raw_limit = config.get("sampleLimit")
+    if not isinstance(raw_limit, int) or raw_limit <= 0:
+        raw_limit = config.get("sample_limit")
     sample_limit = (
         raw_limit
         if isinstance(raw_limit, int) and raw_limit > 0

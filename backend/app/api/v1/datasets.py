@@ -116,6 +116,7 @@ DescForm = Annotated[str | None, Form()]
 CategoryIdForm = Annotated[str | None, Form(alias="categoryId")]
 SafetyCheckForm = Annotated[bool, Form(alias="safety_check")]
 SafetyUseLlmForm = Annotated[bool, Form(alias="safety_use_llm")]
+SafetySampleLimitForm = Annotated[int | None, Form(alias="safety_sample_limit", ge=1)]
 CreatedStartQuery = Annotated[datetime | None, Query(alias="createdStart")]
 CreatedEndQuery = Annotated[datetime | None, Query(alias="createdEnd")]
 
@@ -534,6 +535,7 @@ async def upload_batch_as_dataset(
     category_id: CategoryIdForm = None,
     safety_check: SafetyCheckForm = True,
     safety_use_llm: SafetyUseLlmForm = False,
+    safety_sample_limit: SafetySampleLimitForm = None,
 ) -> JSONResponse:
     """单一格式批量本地上传:一批同格式文本/结构化文件 → 原文件复制进平台内置 MinIO
     + 合并解析为一个 data.jsonl(也存 MinIO)→ 生成一个受管数据集。
@@ -652,7 +654,7 @@ async def upload_batch_as_dataset(
                 "useFlaggedWords": True,
                 "usePii": True,
                 "useLlm": safety_use_llm,
-                "sampleLimit": 500,
+                "sampleLimit": safety_sample_limit if safety_sample_limit else 500,
             }
             provider = get_ai_provider(settings) if safety_use_llm else None
             async with _semaphore:
