@@ -1,8 +1,6 @@
 /**
  * 已发布数据集 — 算法工程师消费视图。
- * 只展示含已发布(publishStatus=published)版本的数据集，前端只读，无删除/编辑权限。
- * 详情抽屉:已发布版本表 + 数据预览(选版本 → 文件清单 + 按文件预览,复用 VersionFilePreview)。
- * 操作列:下载(原) + 导出到 S3(对齐数据集详情页 + 数据源列表的同一实现)。
+ * 详情抽屉:左侧已发布版本列表(点选高亮) + 右侧版本详情 + 底部数据预览。
  */
 import type { ProColumns } from '@ant-design/pro-components';
 import {
@@ -12,13 +10,16 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components';
-import type { TableColumnsType } from 'antd';
 import {
+  Col,
+  Descriptions,
+  Divider,
   Drawer,
+  Flex,
+  List,
   message,
-  Select,
+  Row,
   Space,
-  Table,
   Tag,
   Tooltip,
   Typography,
@@ -37,8 +38,6 @@ import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 
-const { Title } = Typography;
-
 const fmtSize = (n?: number) => {
   if (!n && n !== 0) return '-';
   if (n < 1024) return `${n} B`;
@@ -49,9 +48,7 @@ const fmtSize = (n?: number) => {
 const DatasetsPresets: React.FC = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
-  // 当前预览的版本 id(默认首个已发布版本);文件清单 + 按文件预览交给 VersionFilePreview
-  const [previewVersionId, setPreviewVersionId] = useState<string>();
-  // 导出到 S3:记录当前要导出的版本(打开 ModalForm);为 undefined 表示未打开
+  const [activeVersionId, setActiveVersionId] = useState<string>();
   const [exportVersion, setExportVersion] =
     useState<DataPlatform.DatasetVersion>();
 
@@ -59,10 +56,10 @@ const DatasetsPresets: React.FC = () => {
     const res = await getDataset(id);
     if (res?.success) {
       setDetail(res.data);
-      const published = res.data.versions.find(
+      const published = res.data.versions.filter(
         (v) => v.publishStatus === 'published',
       );
-      setPreviewVersionId(published?.id);
+      setActiveVersionId(published[published.length - 1]?.id);
       setDetailOpen(true);
     }
   };
@@ -70,50 +67,7 @@ const DatasetsPresets: React.FC = () => {
   const publishedVersions =
     detail?.versions.filter((v) => v.publishStatus === 'published') ?? [];
 
-  const versionColumns: TableColumnsType<DataPlatform.DatasetVersion> = [
-    {
-      title: '版本',
-      dataIndex: 'versionNo',
-      render: (_, v) => v.versionLabel ?? `v${v.versionNo}`,
-    },
-    { title: '行数', dataIndex: 'rows', render: (_, v) => v.rows ?? '-' },
-    { title: '大小', dataIndex: 'size', render: (_, v) => fmtSize(v.size) },
-    {
-      title: '扫描结论',
-      dataIndex: 'scanVerdict',
-      render: (_, v) => (
-        <Tooltip title={v.verdictNote}>
-          <Tag color="green">
-            通过{v.verdictSource === 'manual' ? '·人工' : ''}
-          </Tag>
-        </Tooltip>
-      ),
-    },
-    {
-      title: '发布时间',
-      dataIndex: 'publishedAt',
-      render: (_, v) => formatDateTime(v.publishedAt),
-    },
-    { title: '说明', dataIndex: 'note', render: (_, v) => v.note ?? '-' },
-    {
-      title: '操作',
-      key: 'option',
-      // 闭环终点:算法工程师取走已发布版本(后端仅 published 放行,见 /download;
-      // 导出到 S3 与数据集详情/数据源列表对齐,任一即可任选其一)
-      render: (_, v) => (
-        <Space size="middle">
-          <a
-            onClick={() =>
-              window.open(`/api/v1/dataset-versions/${v.id}/download`, '_blank')
-            }
-          >
-            下载
-          </a>
-          <a onClick={() => setExportVersion(v)}>导出到 S3</a>
-        </Space>
-      ),
-    },
-  ];
+  const activeVer = publishedVersions.find((v) => v.id === activeVersionId);
 
   const columns: ProColumns<DataPlatform.Dataset>[] = [
     {
@@ -136,18 +90,6 @@ const DatasetsPresets: React.FC = () => {
       valueType: 'select',
       valueEnum: SOURCE_KIND_ENUM,
       render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
-    },
-    {
-      title: '版本',
-      dataIndex: 'latestVersionLabel',
-      search: false,
-      width: 150,
-      render: (_, r) =>
-        r.latestVersionLabel ? (
-          <Tag color="blue">{r.latestVersionLabel}</Tag>
-        ) : (
-          '-'
-        ),
     },
     {
       title: '数据类型',
@@ -217,49 +159,226 @@ const DatasetsPresets: React.FC = () => {
       />
 
       <Drawer
-        width={1100}
+        width={1200}
         open={detailOpen}
-        title={detail?.name}
+        title={
+          detail && (
+            <Space>
+              {detail.name}
+              {detail.semanticType && (
+                <SemanticTypeTag type={detail.semanticType} />
+              )}
+              <Tag color="green">已发布 {publishedVersions.length} 个版本</Tag>
+            </Space>
+          )
+        }
         onClose={() => {
           setDetailOpen(false);
           setDetail(undefined);
-          setPreviewVersionId(undefined);
+          setActiveVersionId(undefined);
         }}
       >
         {detail && (
           <>
-            <Title level={5}>已发布版本</Title>
-            <Table<DataPlatform.DatasetVersion>
-              rowKey="id"
-              size="small"
-              pagination={false}
-              dataSource={publishedVersions}
-              columns={versionColumns}
-            />
+            {/* 数据集元数据摘要 */}
+            <Descriptions size="small" column={{ xs: 1, sm: 3 }} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="来源">
+                <SourceKindTag kind={detail.sourceKind} />
+              </Descriptions.Item>
+              <Descriptions.Item label="格式">
+                {detail.sourceFormat?.toUpperCase() ?? '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="分类">
+                {detail.categoryName ?? '-'}
+              </Descriptions.Item>
+              {detail.description && (
+                <Descriptions.Item label="描述" span={3}>
+                  {detail.description}
+                </Descriptions.Item>
+              )}
+              {detail.tags?.length ? (
+                <Descriptions.Item label="标签" span={3}>
+                  {detail.tags.map((t) => (
+                    <Tag key={t} color={tagColor(t)}>{t}</Tag>
+                  ))}
+                </Descriptions.Item>
+              ) : null}
+            </Descriptions>
 
-            <Title level={5} style={{ marginTop: 16 }}>
+            <Divider style={{ margin: '0 0 16px 0' }} />
+
+            {/* 版本主详情:左侧版本列表 + 右侧版本详情 */}
+            <Row gutter={16}>
+              <Col xs={24} md={8} lg={7}>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  已发布版本（{publishedVersions.length}）
+                </Typography.Text>
+                <List<DataPlatform.DatasetVersion>
+                  size="small"
+                  bordered
+                  rowKey="id"
+                  style={{ marginTop: 8, borderRadius: 8 }}
+                  dataSource={[...publishedVersions].reverse()}
+                  renderItem={(v) => {
+                    const selected = activeVersionId === v.id;
+                    return (
+                      <List.Item
+                        onClick={() => setActiveVersionId(v.id)}
+                        style={{
+                          cursor: 'pointer',
+                          paddingInline: 12,
+                          background: selected
+                            ? 'var(--ant-color-primary-bg)'
+                            : undefined,
+                          borderInlineStart: `2px solid ${
+                            selected
+                              ? 'var(--ant-color-primary)'
+                              : 'transparent'
+                          }`,
+                          transition: 'background 0.2s',
+                        }}
+                      >
+                        <Flex vertical gap={4} style={{ width: '100%' }}>
+                          <Typography.Text strong={selected}>
+                            {v.versionLabel ?? `v${v.versionNo}`}
+                          </Typography.Text>
+                          <Flex gap={4} wrap="wrap">
+                            <Tag
+                              color="green"
+                              style={{ marginInlineEnd: 0, fontSize: 11 }}
+                            >
+                              已发布
+                            </Tag>
+                            {v.verdictSource === 'manual' && (
+                              <Tag
+                                color="orange"
+                                style={{ marginInlineEnd: 0, fontSize: 11 }}
+                              >
+                                人工接受
+                              </Tag>
+                            )}
+                          </Flex>
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: 11 }}
+                          >
+                            {v.rows != null ? `${v.rows} 行` : '-'} ·{' '}
+                            {fmtSize(v.size)}
+                          </Typography.Text>
+                          {v.publishedAt && (
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontSize: 11 }}
+                            >
+                              发布于 {formatDateTime(v.publishedAt)}
+                            </Typography.Text>
+                          )}
+                        </Flex>
+                      </List.Item>
+                    );
+                  }}
+                />
+              </Col>
+
+              {/* 右侧:选中版本详情 */}
+              <Col xs={24} md={16} lg={17}>
+                {activeVer ? (
+                  <div>
+                    <Flex justify="space-between" align="center" style={{ marginBottom: 12 }}>
+                      <Typography.Title level={5} style={{ margin: 0 }}>
+                        {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
+                      </Typography.Title>
+                      <Space>
+                        <a
+                          onClick={() =>
+                            window.open(
+                              `/api/v1/dataset-versions/${activeVer.id}/download`,
+                              '_blank',
+                            )
+                          }
+                        >
+                          下载
+                        </a>
+                        <a onClick={() => setExportVersion(activeVer)}>
+                          导出到 S3
+                        </a>
+                      </Space>
+                    </Flex>
+                    <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered>
+                      <Descriptions.Item label="版本号">
+                        {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="格式">
+                        <Tag>{(activeVer.format ?? '-').toUpperCase()}</Tag>
+                      </Descriptions.Item>
+                      <Descriptions.Item label="行数">
+                        {activeVer.rows ?? '-'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="大小">
+                        {fmtSize(activeVer.size)}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="来源">
+                        <Tag color={activeVer.origin === 'managed' ? 'green' : 'gold'}>
+                          {activeVer.origin ?? '-'}
+                        </Tag>
+                      </Descriptions.Item>
+                      <Descriptions.Item label="扫描结论">
+                        <Tooltip title={activeVer.verdictNote}>
+                          <Tag color="green">
+                            通过{activeVer.verdictSource === 'manual' ? '·人工' : ''}
+                          </Tag>
+                        </Tooltip>
+                      </Descriptions.Item>
+                      {activeVer.trainType && (
+                        <Descriptions.Item label="训练用途">
+                          <Tag color="blue">{activeVer.trainType}</Tag>
+                        </Descriptions.Item>
+                      )}
+                      {activeVer.schemaVariant && (
+                        <Descriptions.Item label="Schema 变体">
+                          <Tag color="cyan">{activeVer.schemaVariant}</Tag>
+                        </Descriptions.Item>
+                      )}
+                      <Descriptions.Item label="发布时间">
+                        {formatDateTime(activeVer.publishedAt)}
+                      </Descriptions.Item>
+                      {activeVer.note && (
+                        <Descriptions.Item label="说明" span={2}>
+                          {activeVer.note}
+                        </Descriptions.Item>
+                      )}
+                    </Descriptions>
+                  </div>
+                ) : (
+                  <Typography.Text type="secondary">
+                    选择左侧版本查看详情
+                  </Typography.Text>
+                )}
+              </Col>
+            </Row>
+
+            <Divider style={{ margin: '16px 0' }} />
+
+            {/* 数据预览 */}
+            <Typography.Title level={5} style={{ margin: '0 0 8px 0' }}>
               数据预览
-            </Title>
-            <Space style={{ marginBottom: 8 }}>
-              <Typography.Text type="secondary">版本</Typography.Text>
-              <Select
-                size="small"
-                style={{ width: 280 }}
-                value={previewVersionId}
-                onChange={setPreviewVersionId}
-                options={publishedVersions.map((v) => ({
-                  label: v.versionLabel ?? `v${v.versionNo}`,
-                  value: v.id,
-                }))}
-              />
-            </Space>
+              {activeVer && (
+                <Typography.Text
+                  type="secondary"
+                  style={{ fontSize: 13, fontWeight: 400, marginLeft: 8 }}
+                >
+                  {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
+                </Typography.Text>
+              )}
+            </Typography.Title>
             <VersionFilePreview
-              versionId={previewVersionId}
+              versionId={activeVersionId}
               semanticType={detail.semanticType}
             />
           </>
         )}
       </Drawer>
+
       <ModalForm<DataPlatform.ExportS3Params>
         title="导出到 S3"
         width={520}
