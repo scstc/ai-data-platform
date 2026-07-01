@@ -28,6 +28,13 @@ COPY data-juicer/ /opt/dj/
 RUN uv venv /opt/dj/.venv --python 3.12 \
     && uv pip install --python /opt/dj/.venv/bin/python /opt/dj
 
+# 临时热补丁:scstc/data-juicer PR#2 correlation_analysis.py StringDtype 兜底
+# 补丁合并到 data-juicer 上游 + 后续 rebuild 镜像后可整段删除。
+# 脚本幂等(检测 marker),跑多次安全。
+COPY deploy/patch_dj_correlation_stringdtype.py /tmp/patch_dj_correlation_stringdtype.py
+RUN /opt/dj/.venv/bin/python /tmp/patch_dj_correlation_stringdtype.py \
+    && rm /tmp/patch_dj_correlation_stringdtype.py
+
 # --- 后端应用 venv ---
 WORKDIR /app
 RUN uv venv /app/.venv --python 3.12
