@@ -59,10 +59,30 @@ const FORMAT_GROUPS: {
   {
     label: '图像',
     options: [
-      { value: 'jpg', label: 'JPEG', icon: <PictureOutlined />, color: '#E5484D' },
-      { value: 'png', label: 'PNG', icon: <PictureOutlined />, color: '#E5484D' },
-      { value: 'gif', label: 'GIF', icon: <PictureOutlined />, color: '#E5484D' },
-      { value: 'webp', label: 'WebP', icon: <PictureOutlined />, color: '#E5484D' },
+      {
+        value: 'jpg',
+        label: 'JPEG',
+        icon: <PictureOutlined />,
+        color: '#E5484D',
+      },
+      {
+        value: 'png',
+        label: 'PNG',
+        icon: <PictureOutlined />,
+        color: '#E5484D',
+      },
+      {
+        value: 'gif',
+        label: 'GIF',
+        icon: <PictureOutlined />,
+        color: '#E5484D',
+      },
+      {
+        value: 'webp',
+        label: 'WebP',
+        icon: <PictureOutlined />,
+        color: '#E5484D',
+      },
     ],
   },
   {
@@ -70,17 +90,42 @@ const FORMAT_GROUPS: {
     options: [
       { value: 'mp3', label: 'MP3', icon: <SoundOutlined />, color: '#8B5CF6' },
       { value: 'wav', label: 'WAV', icon: <SoundOutlined />, color: '#8B5CF6' },
-      { value: 'flac', label: 'FLAC', icon: <SoundOutlined />, color: '#8B5CF6' },
+      {
+        value: 'flac',
+        label: 'FLAC',
+        icon: <SoundOutlined />,
+        color: '#8B5CF6',
+      },
       { value: 'ogg', label: 'OGG', icon: <SoundOutlined />, color: '#8B5CF6' },
     ],
   },
   {
     label: '视频',
     options: [
-      { value: 'mp4', label: 'MP4', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
-      { value: 'avi', label: 'AVI', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
-      { value: 'mov', label: 'MOV', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
-      { value: 'mkv', label: 'MKV', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
+      {
+        value: 'mp4',
+        label: 'MP4',
+        icon: <VideoCameraOutlined />,
+        color: '#0EA5E9',
+      },
+      {
+        value: 'avi',
+        label: 'AVI',
+        icon: <VideoCameraOutlined />,
+        color: '#0EA5E9',
+      },
+      {
+        value: 'mov',
+        label: 'MOV',
+        icon: <VideoCameraOutlined />,
+        color: '#0EA5E9',
+      },
+      {
+        value: 'mkv',
+        label: 'MKV',
+        icon: <VideoCameraOutlined />,
+        color: '#0EA5E9',
+      },
     ],
   },
   {
@@ -181,7 +226,11 @@ const FORMAT_GROUPS: {
 
 const SUPPORTED_EXTS = new Set([
   ...FORMAT_GROUPS.flatMap((g) => g.options.map((o) => o.value)),
-  'jpeg', 'm4a', 'aac', 'webm', 'bmp', // aliases not in display list
+  'jpeg',
+  'm4a',
+  'aac',
+  'webm',
+  'bmp', // aliases not in display list
 ]);
 
 /** 单文件体积上限,与后端 _MAX_MEDIA_FILE_BYTES(200MB)对齐 */
@@ -242,7 +291,9 @@ const SingleUploadPage: React.FC = () => {
     }
 
     const exts = fileList.map((f) => getExt(f.name));
-    const mediaTypes = new Set(exts.map((e) => mediaDataType(e)).filter(Boolean));
+    const mediaTypes = new Set(
+      exts.map((e) => mediaDataType(e)).filter(Boolean),
+    );
     const hasMedia = exts.some((e) => MEDIA_EXTS.has(e));
     const hasNonMedia = exts.some((e) => !MEDIA_EXTS.has(e));
 
@@ -398,7 +449,8 @@ const SingleUploadPage: React.FC = () => {
             </p>
             <p className="ant-upload-text">点击或拖拽文件到此处</p>
             <p className="ant-upload-hint">
-              支持多文件批量上传;图像/音频/视频请单独上传同一模态,将自动生成多模态 JSONL;单文件最大 200MB。
+              支持多文件批量上传;图像/音频/视频请单独上传同一模态,将自动生成多模态
+              JSONL;单文件最大 200MB。
             </p>
           </Dragger>
           <Button
