@@ -68,7 +68,10 @@ async def create_data_lake(
     Returns:
         创建的数据湖对象
     """
-    lake_id = f"lake-{uuid7_hex()[:6]}"
+    # UUIDv7:前 48 bit 是毫秒时间戳,字典序 = 创建顺序;跟随 dset- 约定用完整
+    # 32 位 hex,避免 6 位截断在快照量大时冲撞(datasource/task/job 等旧资源
+    # 沿用 token_hex(3) 是历史遗留,数据湖是与 dataset 同链路的新表,统一走完整 UUIDv7)。
+    lake_id = f"lake-{uuid7_hex()}"
     lake = DataLake(
         id=lake_id,
         name=name,
@@ -186,7 +189,7 @@ async def ingest_to_lake_parquet(
     )
 
     # 4. 创建快照记录
-    snapshot_id = f"snap-{uuid7_hex()[:6]}"
+    snapshot_id = f"snap-{uuid7_hex()}"
     bucket = settings.storage_minio_lake_bucket
     storage_uri = f"s3://{bucket}/{object_key}"
     snapshot = DataLakeSnapshot(
@@ -251,7 +254,7 @@ async def ingest_to_lake_raw(
     )
 
     # 4. 创建快照记录
-    snapshot_id = f"snap-{uuid7_hex()[:6]}"
+    snapshot_id = f"snap-{uuid7_hex()}"
     bucket = settings.storage_minio_lake_bucket
     storage_uri = f"s3://{bucket}/{object_key}"
 

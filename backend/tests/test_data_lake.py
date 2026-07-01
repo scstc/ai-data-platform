@@ -86,6 +86,53 @@ async def test_create_data_lake(db_session):
 
 
 @pytest.mark.asyncio
+async def test_extract_to_new_dataset_rejects_empty_snapshots(db_session):
+    """抽取生成数据集:空快照列表拒绝。"""
+    from app.services.external_store import ExternalStoreError
+    from app.services.lake_extract import extract_to_new_dataset
+
+    lake = await create_data_lake(db_session, name="抽取空测试湖")
+    with pytest.raises(ExternalStoreError, match="至少选择一个快照"):
+        await extract_to_new_dataset(
+            db_session,
+            lake_id=lake.id,
+            snapshot_ids=[],
+            dataset_name="不应该被创建",
+        )
+
+
+@pytest.mark.asyncio
+async def test_extract_to_new_dataset_rejects_cross_lake_snapshots(db_session):
+    """抽取生成数据集:快照不属于目标湖 → 拒绝(防止跨湖污染)。"""
+    from app.models.data_lake import DataLakeSnapshot
+    from app.services.external_store import ExternalStoreError
+    from app.services.lake_extract import extract_to_new_dataset
+
+    lake_a = await create_data_lake(db_session, name="源湖 A")
+    lake_b = await create_data_lake(db_session, name="源湖 B")
+    stray = DataLakeSnapshot(
+        id="snap-stray001",
+        lake_id=lake_b.id,  # 属于 B
+        source_version="source_v20260701_01_x",
+        storage_uri="s3://adp-data-lake/x.parquet",
+        storage_format="parquet",
+        data_category="database",
+        upload_channel="database",
+    )
+    db_session.add(stray)
+    await db_session.commit()
+
+    # 请求 A 湖抽取,却传入 B 湖的快照 id → 拒绝
+    with pytest.raises(ExternalStoreError, match="不属于"):
+        await extract_to_new_dataset(
+            db_session,
+            lake_id=lake_a.id,
+            snapshot_ids=[stray.id],
+            dataset_name="不应该被创建",
+        )
+
+
+@pytest.mark.asyncio
 async def test_lake_is_multi_source_container(db_session):
     """一个数据湖可以承接多种来源的快照（多源汇聚）。"""
     from app.models.data_lake import DataLakeSnapshot

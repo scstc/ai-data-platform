@@ -37,7 +37,11 @@ class IngestTask(Base):
     category_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 「生成 CSV 数据集」绑定的数据集 id(datasets.id,无 FK,可空)。
     # 首次生成时落定,后续生成在同一数据集追加新版本(v1/v2/... 各落不同文件夹)。
+    # 治理改造后:新任务优先用 lake_id 落湖,dataset_id 仅存量任务继续沿用。
     dataset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 目标数据湖(治理改造,见 docs/数据治理.md §5):新任务经此字段落湖快照,
+    # 湖是原始归档层;数据集通过'从湖抽取'作业单独产生。无 FK,可空(存量任务空)。
+    lake_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 创建人(RBAC self 数据范围依据);存量回填 "admin"
     creator: Mapped[str] = mapped_column(
         String, nullable=False, default="admin", server_default="admin"

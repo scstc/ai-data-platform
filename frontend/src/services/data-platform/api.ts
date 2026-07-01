@@ -2123,6 +2123,22 @@ export async function deleteDataLake(
   });
 }
 
+/** 批量删除数据湖(admin,物理文件保留)POST /api/v1/data-lakes/batch-delete */
+export async function batchDeleteDataLakes(
+  ids: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/data-lakes/batch-delete',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: { ids },
+      ...(options || {}),
+    },
+  );
+}
+
 /** 快照列表(数据湖内,按创建时间倒序)GET /api/v1/data-lakes/:lakeId/snapshots */
 export async function listLakeSnapshots(
   lakeId: string,
@@ -2149,4 +2165,25 @@ export async function getLakeSnapshot(
     `/api/v1/data-lake-snapshots/${snapshotId}`,
     { method: 'GET', ...(options || {}) },
   );
+}
+
+/** 从湖快照抽取生成新数据集(admin) POST /api/v1/data-lakes/:lakeId/extract-to-dataset */
+export async function extractLakeToDataset(
+  lakeId: string,
+  body: {
+    snapshotIds: string[];
+    datasetName: string;
+    description?: string | null;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { datasetId: string; datasetName: string };
+    success: boolean;
+  }>(`/api/v1/data-lakes/${lakeId}/extract-to-dataset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    ...(options || {}),
+  });
 }

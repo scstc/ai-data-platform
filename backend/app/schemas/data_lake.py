@@ -84,3 +84,11 @@ class DataLakeDetailRead(DataLakeRead):
     """数据湖详情：元信息 + 快照列表。"""
 
     snapshots: list[DataLakeSnapshotRead] = []
+
+
+class ExtractToDatasetRequest(CamelModel):
+    """从湖抽取生成数据集入参(治理改造契约地基)。"""
+
+    snapshot_ids: list[str]
+    dataset_name: str
+    description: str | None = None

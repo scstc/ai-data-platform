@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
@@ -14,19 +14,41 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin
 from app.core.db import get_session
 from app.models.data_lake import DataLake, DataLakeSnapshot
-from app.schemas.common import PageResponse
+from app.schemas.common import CamelModel, PageResponse
 from app.schemas.data_lake import (
     DataLakeCreate,
     DataLakeDetailRead,
     DataLakeRead,
     DataLakeSnapshotRead,
     DataLakeUpdate,
+    ExtractToDatasetRequest,
 )
 from app.services import data_lake as data_lake_service
+from app.services import lake_extract
 
 router = APIRouter(tags=["data-lakes"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+class BatchDeleteRequest(CamelModel):
+    """批量删除入参。"""
+
+    ids: list[str]
+
+
+async def _purge_lake(db: AsyncSession, lake_id: str) -> bool:
+    """删除一个数据湖 + 所有快照记录(物理文件保留);不存在返回 False。
+
+    不 commit——由调用方在批量场景下统一提交,减少多次事务开销。
+    """
+    lake = await data_lake_service.get_lake_by_id(db, lake_id)
+    if not lake:
+        return False
+    for snapshot in await data_lake_service.list_lake_snapshots(db, lake_id):
+        await db.delete(snapshot)
+    await db.delete(lake)
+    return True
 
 
 @router.post("/data-lakes", response_model=DataLakeRead)
@@ -129,25 +151,32 @@ async def delete_data_lake(
     _admin: Annotated[None, Depends(require_admin)],
 ) -> dict[str, bool]:
     """删除数据湖（及其所有快照记录，物理文件保留）。"""
-    lake = await data_lake_service.get_lake_by_id(db, lake_id)
-    if not lake:
+    if not await _purge_lake(db, lake_id):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="数据湖不存在")
-
-    # 删除所有快照记录
-    await db.execute(
-        select(DataLakeSnapshot).where(DataLakeSnapshot.lake_id == lake_id)
-    )
-    snapshots = await data_lake_service.list_lake_snapshots(db, lake_id)
-    for snapshot in snapshots:
-        await db.delete(snapshot)
-
-    # 删除数据湖
-    await db.delete(lake)
     await db.commit()
-
     return {"success": True}
+
+
+@router.post(
+    "/data-lakes/batch-delete", dependencies=[Depends(require_admin)]
+)
+async def batch_delete_data_lakes(
+    body: BatchDeleteRequest,
+    db: SessionDep,
+) -> dict[str, Any]:
+    """批量删除数据湖（及其所有快照记录，物理文件保留）。
+
+    不存在的 id 静默跳过,返回实际删除数量。契约与 datasets/batch-delete 一致:
+    {data:{deleted:N}, success:true}。
+    """
+    deleted = 0
+    for lake_id in body.ids:
+        if await _purge_lake(db, lake_id):
+            deleted += 1
+    await db.commit()
+    return {"data": {"deleted": deleted}, "success": True}
 
 
 @router.get(
@@ -209,3 +238,38 @@ async def get_snapshot(
         raise HTTPException(status_code=404, detail="快照不存在")
 
     return DataLakeSnapshotRead.model_validate(snapshot)
+
+
+@router.post("/data-lakes/{lake_id}/extract-to-dataset")
+async def extract_to_dataset(
+    lake_id: str,
+    body: ExtractToDatasetRequest,
+    db: SessionDep,
+    _admin: Annotated[None, Depends(require_admin)],
+) -> dict[str, Any]:
+    """从湖快照抽取生成新数据集(治理改造契约地基,见 docs/数据治理.md §5)。
+
+    数据湖 → 数据集的标准链路:
+    - 每个选中的快照作为一个表成员落进新数据集(表名 = source_version)
+    - 血缘字段(source_version/db_schema/db_table 等)自动注入到记录中
+    - 语义类型自动推断:全 database → structured,含非 database → unstructured
+    """
+    from app.services.external_store import ExternalStoreError
+
+    try:
+        dataset = await lake_extract.extract_to_new_dataset(
+            db,
+            lake_id=lake_id,
+            snapshot_ids=body.snapshot_ids,
+            dataset_name=body.dataset_name,
+            description=body.description,
+        )
+    except ExternalStoreError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "data": {"datasetId": dataset.id, "datasetName": dataset.name},
+        "success": True,
+    }

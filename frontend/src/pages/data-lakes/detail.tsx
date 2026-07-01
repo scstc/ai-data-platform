@@ -1,15 +1,30 @@
 import {
+  ModalForm,
   PageContainer,
   ProCard,
   type ProColumns,
   ProDescriptions,
+  ProFormText,
+  ProFormTextArea,
   ProTable,
 } from '@ant-design/pro-components';
-import { useParams } from '@umijs/max';
-import { Empty, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { history, useParams } from '@umijs/max';
+import {
+  Button,
+  Empty,
+  message,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd';
 import dayjs from 'dayjs';
 import { type FC, useEffect, useState } from 'react';
-import { getDataLakeDetail } from '@/services/data-platform';
+import {
+  extractLakeToDataset,
+  getDataLakeDetail,
+} from '@/services/data-platform';
 
 const { Text } = Typography;
 
@@ -54,14 +69,23 @@ const DataLakeDetailPage: FC = () => {
     null,
   );
   const [loading, setLoading] = useState(true);
+  const [selectedSnapshots, setSelectedSnapshots] = useState<
+    DataPlatform.DataLakeSnapshot[]
+  >([]);
+  const [extractOpen, setExtractOpen] = useState(false);
 
-  useEffect(() => {
+  const reload = () => {
     if (!id) return;
     setLoading(true);
     getDataLakeDetail(id)
       .then(setDetail)
       .catch(() => setDetail(null))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const snapshotColumns: ProColumns<DataPlatform.DataLakeSnapshot>[] = [
@@ -191,6 +215,15 @@ const DataLakeDetailPage: FC = () => {
             </Space>
           }
           tooltip="快照 = 一次数据接入的不可变版本归档,永久固化、可追溯"
+          extra={
+            <Button
+              type="primary"
+              disabled={selectedSnapshots.length === 0}
+              onClick={() => setExtractOpen(true)}
+            >
+              抽取生成数据集({selectedSnapshots.length})
+            </Button>
+          }
         >
           <ProTable<DataPlatform.DataLakeSnapshot>
             columns={snapshotColumns}
@@ -199,6 +232,11 @@ const DataLakeDetailPage: FC = () => {
             search={false}
             pagination={{ pageSize: 20 }}
             options={false}
+            rowSelection={{
+              selectedRowKeys: selectedSnapshots.map((s) => s.id),
+              onChange: (_keys, rows) =>
+                setSelectedSnapshots(rows as DataPlatform.DataLakeSnapshot[]),
+            }}
             locale={{
               emptyText: (
                 <Empty description="该数据湖暂无快照,等待接入任务写入" />
@@ -207,6 +245,63 @@ const DataLakeDetailPage: FC = () => {
           />
         </ProCard>
       </Space>
+
+      <ModalForm<{ datasetName: string; description?: string }>
+        title="从湖快照抽取生成数据集"
+        open={extractOpen}
+        onOpenChange={setExtractOpen}
+        width={520}
+        modalProps={{ destroyOnHidden: true }}
+        onFinish={async (values) => {
+          if (!id) return false;
+          const hide = message.loading('正在抽取...', 0);
+          try {
+            const res = await extractLakeToDataset(id, {
+              snapshotIds: selectedSnapshots.map((s) => s.id),
+              datasetName: values.datasetName,
+              description: values.description,
+            });
+            hide();
+            message.success(
+              `已生成数据集: ${res?.data?.datasetName ?? values.datasetName}`,
+            );
+            setSelectedSnapshots([]);
+            if (res?.data?.datasetId) {
+              history.push(`/datasets/${res.data.datasetId}`);
+            }
+            return true;
+          } catch (err) {
+            hide();
+            const e = err as {
+              response?: { data?: { detail?: string; message?: string } };
+            };
+            message.error(
+              e?.response?.data?.detail ??
+                e?.response?.data?.message ??
+                '抽取失败',
+            );
+            return false;
+          }
+        }}
+      >
+        <div style={{ marginBottom: 16, color: '#666' }}>
+          将从 <b>{selectedSnapshots.length}</b> 个快照抽取数据,
+          每个快照作为一个表成员落进新数据集(表名 = source_version)。
+          血缘字段自动透传。
+        </div>
+        <ProFormText
+          name="datasetName"
+          label="数据集名称"
+          rules={[{ required: true, message: '请填写数据集名称' }]}
+          placeholder="如:2026-Q3 财务数据"
+        />
+        <ProFormTextArea
+          name="description"
+          label="描述"
+          placeholder="选填"
+          fieldProps={{ rows: 3 }}
+        />
+      </ModalForm>
     </PageContainer>
   );
 };

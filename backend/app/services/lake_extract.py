@@ -171,7 +171,7 @@ async def extract_and_land_from_lake(
     note: str | None = None,
     produced_by_job_id: str | None = None,
 ) -> tuple[Any, Any]:
-    """从数据湖抽取数据并落地到数据集（一站式）。
+    """从数据湖抽取数据并落地到已有数据集（一站式）。
 
     这是"数据湖 → 数据集"的标准流程：
     1. 从湖中读取快照数据
@@ -182,7 +182,7 @@ async def extract_and_land_from_lake(
         db: 数据库会话
         lake_id: 数据湖 ID
         source_version: 源头快照版本号
-        dataset_id: 目标数据集 ID
+        dataset_id: 目标数据集 ID(需已存在)
         table_name: 表成员名称
         note: 版本说明
         produced_by_job_id: 产出该版本的 job ID
@@ -219,3 +219,91 @@ async def extract_and_land_from_lake(
     )
 
     return version, member
+
+
+async def extract_to_new_dataset(
+    db: AsyncSession,
+    *,
+    lake_id: str,
+    snapshot_ids: list[str],
+    dataset_name: str,
+    description: str | None = None,
+    creator: str = "admin",
+) -> Any:
+    """从若干湖快照抽取生成**新**数据集(治理改造契约地基)。
+
+    数据湖 → 数据集的核心链路:
+    1. 建空数据集(用户指定 name/description)
+    2. 每个快照作为一个表成员落进数据集(表名 = source_version)
+    3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
+       extract_from_lake_snapshot 注入到 records
+
+    Args:
+        db: 数据库会话
+        lake_id: 数据湖 ID
+        snapshot_ids: 参与抽取的快照 id 列表(必须都属于 lake_id)
+        dataset_name: 新数据集名称
+        description: 数据集描述
+        creator: 创建人
+
+    Returns:
+        新建的 Dataset 对象
+
+    Raises:
+        ExternalStoreError: 湖不存在 / 快照不存在 / 快照跨湖 / 空快照列表
+    """
+    from sqlalchemy import select
+
+    from app.services.data_lake import get_lake_by_id
+    from app.services.landing import add_table_member, create_dataset
+
+    if not snapshot_ids:
+        raise ExternalStoreError("至少选择一个快照")
+
+    lake = await get_lake_by_id(db, lake_id)
+    if not lake:
+        raise ExternalStoreError(f"数据湖不存在: {lake_id}")
+
+    # 一次性把选中的快照都取出,校验都属于 lake_id
+    result = await db.execute(
+        select(DataLakeSnapshot).where(DataLakeSnapshot.id.in_(snapshot_ids))
+    )
+    snapshots = list(result.scalars().all())
+    if len(snapshots) != len(snapshot_ids):
+        raise ExternalStoreError("部分快照不存在或已被删除")
+    stray = [s.id for s in snapshots if s.lake_id != lake_id]
+    if stray:
+        raise ExternalStoreError(f"以下快照不属于 {lake_id}: {stray}")
+
+    # 语义类型推断:全 database 类快照 → structured;含非 database → unstructured
+    categories = {s.data_category for s in snapshots}
+    semantic_type = (
+        "structured" if categories == {"database"} else "unstructured"
+    )
+
+    # 建数据集
+    dataset = await create_dataset(
+        db,
+        name=dataset_name,
+        semantic_type=semantic_type,
+        description=description,
+        creator=creator,
+    )
+
+    # 逐快照抽取并落表成员;表名取 source_version(版本内唯一)
+    for snapshot in snapshots:
+        records = await extract_from_lake_snapshot(
+            db, lake_id, snapshot.source_version, inject_lineage=True
+        )
+        await add_table_member(
+            db,
+            dataset.id,
+            records,
+            table_name=snapshot.source_version,
+            semantic_type=semantic_type,
+            source_format=snapshot.storage_format,
+            note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",
+            storage_format="parquet",
+        )
+
+    return dataset

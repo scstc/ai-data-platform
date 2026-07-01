@@ -7,11 +7,12 @@ import {
   ProFormTextArea,
   ProTable,
 } from '@ant-design/pro-components';
-import { history, useAccess } from '@umijs/max';
+import { Access, history, useAccess } from '@umijs/max';
 import { Button, message, Popconfirm } from 'antd';
 import dayjs from 'dayjs';
 import { type FC, useRef, useState } from 'react';
 import {
+  batchDeleteDataLakes,
   createDataLake,
   deleteDataLake,
   listDataLakes,
@@ -37,8 +38,26 @@ const DataLakesPage: FC = () => {
   const canAdmin = !!access.canAdmin;
   const actionRef = useRef<ActionType | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [selectedRows, setSelectedRows] = useState<DataPlatform.DataLake[]>([]);
 
   const reload = () => actionRef.current?.reload();
+  const selectedRowKeys = selectedRows.map((r) => r.id);
+
+  const handleBatchDelete = async () => {
+    const hide = message.loading('正在批量删除…', 0);
+    try {
+      const res = await batchDeleteDataLakes(selectedRowKeys);
+      hide();
+      message.success(
+        `已删除 ${res?.data?.deleted ?? selectedRowKeys.length} 个数据湖`,
+      );
+      setSelectedRows([]);
+      reload();
+    } catch {
+      hide();
+      message.error('批量删除失败,请重试');
+    }
+  };
 
   const columns: ProColumns<DataPlatform.DataLake>[] = [
     {
@@ -109,6 +128,30 @@ const DataLakesPage: FC = () => {
         rowKey="id"
         headerTitle="数据湖列表"
         search={{ labelWidth: 90 }}
+        rowSelection={
+          canAdmin
+            ? {
+                selectedRowKeys,
+                onChange: (_keys, rows) =>
+                  setSelectedRows(rows as DataPlatform.DataLake[]),
+              }
+            : undefined
+        }
+        tableAlertOptionRender={() => (
+          <Access accessible={canAdmin}>
+            <Popconfirm
+              title={`确认删除选中的 ${selectedRowKeys.length} 个数据湖?`}
+              description="仅删元数据,快照物理文件保留。不可恢复。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleBatchDelete}
+            >
+              <Button type="link" danger>
+                批量删除
+              </Button>
+            </Popconfirm>
+          </Access>
+        )}
         request={async (params) => {
           const { current, pageSize, name } = params;
           const res = await listDataLakes({
