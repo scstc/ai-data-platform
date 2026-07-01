@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.models.data_lake import DataLakeSnapshot
 from app.services.data_lake import get_snapshot_by_version
 from app.services.external_store import ExternalStoreError, client_for, parse_s3_uri
-from app.services.landing import normalize_to_records
+from app.services.landing import LANDABLE_FORMATS, normalize_to_records
 
 
 async def extract_from_lake_snapshot(
@@ -53,22 +53,14 @@ async def extract_from_lake_snapshot(
     # 2. 根据存储格式读取数据
     if snapshot.storage_format == "parquet":
         records = await _read_parquet_from_snapshot(snapshot)
-    elif snapshot.storage_format in {
-        "csv",
-        "tsv",
-        "xlsx",
-        "xls",
-        "jsonl",
-        "json",
-        "txt",
-        "md",
-    }:
-        # 原格式文件:从 MinIO 读原始字节 → normalize_to_records 解析
+    elif snapshot.storage_format in LANDABLE_FORMATS:
+        # 原格式文件(含 pdf/doc/docx/ppt/pptx/html):从 MinIO 读原始字节
+        # → normalize_to_records 解析(文档类内部走 markitdown/OCR)
         records = await _read_raw_from_snapshot(snapshot)
     else:
         raise ExternalStoreError(
             f"不支持的存储格式: {snapshot.storage_format}"
-            "(当前支持 parquet/csv/xlsx/jsonl 等文本格式)"
+            "(当前支持 parquet 及 landing.LANDABLE_FORMATS 覆盖的文本/文档格式)"
         )
 
     # 3. 注入血缘追踪字段

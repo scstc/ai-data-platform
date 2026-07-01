@@ -133,6 +133,50 @@ async def test_extract_to_new_dataset_rejects_cross_lake_snapshots(db_session):
 
 
 @pytest.mark.asyncio
+async def test_extract_from_lake_snapshot_accepts_doc_formats(db_session, monkeypatch):
+    """pdf/doc/docx/ppt/pptx/html 快照走原格式解析分支,不再被判"不支持的存储格式"。
+
+    抽取层此前只放行 csv/xlsx/jsonl 等纯文本格式,文档快照(数据湖按 PRD §2.1
+    原格式入湖)会在抽取时直接报错,导致"湖→集"链路对文档类数据断链。
+    """
+    from app.models.data_lake import DataLakeSnapshot
+    from app.services import lake_extract
+
+    lake = await create_data_lake(db_session, name="文档湖")
+    snap = DataLakeSnapshot(
+        id="snap-pdf001",
+        lake_id=lake.id,
+        source_version="source_v20260701_01_pdf",
+        storage_uri="s3://uploads/doc/1.pdf",
+        storage_format="pdf",
+        data_category="document",
+        upload_channel="local",
+    )
+    db_session.add(snap)
+    await db_session.commit()
+
+    async def fake_read_raw(snapshot):
+        # 真实实现会下载字节再走 landing._doc_to_records(markitdown/OCR),
+        # 这里只验证网关放行 + 血缘注入,文档解析本身已有独立单测覆盖。
+        return [{"text": "解析出的段落"}]
+
+    monkeypatch.setattr(lake_extract, "_read_raw_from_snapshot", fake_read_raw)
+
+    records = await lake_extract.extract_from_lake_snapshot(
+        db_session, lake.id, "source_v20260701_01_pdf"
+    )
+    assert records == [
+        {
+            "text": "解析出的段落",
+            "source_version": "source_v20260701_01_pdf",
+            "source_category": "document",
+            "upload_channel": "local",
+            "data_lake_snapshot_id": "snap-pdf001",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_lake_is_multi_source_container(db_session):
     """一个数据湖可以承接多种来源的快照（多源汇聚）。"""
     from app.models.data_lake import DataLakeSnapshot
