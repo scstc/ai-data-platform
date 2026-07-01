@@ -6,7 +6,10 @@ import {
   FileTextOutlined,
   FileWordOutlined,
   InboxOutlined,
+  PictureOutlined,
+  SoundOutlined,
   TableOutlined,
+  VideoCameraOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
@@ -22,11 +25,29 @@ import {
   Upload,
 } from 'antd';
 import { type ReactNode, useCallback, useState } from 'react';
-import { listDatasets, uploadBatchDataset } from '@/services/data-platform';
+import {
+  listDatasets,
+  uploadBatchDataset,
+  uploadMediaDataset,
+} from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
 
 const { Text } = Typography;
 const { Dragger } = Upload;
+
+/** 媒体格式集合,对应后端 landing.py IMAGE/AUDIO/VIDEO_FORMATS */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp']);
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg']);
+const VIDEO_EXTS = new Set(['mp4', 'avi', 'mov', 'mkv', 'webm']);
+const MEDIA_EXTS = new Set([...IMAGE_EXTS, ...AUDIO_EXTS, ...VIDEO_EXTS]);
+
+/** 媒体扩展名 → data_type(供 /upload-media 的 dataType 参数) */
+const mediaDataType = (ext: string): 'image' | 'audio' | 'video' | null => {
+  if (IMAGE_EXTS.has(ext)) return 'image';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
+  if (VIDEO_EXTS.has(ext)) return 'video';
+  return null;
+};
 
 /** 支持格式展示(对齐后端 landing.LANDABLE_FORMATS 的非二进制、可规范化格式)。
  *  媒体(图/音/视频)走「多模态」接入,不在此列。
@@ -35,6 +56,33 @@ const FORMAT_GROUPS: {
   label: string;
   options: { value: string; label: string; icon: ReactNode; color: string }[];
 }[] = [
+  {
+    label: '图像',
+    options: [
+      { value: 'jpg', label: 'JPEG', icon: <PictureOutlined />, color: '#E5484D' },
+      { value: 'png', label: 'PNG', icon: <PictureOutlined />, color: '#E5484D' },
+      { value: 'gif', label: 'GIF', icon: <PictureOutlined />, color: '#E5484D' },
+      { value: 'webp', label: 'WebP', icon: <PictureOutlined />, color: '#E5484D' },
+    ],
+  },
+  {
+    label: '音频',
+    options: [
+      { value: 'mp3', label: 'MP3', icon: <SoundOutlined />, color: '#8B5CF6' },
+      { value: 'wav', label: 'WAV', icon: <SoundOutlined />, color: '#8B5CF6' },
+      { value: 'flac', label: 'FLAC', icon: <SoundOutlined />, color: '#8B5CF6' },
+      { value: 'ogg', label: 'OGG', icon: <SoundOutlined />, color: '#8B5CF6' },
+    ],
+  },
+  {
+    label: '视频',
+    options: [
+      { value: 'mp4', label: 'MP4', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
+      { value: 'avi', label: 'AVI', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
+      { value: 'mov', label: 'MOV', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
+      { value: 'mkv', label: 'MKV', icon: <VideoCameraOutlined />, color: '#0EA5E9' },
+    ],
+  },
   {
     label: '表格类',
     options: [
@@ -131,9 +179,10 @@ const FORMAT_GROUPS: {
   },
 ];
 
-const SUPPORTED_EXTS = new Set(
-  FORMAT_GROUPS.flatMap((g) => g.options.map((o) => o.value)),
-);
+const SUPPORTED_EXTS = new Set([
+  ...FORMAT_GROUPS.flatMap((g) => g.options.map((o) => o.value)),
+  'jpeg', 'm4a', 'aac', 'webm', 'bmp', // aliases not in display list
+]);
 
 /** 单文件体积上限,与后端 _MAX_MEDIA_FILE_BYTES(200MB)对齐 */
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
@@ -191,22 +240,47 @@ const SingleUploadPage: React.FC = () => {
       message.warning('请选择目标数据集');
       return;
     }
+
+    const exts = fileList.map((f) => getExt(f.name));
+    const mediaTypes = new Set(exts.map((e) => mediaDataType(e)).filter(Boolean));
+    const hasMedia = exts.some((e) => MEDIA_EXTS.has(e));
+    const hasNonMedia = exts.some((e) => !MEDIA_EXTS.has(e));
+
+    if (hasMedia && hasNonMedia) {
+      message.error('媒体文件(图像/音频/视频)请单独上传,不能与其他格式混用');
+      return;
+    }
+    if (hasMedia && mediaTypes.size > 1) {
+      message.error('媒体文件每次只能上传同一模态(图像、音频、视频三选一)');
+      return;
+    }
+
     const fd = new FormData();
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
     fd.append('datasetId', datasetId);
-    fd.append('safety_check', 'false');
-    fd.append('raw', 'true');
 
     setSubmitting(true);
     const hide = message.loading('正在上传并落入数据集…', 0);
     try {
-      const res = await uploadBatchDataset(fd, { skipErrorHandler: true });
-      hide();
-      message.success(
-        `已上传并作为表成员落入数据集「${res.data?.name ?? ''}」`,
-      );
+      if (hasMedia) {
+        const dataType = [...mediaTypes][0] as string;
+        fd.append('dataType', dataType);
+        const res = await uploadMediaDataset(fd, { skipErrorHandler: true });
+        hide();
+        message.success(
+          `已生成多模态 JSONL 并落入数据集「${res.data?.name ?? ''}」`,
+        );
+      } else {
+        fd.append('safety_check', 'false');
+        fd.append('raw', 'true');
+        const res = await uploadBatchDataset(fd, { skipErrorHandler: true });
+        hide();
+        message.success(
+          `已上传并作为表成员落入数据集「${res.data?.name ?? ''}」`,
+        );
+      }
       setFileList([]);
       history.push(`/datasets/detail?id=${datasetId}`);
     } catch (e: any) {
@@ -324,7 +398,7 @@ const SingleUploadPage: React.FC = () => {
             </p>
             <p className="ant-upload-text">点击或拖拽文件到此处</p>
             <p className="ant-upload-hint">
-              支持多文件批量上传,合并为一个数据集;单文件最大 200MB。
+              支持多文件批量上传;图像/音频/视频请单独上传同一模态,将自动生成多模态 JSONL;单文件最大 200MB。
             </p>
           </Dragger>
           <Button
