@@ -2,7 +2,7 @@
 
 第二层职责：
 - 从数据湖中按需筛选、抽取指定版本的原始数据
-- 完成格式解析与初步结构化（Parquet → 记录、文档 → 文本块）
+- 完成格式解析与初步结构化（Parquet → 记录、csv/xlsx/jsonl → 解析为记录）
 - 注入血缘追踪字段（source_version, source_category, upload_channel 等）
 - 生成中间 JSONL 供数据集落地
 """
@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.models.data_lake import DataLakeSnapshot
 from app.services.data_lake import get_snapshot_by_version
 from app.services.external_store import ExternalStoreError, client_for, parse_s3_uri
+from app.services.landing import normalize_to_records
 
 
 async def extract_from_lake_snapshot(
@@ -52,9 +53,22 @@ async def extract_from_lake_snapshot(
     # 2. 根据存储格式读取数据
     if snapshot.storage_format == "parquet":
         records = await _read_parquet_from_snapshot(snapshot)
+    elif snapshot.storage_format in {
+        "csv",
+        "tsv",
+        "xlsx",
+        "xls",
+        "jsonl",
+        "json",
+        "txt",
+        "md",
+    }:
+        # 原格式文件:从 MinIO 读原始字节 → normalize_to_records 解析
+        records = await _read_raw_from_snapshot(snapshot)
     else:
         raise ExternalStoreError(
-            f"不支持的存储格式: {snapshot.storage_format}（当前仅支持 parquet）"
+            f"不支持的存储格式: {snapshot.storage_format}"
+            "(当前支持 parquet/csv/xlsx/jsonl 等文本格式)"
         )
 
     # 3. 注入血缘追踪字段
@@ -103,6 +117,50 @@ async def _read_parquet_from_snapshot(
 
     # 5. 转换为记录列表
     return df.to_dict(orient="records")
+
+
+async def _read_raw_from_snapshot(
+    snapshot: DataLakeSnapshot,
+) -> list[dict[str, Any]]:
+    """从快照的原格式文件(csv/xlsx/jsonl 等)中读取并解析为记录。
+
+    数据湖存原格式,抽取时才解析 → records。
+
+    Args:
+        snapshot: 数据湖快照
+
+    Returns:
+        记录列表
+    """
+    # 1. 解析 S3 URI
+    bucket, key = parse_s3_uri(snapshot.storage_uri)
+
+    # 2. 从平台 MinIO 下载
+    config = {
+        "endpoint": settings.storage_minio_endpoint,
+        "accessKey": settings.storage_minio_access_key,
+        "secretKey": settings.storage_minio_secret_key,
+    }
+    client = client_for(config)
+
+    # 3. 下载到内存
+    def _get():
+        response = client.get_object(bucket, key)
+        return response.read()
+
+    try:
+        raw_bytes = await asyncio.to_thread(_get)
+    except S3Error as exc:
+        raise ExternalStoreError(f"读取快照文件失败: {exc}") from exc
+
+    # 4. 根据扩展名解析(调用 landing.normalize_to_records)
+    ext = snapshot.storage_format
+    try:
+        return normalize_to_records(raw_bytes, ext)
+    except Exception as exc:  # noqa: BLE001 解析失败统一上报
+        raise ExternalStoreError(
+            f"解析 {ext} 文件失败: {exc}(快照 {snapshot.id})"
+        ) from exc
 
 
 def _inject_lineage_fields(

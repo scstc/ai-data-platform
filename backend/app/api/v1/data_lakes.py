@@ -30,10 +30,7 @@ from app.services.external_store import MAX_MANIFEST_MEMBERS, ExternalStoreError
 from app.services.landing import (
     BINARY_FORMATS,
     LANDABLE_FORMATS,
-    ParseError,
-    UnsupportedFormatError,
     media_kind,
-    normalize_to_records,
 )
 
 router = APIRouter(tags=["data-lakes"])
@@ -297,20 +294,21 @@ async def local_upload_to_lake(
     _admin: Annotated[None, Depends(require_admin)],
     files: Annotated[list[UploadFile], File()],
 ) -> dict[str, Any]:
-    """本地文件归档到数据湖:一批文件 → 一批快照(一文件一快照)。
+    """本地文件归档到数据湖:一批文件 → 一批快照(一文件一快照,原格式存储)。
 
-    分派规则(按扩展名):
-    - 二进制媒体(png/jpg/mp3/mp4 等)→ `ingest_to_lake_raw`,原格式归档,
-      data_category = image/audio/video
-    - 可解析文本/文档(jsonl/csv/xlsx/pdf 等 LANDABLE_FORMATS)→
-      `normalize_to_records` 解析成 records → `ingest_to_lake_parquet`,
-      data_category = "tabular"(与 PG 拉的 "database" 区分统计口径)
-    - 其他扩展名 → 400
+    **数据湖职责**:原样归档,不做解析。所有文件(csv/xlsx/mp4/jpg 等)都走
+    `ingest_to_lake_raw` 按原格式存入 MinIO;`data_category` 根据扩展名映射:
+    - csv/xlsx/jsonl/txt → "tabular"
+    - pdf/docx/pptx/md → "document"
+    - png/jpg/gif/bmp → "image"
+    - mp3/wav/flac/m4a → "audio"
+    - mp4/avi/mov/mkv → "video"
+    - 其他 → "text"(兜底)
 
     上传后**不生成数据集**;用户后续到数据湖详情页勾快照走
-    `POST /data-lakes/{lake_id}/extract-to-dataset` 生成数据集。
+    `POST /data-lakes/{lake_id}/extract-to-dataset` 生成数据集(抽取时才解析)。
 
-    并发/批次冲突:`ingest_to_lake_*` 内部依赖 `_next_batch_no + IntegrityError
+    并发/批次冲突:`ingest_to_lake_raw` 内部依赖 `_next_batch_no + IntegrityError
     重试`,同湖同天同扩展名多次入湖批次自增。
 
     错误策略(MVP):任一文件失败即抛 400,已入库快照留在湖里,前端提示
@@ -345,35 +343,25 @@ async def local_upload_to_lake(
         ext = _file_ext(original_filename)
         content = await f.read()
 
+        # 根据扩展名映射 data_category(数据湖原样归档,不解析)
+        if ext in BINARY_FORMATS:
+            kind = media_kind(ext) or "text"
+        elif ext in {"csv", "tsv", "xlsx", "xls", "jsonl", "json"}:
+            kind = "tabular"
+        elif ext in {"pdf", "docx", "pptx", "doc", "md", "txt"}:
+            kind = "document"
+        else:
+            kind = "text"  # 兜底
+
         try:
-            if ext in BINARY_FORMATS:
-                # 媒体:按扩展名判 image/audio/video
-                kind = media_kind(ext) or "text"  # media_kind 兜底防 None
-                snapshot = await data_lake_service.ingest_to_lake_raw(
-                    db,
-                    lake_id=lake_id,
-                    file_content=content,
-                    original_filename=original_filename,
-                    data_category=kind,
-                    upload_channel="local",
-                )
-            else:
-                # 可解析:normalize_to_records → parquet 归档
-                records = normalize_to_records(content, ext)
-                snapshot = await data_lake_service.ingest_to_lake_parquet(
-                    db,
-                    lake_id=lake_id,
-                    data=records,
-                    source_type=ext,
-                    data_category="tabular",
-                    upload_channel="local",
-                    source_metadata={"original_filename": original_filename},
-                )
-        except (ParseError, UnsupportedFormatError) as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"文件 {original_filename} 解析失败:{exc}",
-            ) from exc
+            snapshot = await data_lake_service.ingest_to_lake_raw(
+                db,
+                lake_id=lake_id,
+                file_content=content,
+                original_filename=original_filename,
+                data_category=kind,
+                upload_channel="local",
+            )
         except ExternalStoreError as exc:
             raise HTTPException(
                 status_code=400,

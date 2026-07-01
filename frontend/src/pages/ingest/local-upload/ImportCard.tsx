@@ -317,7 +317,8 @@ const ScenarioImportCard: React.FC<Props> = ({
             : `点击或拖拽 ${formatList.map((f) => `.${f}`).join(' / ')} 文件到此处导入`}
         </p>
         <p className="ant-upload-hint">
-          {cfg.label}数据,单文件最大 200MB;归档到数据湖后可到数据湖详情页抽取生成数据集。
+          {cfg.label}数据,单文件最大
+          200MB;归档到数据湖后可到数据湖详情页抽取生成数据集。
         </p>
       </Dragger>
       <Button
