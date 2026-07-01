@@ -36,6 +36,7 @@ import { VersionFilePreview } from '@/components';
 import {
   createDatasetVersion,
   deleteDatasetVersion,
+  deleteVersionMembers,
   exportVersionToS3,
   getDataset,
   listBuckets,
@@ -115,6 +116,9 @@ const DatasetDetail: React.FC = () => {
   const [editVersionOpen, setEditVersionOpen] = useState(false);
   const [editingVersion, setEditingVersion] =
     useState<DataPlatform.DatasetVersion>();
+  const [selectedMembers, setSelectedMembers] = useState<
+    Record<string, string[]>
+  >({}); // { versionId: [tableName1, tableName2] }
 
   // 切换当前查看的版本;文件清单 + 按文件预览由 VersionFilePreview 按 versionId 自管
   const loadPreview = useCallback((versionId: string) => {
@@ -198,6 +202,26 @@ const DatasetDetail: React.FC = () => {
       await reloadDetail();
     } catch {
       message.error('下架失败，请重试');
+    }
+  };
+
+  const handleDeleteMembers = async (versionId: string, keys: string[]) => {
+    if (keys.length === 0) {
+      message.warning('请选择要删除的表成员');
+      return;
+    }
+    try {
+      const res = await deleteVersionMembers(versionId, keys, {
+        skipErrorHandler: true,
+      });
+      message.success(
+        `已删除 ${res.data?.deleted ?? 0} 个表成员${res.data?.notFound ? `,${res.data.notFound} 个未找到` : ''}`,
+      );
+      setSelectedMembers((prev) => ({ ...prev, [versionId]: [] }));
+      await reloadDetail();
+    } catch (e: any) {
+      const body = e?.response?.data ?? e?.data;
+      message.error(body?.message ?? e?.message ?? '删除失败，请重试');
     }
   };
 
@@ -411,12 +435,44 @@ const DatasetDetail: React.FC = () => {
           <>
             <Divider style={{ margin: '12px 0' }}>
               表成员（{v.tables?.length}）
+              {v.publishStatus === 'draft' &&
+                access.canAdmin &&
+                selectedMembers[v.id]?.length > 0 && (
+                  <Popconfirm
+                    title="确认删除"
+                    description={`确认删除选中的 ${selectedMembers[v.id]?.length} 个表成员吗？`}
+                    onConfirm={() =>
+                      handleDeleteMembers(v.id, selectedMembers[v.id])
+                    }
+                  >
+                    <Button
+                      type="link"
+                      danger
+                      size="small"
+                      style={{ marginLeft: 8 }}
+                    >
+                      批量删除（{selectedMembers[v.id]?.length}）
+                    </Button>
+                  </Popconfirm>
+                )}
             </Divider>
             <Table<DataPlatform.DatasetTable>
               size="small"
               rowKey="tableName"
               pagination={false}
               dataSource={v.tables ?? []}
+              rowSelection={
+                v.publishStatus === 'draft' && access.canAdmin
+                  ? {
+                      selectedRowKeys: selectedMembers[v.id] ?? [],
+                      onChange: (keys) =>
+                        setSelectedMembers((prev) => ({
+                          ...prev,
+                          [v.id]: keys as string[],
+                        })),
+                    }
+                  : undefined
+              }
               columns={[
                 { title: '表名', dataIndex: 'tableName' },
                 {
@@ -434,6 +490,27 @@ const DatasetDetail: React.FC = () => {
                   dataIndex: 'size',
                   render: (s?: number) => fmtSize(s),
                 },
+                ...(v.publishStatus === 'draft' && access.canAdmin
+                  ? [
+                      {
+                        title: '操作',
+                        width: 80,
+                        render: (_: any, record: DataPlatform.DatasetTable) => (
+                          <Popconfirm
+                            title="确认删除"
+                            description={`确认删除表「${record.tableName}」吗？`}
+                            onConfirm={() =>
+                              handleDeleteMembers(v.id, [record.tableName])
+                            }
+                          >
+                            <Button type="link" danger size="small">
+                              删除
+                            </Button>
+                          </Popconfirm>
+                        ),
+                      },
+                    ]
+                  : []),
               ]}
             />
           </>
