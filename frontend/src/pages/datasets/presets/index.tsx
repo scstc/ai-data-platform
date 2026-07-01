@@ -109,7 +109,7 @@ const DatasetsPresets: React.FC = () => {
           >
             下载
           </a>
-          <a onClick={() => setExportVersion(v)}>导出到 S3</a>
+          <a onClick={() => setExportVersion(v)}>导出到分布式存储</a>
         </Space>
       ),
     },
@@ -261,7 +261,7 @@ const DatasetsPresets: React.FC = () => {
         )}
       </Drawer>
       <ModalForm<DataPlatform.ExportS3Params>
-        title="导出到 S3"
+        title="导出到分布式存储"
         width={520}
         open={!!exportVersion}
         modalProps={{ destroyOnHidden: true }}

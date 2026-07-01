@@ -353,7 +353,7 @@ const DatasetDetail: React.FC = () => {
             下载
           </Button>
           <Button size="small" onClick={() => setExportVersion(v)}>
-            导出到 S3
+            导出到分布式存储
           </Button>
         </Space>
         {access.canAdmin && (
@@ -684,7 +684,7 @@ const DatasetDetail: React.FC = () => {
       </Modal>
 
       <ModalForm<DataPlatform.ExportS3Params>
-        title="导出到 S3"
+        title="导出到分布式存储"
         width={520}
         open={!!exportVersion}
         modalProps={{ destroyOnHidden: true }}
