@@ -2187,3 +2187,20 @@ export async function extractLakeToDataset(
     ...(options || {}),
   });
 }
+
+/** 本地文件归档到数据湖(admin) POST /api/v1/data-lakes/:lakeId/local-upload */
+export async function localUploadToLake(
+  lakeId: string,
+  formData: FormData,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { snapshots: DataPlatform.DataLakeSnapshot[] };
+    success: boolean;
+  }>(`/api/v1/data-lakes/${lakeId}/local-upload`, {
+    method: 'POST',
+    data: formData,
+    requestType: 'form',
+    ...(options || {}),
+  });
+}

@@ -1,13 +1,14 @@
-"""数据湖路由：CRUD + 数据入湖 + 快照查询。
+"""数据湖路由：CRUD + 数据入湖 + 快照查询 + 本地文件归档。
 
 数据湖是所有外部数据源的统一入口（ODS 层），原样接入、版本固化、血缘追踪。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,8 +26,22 @@ from app.schemas.data_lake import (
 )
 from app.services import data_lake as data_lake_service
 from app.services import lake_extract
+from app.services.external_store import MAX_MANIFEST_MEMBERS, ExternalStoreError
+from app.services.landing import (
+    BINARY_FORMATS,
+    LANDABLE_FORMATS,
+    ParseError,
+    UnsupportedFormatError,
+    media_kind,
+    normalize_to_records,
+)
 
 router = APIRouter(tags=["data-lakes"])
+
+
+def _file_ext(filename: str) -> str:
+    """从文件名取小写扩展名(不含点);无扩展返回空串。"""
+    return Path(filename).suffix.lstrip(".").lower()
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -271,5 +286,108 @@ async def extract_to_dataset(
 
     return {
         "data": {"datasetId": dataset.id, "datasetName": dataset.name},
+        "success": True,
+    }
+
+
+@router.post("/data-lakes/{lake_id}/local-upload")
+async def local_upload_to_lake(
+    lake_id: str,
+    db: SessionDep,
+    _admin: Annotated[None, Depends(require_admin)],
+    files: Annotated[list[UploadFile], File()],
+) -> dict[str, Any]:
+    """本地文件归档到数据湖:一批文件 → 一批快照(一文件一快照)。
+
+    分派规则(按扩展名):
+    - 二进制媒体(png/jpg/mp3/mp4 等)→ `ingest_to_lake_raw`,原格式归档,
+      data_category = image/audio/video
+    - 可解析文本/文档(jsonl/csv/xlsx/pdf 等 LANDABLE_FORMATS)→
+      `normalize_to_records` 解析成 records → `ingest_to_lake_parquet`,
+      data_category = "tabular"(与 PG 拉的 "database" 区分统计口径)
+    - 其他扩展名 → 400
+
+    上传后**不生成数据集**;用户后续到数据湖详情页勾快照走
+    `POST /data-lakes/{lake_id}/extract-to-dataset` 生成数据集。
+
+    并发/批次冲突:`ingest_to_lake_*` 内部依赖 `_next_batch_no + IntegrityError
+    重试`,同湖同天同扩展名多次入湖批次自增。
+
+    错误策略(MVP):任一文件失败即抛 400,已入库快照留在湖里,前端提示
+    "部分文件已入湖,请到数据湖详情页手动清理"——比复杂的补偿事务更清晰。
+    """
+    from fastapi import HTTPException
+
+    lake = await data_lake_service.get_lake_by_id(db, lake_id)
+    if not lake:
+        raise HTTPException(status_code=404, detail="数据湖不存在")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少选择一个文件")
+    if len(files) > MAX_MANIFEST_MEMBERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多上传 {MAX_MANIFEST_MEMBERS} 个文件",
+        )
+
+    # 先扫一遍扩展名,任一不支持就拒(避免半个批次已经入库)
+    for f in files:
+        ext = _file_ext(f.filename or "")
+        if ext not in LANDABLE_FORMATS and ext not in BINARY_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件 {f.filename} 的格式 .{ext} 不支持归档到数据湖",
+            )
+
+    snapshots: list[DataLakeSnapshot] = []
+    for f in files:
+        original_filename = f.filename or "unnamed"
+        ext = _file_ext(original_filename)
+        content = await f.read()
+
+        try:
+            if ext in BINARY_FORMATS:
+                # 媒体:按扩展名判 image/audio/video
+                kind = media_kind(ext) or "text"  # media_kind 兜底防 None
+                snapshot = await data_lake_service.ingest_to_lake_raw(
+                    db,
+                    lake_id=lake_id,
+                    file_content=content,
+                    original_filename=original_filename,
+                    data_category=kind,
+                    upload_channel="local",
+                )
+            else:
+                # 可解析:normalize_to_records → parquet 归档
+                records = normalize_to_records(content, ext)
+                snapshot = await data_lake_service.ingest_to_lake_parquet(
+                    db,
+                    lake_id=lake_id,
+                    data=records,
+                    source_type=ext,
+                    data_category="tabular",
+                    upload_channel="local",
+                    source_metadata={"original_filename": original_filename},
+                )
+        except (ParseError, UnsupportedFormatError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件 {original_filename} 解析失败:{exc}",
+            ) from exc
+        except ExternalStoreError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件 {original_filename} 归档失败:{exc}",
+            ) from exc
+
+        snapshots.append(snapshot)
+
+    return {
+        "data": {
+            "snapshots": [
+                DataLakeSnapshotRead.model_validate(s).model_dump(by_alias=True)
+                for s in snapshots
+            ],
+        },
         "success": True,
     }

@@ -26,9 +26,8 @@ import {
 } from 'antd';
 import { type ReactNode, useCallback, useState } from 'react';
 import {
-  listDatasets,
-  uploadBatchDataset,
-  uploadMediaDataset,
+  listDataLakes,
+  localUploadToLake,
 } from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
 
@@ -241,29 +240,30 @@ const getExt = (filename: string): string => {
   return i >= 0 ? filename.slice(i + 1).toLowerCase() : '';
 };
 
-/** 单一数据接入:一批同格式文件 → 原件存内置 MinIO + 合并生成一个 jsonl 数据集。 */
+/** 单一数据接入:一批文件 → 数据湖归档(结构化解析 parquet、媒体原格式),
+ *  后续到数据湖详情页勾快照抽取生成数据集。 */
 const SingleUploadPage: React.FC = () => {
-  const [datasetId, setDatasetId] = useState<string>();
+  const [lakeId, setLakeId] = useState<string>();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [datasetOptions, setDatasetOptions] = useState<
+  const [lakeOptions, setLakeOptions] = useState<
     { label: string; value: string }[]
   >([]);
-  const [datasetLoading, setDatasetLoading] = useState(false);
+  const [lakeLoading, setLakeLoading] = useState(false);
 
-  // 目标数据集下拉:按关键词拉取已有数据集(数据集优先流程,上传落入其 draft 版本)
-  const loadDatasetOptions = useCallback((keyword?: string) => {
-    setDatasetLoading(true);
-    listDatasets({ name: keyword || undefined, pageSize: 50 })
+  // 目标数据湖下拉:按关键词拉取已有数据湖(本地上传入湖归档,后续从湖抽成数据集)
+  const loadLakeOptions = useCallback((keyword?: string) => {
+    setLakeLoading(true);
+    listDataLakes({ name: keyword || undefined, pageSize: 50 })
       .then((res) =>
-        setDatasetOptions(
+        setLakeOptions(
           (res.data ?? []).map((d) => ({ label: d.name, value: d.id })),
         ),
       )
       .catch(() => {
         /* 拉取失败不阻断,留空列表 */
       })
-      .finally(() => setDatasetLoading(false));
+      .finally(() => setLakeLoading(false));
   }, []);
   const { token } = theme.useToken();
 
@@ -285,24 +285,8 @@ const SingleUploadPage: React.FC = () => {
       message.warning('请至少添加一个文件');
       return;
     }
-    if (!datasetId) {
-      message.warning('请选择目标数据集');
-      return;
-    }
-
-    const exts = fileList.map((f) => getExt(f.name));
-    const mediaTypes = new Set(
-      exts.map((e) => mediaDataType(e)).filter(Boolean),
-    );
-    const hasMedia = exts.some((e) => MEDIA_EXTS.has(e));
-    const hasNonMedia = exts.some((e) => !MEDIA_EXTS.has(e));
-
-    if (hasMedia && hasNonMedia) {
-      message.error('媒体文件(图像/音频/视频)请单独上传,不能与其他格式混用');
-      return;
-    }
-    if (hasMedia && mediaTypes.size > 1) {
-      message.error('媒体文件每次只能上传同一模态(图像、音频、视频三选一)');
+    if (!lakeId) {
+      message.warning('请选择目标数据湖');
       return;
     }
 
@@ -310,34 +294,23 @@ const SingleUploadPage: React.FC = () => {
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
-    fd.append('datasetId', datasetId);
 
     setSubmitting(true);
-    const hide = message.loading('正在上传并落入数据集…', 0);
+    const hide = message.loading('正在归档到数据湖…', 0);
     try {
-      if (hasMedia) {
-        const dataType = [...mediaTypes][0] as string;
-        fd.append('data_type', dataType);
-        const res = await uploadMediaDataset(fd, { skipErrorHandler: true });
-        hide();
-        message.success(
-          `已生成多模态 JSONL 并落入数据集「${res.data?.name ?? ''}」`,
-        );
-      } else {
-        fd.append('safety_check', 'false');
-        fd.append('raw', 'true');
-        const res = await uploadBatchDataset(fd, { skipErrorHandler: true });
-        hide();
-        message.success(
-          `已上传并作为表成员落入数据集「${res.data?.name ?? ''}」`,
-        );
-      }
+      const res = await localUploadToLake(lakeId, fd, {
+        skipErrorHandler: true,
+      });
+      hide();
+      message.success(
+        `已归档 ${res.data?.snapshots?.length ?? 0} 个快照,可到数据湖抽取生成数据集`,
+      );
       setFileList([]);
-      history.push(`/datasets/detail?id=${datasetId}`);
+      history.push(`/data-lakes/${lakeId}`);
     } catch (e: any) {
       hide();
       const body = e?.response?.data ?? e?.data;
-      message.error(body?.message ?? e?.message ?? '上传失败,请重试');
+      message.error(body?.message ?? e?.message ?? '归档失败,请重试');
     } finally {
       setSubmitting(false);
     }
@@ -351,7 +324,7 @@ const SingleUploadPage: React.FC = () => {
         { title: '单一数据' },
       ])}
       title="单一数据接入"
-      content="批量上传文件:原始文件原样存入内置 MinIO,不做内容解析,合并生成一个数据集。"
+      content="批量上传文件:结构化文件解析成 parquet 归档、媒体原格式归档,后续到数据湖详情页勾快照抽取生成数据集。"
       onBack={() => history.push('/ingest/local-upload')}
     >
       <Card style={{ maxWidth: 760 }}>
@@ -413,24 +386,24 @@ const SingleUploadPage: React.FC = () => {
           </div>
           <div>
             <Text strong>
-              目标数据集 <Text type="danger">*</Text>
+              目标数据湖 <Text type="danger">*</Text>
             </Text>
             <div style={{ marginTop: 8 }}>
               <Select
                 style={{ width: '100%' }}
-                placeholder="选择已有数据集(上传的文件将作为表成员加入)"
-                value={datasetId}
-                onChange={setDatasetId}
+                placeholder="选择已有数据湖(文件归档后可抽取生成数据集)"
+                value={lakeId}
+                onChange={setLakeId}
                 showSearch
                 allowClear
                 filterOption={false}
-                onSearch={(kw) => loadDatasetOptions(kw)}
-                onFocus={() => loadDatasetOptions()}
-                options={datasetOptions}
+                onSearch={(kw) => loadLakeOptions(kw)}
+                onFocus={() => loadLakeOptions()}
+                options={lakeOptions}
                 notFoundContent={
-                  datasetLoading
+                  lakeLoading
                     ? '加载中…'
-                    : '无匹配数据集,请先到「数据集」页新建'
+                    : '无匹配数据湖,请先到「数据湖」页新建'
                 }
               />
             </div>
@@ -449,8 +422,8 @@ const SingleUploadPage: React.FC = () => {
             </p>
             <p className="ant-upload-text">点击或拖拽文件到此处</p>
             <p className="ant-upload-hint">
-              支持多文件批量上传;图像/音频/视频请单独上传同一模态,将自动生成多模态
-              JSONL;单文件最大 200MB。
+              支持多文件批量上传;结构化文件解析为 parquet 快照、媒体原格式归档;
+              单文件最大 200MB。
             </p>
           </Dragger>
           <Button
@@ -459,7 +432,7 @@ const SingleUploadPage: React.FC = () => {
             loading={submitting}
             disabled={fileList.length === 0}
           >
-            上传并生成数据集（{fileList.length}）
+            上传并归档到数据湖({fileList.length})
           </Button>
         </Space>
       </Card>

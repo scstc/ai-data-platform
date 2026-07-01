@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from minio.error import S3Error
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -44,6 +46,41 @@ def generate_source_version(
         date = datetime.now(UTC)
     date_str = date.strftime("%Y%m%d")
     return f"source_v{date_str}_{batch:02d}_{source_type}"
+
+
+# 匹配 source_v{yyyymmdd}_{batch}_{source_type} 中的 batch 段(2+ 位数字,兼容
+# 未来溢出到 3 位的批次)
+_BATCH_RE = re.compile(r"^source_v\d{8}_(\d+)_")
+
+
+async def _next_batch_no(
+    db: AsyncSession, lake_id: str, date: datetime, source_type: str
+) -> int:
+    """算某湖当天某 source_type 下一个可用批次号(1 起)。
+
+    通过前缀 LIKE 匹配当天所有同 source_type 的快照,解析批次段取 max + 1;
+    无匹配返回 1。**并发竞态**:两个并发调用可能算到同一批次,依赖
+    `uq_lake_source_version` 唯一约束兜底(见 `_ingest_with_retry`)。
+    """
+    date_str = date.strftime("%Y%m%d")
+    prefix = f"source_v{date_str}_"
+    suffix = f"_{source_type}"
+    result = await db.execute(
+        select(DataLakeSnapshot.source_version).where(
+            DataLakeSnapshot.lake_id == lake_id,
+            DataLakeSnapshot.source_version.like(f"{prefix}%{suffix}"),
+        )
+    )
+    versions = [row[0] for row in result.all()]
+    max_batch = 0
+    for v in versions:
+        m = _BATCH_RE.match(v)
+        if m:
+            try:
+                max_batch = max(max_batch, int(m.group(1)))
+            except ValueError:
+                continue
+    return max_batch + 1
 
 
 async def create_data_lake(
@@ -152,27 +189,31 @@ async def ingest_to_lake_parquet(
     source_type: str,
     source_metadata: dict | None = None,
     upload_channel: str = "database",
+    data_category: str = "database",
     datasource_id: str | None = None,
     ingest_task_id: str | None = None,
 ) -> DataLakeSnapshot:
     """将结构化数据以 Parquet 格式入湖。
 
+    批次号从数据库现有快照自增(`_next_batch_no`),同湖同天同 source_type 多次
+    入湖会得到 batch=1,2,3...;并发时依赖 `uq_lake_source_version` 唯一约束
+    兜底 + 最多 3 次重试。
+
     Args:
         db: 数据库会话
         lake_id: 数据湖 ID
         data: 结构化数据（list of dict）
-        source_type: 数据源类型（mysql/pg/oceanbase等）
-        source_metadata: 源头元数据（db_schema/db_table/db_engine等）
+        source_type: 数据源类型（mysql/pg/oceanbase等,决定 source_version 尾缀)
+        source_metadata: 源头元数据（db_schema/db_table/db_engine 等）
         upload_channel: 上传渠道（database/oss/obs/minio/api/local）
+        data_category: 数据类型标签(默认 "database" 兼容旧调用;本地上传结构化
+            文件传 "tabular",与 PG 拉的 DB 数据区分统计口径)
         ingest_task_id: 关联的采集任务 ID
 
     Returns:
         创建的数据湖快照对象
     """
-    # 1. 生成 source_version
-    source_version = generate_source_version(source_type=source_type)
-
-    # 2. 转换为 Parquet
+    # 1. 转换为 Parquet(可复用,不含 source_version)
     df = pd.DataFrame(data)
     table = pa.Table.from_pandas(df)
     parquet_buffer = io.BytesIO()
@@ -180,36 +221,70 @@ async def ingest_to_lake_parquet(
     parquet_buffer.seek(0)
     parquet_bytes = parquet_buffer.getvalue()
 
-    # 3. 上传到 MinIO
-    object_key = f"data-lake/{lake_id}/{source_version}/data.parquet"
-    await _put_object_to_lake_minio(
-        object_key=object_key,
-        data=parquet_bytes,
-        content_type="application/octet-stream",
+    now = datetime.now(UTC)
+
+    async def _build_snapshot(batch_no: int) -> DataLakeSnapshot:
+        source_version = generate_source_version(
+            date=now, batch=batch_no, source_type=source_type
+        )
+        object_key = f"data-lake/{lake_id}/{source_version}/data.parquet"
+        await _put_object_to_lake_minio(
+            object_key=object_key,
+            data=parquet_bytes,
+            content_type="application/octet-stream",
+        )
+        bucket = settings.storage_minio_lake_bucket
+        return DataLakeSnapshot(
+            id=f"snap-{uuid7_hex()}",
+            lake_id=lake_id,
+            source_version=source_version,
+            storage_uri=f"s3://{bucket}/{object_key}",
+            storage_format="parquet",
+            data_category=data_category,
+            upload_channel=upload_channel,
+            datasource_id=datasource_id,
+            source_metadata=source_metadata,
+            rows=len(data),
+            size=len(parquet_bytes),
+            ingest_task_id=ingest_task_id,
+        )
+
+    return await _persist_snapshot_with_retry(
+        db, lake_id=lake_id, date=now, source_type=source_type, build=_build_snapshot
     )
 
-    # 4. 创建快照记录
-    snapshot_id = f"snap-{uuid7_hex()}"
-    bucket = settings.storage_minio_lake_bucket
-    storage_uri = f"s3://{bucket}/{object_key}"
-    snapshot = DataLakeSnapshot(
-        id=snapshot_id,
-        lake_id=lake_id,
-        source_version=source_version,
-        storage_uri=storage_uri,
-        storage_format="parquet",
-        data_category="database",
-        upload_channel=upload_channel,
-        datasource_id=datasource_id,
-        source_metadata=source_metadata,
-        rows=len(data),
-        size=len(parquet_bytes),
-        ingest_task_id=ingest_task_id,
-    )
-    db.add(snapshot)
-    await db.commit()
-    await db.refresh(snapshot)
-    return snapshot
+
+async def _persist_snapshot_with_retry(
+    db: AsyncSession,
+    *,
+    lake_id: str,
+    date: datetime,
+    source_type: str,
+    build,  # Callable[[int], Awaitable[DataLakeSnapshot]]
+    max_retries: int = 3,
+) -> DataLakeSnapshot:
+    """批次号自增 + 唯一约束冲突重试。
+
+    并发场景下两次调用可能算到同一 batch_no,DB 层 `uq_lake_source_version`
+    会挡下第二次插入(IntegrityError);捕获后回滚重算下一批次,最多重试 3 次。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        batch_no = await _next_batch_no(db, lake_id, date, source_type)
+        snapshot = await build(batch_no)
+        db.add(snapshot)
+        try:
+            await db.commit()
+            await db.refresh(snapshot)
+            return snapshot
+        except IntegrityError as exc:
+            await db.rollback()
+            last_exc = exc
+            if attempt == max_retries - 1:
+                break
+    raise ExternalStoreError(
+        f"数据湖 {lake_id} 批次号冲突,重试 {max_retries} 次仍失败,请稍后重试"
+    ) from last_exc
 
 
 async def ingest_to_lake_raw(
@@ -226,6 +301,9 @@ async def ingest_to_lake_raw(
 ) -> DataLakeSnapshot:
     """将文档/多媒体文件原格式入湖。
 
+    批次号自增语义同 `ingest_to_lake_parquet`——source_type 用文件扩展名,
+    同湖同天同扩展名多次入湖批次递增。
+
     Args:
         db: 数据库会话
         lake_id: 数据湖 ID
@@ -239,48 +317,43 @@ async def ingest_to_lake_raw(
     Returns:
         创建的数据湖快照对象
     """
-    # 1. 提取文件扩展名
     file_ext = Path(original_filename).suffix.lstrip(".").lower() or "bin"
 
-    # 2. 生成 source_version
-    source_version = generate_source_version(source_type=file_ext)
+    # 补充 source_metadata:确保 original_filename 一定在里面
+    metadata = dict(source_metadata or {})
+    metadata["original_filename"] = original_filename
 
-    # 3. 上传到 MinIO（保留原始扩展名）
-    object_key = f"data-lake/{lake_id}/{source_version}/{original_filename}"
-    await _put_object_to_lake_minio(
-        object_key=object_key,
-        data=file_content,
-        content_type="application/octet-stream",
+    now = datetime.now(UTC)
+
+    async def _build_snapshot(batch_no: int) -> DataLakeSnapshot:
+        source_version = generate_source_version(
+            date=now, batch=batch_no, source_type=file_ext
+        )
+        object_key = f"data-lake/{lake_id}/{source_version}/{original_filename}"
+        await _put_object_to_lake_minio(
+            object_key=object_key,
+            data=file_content,
+            content_type="application/octet-stream",
+        )
+        bucket = settings.storage_minio_lake_bucket
+        return DataLakeSnapshot(
+            id=f"snap-{uuid7_hex()}",
+            lake_id=lake_id,
+            source_version=source_version,
+            storage_uri=f"s3://{bucket}/{object_key}",
+            storage_format=file_ext,
+            data_category=data_category,
+            upload_channel=upload_channel,
+            datasource_id=datasource_id,
+            source_metadata=metadata,
+            rows=None,  # 非结构化数据无行数
+            size=len(file_content),
+            ingest_task_id=ingest_task_id,
+        )
+
+    return await _persist_snapshot_with_retry(
+        db, lake_id=lake_id, date=now, source_type=file_ext, build=_build_snapshot
     )
-
-    # 4. 创建快照记录
-    snapshot_id = f"snap-{uuid7_hex()}"
-    bucket = settings.storage_minio_lake_bucket
-    storage_uri = f"s3://{bucket}/{object_key}"
-
-    # 5. 补充 source_metadata
-    if source_metadata is None:
-        source_metadata = {}
-    source_metadata["original_filename"] = original_filename
-
-    snapshot = DataLakeSnapshot(
-        id=snapshot_id,
-        lake_id=lake_id,
-        source_version=source_version,
-        storage_uri=storage_uri,
-        storage_format=file_ext,
-        data_category=data_category,
-        upload_channel=upload_channel,
-        datasource_id=datasource_id,
-        source_metadata=source_metadata,
-        rows=None,  # 非结构化数据无行数
-        size=len(file_content),
-        ingest_task_id=ingest_task_id,
-    )
-    db.add(snapshot)
-    await db.commit()
-    await db.refresh(snapshot)
-    return snapshot
 
 
 async def get_lake_by_id(db: AsyncSession, lake_id: str) -> DataLake | None:
