@@ -183,12 +183,9 @@ const DatasetsPresets: React.FC = () => {
             {/* 数据集元数据摘要 */}
             <Descriptions
               size="small"
-              column={{ xs: 1, sm: 3 }}
+              column={{ xs: 1, sm: 2 }}
               style={{ marginBottom: 16 }}
             >
-              <Descriptions.Item label="来源">
-                <SourceKindTag kind={detail.sourceKind} />
-              </Descriptions.Item>
               <Descriptions.Item label="格式">
                 {detail.sourceFormat?.toUpperCase() ?? '-'}
               </Descriptions.Item>
@@ -307,7 +304,10 @@ const DatasetsPresets: React.FC = () => {
               <Col xs={24} md={16} lg={17}>
                 {activeVer ? (
                   <div>
-                    <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 12 }}>
+                    <Typography.Title
+                      level={5}
+                      style={{ marginTop: 0, marginBottom: 12 }}
+                    >
                       {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
                     </Typography.Title>
                     <Descriptions
@@ -335,6 +335,9 @@ const DatasetsPresets: React.FC = () => {
                         >
                           {activeVer.origin ?? '-'}
                         </Tag>
+                      </Descriptions.Item>
+                      <Descriptions.Item label="接入方式">
+                        <SourceKindTag kind={detail.sourceKind} />
                       </Descriptions.Item>
                       <Descriptions.Item label="扫描结论">
                         <Tooltip title={activeVer.verdictNote}>
