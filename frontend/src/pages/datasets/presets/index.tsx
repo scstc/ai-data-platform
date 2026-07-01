@@ -181,7 +181,11 @@ const DatasetsPresets: React.FC = () => {
         {detail && (
           <>
             {/* 数据集元数据摘要 */}
-            <Descriptions size="small" column={{ xs: 1, sm: 3 }} style={{ marginBottom: 16 }}>
+            <Descriptions
+              size="small"
+              column={{ xs: 1, sm: 3 }}
+              style={{ marginBottom: 16 }}
+            >
               <Descriptions.Item label="来源">
                 <SourceKindTag kind={detail.sourceKind} />
               </Descriptions.Item>
@@ -199,7 +203,9 @@ const DatasetsPresets: React.FC = () => {
               {detail.tags?.length ? (
                 <Descriptions.Item label="标签" span={3}>
                   {detail.tags.map((t) => (
-                    <Tag key={t} color={tagColor(t)}>{t}</Tag>
+                    <Tag key={t} color={tagColor(t)}>
+                      {t}
+                    </Tag>
                   ))}
                 </Descriptions.Item>
               ) : null}
@@ -239,16 +245,10 @@ const DatasetsPresets: React.FC = () => {
                         }}
                       >
                         <Flex vertical gap={4} style={{ width: '100%' }}>
-                          <Typography.Text strong={selected}>
-                            {v.versionLabel ?? `v${v.versionNo}`}
-                          </Typography.Text>
-                          <Flex gap={4} wrap="wrap">
-                            <Tag
-                              color="green"
-                              style={{ marginInlineEnd: 0, fontSize: 11 }}
-                            >
-                              已发布
-                            </Tag>
+                          <Flex justify="space-between" align="center">
+                            <Typography.Text strong={selected}>
+                              {v.versionLabel ?? `v${v.versionNo}`}
+                            </Typography.Text>
                             {v.verdictSource === 'manual' && (
                               <Tag
                                 color="orange"
@@ -273,6 +273,29 @@ const DatasetsPresets: React.FC = () => {
                               发布于 {formatDateTime(v.publishedAt)}
                             </Typography.Text>
                           )}
+                          <Space size={12} style={{ marginTop: 2 }}>
+                            <a
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(
+                                  `/api/v1/dataset-versions/${v.id}/download`,
+                                  '_blank',
+                                );
+                              }}
+                              style={{ fontSize: 12 }}
+                            >
+                              下载
+                            </a>
+                            <a
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExportVersion(v);
+                              }}
+                              style={{ fontSize: 12 }}
+                            >
+                              导出到 S3
+                            </a>
+                          </Space>
                         </Flex>
                       </List.Item>
                     );
@@ -284,27 +307,14 @@ const DatasetsPresets: React.FC = () => {
               <Col xs={24} md={16} lg={17}>
                 {activeVer ? (
                   <div>
-                    <Flex justify="space-between" align="center" style={{ marginBottom: 12 }}>
-                      <Typography.Title level={5} style={{ margin: 0 }}>
-                        {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
-                      </Typography.Title>
-                      <Space>
-                        <a
-                          onClick={() =>
-                            window.open(
-                              `/api/v1/dataset-versions/${activeVer.id}/download`,
-                              '_blank',
-                            )
-                          }
-                        >
-                          下载
-                        </a>
-                        <a onClick={() => setExportVersion(activeVer)}>
-                          导出到 S3
-                        </a>
-                      </Space>
-                    </Flex>
-                    <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered>
+                    <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 12 }}>
+                      {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
+                    </Typography.Title>
+                    <Descriptions
+                      size="small"
+                      column={{ xs: 1, sm: 2 }}
+                      bordered
+                    >
                       <Descriptions.Item label="版本号">
                         {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
                       </Descriptions.Item>
@@ -318,14 +328,21 @@ const DatasetsPresets: React.FC = () => {
                         {fmtSize(activeVer.size)}
                       </Descriptions.Item>
                       <Descriptions.Item label="来源">
-                        <Tag color={activeVer.origin === 'managed' ? 'green' : 'gold'}>
+                        <Tag
+                          color={
+                            activeVer.origin === 'managed' ? 'green' : 'gold'
+                          }
+                        >
                           {activeVer.origin ?? '-'}
                         </Tag>
                       </Descriptions.Item>
                       <Descriptions.Item label="扫描结论">
                         <Tooltip title={activeVer.verdictNote}>
                           <Tag color="green">
-                            通过{activeVer.verdictSource === 'manual' ? '·人工' : ''}
+                            通过
+                            {activeVer.verdictSource === 'manual'
+                              ? '·人工'
+                              : ''}
                           </Tag>
                         </Tooltip>
                       </Descriptions.Item>
