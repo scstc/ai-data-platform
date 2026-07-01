@@ -511,19 +511,56 @@ async def upload_media_as_dataset(
         )
 
     bucket = settings.storage_minio_upload_bucket
-    # 数据集已存在:追加 manifest 版本(version_no=max+1),keys 落 v<n>/ 下,
-    # 失败仅回收本版本前缀,绝不动该数据集已有的其它版本对象。
-    max_no = (
+    # 优先复用该数据集最新的 draft 版本;若无 draft 则新建版本。
+    existing_draft = (
         await session.execute(
-            select(func.max(DatasetVersion.version_no)).where(
-                DatasetVersion.dataset_id == dataset_id
+            select(DatasetVersion)
+            .where(
+                DatasetVersion.dataset_id == dataset_id,
+                DatasetVersion.publish_status == "draft",
             )
+            .order_by(DatasetVersion.version_no.desc())
+            .limit(1)
         )
-    ).scalar()
-    version_no = (max_no or 0) + 1
+    ).scalar_one_or_none()
+
+    if existing_draft is not None:
+        version = existing_draft
+        version_no = version.version_no
+        # 读取已有 manifest 行(如有),用于覆盖写时保留旧数据
+        existing_manifest_rows: list[dict] = []
+        if version.storage_uri:
+            try:
+                # storage_uri = s3://<bucket>/<key>
+                _uri_parts = version.storage_uri.removeprefix("s3://").split("/", 1)
+                _m_bucket, _m_key = _uri_parts[0], _uri_parts[1]
+                _tmp = await download_to_temp(cfg, _m_bucket, _m_key)
+                import json as _json
+                existing_manifest_rows = [
+                    _json.loads(line)
+                    for line in _tmp.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                _tmp.unlink(missing_ok=True)
+            except Exception:
+                existing_manifest_rows = []
+        start_idx = len(existing_manifest_rows)
+    else:
+        max_no = (
+            await session.execute(
+                select(func.max(DatasetVersion.version_no)).where(
+                    DatasetVersion.dataset_id == dataset_id
+                )
+            )
+        ).scalar()
+        version_no = (max_no or 0) + 1
+        existing_manifest_rows = []
+        start_idx = 0
+        version = None  # 新建,下方赋值
+
     ver_prefix = f"{dataset_id}/v{version_no}/"
     try:
-        manifest_rows: list[dict] = []
+        new_rows: list[dict] = []
         total_size = 0
         for idx, f in enumerate(files):
             content = await f.read()
@@ -533,8 +570,8 @@ async def upload_media_as_dataset(
             if total_size > MAX_MATERIALIZE_BYTES:
                 raise ValueError("本批文件总体积超过上限,无法加工")
             fmt = _file_ext(f.filename or "")
-            base = Path(f.filename or f"file{idx}").name  # 去路径,防 key 注入
-            member_key = f"{ver_prefix}{idx:06d}-{base}"
+            base = Path(f.filename or f"file{idx}").name
+            member_key = f"{ver_prefix}{start_idx + idx:06d}-{base}"
             await upload_object(
                 cfg,
                 bucket,
@@ -543,7 +580,7 @@ async def upload_media_as_dataset(
                 len(content),
                 content_type=f.content_type or "application/octet-stream",
             )
-            manifest_rows.append(
+            new_rows.append(
                 {
                     field: [member_key],
                     "text": token,
@@ -556,6 +593,7 @@ async def upload_media_as_dataset(
                     },
                 }
             )
+        manifest_rows = existing_manifest_rows + new_rows
         manifest_bytes = _manifest_bytes(manifest_rows)
         manifest_key = f"{ver_prefix}manifest.jsonl"
         await upload_object(
@@ -567,23 +605,29 @@ async def upload_media_as_dataset(
             content_type="application/x-ndjson",
         )
 
-        # manifest 媒体集:单模态(每行 text 是 dj 占位 token,非真实文本 → 单模态子标签)
         media_modalities = [_MEDIA_FIELD[data_type]] if data_type else None
-        version = DatasetVersion(
-            id=_new_version_id(),
-            dataset_id=dataset_id,
-            version_no=version_no,
-            storage_uri=f"s3://{bucket}/{manifest_key}",
-            format=MANIFEST_FORMAT,
-            rows=len(files),
-            size=total_size,
-            origin="managed",
-            source_datasource_id=None,
-            modalities=media_modalities,
-            publish_status="draft",
-            note=f"媒体批量接入:{len(files)} 个文件",
-        )
-        session.add(version)
+        if version is None:
+            version = DatasetVersion(
+                id=_new_version_id(),
+                dataset_id=dataset_id,
+                version_no=version_no,
+                storage_uri=f"s3://{bucket}/{manifest_key}",
+                format=MANIFEST_FORMAT,
+                rows=len(manifest_rows),
+                size=total_size,
+                origin="managed",
+                source_datasource_id=None,
+                modalities=media_modalities,
+                publish_status="draft",
+                note=f"媒体批量接入:{len(files)} 个文件",
+            )
+            session.add(version)
+        else:
+            version.storage_uri = f"s3://{bucket}/{manifest_key}"
+            version.rows = len(manifest_rows)
+            version.size = (version.size or 0) + total_size
+            if media_modalities:
+                version.modalities = media_modalities
         await session.commit()
         await session.refresh(dataset)
         await session.refresh(version)
@@ -2885,6 +2929,26 @@ async def update_dataset_version(
     await session.commit()
     await session.refresh(version)
     return JSONResponse(content=_version_item(version))
+
+
+@router.delete("/dataset-versions/{version_id}", response_model=None)
+async def delete_dataset_version(
+    version_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """删除数据集版本(仅允许删除 draft 状态版本)。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    if version.publish_status != "draft":
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "只能删除草稿(draft)状态的版本"},
+        )
+    await session.delete(version)
+    await session.commit()
+    return JSONResponse(content={"success": True})
 
 
 @router.get("/dataset-versions/{version_id}/download", response_model=None)

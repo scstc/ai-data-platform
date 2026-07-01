@@ -413,6 +413,14 @@ export async function updateDatasetVersion(
   );
 }
 
+/** 删除草稿版本 DELETE /api/v1/dataset-versions/:id */
+export async function deleteDatasetVersion(versionId: string) {
+  return request<{ success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}`,
+    { method: 'DELETE', skipErrorHandler: true },
+  );
+}
+
 /** 获取采集任务列表 GET /api/v1/ingest-tasks */
 export async function listIngestTasks(
   params?: DataPlatform.IngestTaskListParams,

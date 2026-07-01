@@ -35,6 +35,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { VersionFilePreview } from '@/components';
 import {
   createDatasetVersion,
+  deleteDatasetVersion,
   exportVersionToS3,
   getDataset,
   listBuckets,
@@ -344,23 +345,45 @@ const DatasetDetail: React.FC = () => {
           </Space>
         }
         extra={
-          <a
-            onClick={() => {
-              setEditingVersion(v);
-              setEditVersionOpen(true);
-            }}
-          >
-            编辑
-          </a>
+          <Space size="small">
+            <a onClick={() => { setEditingVersion(v); setEditVersionOpen(true); }}>
+              编辑
+            </a>
+            {v.publishStatus === 'draft' && (
+              <Popconfirm
+                title="确认删除此版本？"
+                description="删除后不可恢复。"
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                cancelText="取消"
+                onConfirm={async () => {
+                  try {
+                    await deleteDatasetVersion(v.id);
+                    message.success('版本已删除');
+                    setDetail((prev) => {
+                      if (!prev) return prev;
+                      return { ...prev, versions: prev.versions.filter((x) => x.id !== v.id) };
+                    });
+                    if (activeVersion === v.id) {
+                      const remaining = (detail?.versions ?? []).filter((x) => x.id !== v.id);
+                      setActiveVersion(remaining[remaining.length - 1]?.id);
+                    }
+                  } catch (e: any) {
+                    message.error(e?.response?.data?.message || '删除失败');
+                  }
+                }}
+              >
+                <a style={{ color: 'var(--ant-color-error)' }}>删除</a>
+              </Popconfirm>
+            )}
+          </Space>
         }
       >
         <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
           <Descriptions.Item label="训练用途">
             <TrainTypeTag type={v.trainType} />
           </Descriptions.Item>
-          <Descriptions.Item label="说明">
-            {v.note ?? '-'}
-          </Descriptions.Item>
+          <Descriptions.Item label="说明">{v.note ?? '-'}</Descriptions.Item>
           {v.schemaVariant && (
             <Descriptions.Item label="Schema 变体">
               <Tag color="cyan">{v.schemaVariant}</Tag>
