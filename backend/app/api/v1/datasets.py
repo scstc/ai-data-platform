@@ -2857,6 +2857,36 @@ async def _download_zip(
     )
 
 
+class DatasetVersionUpdate(CamelModel):
+    """版本元数据可编辑字段(训练用途 / 说明 / schema变体)。"""
+
+    train_type: str | None = None
+    note: str | None = None
+    schema_variant: str | None = None
+
+
+@router.patch("/dataset-versions/{version_id}", response_model=None)
+async def update_dataset_version(
+    version_id: str,
+    payload: DatasetVersionUpdate,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """更新版本元数据(训练用途/说明/schema变体)。需登录,无需 admin。"""
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    if payload.train_type is not None:
+        version.train_type = payload.train_type or None
+    if payload.note is not None:
+        version.note = payload.note or None
+    if payload.schema_variant is not None:
+        version.schema_variant = payload.schema_variant or None
+    await session.commit()
+    await session.refresh(version)
+    return JSONResponse(content=_version_item(version))
+
+
 @router.get("/dataset-versions/{version_id}/download", response_model=None)
 async def download_version(
     version_id: str, session: SessionDep

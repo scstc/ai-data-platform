@@ -45,6 +45,7 @@ import {
   setVersionVerdict,
   unpublishVersion,
   updateDataset,
+  updateDatasetVersion,
 } from '@/services/data-platform';
 import {
   type CategoryTreeNode,
@@ -54,6 +55,7 @@ import { formatDateTime } from '@/utils/format';
 import { SemanticTypeTag } from '@/utils/semanticType';
 import { SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
+import { TRAIN_TYPE_META, TrainTypeTag } from '@/utils/trainType';
 import AclDrawer from './components/AclDrawer';
 
 /** 数据类型枚举（编辑表单复用） */
@@ -109,6 +111,9 @@ const DatasetDetail: React.FC = () => {
   const [exportVersion, setExportVersion] =
     useState<DataPlatform.DatasetVersion>();
   const [creatingVersion, setCreatingVersion] = useState(false);
+  const [editVersionOpen, setEditVersionOpen] = useState(false);
+  const [editingVersion, setEditingVersion] =
+    useState<DataPlatform.DatasetVersion>();
 
   // 切换当前查看的版本;文件清单 + 按文件预览由 VersionFilePreview 按 versionId 自管
   const loadPreview = useCallback((versionId: string) => {
@@ -338,13 +343,18 @@ const DatasetDetail: React.FC = () => {
             </Tag>
           </Space>
         }
+        extra={
+          <a onClick={() => { setEditingVersion(v); setEditVersionOpen(true); }}>
+            编辑
+          </a>
+        }
       >
         <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
           <Descriptions.Item label="行数">{v.rows ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="大小">{fmtSize(v.size)}</Descriptions.Item>
           {v.trainType && (
             <Descriptions.Item label="训练用途">
-              <Tag color="blue">{v.trainType}</Tag>
+              <TrainTypeTag type={v.trainType} />
             </Descriptions.Item>
           )}
           {v.schemaVariant && (
@@ -828,6 +838,57 @@ const DatasetDetail: React.FC = () => {
           label="目标前缀（可选）"
           placeholder="如 exports/my-dataset；对象将落在「前缀/文件名」"
         />
+      </ModalForm>
+
+      {/* 编辑版本元数据 */}
+      <ModalForm<{ trainType?: string; note?: string }>
+        title="编辑版本元数据"
+        width={480}
+        open={editVersionOpen}
+        modalProps={{ destroyOnHidden: true }}
+        initialValues={{
+          trainType: editingVersion?.trainType ?? undefined,
+          note: editingVersion?.note ?? undefined,
+        }}
+        onOpenChange={(o) => { if (!o) { setEditVersionOpen(false); setEditingVersion(undefined); } }}
+        onFinish={async (values) => {
+          if (!editingVersion) return false;
+          try {
+            const res = await updateDatasetVersion(editingVersion.id, {
+              trainType: values.trainType ?? null,
+              note: values.note ?? null,
+            });
+            if (res?.success) {
+              message.success('已更新');
+              setDetail((prev) => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  versions: prev.versions.map((v) =>
+                    v.id === editingVersion.id ? { ...v, ...res.data } : v,
+                  ),
+                };
+              });
+              setEditVersionOpen(false);
+              setEditingVersion(undefined);
+              return true;
+            }
+          } catch (e: any) {
+            message.error(e?.response?.data?.message || '更新失败');
+          }
+          return false;
+        }}
+      >
+        <ProFormSelect
+          name="trainType"
+          label="训练用途"
+          allowClear
+          options={Object.entries(TRAIN_TYPE_META).map(([k, v]) => ({
+            value: k,
+            label: v.label,
+          }))}
+        />
+        <ProFormText name="note" label="说明" placeholder="版本备注（可选）" />
       </ModalForm>
 
       {detail && (

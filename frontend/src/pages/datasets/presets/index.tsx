@@ -32,11 +32,13 @@ import {
   listBuckets,
   listDataSources,
   listDatasets,
+  updateDatasetVersion,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
+import { TRAIN_TYPE_META, TrainTypeTag } from '@/utils/trainType';
 
 const fmtSize = (n?: number) => {
   if (!n && n !== 0) return '-';
@@ -50,6 +52,9 @@ const DatasetsPresets: React.FC = () => {
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
   const [activeVersionId, setActiveVersionId] = useState<string>();
   const [exportVersion, setExportVersion] =
+    useState<DataPlatform.DatasetVersion>();
+  const [editVersionOpen, setEditVersionOpen] = useState(false);
+  const [editingVersion, setEditingVersion] =
     useState<DataPlatform.DatasetVersion>();
 
   const openDetail = async (id: string) => {
@@ -304,12 +309,14 @@ const DatasetsPresets: React.FC = () => {
               <Col xs={24} md={16} lg={17}>
                 {activeVer ? (
                   <div>
-                    <Typography.Title
-                      level={5}
-                      style={{ marginTop: 0, marginBottom: 12 }}
-                    >
-                      {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
-                    </Typography.Title>
+                    <Flex justify="space-between" align="center" style={{ marginBottom: 12 }}>
+                      <Typography.Title level={5} style={{ margin: 0 }}>
+                        {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
+                      </Typography.Title>
+                      <a onClick={() => { setEditingVersion(activeVer); setEditVersionOpen(true); }}>
+                        编辑
+                      </a>
+                    </Flex>
                     <Descriptions
                       size="small"
                       column={{ xs: 1, sm: 2 }}
@@ -351,7 +358,7 @@ const DatasetsPresets: React.FC = () => {
                       </Descriptions.Item>
                       {activeVer.trainType && (
                         <Descriptions.Item label="训练用途">
-                          <Tag color="blue">{activeVer.trainType}</Tag>
+                          <TrainTypeTag type={activeVer.trainType} />
                         </Descriptions.Item>
                       )}
                       {activeVer.schemaVariant && (
@@ -465,6 +472,62 @@ const DatasetsPresets: React.FC = () => {
           label="目标前缀（可选）"
           placeholder="如 exports/my-dataset；对象将落在「前缀/文件名」"
         />
+      </ModalForm>
+
+      {/* 编辑版本元数据 */}
+      <ModalForm<{ trainType?: string; note?: string }>
+        title="编辑版本元数据"
+        width={480}
+        open={editVersionOpen}
+        modalProps={{ destroyOnHidden: true }}
+        initialValues={{
+          trainType: editingVersion?.trainType ?? undefined,
+          note: editingVersion?.note ?? undefined,
+        }}
+        onOpenChange={(o) => {
+          if (!o) {
+            setEditVersionOpen(false);
+            setEditingVersion(undefined);
+          }
+        }}
+        onFinish={async (values) => {
+          if (!editingVersion) return false;
+          try {
+            const res = await updateDatasetVersion(editingVersion.id, {
+              trainType: values.trainType ?? null,
+              note: values.note ?? null,
+            });
+            if (res?.success) {
+              message.success('已更新');
+              setDetail((prev) => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  versions: prev.versions.map((v) =>
+                    v.id === editingVersion.id ? { ...v, ...res.data } : v,
+                  ),
+                };
+              });
+              setEditVersionOpen(false);
+              setEditingVersion(undefined);
+              return true;
+            }
+          } catch (e: any) {
+            message.error(e?.response?.data?.message || '更新失败');
+          }
+          return false;
+        }}
+      >
+        <ProFormSelect
+          name="trainType"
+          label="训练用途"
+          allowClear
+          options={Object.entries(TRAIN_TYPE_META).map(([k, v]) => ({
+            value: k,
+            label: v.label,
+          }))}
+        />
+        <ProFormText name="note" label="说明" placeholder="版本备注（可选）" />
       </ModalForm>
     </PageContainer>
   );
