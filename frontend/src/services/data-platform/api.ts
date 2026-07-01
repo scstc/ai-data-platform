@@ -316,6 +316,20 @@ export async function unhostDataset(id: string, options?: { [key: string]: any }
   });
 }
 
+/** 显式新建一个空版本（数据集详情页「新建版本」按钮；永远新建，不复用现有 draft） */
+export async function createDatasetVersion(
+  datasetId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.DatasetVersion; success: boolean }>(
+    `/api/v1/datasets/${datasetId}/versions`,
+    {
+      method: 'POST',
+      ...(options || {}),
+    },
+  );
+}
+
 /** 发布版本为可训练（仅 admin；未过安全扫描返回 409 + message）（#4 发布门） */
 export async function publishVersion(
   versionId: string,
@@ -663,6 +677,22 @@ export async function getDatasetMemberUrl(
   return request<{ data: { url: string }; success: boolean }>(
     `/api/v1/dataset-versions/${versionId}/member-url`,
     { method: 'GET', params: { key }, ...(options || {}) },
+  );
+}
+
+/** 删除版本成员文件(单个或批量) DELETE /api/v1/dataset-versions/{id}/members */
+export async function deleteVersionMembers(
+  versionId: string,
+  keys: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number; notFound: number }; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/members`,
+    {
+      method: 'DELETE',
+      params: { keys },
+      ...(options || {}),
+    },
   );
 }
 

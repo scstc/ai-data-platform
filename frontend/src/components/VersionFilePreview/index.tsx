@@ -1,10 +1,13 @@
 import {
   Button,
+  Checkbox,
   Collapse,
   Empty,
+  Flex,
   Input,
   List,
   Modal,
+  Popconfirm,
   Space,
   Spin,
   Tabs,
@@ -15,6 +18,7 @@ import jsonLang from 'highlight.js/lib/languages/json';
 import { useEffect, useState } from 'react';
 import DatasetDataView from '@/pages/datasets/detail/views/DataView';
 import {
+  deleteVersionMembers,
   getDatasetMemberUrl,
   listDatasetMembers,
   previewDatasetVersion,
@@ -55,6 +59,10 @@ export interface VersionFilePreviewProps {
   semanticType?: DataPlatform.SemanticType;
   /** 无文件 / 无版本时的占位文案。 */
   emptyText?: string;
+  /** 是否允许删除操作(仅 draft 版本且有 edit/admin 权限时传 true)。 */
+  editable?: boolean;
+  /** 删除成员后的回调(可用于刷新父组件)。 */
+  onDeleted?: () => void;
 }
 
 /** 单个数据集版本的「文件清单 + 按文件预览」组件。
@@ -166,6 +174,8 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
   versionId,
   semanticType,
   emptyText,
+  editable,
+  onDeleted,
 }) => {
   const [members, setMembers] = useState<DataPlatform.DatasetMember[]>([]);
   const [loading, setLoading] = useState(false);
@@ -175,15 +185,28 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
   const [modalPreview, setModalPreview] =
     useState<DataPlatform.DatasetPreview>();
   const [modalUrl, setModalUrl] = useState<string>();
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+
+  const reloadMembers = () => {
+    if (!versionId) return;
+    setLoading(true);
+    listDatasetMembers(versionId)
+      .then((res) => setMembers(res.data ?? []))
+      .catch(() => setMembers([]))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
     if (!versionId) {
       setMembers([]);
+      setSelectedKeys(new Set());
       return;
     }
     let cancelled = false;
     setLoading(true);
     setMembers([]);
+    setSelectedKeys(new Set());
     listDatasetMembers(versionId)
       .then((res) => {
         if (!cancelled) setMembers(res.data ?? []);
@@ -198,6 +221,35 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
       cancelled = true;
     };
   }, [versionId]);
+
+  const handleDeleteKeys = async (keys: string[]) => {
+    if (!versionId || keys.length === 0) return;
+    setDeleting(true);
+    try {
+      await deleteVersionMembers(versionId, keys);
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        keys.forEach((k) => next.delete(k));
+        return next;
+      });
+      reloadMembers();
+      onDeleted?.();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const toggleSelect = (key: string, checked: boolean) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      checked ? next.add(key) : next.delete(key);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (checked: boolean) => {
+    setSelectedKeys(checked ? new Set(members.map((m) => m.key)) : new Set());
+  };
 
   const openPreview = async (m: DataPlatform.DatasetMember) => {
     if (!versionId) return;
@@ -257,9 +309,45 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
     return <Empty description={emptyText ?? '无版本'} />;
   }
 
+  const allSelected =
+    members.length > 0 && selectedKeys.size === members.length;
+  const someSelected = selectedKeys.size > 0;
+
   return (
     <>
       <Spin spinning={loading}>
+        {editable && members.length > 0 && (
+          <Flex
+            align="center"
+            justify="space-between"
+            style={{ marginBottom: 8 }}
+          >
+            <Checkbox
+              indeterminate={someSelected && !allSelected}
+              checked={allSelected}
+              onChange={(e) => toggleSelectAll(e.target.checked)}
+            >
+              全选
+            </Checkbox>
+            <Popconfirm
+              title={`确认删除所选 ${selectedKeys.size} 个文件？`}
+              onConfirm={() => handleDeleteKeys([...selectedKeys])}
+              disabled={!someSelected}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+            >
+              <Button
+                type="link"
+                danger
+                disabled={!someSelected}
+                loading={deleting}
+              >
+                批量删除（{selectedKeys.size}）
+              </Button>
+            </Popconfirm>
+          </Flex>
+        )}
         {members.length > 0 ? (
           <List
             size="small"
@@ -271,13 +359,39 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
                 actions={[
                   <Button
                     key="preview"
+                    type="link"
                     size="small"
                     onClick={() => openPreview(m)}
                   >
                     预览
                   </Button>,
+                  ...(editable
+                    ? [
+                        <Popconfirm
+                          key="del"
+                          title="确认删除此文件？"
+                          onConfirm={() => handleDeleteKeys([m.key])}
+                          okText="删除"
+                          okButtonProps={{ danger: true }}
+                          cancelText="取消"
+                        >
+                          <a
+                            style={{ color: 'var(--ant-color-error, #ff4d4f)' }}
+                          >
+                            删除
+                          </a>
+                        </Popconfirm>,
+                      ]
+                    : []),
                 ]}
               >
+                {editable && (
+                  <Checkbox
+                    checked={selectedKeys.has(m.key)}
+                    onChange={(e) => toggleSelect(m.key, e.target.checked)}
+                    style={{ marginRight: 8 }}
+                  />
+                )}
                 <List.Item.Meta
                   title={m.name}
                   description={`${(m.format || '').toUpperCase()} · ${fmtSize(
