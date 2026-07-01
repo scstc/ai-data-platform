@@ -38,6 +38,9 @@ class DistillationJobCreate(CamelModel):
     goal: DistillationGoal
     # 选填:另存到别的数据集;默认沿用输入版本所属的数据集
     output_dataset_id: str | None = None
+    # DJ text_keys:算子作用的主文本字段;留空则后端按字段名优先级自动探测。
+    # 蒸馏数据通常无 text 字段(如 instruction),建议显式指定。
+    text_keys: list[str] | None = None
 
 
 class DistillationReport(CamelModel):

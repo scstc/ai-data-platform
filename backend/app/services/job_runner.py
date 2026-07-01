@@ -222,6 +222,7 @@ async def _run_job(job_id: str) -> None:
                         operators=operators,
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
+                        text_keys=getattr(body, "text_keys", None),
                     )
                 elif job.type == "synthesis":
                     _v, yaml_text, log_path, _report = await run_make_job(
@@ -231,6 +232,7 @@ async def _run_job(job_id: str) -> None:
                         operators=operators,
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
+                        text_keys=getattr(body, "text_keys", None),
                     )
                 elif job.type == "augmentation":
                     _v, yaml_text, log_path, _report = await run_augment_job(
@@ -240,6 +242,7 @@ async def _run_job(job_id: str) -> None:
                         operators=operators,
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
+                        text_keys=getattr(body, "text_keys", None),
                     )
                 elif job.type == "quality":
                     yaml_text, log_path = await run_quality_job(
@@ -247,6 +250,7 @@ async def _run_job(job_id: str) -> None:
                         job_id=job_id,
                         input_version=input_version,
                         operators=operators,
+                        text_keys=getattr(body, "text_keys", None),
                     )
                 elif job.type == "review":
                     # review 无 yaml/日志产物;run_review 内部落命中 + 打标版本 + 回写报告
