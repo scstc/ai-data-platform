@@ -16,21 +16,17 @@ import {
   Upload,
 } from 'antd';
 import { useCallback, useState } from 'react';
-import {
-  listDatasets,
-  uploadBatchDataset,
-  uploadMediaDataset,
-} from '@/services/data-platform';
+import { listDataLakes, localUploadToLake } from '@/services/data-platform';
 
 const { Text } = Typography;
 const { Dragger } = Upload;
 
 /** 场景数据「文件导入」卡片。
- *  文本/结构化类(cot/qa/preference/timeseries/gis):按示例格式准备一批同格式文件
- *  → POST /api/v1/datasets/upload-batch(携带 semantic_type),后端合并成 data.jsonl
- *  + 登记受管数据集;每类提供可下载示例文件(public/samples/)。
- *  多模态(multimodal):选模态(图像/音频/视频)上传媒体文件
- *  → POST /api/v1/datasets/upload-media,后端建一个 manifest 数据集(自动标记多模态)。 */
+ *  按场景类型提供示例文件(public/samples/) + 格式说明,用户准备好文件后
+ *  归档到数据湖,后续从湖抽取生成数据集。
+ *  - 文本/结构化类(cot/qa/preference/timeseries/gis):jsonl/csv/geojson
+ *  - 多模态(multimodal):图像/音频/视频媒体文件
+ *  后端按扩展名分派 parquet/raw 归档,不再传 semantic_type(语义在抽取时决定)。 */
 
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
 
@@ -133,29 +129,29 @@ const ScenarioImportCard: React.FC<Props> = ({
 }) => {
   const cfg = CONFIG[semanticType];
   const [fileList, setFileList] = useState<UploadFile[]>([]);
-  const [datasetId, setDatasetId] = useState<string>();
-  const [datasetOptions, setDatasetOptions] = useState<
+  const [lakeId, setLakeId] = useState<string>();
+  const [lakeOptions, setLakeOptions] = useState<
     { label: string; value: string }[]
   >([]);
-  const [datasetLoading, setDatasetLoading] = useState(false);
+  const [lakeLoading, setLakeLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [modality, setModality] = useState(
     cfg?.modalities?.[0]?.key ?? 'image',
   );
 
-  // 目标数据集下拉:按关键词拉取已有数据集(数据集优先流程,上传落入其版本)
-  const loadDatasetOptions = useCallback((keyword?: string) => {
-    setDatasetLoading(true);
-    listDatasets({ name: keyword || undefined, pageSize: 50 })
+  // 目标数据湖下拉:按关键词拉取已有数据湖(本地上传入湖归档,后续从湖抽成数据集)
+  const loadLakeOptions = useCallback((keyword?: string) => {
+    setLakeLoading(true);
+    listDataLakes({ name: keyword || undefined, pageSize: 50 })
       .then((res) =>
-        setDatasetOptions(
+        setLakeOptions(
           (res.data ?? []).map((d) => ({ label: d.name, value: d.id })),
         ),
       )
       .catch(() => {
         /* 拉取失败不阻断,留空列表 */
       })
-      .finally(() => setDatasetLoading(false));
+      .finally(() => setLakeLoading(false));
   }, []);
 
   if (!cfg) return null;
@@ -195,34 +191,31 @@ const ScenarioImportCard: React.FC<Props> = ({
       message.warning('请先选择文件');
       return;
     }
-    if (!datasetId) {
-      message.warning('请选择目标数据集');
+    if (!lakeId) {
+      message.warning('请选择目标数据湖');
       return;
     }
     const fd = new FormData();
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
-    fd.append('datasetId', datasetId);
-    if (cfg.media) {
-      fd.append('data_type', modality); // image / audio / video
-    } else {
-      fd.append('semantic_type', semanticType);
-    }
 
     setSubmitting(true);
-    const hide = message.loading('正在上传并落入数据集…', 0);
+    const hide = message.loading('正在归档到数据湖…', 0);
     try {
-      const res = cfg.media
-        ? await uploadMediaDataset(fd)
-        : await uploadBatchDataset(fd);
+      const res = await localUploadToLake(lakeId, fd, {
+        skipErrorHandler: true,
+      });
       hide();
-      message.success(`已上传并落入数据集「${res.data?.name ?? cfg.label}」`);
+      message.success(
+        `已归档 ${res.data?.snapshots?.length ?? 0} 个${cfg.label}快照,可到数据湖抽取生成数据集`,
+      );
       setFileList([]);
-      history.push(`/datasets/detail?id=${datasetId}`);
+      history.push(`/data-lakes/${lakeId}`);
     } catch (e: any) {
       hide();
-      message.error(e?.data?.message ?? e?.message ?? '上传失败,请重试');
+      const body = e?.response?.data ?? e?.data;
+      message.error(body?.message ?? e?.message ?? '归档失败,请重试');
     } finally {
       setSubmitting(false);
     }
@@ -238,25 +231,25 @@ const ScenarioImportCard: React.FC<Props> = ({
           文件导入 · {cfg.label}
         </span>
       }
-      extra={<Tag color="blue">上传即落入数据集</Tag>}
+      extra={<Tag color="blue">归档到数据湖</Tag>}
     >
       <div style={{ marginBottom: 12 }}>
         <Text strong>
-          目标数据集 <Text type="danger">*</Text>
+          目标数据湖 <Text type="danger">*</Text>
         </Text>
         <Select
           style={{ width: '100%', marginTop: 8 }}
-          placeholder="选择已有数据集(上传的文件将落入其版本)"
-          value={datasetId}
-          onChange={setDatasetId}
+          placeholder="选择已有数据湖(文件归档后可抽取生成数据集)"
+          value={lakeId}
+          onChange={setLakeId}
           showSearch
           allowClear
           filterOption={false}
-          onSearch={(kw) => loadDatasetOptions(kw)}
-          onFocus={() => loadDatasetOptions()}
-          options={datasetOptions}
+          onSearch={(kw) => loadLakeOptions(kw)}
+          onFocus={() => loadLakeOptions()}
+          options={lakeOptions}
           notFoundContent={
-            datasetLoading ? '加载中…' : '无匹配数据集,请先到「数据集」页新建'
+            lakeLoading ? '加载中…' : '无匹配数据湖,请先到「数据湖」页新建'
           }
         />
       </div>
@@ -285,7 +278,7 @@ const ScenarioImportCard: React.FC<Props> = ({
               data-testid="scenario-modality"
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              选择模态后上传,一批合并为一个 manifest 数据集(自动标记多模态)。
+              选择模态后上传,一文件一快照归档到数据湖(后续可抽取生成数据集)。
             </Text>
           </>
         ) : (
@@ -324,8 +317,7 @@ const ScenarioImportCard: React.FC<Props> = ({
             : `点击或拖拽 ${formatList.map((f) => `.${f}`).join(' / ')} 文件到此处导入`}
         </p>
         <p className="ant-upload-hint">
-          {cfg.label}数据,单文件最大 200MB;多文件合并生成一个数据集,原件存入内置
-          MinIO。
+          {cfg.label}数据,单文件最大 200MB;归档到数据湖后可到数据湖详情页抽取生成数据集。
         </p>
       </Dragger>
       <Button
@@ -333,11 +325,11 @@ const ScenarioImportCard: React.FC<Props> = ({
         icon={<CloudUploadOutlined />}
         style={{ marginTop: 16 }}
         loading={submitting}
-        disabled={fileList.length === 0 || !datasetId}
+        disabled={fileList.length === 0 || !lakeId}
         onClick={onSubmit}
         data-testid={`scenario-import-submit-${semanticType}`}
       >
-        上传并生成数据集（{fileList.length}）
+        上传并归档到数据湖（{fileList.length}）
       </Button>
     </Card>
   );
