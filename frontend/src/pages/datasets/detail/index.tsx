@@ -344,19 +344,23 @@ const DatasetDetail: React.FC = () => {
           </Space>
         }
         extra={
-          <a onClick={() => { setEditingVersion(v); setEditVersionOpen(true); }}>
+          <a
+            onClick={() => {
+              setEditingVersion(v);
+              setEditVersionOpen(true);
+            }}
+          >
             编辑
           </a>
         }
       >
         <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
-          <Descriptions.Item label="行数">{v.rows ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="大小">{fmtSize(v.size)}</Descriptions.Item>
-          {v.trainType && (
-            <Descriptions.Item label="训练用途">
-              <TrainTypeTag type={v.trainType} />
-            </Descriptions.Item>
-          )}
+          <Descriptions.Item label="训练用途">
+            <TrainTypeTag type={v.trainType} />
+          </Descriptions.Item>
+          <Descriptions.Item label="说明">
+            {v.note ?? '-'}
+          </Descriptions.Item>
           {v.schemaVariant && (
             <Descriptions.Item label="Schema 变体">
               <Tag color="cyan">{v.schemaVariant}</Tag>
@@ -850,7 +854,12 @@ const DatasetDetail: React.FC = () => {
           trainType: editingVersion?.trainType ?? undefined,
           note: editingVersion?.note ?? undefined,
         }}
-        onOpenChange={(o) => { if (!o) { setEditVersionOpen(false); setEditingVersion(undefined); } }}
+        onOpenChange={(o) => {
+          if (!o) {
+            setEditVersionOpen(false);
+            setEditingVersion(undefined);
+          }
+        }}
         onFinish={async (values) => {
           if (!editingVersion) return false;
           try {

@@ -309,11 +309,20 @@ const DatasetsPresets: React.FC = () => {
               <Col xs={24} md={16} lg={17}>
                 {activeVer ? (
                   <div>
-                    <Flex justify="space-between" align="center" style={{ marginBottom: 12 }}>
+                    <Flex
+                      justify="space-between"
+                      align="center"
+                      style={{ marginBottom: 12 }}
+                    >
                       <Typography.Title level={5} style={{ margin: 0 }}>
                         {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
                       </Typography.Title>
-                      <a onClick={() => { setEditingVersion(activeVer); setEditVersionOpen(true); }}>
+                      <a
+                        onClick={() => {
+                          setEditingVersion(activeVer);
+                          setEditVersionOpen(true);
+                        }}
+                      >
                         编辑
                       </a>
                     </Flex>
@@ -322,17 +331,17 @@ const DatasetsPresets: React.FC = () => {
                       column={{ xs: 1, sm: 2 }}
                       bordered
                     >
+                      <Descriptions.Item label="训练用途">
+                        <TrainTypeTag type={activeVer.trainType} />
+                      </Descriptions.Item>
+                      <Descriptions.Item label="说明" span={2}>
+                        {activeVer.note ?? '-'}
+                      </Descriptions.Item>
                       <Descriptions.Item label="版本号">
                         {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
                       </Descriptions.Item>
                       <Descriptions.Item label="格式">
                         <Tag>{(activeVer.format ?? '-').toUpperCase()}</Tag>
-                      </Descriptions.Item>
-                      <Descriptions.Item label="行数">
-                        {activeVer.rows ?? '-'}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="大小">
-                        {fmtSize(activeVer.size)}
                       </Descriptions.Item>
                       <Descriptions.Item label="来源">
                         <Tag
@@ -356,11 +365,6 @@ const DatasetsPresets: React.FC = () => {
                           </Tag>
                         </Tooltip>
                       </Descriptions.Item>
-                      {activeVer.trainType && (
-                        <Descriptions.Item label="训练用途">
-                          <TrainTypeTag type={activeVer.trainType} />
-                        </Descriptions.Item>
-                      )}
                       {activeVer.schemaVariant && (
                         <Descriptions.Item label="Schema 变体">
                           <Tag color="cyan">{activeVer.schemaVariant}</Tag>
@@ -369,11 +373,6 @@ const DatasetsPresets: React.FC = () => {
                       <Descriptions.Item label="发布时间">
                         {formatDateTime(activeVer.publishedAt)}
                       </Descriptions.Item>
-                      {activeVer.note && (
-                        <Descriptions.Item label="说明" span={2}>
-                          {activeVer.note}
-                        </Descriptions.Item>
-                      )}
                     </Descriptions>
                   </div>
                 ) : (
