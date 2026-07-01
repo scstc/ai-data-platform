@@ -2048,3 +2048,105 @@ export async function getExportReport(
     { method: 'GET', ...(options || {}) },
   );
 }
+
+// ============================================================================
+// 数据湖(ODS 原始数据层)—— 湖集分离架构:所有外部数据源的统一入口
+// 见 docs/数据治理.md / docs/data-lake-implementation.md
+// ============================================================================
+
+/** 数据湖列表(分页 + 名称模糊)GET /api/v1/data-lakes */
+export async function listDataLakes(
+  params: {
+    page?: number;
+    pageSize?: number;
+    name?: string;
+  } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.DataLake[];
+    total: number;
+    success: boolean;
+  }>('/api/v1/data-lakes', {
+    method: 'GET',
+    params,
+    ...(options || {}),
+  });
+}
+
+/** 创建数据湖(admin)POST /api/v1/data-lakes */
+export async function createDataLake(
+  body: DataPlatform.DataLakeCreate,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.DataLake>('/api/v1/data-lakes', {
+    method: 'POST',
+    data: body,
+    headers: { 'Content-Type': 'application/json' },
+    ...(options || {}),
+  });
+}
+
+/** 数据湖详情(含快照列表)GET /api/v1/data-lakes/:lakeId */
+export async function getDataLakeDetail(
+  lakeId: string,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.DataLakeDetail>(
+    `/api/v1/data-lakes/${lakeId}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 更新数据湖元数据(admin)PATCH /api/v1/data-lakes/:lakeId */
+export async function updateDataLake(
+  lakeId: string,
+  body: DataPlatform.DataLakeUpdate,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.DataLake>(`/api/v1/data-lakes/${lakeId}`, {
+    method: 'PATCH',
+    data: body,
+    headers: { 'Content-Type': 'application/json' },
+    ...(options || {}),
+  });
+}
+
+/** 删除数据湖(admin,物理文件保留)DELETE /api/v1/data-lakes/:lakeId */
+export async function deleteDataLake(
+  lakeId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(`/api/v1/data-lakes/${lakeId}`, {
+    method: 'DELETE',
+    ...(options || {}),
+  });
+}
+
+/** 快照列表(数据湖内,按创建时间倒序)GET /api/v1/data-lakes/:lakeId/snapshots */
+export async function listLakeSnapshots(
+  lakeId: string,
+  params: { page?: number; pageSize?: number } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.DataLakeSnapshot[];
+    total: number;
+    success: boolean;
+  }>(`/api/v1/data-lakes/${lakeId}/snapshots`, {
+    method: 'GET',
+    params,
+    ...(options || {}),
+  });
+}
+
+/** 快照详情 GET /api/v1/data-lake-snapshots/:snapshotId */
+export async function getLakeSnapshot(
+  snapshotId: string,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.DataLakeSnapshot>(
+    `/api/v1/data-lake-snapshots/${snapshotId}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}

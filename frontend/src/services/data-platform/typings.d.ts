@@ -1302,4 +1302,80 @@ declare namespace DataPlatform {
     createdAt: string;
     readAt: string | null;
   };
+
+  // ==========================================================================
+  // 数据湖(ODS 原始数据层)
+  // ==========================================================================
+
+  /** 数据类型(快照的数据形态):database/document/image/audio/video/text */
+  type DataLakeDataCategory =
+    | 'database'
+    | 'document'
+    | 'image'
+    | 'audio'
+    | 'video'
+    | 'text';
+
+  /** 上传渠道:oss/obs/minio/api/local/database */
+  type DataLakeUploadChannel =
+    | 'oss'
+    | 'obs'
+    | 'minio'
+    | 'api'
+    | 'local'
+    | 'database';
+
+  /** 数据湖读模型(多源汇聚容器,不绑定类型)
+   *
+   * 类型和来源属于每一次接入(快照层),不属于湖本身:同一个湖可以有 MySQL 快照
+   * + OSS 快照 + PDF 快照并存。见 docs/数据治理.md §2.1。
+   */
+  interface DataLake {
+    id: string;
+    name: string;
+    description: string | null;
+    owner: string;
+    creator: string;
+    deptId: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }
+
+  /** 数据湖快照(不可变版本归档,承载类型/来源语义) */
+  interface DataLakeSnapshot {
+    id: string;
+    lakeId: string;
+    /** source_v年月日_批次_类型,如 source_v20260701_01_mysql */
+    sourceVersion: string;
+    /** s3://bucket/data-lake/lake-xxx/source_vXXX/data.parquet */
+    storageUri: string;
+    /** parquet | pdf | docx | png | mp4 等 */
+    storageFormat: string;
+    dataCategory: DataLakeDataCategory;
+    uploadChannel: DataLakeUploadChannel;
+    /** 本次接入的数据源(本地上传/API 推送为空) */
+    datasourceId: string | null;
+    sourceMetadata: Record<string, unknown> | null;
+    rows: number | null;
+    size: number | null;
+    ingestTaskId: string | null;
+    createdAt: string;
+  }
+
+  /** 数据湖详情(元信息 + 快照列表) */
+  interface DataLakeDetail extends DataLake {
+    snapshots: DataLakeSnapshot[];
+  }
+
+  /** 创建数据湖入参(湖=纯容器) */
+  interface DataLakeCreate {
+    name: string;
+    description?: string | null;
+  }
+
+  /** 更新数据湖入参 */
+  interface DataLakeUpdate {
+    name?: string | null;
+    description?: string | null;
+  }
 }

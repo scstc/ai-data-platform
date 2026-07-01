@@ -695,6 +695,24 @@ async def ensure_upload_bucket() -> None:
     await asyncio.to_thread(_ensure)
 
 
+async def ensure_lake_bucket() -> None:
+    """启动时确保数据湖专用桶存在(best-effort,由调用方吞异常)。
+
+    数据湖使用独立桶 `storage_minio_lake_bucket`(默认 adp-data-lake),与
+    upload 桶物理隔离。见 docs/数据治理.md §2.1、data-lake.py 模块注释。
+    未配置 MinIO → 直接跳过;已配置且桶不存在 → 创建;存在 → 幂等跳过。
+    """
+    cfg = platform_config()
+    bucket = settings.storage_minio_lake_bucket
+    client = client_for(cfg)
+
+    def _ensure() -> None:
+        if not client.bucket_exists(bucket):
+            client.make_bucket(bucket)
+
+    await asyncio.to_thread(_ensure)
+
+
 async def upload_jsonl_to_uploads(
     dataset_id: str, version_no: int, jsonl_bytes: bytes
 ) -> str:

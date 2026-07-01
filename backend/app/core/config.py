@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     storage_minio_secret_key: str | None = None
     # 媒体批量接入(manifest 数据集)上传成员/清单的目标桶(平台自有,可删可回收)
     storage_minio_upload_bucket: str = "uploads"
+    # 数据湖专用桶(ODS 原始数据归档,见 docs/数据治理.md §2.1)。
+    # 与 upload 桶物理隔离:数据湖=原始不可变,upload 桶=加工产物可回收;
+    # 生产环境可给数据湖桶独立配额、生命周期、备份策略。
+    storage_minio_lake_bucket: str = "adp-data-lake"
 
     # 上传文件落盘目录
     upload_dir: str = (

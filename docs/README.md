@@ -23,6 +23,10 @@
 | `poc-hardware-sizing-b.md` | POC 硬件资源清单(档位 B):部署拓扑 + 16C/64G/1TB NVMe/1× 24G GPU 推荐配置 + 云规格对照(2026-06-30) |
 | `training-dataset-format-spec.md` | 训练数据集格式规范:数据治理平台→训练/推理平台的格式契约;8 种训练方式各自的数据集 schema(预训练`text`/SFT`messages`/DPO`prompt,chosen,rejected`/评估`prompt,response`≥300条等)、**蒸馏区分**(模型蒸馏=训练方式 vs 数据蒸馏=Selector选子集/Mapper合成)、**多模态变体**(图文/音频/视频走 `images/audios/videos` 路径+`<image>`占位符,媒体存OBS不嵌入)、数据集元数据(train_type 过滤)、数据集构造层(原始列→训练字段,当前缺口)、交付三件套、优先级建议(P0:SFT+评估);承接 `data-governance-flow.md` 下游(2026-06-30) |
 | `data-governance-remediation-plan.md` | **数据治理系统整改方案**:依据上述三份目标文档对当前系统(后端/前端 + data-juicer fork)做逐文件核实的差距分析(6+1 路并行代码调研 + 核心模块亲读交叉验证);含已实现能力基线、**文档勘误**(DJ 算子真实性核实:`columns_selector`/`obs_*_file_mapper`/`python_lambda_filter` 等不存在,`_detect_pdf_type`/OCR/去格式为未实现示意代码)、19 项差距清单(P0:train_type 元数据/构造层/SFT messages/评估≥300+裁判员;P1:Ray接线/交付三件套/proprietary签名bug)、分 5 阶段整改路线 + 排期/风险/验证(2026-06-30) |
+| `数据治理.md` | 数据治理 PRD:多源统一数据湖+标准化算子加工流水线的四层架构(ODS原始层/抽取解析层/DJ加工层/成品数据集层),湖集分离设计,双版本机制(source_v/dataset_v),血缘字段规范,全品类 JSONL 格式定义 |
+| `data-lake-implementation.md` | 数据湖 ODS 层实现说明:数据模型(DataLake/DataLakeSnapshot)、迁移(0036)、服务层(入湖/抽取/血缘注入)、API 端点(7 个)、使用示例;第一阶段完成,支持结构化 Parquet + 文档/多媒体原格式入湖(2026-07-01) |
+| `data-lake-migration-guide.md` | 数据湖改造指南:从现有 `run_pg_ingest` 直接落集流程迁移到"数据源→数据湖→数据集"湖集分离链路,含 Connector 改造步骤、灰度策略(via_lake 开关)、血缘追踪验证、性能影响评估、故障排查(2026-07-01) |
+| `data-lake-summary.md` | 数据湖实现总结:第一阶段成果清单(11 个文件)、核心特性(版本号规范/血缘追踪/湖集分离)、验证状态(12/12 单测通过)、性能指标、下一步(第二层抽取解析/第三层 DJ 集成)(2026-07-01) |
 
 ## 项目级文档(根目录)
 

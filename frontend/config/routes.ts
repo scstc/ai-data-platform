@@ -158,6 +158,27 @@ export default [
       { path: '/ingest/files', name: 'files', component: './files' },
     ],
   },
+  // ①.5 数据湖(ODS 原始数据层 · 湖集分离架构 · 见 docs/数据治理.md)
+  // 数据湖是所有外部数据源的统一入口,原样归档、版本固化、血缘追踪
+  {
+    path: '/data-lakes',
+    name: 'data-lakes',
+    icon: 'cluster',
+    routes: [
+      { path: '/data-lakes', redirect: '/data-lakes/list' },
+      {
+        path: '/data-lakes/list',
+        name: 'list',
+        component: './data-lakes',
+      },
+      {
+        path: '/data-lakes/:id',
+        name: 'detail',
+        hideInMenu: true,
+        component: './data-lakes/detail',
+      },
+    ],
+  },
   // ② 数据集仓库(原始数据湖 · 草稿版本 + 发布门 + 算法工程师消费)
   {
     path: '/datasets',

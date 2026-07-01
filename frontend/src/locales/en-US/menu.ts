@@ -52,6 +52,9 @@ export default {
   'menu.chatbot': 'AI Assistant',
   // Data-engineering pipeline menu (top→bottom = pipeline order)
   'menu.ingest': 'Data Ingestion',
+  'menu.data-lakes': 'Data Lake',
+  'menu.data-lakes.list': 'Lake List',
+  'menu.data-lakes.detail': 'Lake Detail',
   'menu.ingest.datasources': 'Data Sources',
   'menu.ingest.tasks': 'Ingestion Tasks',
   'menu.ingest.access': 'Data Access',

@@ -17,6 +17,7 @@ from app.api.v1 import (
     categories,
     construct,
     content_safety,
+    data_lakes,
     data_tasks,
     datasets,
     datasources,
@@ -62,13 +63,17 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             await refresh_cache(session)
     except Exception:  # noqa: BLE001
         _logger.warning("启动时刷新 LLM 配置缓存失败（已忽略）", exc_info=True)
-    # best-effort:确保平台上传桶存在(未配置 MinIO 时静默跳过)
+    # best-effort:确保平台上传桶 + 数据湖桶存在(未配置 MinIO 时静默跳过)
     try:
-        from app.services.external_store import ensure_upload_bucket
+        from app.services.external_store import (
+            ensure_lake_bucket,
+            ensure_upload_bucket,
+        )
 
         await ensure_upload_bucket()
+        await ensure_lake_bucket()
     except Exception:  # noqa: BLE001
-        _logger.warning("启动时确保平台上传桶失败（已忽略）", exc_info=True)
+        _logger.warning("启动时确保平台 MinIO 桶失败（已忽略）", exc_info=True)
 
     # 调度器(切片 C):scheduler_enabled=False 时跳过;启动 / 对账失败仅告警,
     # 不阻断 app 启动——采集主流程不依赖调度器在线(可手工触发)。
@@ -113,6 +118,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(datasources.router, prefix="/api/v1")
+    app.include_router(data_lakes.router, prefix="/api/v1")
     app.include_router(datasets.router, prefix="/api/v1")
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(data_tasks.router, prefix="/api/v1")
