@@ -1,3 +1,4 @@
+import { UploadOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useModel } from '@umijs/max';
 import {
@@ -342,6 +343,12 @@ const Market: React.FC = () => {
                     setCurrent(1);
                   }}
                 />
+                <Button
+                  icon={<UploadOutlined />}
+                  onClick={() => history.push('/operators/upload')}
+                >
+                  上传自定义算子
+                </Button>
               </Space>
             </Space>
 
@@ -405,6 +412,7 @@ const Market: React.FC = () => {
                           <Text strong ellipsis style={{ flex: 1 }}>
                             {op.zhLabel}
                           </Text>
+                          {op.isCustom && <Tag color="purple">自定义</Tag>}
                         </div>
                         <Text
                           type="secondary"

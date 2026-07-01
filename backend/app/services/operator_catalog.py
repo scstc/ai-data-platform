@@ -65,12 +65,20 @@ def _operator_to_dict(op: Operator) -> dict[str, Any]:
         "recommend": op.recommend,
         "runnable": op.runnable,
         "usage_count": op.usage_count,
+        "is_custom": op.is_custom,
+        "source_object_key": op.source_object_key,
+        "created_by": op.created_by,
     }
 
 
 def all_operators() -> list[dict[str, Any]]:
     """获取全部算子（从缓存）。"""
     return _load_all_operators()
+
+
+def refresh_cache() -> None:
+    """失效算子目录缓存(自定义算子上传/删除后调用,下次查询即时可见)。"""
+    _load_all_operators.cache_clear()
 
 
 def get_operator(name: str) -> dict[str, Any] | None:
@@ -305,6 +313,8 @@ _OP_KEY_MAP = {
     "zh_usage_tip": "zhUsageTip",
     "detail_page": "detailPage",
     "effect_demo": "effectDemo",
+    "is_custom": "isCustom",
+    "created_by": "createdBy",
 }
 _META_KEY_MAP = {
     "with_detail_page": "withDetailPage",
@@ -332,8 +342,12 @@ _CATEGORY_LABEL = {
 
 
 def _derive_tags(op: dict[str, Any]) -> list[str]:
-    """标签:场景分组 + 类别中文,去空去重(保序)。"""
-    cands = [op.get("scenario_group"), _CATEGORY_LABEL.get(op.get("category", ""))]
+    """标签:场景分组 + 类别中文 + 自定义标记,去空去重(保序)。"""
+    cands = [
+        "自定义算子" if op.get("is_custom") else None,
+        op.get("scenario_group"),
+        _CATEGORY_LABEL.get(op.get("category", "")),
+    ]
     seen: dict[str, None] = {}
     for t in cands:
         if t:
@@ -349,7 +363,7 @@ def to_api(op: dict[str, Any]) -> dict[str, Any]:
     distillation/make/augment)归属由独立 ``bucket`` 查询参数 + ``_BUCKET_SETS``
     表达,与场景维度解耦。
     """
-    out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items()}
+    out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items() if k != "source_object_key"}
     # 市场/编辑器口径:只看环境能力(media_ok=True),不预判数据集格式——
     # 媒体算子按环境(GPU/LLM/...)判 ready,数据集适配留到提交期 runnable_reason。
     out["runnable"] = effective_runnable(op, media_ok=True)

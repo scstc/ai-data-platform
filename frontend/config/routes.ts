@@ -51,6 +51,13 @@ export default [
     icon: 'block',
     component: './processing/market',
   },
+  // 上传自定义算子(独立页,须声明在 /operators/:name 之前,否则被当成 name 命中详情路由)
+  {
+    path: '/operators/upload',
+    name: 'operators-upload',
+    component: './processing/market/upload',
+    hideInMenu: true,
+  },
   // 算子详情(从市场卡片进入,不进左侧菜单)
   {
     path: '/operators/:name',

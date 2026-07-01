@@ -77,6 +77,17 @@ class Operator(Base):
     # 使用次数统计（由 job 提交时更新）
     usage_count: Mapped[int] = mapped_column(default=0, nullable=False)
 
+    # 是否用户自定义上传（False=data-juicer 内置快照）
+    is_custom: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    # 自定义算子源码相对路径(相对 UPLOAD_DIR/custom_operators/);内置算子为空
+    source_object_key: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
+
+    # 上传者 username；内置算子为空
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

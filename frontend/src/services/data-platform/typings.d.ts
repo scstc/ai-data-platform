@@ -297,6 +297,10 @@ declare namespace DataPlatform {
     tags?: string[];
     /** 效果展示:处理前/处理后样例(仅部分算子有,无则不展示) */
     effectDemo?: { before: string; after: string }[];
+    /** 是否用户自定义上传(false/空=data-juicer 内置) */
+    isCustom?: boolean;
+    /** 自定义算子上传者 username;内置算子为空 */
+    createdBy?: string | null;
   };
 
   /** 当前环境探测到的执行能力(决定 GPU/LLM/vLLM/Ray 类算子是否可运行) */

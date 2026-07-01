@@ -1417,6 +1417,28 @@ export async function getOperatorDetail(
   );
 }
 
+/** 算子市场:上传自定义算子(.py 源码,静态校验后注册) POST /api/v1/operators/custom */
+export async function uploadCustomOperator(
+  formData: FormData,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.CatalogOperator; success: boolean }>(
+    '/api/v1/operators/custom',
+    { method: 'POST', data: formData, ...(options || {}) },
+  );
+}
+
+/** 算子市场:删除自定义算子 DELETE /api/v1/operators/custom/{name} */
+export async function deleteCustomOperator(
+  name: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(`/api/v1/operators/custom/${name}`, {
+    method: 'DELETE',
+    ...(options || {}),
+  });
+}
+
 /** 内容安全:新建并执行审核任务 POST /api/v1/content-safety/jobs */
 export async function createReviewJob(
   body: DataPlatform.ReviewJobCreate,
