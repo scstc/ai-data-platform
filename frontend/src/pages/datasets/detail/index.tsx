@@ -34,6 +34,7 @@ import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { VersionFilePreview } from '@/components';
 import {
+  createDatasetVersion,
   exportVersionToS3,
   getDataset,
   listBuckets,
@@ -107,6 +108,7 @@ const DatasetDetail: React.FC = () => {
   // 导出到 S3:记录当前要导出的版本(打开 ModalForm)
   const [exportVersion, setExportVersion] =
     useState<DataPlatform.DatasetVersion>();
+  const [creatingVersion, setCreatingVersion] = useState(false);
 
   // 切换当前查看的版本;文件清单 + 按文件预览由 VersionFilePreview 按 versionId 自管
   const loadPreview = useCallback((versionId: string) => {
@@ -155,6 +157,21 @@ const DatasetDetail: React.FC = () => {
     const res = await getDataset(id);
     if (res?.success) setDetail(res.data);
   }, [id]);
+
+  const handleCreateVersion = async () => {
+    if (!id) return;
+    setCreatingVersion(true);
+    try {
+      const res = await createDatasetVersion(id);
+      message.success('已新建版本');
+      await reloadDetail();
+      if (res?.data?.id) await loadPreview(res.data.id);
+    } catch {
+      message.error('新建版本失败，请重试');
+    } finally {
+      setCreatingVersion(false);
+    }
+  };
 
   const handlePublish = async (versionId: string) => {
     try {
@@ -530,9 +547,24 @@ const DatasetDetail: React.FC = () => {
               ]}
             />
 
-            <Typography.Title level={5} style={{ marginTop: 16 }}>
-              版本（{detail.versions.length}）
-            </Typography.Title>
+            <Flex
+              justify="space-between"
+              align="center"
+              style={{ marginTop: 16 }}
+            >
+              <Typography.Title level={5} style={{ margin: 0 }}>
+                版本（{detail.versions.length}）
+              </Typography.Title>
+              {(detail.myLevel === 'edit' || detail.myLevel === 'admin') && (
+                <Button
+                  size="small"
+                  loading={creatingVersion}
+                  onClick={handleCreateVersion}
+                >
+                  新建版本
+                </Button>
+              )}
+            </Flex>
             <Row gutter={16}>
               <Col xs={24} md={9} lg={7}>
                 <List<DataPlatform.DatasetVersion>
@@ -611,6 +643,11 @@ const DatasetDetail: React.FC = () => {
             <VersionFilePreview
               versionId={activeVersion}
               semanticType={detail?.semanticType}
+              editable={
+                activeVer?.publishStatus === 'draft' &&
+                (detail?.myLevel === 'edit' || detail?.myLevel === 'admin')
+              }
+              onDeleted={load}
             />
           </>
         )}

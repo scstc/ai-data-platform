@@ -95,6 +95,11 @@ const FilesPage: React.FC = () => {
   // 数据集 id→名称映射:uploads 桶的顶层文件夹是数据集 id(dset-xxx),
   // 用名称关联让用户看懂文件夹对应哪个数据集
   const [datasetNames, setDatasetNames] = useState<Record<string, string>>({});
+  // 数据集 id→创建时间:S3 目录前缀本身无时间戳,根目录下的文件夹排序借数据集的
+  // createdAt 实现「最新创建的排最前」
+  const [datasetCreatedAt, setDatasetCreatedAt] = useState<
+    Record<string, string>
+  >({});
   // 当前目录关键字过滤(纯前端,按文件夹/文件名 + 数据集名匹配)
   const [keyword, setKeyword] = useState('');
 
@@ -126,14 +131,21 @@ const FilesPage: React.FC = () => {
     (async () => {
       try {
         const map: Record<string, string> = {};
+        const createdMap: Record<string, string> = {};
         for (let current = 1; current <= MAX_PAGES; current += 1) {
           const res = await listDatasets({ current, pageSize: PAGE });
-          for (const d of res.data ?? []) map[d.id] = d.name;
+          for (const d of res.data ?? []) {
+            map[d.id] = d.name;
+            createdMap[d.id] = d.createdAt;
+          }
           const got = res.data?.length ?? 0;
           if (got < PAGE || Object.keys(map).length >= (res.total ?? Infinity))
             break;
         }
-        if (!cancelled) setDatasetNames(map);
+        if (!cancelled) {
+          setDatasetNames(map);
+          setDatasetCreatedAt(createdMap);
+        }
       } catch {
         // 静默:名称映射失败不影响浏览
       }
@@ -488,13 +500,25 @@ const FilesPage: React.FC = () => {
         request={async () => {
           if (!bucket) return { data: [], success: true };
           const res = await listFiles({ bucket, prefix });
+          // 根目录下的文件夹 = 数据集 id,借数据集 createdAt 排序(S3 目录前缀本身
+          // 无时间戳);非根目录(如某数据集内的 v1/v2/originals)按名称保持原序。
+          const folders = [...(res.data.folders ?? [])];
+          if (!prefix) {
+            folders.sort(
+              (a, b) =>
+                new Date(datasetCreatedAt[b] ?? 0).getTime() -
+                new Date(datasetCreatedAt[a] ?? 0).getTime(),
+            );
+          }
+          // 文件按 lastModified 降序,最新上传的排最前。
+          const files = [...(res.data.files ?? [])].sort(
+            (a, b) =>
+              new Date(b.lastModified ?? 0).getTime() -
+              new Date(a.lastModified ?? 0).getTime(),
+          );
           const rows: Row[] = [
-            ...(res.data.folders ?? []).map(
-              (name) => ({ kind: 'folder', name }) as Row,
-            ),
-            ...(res.data.files ?? []).map(
-              (entry) => ({ kind: 'file', entry }) as Row,
-            ),
+            ...folders.map((name) => ({ kind: 'folder', name }) as Row),
+            ...files.map((entry) => ({ kind: 'file', entry }) as Row),
           ];
           return { data: rows, success: res.success };
         }}

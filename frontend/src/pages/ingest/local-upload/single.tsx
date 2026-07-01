@@ -197,6 +197,7 @@ const SingleUploadPage: React.FC = () => {
     });
     fd.append('datasetId', datasetId);
     fd.append('safety_check', 'false');
+    fd.append('raw', 'true');
 
     setSubmitting(true);
     const hide = message.loading('正在上传并落入数据集…', 0);
@@ -225,7 +226,7 @@ const SingleUploadPage: React.FC = () => {
         { title: '单一数据' },
       ])}
       title="单一数据接入"
-      content="批量上传文件:原始文件存入内置 MinIO,并合并解析生成一个 jsonl 数据集。"
+      content="批量上传文件:原始文件原样存入内置 MinIO,不做内容解析,合并生成一个数据集。"
       onBack={() => history.push('/ingest/local-upload')}
     >
       <Card style={{ maxWidth: 760 }}>

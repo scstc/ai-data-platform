@@ -26,6 +26,7 @@ from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
+from app.core.ids import uuid7_hex
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
@@ -79,6 +80,7 @@ from app.services.landing import (
     ParseError,
     UnsupportedFormatError,
     _safe_table_name,
+    add_raw_batch,
     add_table_member,
     create_dataset,
     land_upload,
@@ -117,6 +119,7 @@ DescForm = Annotated[str | None, Form()]
 CategoryIdForm = Annotated[str | None, Form(alias="categoryId")]
 SafetyCheckForm = Annotated[bool, Form(alias="safety_check")]
 SafetyUseLlmForm = Annotated[bool, Form(alias="safety_use_llm")]
+RawStoreForm = Annotated[bool, Form(alias="raw")]
 CreatedStartQuery = Annotated[datetime | None, Query(alias="createdStart")]
 CreatedEndQuery = Annotated[datetime | None, Query(alias="createdEnd")]
 
@@ -627,6 +630,7 @@ async def upload_batch_as_dataset(
     table_name: Annotated[str | None, Form(alias="tableName")] = None,
     safety_check: SafetyCheckForm = True,
     safety_use_llm: SafetyUseLlmForm = False,
+    raw: RawStoreForm = False,
 ) -> JSONResponse:
     """单一格式批量本地上传(数据集优先):一批同格式文件 → 原件留存 + 合并解析为
     一个表成员,落进所选数据集的 draft 版本。
@@ -634,6 +638,11 @@ async def upload_batch_as_dataset(
     必选 `datasetId`(缺失 422、不存在 404、无写权 403)。可选 `tableName`(默认
     由首个文件名派生)。原件逐个存 uploads/<id>/originals/;合并 jsonl 作为该
     版本一个成员(table_name)。
+
+    `raw=true`("单一数据"页):纯文件存储,不对内容做任何解析/提取——表成员只记
+    文件名/格式/大小/对象 key 这类元信息,不生成正文记录。供"场景数据"(COT/
+    问答对/偏好/时序/GIS)复用同一接口时不受影响,那几种场景从不传 raw,仍走
+    `normalize_to_records` 解析出真实结构化字段。
     """
     # 语义类型合法性(可选;与 data_type 正交,非法值 422)
     try:
@@ -694,12 +703,13 @@ async def upload_batch_as_dataset(
         )
 
     bucket = settings.storage_minio_upload_bucket
-    # 数据集已存在(数据集优先);本批原件归到独立子前缀,失败仅回收本批,绝不动
-    # 该数据集已有的其它成员/版本对象。
-    batch_token = secrets.token_hex(3)
-    orig_prefix = f"{dataset_id}/originals/{batch_token}/"
+    # 数据集已存在(数据集优先);原件直接落数据集根下的 originals/,与其它批次
+    # 共享该前缀。失败回收按本批已上传的 key 逐个删,不按前缀删,绝不误删其它
+    # 批次已存的原件。
+    orig_prefix = f"{dataset_id}/originals/"
     eff_table = _safe_table_name(table_name or (files[0].filename or "data"))
-    # 任一步失败(体积/解析/对象写入/落库)都回收本批原件前缀,绝不留孤儿对象
+    uploaded_keys: list[str] = []
+    # 任一步失败(体积/解析/对象写入/落库)都回收本批已上传的原件,绝不留孤儿对象
     try:
         all_records: list[dict] = []
         total_size = 0
@@ -717,76 +727,95 @@ async def upload_batch_as_dataset(
                 cfg, bucket, orig_key, io.BytesIO(content), len(content),
                 content_type=f.content_type or "application/octet-stream",
             )
-            all_records.extend(normalize_to_records(content, fmt))
+            uploaded_keys.append(orig_key)
+            if not raw:
+                all_records.extend(normalize_to_records(content, fmt))
 
-        # 语义维度(与 data_type 正交):显式→归一+校验(非严格只计数)。
-        # data_type 归数据集级(建集时已定),批量上传不再单独传。
-        explicit = coerce_semantic_type(semantic_type)
-        if explicit is not None:
-            all_records, _report = apply_semantic_spec(
-                all_records, explicit, strict=False
+        if raw:
+            # 纯上传:不解析内容、不造表成员——版本直接登记这批文件的计数/体积,
+            # 交给 _members_of 的 originals/ 枚举兜底,如实列出每个原件的真实格式。
+            version = await add_raw_batch(
+                session,
+                dataset_id,
+                file_count=len(files),
+                total_size=total_size,
+                bucket=bucket,
+                prefix=orig_prefix,
+                note=(
+                    f"批量上传原始文件(不解析内容):{len(files)} 个文件"
+                    f"(原件存 {orig_prefix})"
+                ),
             )
-
-        # 内容安全前置预检(#4):数据集落库前对全量解析文本跑审核,违规则回滚 + 回收
-        # MinIO 原件,绝不创建脏数据集。默认敏感词 + PII(秒级),LLM 可选(默认关)。
-        # 拦截口径:高危命中 或 违规占比 ≥ _BLOCK_RATIO(见 review.precheck_records)。
-        if safety_check:
-            pre_cfg = {
-                "useFlaggedWords": True,
-                "usePii": True,
-                "useLlm": safety_use_llm,
-                "sampleLimit": 500,
-            }
-            provider = get_ai_provider(settings) if safety_use_llm else None
-            async with _semaphore:
-                pre = await precheck_records(
-                    all_records, pre_cfg, provider=provider
-                )
-            if pre["blocked"]:
-                await session.rollback()
-                await _gc_manifest_objects((bucket, orig_prefix))
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "success": False,
-                        "message": "内容安全预检未通过,已拦截创建",
-                        "reviewReport": pre["report"],
-                        "findings": pre["findings_sample"],
-                        "ratio": pre["ratio"],
-                        "highSeverity": pre["highSeverity"],
-                    },
+        else:
+            # 语义维度(与 data_type 正交):显式→归一+校验(非严格只计数)。
+            # data_type 归数据集级(建集时已定),批量上传不再单独传。
+            explicit = coerce_semantic_type(semantic_type)
+            if explicit is not None:
+                all_records, _report = apply_semantic_spec(
+                    all_records, explicit, strict=False
                 )
 
-        # 合并记录作为目标数据集 draft 版本的一个成员(table_name)
-        version, _member = await add_table_member(
-            session,
-            dataset_id,
-            all_records,
-            table_name=eff_table,
-            storage_format="jsonl",
-            semantic_type=semantic_type,
-            note=(
-                f"单一格式批量上传:{len(files)} 个文件"
-                f"(原件存 {orig_prefix})"
-            ),
-        )
+            # 内容安全前置预检(#4):数据集落库前对全量解析文本跑审核,违规则回滚 +
+            # 回收 MinIO 原件,绝不创建脏数据集。默认敏感词 + PII(秒级),LLM 可选
+            # (默认关)。拦截口径:高危命中 或 违规占比 ≥ _BLOCK_RATIO(见
+            # review.precheck_records)。
+            if safety_check:
+                pre_cfg = {
+                    "useFlaggedWords": True,
+                    "usePii": True,
+                    "useLlm": safety_use_llm,
+                    "sampleLimit": 500,
+                }
+                provider = get_ai_provider(settings) if safety_use_llm else None
+                async with _semaphore:
+                    pre = await precheck_records(
+                        all_records, pre_cfg, provider=provider
+                    )
+                if pre["blocked"]:
+                    await session.rollback()
+                    await _gc_batch_objects(bucket, uploaded_keys)
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "success": False,
+                            "message": "内容安全预检未通过,已拦截创建",
+                            "reviewReport": pre["report"],
+                            "findings": pre["findings_sample"],
+                            "ratio": pre["ratio"],
+                            "highSeverity": pre["highSeverity"],
+                        },
+                    )
+
+            # 合并记录作为目标数据集 draft 版本的一个成员(table_name)
+            version, _member = await add_table_member(
+                session,
+                dataset_id,
+                all_records,
+                table_name=eff_table,
+                storage_format="jsonl",
+                semantic_type=semantic_type,
+                note=(
+                    f"单一格式批量上传:{len(files)} 个文件"
+                    f"(原件存 {orig_prefix})"
+                ),
+            )
         dataset = await session.get(Dataset, dataset_id)
     except (ValueError, UnsupportedFormatError, ParseError) as exc:
         await session.rollback()
-        await _gc_manifest_objects((bucket, orig_prefix))
+        await _gc_batch_objects(bucket, uploaded_keys)
         return JSONResponse(
             status_code=400, content={"success": False, "message": str(exc)}
         )
     except ExternalStoreError as exc:
         await session.rollback()
-        await _gc_manifest_objects((bucket, orig_prefix))
+        await _gc_batch_objects(bucket, uploaded_keys)
         return JSONResponse(
             status_code=503,
             content={"success": False, "message": f"对象写入失败:{exc}"},
         )
     except Exception:
         await session.rollback()
-        await _gc_manifest_objects((bucket, orig_prefix))
+        await _gc_batch_objects(bucket, uploaded_keys)
         raise
 
     versions = (
@@ -984,6 +1013,11 @@ async def _members_of(
                 )
             )
         return out
+    if str(version.storage_uri).startswith("pending://"):
+        # 空版本占位(新建版本/克隆上一版尚未写入任何成员):storage_uri 是
+        # 占位字符串,不是真实对象,不能当成一个成员枚举出去(否则预览列表
+        # 会冒出一个 key 指向不存在对象的假成员)。
+        return []
     if version.format != MANIFEST_FORMAT:
         # 受管批量上传版本(单一格式批量接入):枚举 originals/ 下各原件。
         # 仅限批量上传落地版本(produced_by_job_id 为空);加工/采集等 job 产出是
@@ -1065,6 +1099,119 @@ async def list_version_members(
             "data": [m.model_dump(by_alias=True) for m in members],
             "success": True,
         }
+    )
+
+
+@router.delete("/dataset-versions/{version_id}/members")
+async def delete_version_members(
+    version_id: str,
+    session: SessionDep,
+    user: UserDep,
+    keys: Annotated[list[str], Query()],
+) -> JSONResponse:
+    """删除版本内的一个或多个成员文件(单删/批量)。
+
+    - 仅允许 draft 版本;发布/下架版本返回 409。
+    - 调用者须有该数据集的 edit 或 admin 级别权限;否则 403。
+    - 支持两类成员:
+      · DatasetVersionTable 成员(结构化 parquet/jsonl):删对象 + 删 DB 行 + 刷
+        新版本 rollup。
+      · originals/ 原件(raw 批次上传):删 MinIO 对象;无对应 DB 行。
+    - 返回 {data: {deleted: N, notFound: N}, success: true}。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    if version.publish_status != "draft":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "只有草稿版本可以删除成员"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无权限修改该数据集"},
+        )
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503, content={"success": False, "message": str(exc)}
+        )
+
+    # 查 DatasetVersionTable 成员(按 storage_uri 末段 key 匹配)
+    table_rows: list[DatasetVersionTable] = list(
+        (
+            await session.execute(
+                select(DatasetVersionTable).where(
+                    DatasetVersionTable.dataset_version_id == version_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # 建立 key → row 映射(storage_uri 可能是完整 s3:// URI 或裸 key)
+    key_to_row: dict[str, DatasetVersionTable] = {}
+    for row in table_rows:
+        try:
+            _, rkey = parse_s3_uri(row.storage_uri)
+        except Exception:
+            rkey = str(row.storage_uri)
+        key_to_row[rkey] = row
+
+    deleted = 0
+    not_found = 0
+    size_freed = 0
+    for key in keys:
+        if row := key_to_row.get(key):
+            # 结构化成员:删对象 + DB 行
+            bucket, obj_key = ("", key)
+            try:
+                bucket, obj_key = parse_s3_uri(row.storage_uri)
+            except Exception:
+                pass
+            try:
+                await remove_object(cfg, bucket or settings.storage_minio_upload_bucket, obj_key)
+            except ExternalStoreError:
+                pass
+            size_freed += row.size or 0
+            await session.delete(row)
+            deleted += 1
+        else:
+            # originals/ 原件:只删 MinIO 对象
+            bucket = settings.storage_minio_upload_bucket
+            try:
+                await remove_object(cfg, bucket, key)
+                deleted += 1
+            except ExternalStoreError:
+                not_found += 1
+
+    # 刷新版本 rollup(rows/size 按剩余 DatasetVersionTable 求和)
+    remaining: list[DatasetVersionTable] = list(
+        (
+            await session.execute(
+                select(DatasetVersionTable).where(
+                    DatasetVersionTable.dataset_version_id == version_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if remaining:
+        version.rows = sum(r.rows or 0 for r in remaining)
+        version.size = sum(r.size or 0 for r in remaining)
+    else:
+        # 没有结构化成员了:rows/size 减去已删的 originals 体积(无精确 DB 值则置 None)
+        version.size = max(0, (version.size or 0) - size_freed)
+
+    await session.commit()
+    return JSONResponse(
+        content={"data": {"deleted": deleted, "notFound": not_found}, "success": True}
     )
 
 
@@ -1724,6 +1871,15 @@ async def _gc_manifest_objects(target: tuple[str, str] | None) -> None:
         pass  # DB 行已删;残留对象由后续清理,不让 GC 失败阻断删除
 
 
+async def _gc_batch_objects(bucket: str, keys: list[str]) -> None:
+    """尽力逐个删除批量上传已写入的原件(按 key,非按前缀——前缀与其它批次共享)。"""
+    for key in keys:
+        try:
+            await remove_object(platform_config(), bucket, key)
+        except ExternalStoreError:
+            pass  # 残留对象由后续清理,不让 GC 失败阻断错误返回
+
+
 class BatchDeleteRequest(CamelModel):
     """批量删除入参。"""
 
@@ -2190,8 +2346,8 @@ async def query_version(
 # 外部 S3 数据托管:登记 / 取消(#18)
 # ---------------------------------------------------------------------------
 def _new_dataset_id() -> str:
-    """形如 ``dset-`` + 6 位 hex(与 landing 同款)。"""
-    return f"dset-{secrets.token_hex(3)}"
+    """形如 ``dset-`` + UUIDv7 十六进制(与 landing 同款,时间前缀天然按创建时间排序)。"""
+    return f"dset-{uuid7_hex()}"
 
 
 def _new_version_id() -> str:
@@ -2447,6 +2603,63 @@ def _version_item(version: DatasetVersion) -> dict:
         ),
         "success": True,
     }
+
+
+@router.post("/datasets/{dataset_id}/versions")
+async def create_dataset_version(
+    dataset_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """显式新建一个空版本(数据集详情页「新建版本」按钮)。
+
+    与 `landing._target_draft_version`(上传时的隐式选取:latest 是 draft 则复用,
+    是 published 才开 v+1)是两条独立路径——这是用户的显式动作,不管当前最新版本
+    状态如何,永远新建 v(max+1),不克隆成员、不复用现有 draft。同步在 uploads
+    桶写一个空占位对象,让 `v<n>/` 目录在「文件管理」页立即可见(S3 无空目录,
+    靠公共前缀+至少一个对象体现)。
+    """
+    dataset = await session.get(Dataset, dataset_id)
+    if dataset is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无该数据集写入权限"},
+        )
+    max_no = await session.scalar(
+        select(func.max(DatasetVersion.version_no)).where(
+            DatasetVersion.dataset_id == dataset_id
+        )
+    )
+    next_no = (max_no or 0) + 1
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset_id,
+        version_no=next_no,
+        storage_uri=f"pending://{dataset_id}/v{next_no}/",
+        format="jsonl",
+        origin="managed",
+        publish_status="draft",
+    )
+    session.add(version)
+    await session.commit()
+    await session.refresh(version)
+    try:
+        cfg = platform_config()
+        await upload_object(
+            cfg,
+            settings.storage_minio_upload_bucket,
+            f"{dataset_id}/v{next_no}/.keep",
+            io.BytesIO(b""),
+            0,
+        )
+    except ExternalStoreError:
+        pass  # 占位对象纯展示性,写入失败不影响版本已创建
+    return JSONResponse(content=_version_item(version))
 
 
 @router.post(

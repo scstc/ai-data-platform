@@ -18,7 +18,6 @@ quality/review),入参 body 一律从 ``job.spec`` 重建,故 spawn 只需 job_i
 from __future__ import annotations
 
 import asyncio
-import secrets
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import async_session_factory
+from app.core.ids import uuid7_hex
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.schemas.job import JobCreate
@@ -67,7 +67,7 @@ def _now() -> datetime:
 
 
 def _new_dataset_id() -> str:
-    return f"dset-{secrets.token_hex(3)}"
+    return f"dset-{uuid7_hex()}"
 
 
 def request_cancel(job_id: str) -> None:

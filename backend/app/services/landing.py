@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.ids import uuid7_hex
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
@@ -211,8 +212,8 @@ def _ocr_pdf(content: bytes) -> str:
 
 
 def _new_dataset_id() -> str:
-    """形如 ``dset-`` + 6 位 hex。"""
-    return f"dset-{secrets.token_hex(3)}"
+    """形如 ``dset-`` + UUIDv7 十六进制(时间前缀,天然按创建时间字典序)。"""
+    return f"dset-{uuid7_hex()}"
 
 
 def _new_version_id() -> str:
@@ -833,6 +834,35 @@ async def add_table_member(
     await _recompute_version_rollup(session, version)
     await session.refresh(version)
     return version, member
+
+
+async def add_raw_batch(
+    session: AsyncSession,
+    dataset_id: str,
+    *,
+    file_count: int,
+    total_size: int,
+    bucket: str,
+    prefix: str,
+    note: str | None = None,
+) -> DatasetVersion:
+    """把一批"只存不解析"的原始文件登记到当前 draft 版本,不生成表成员。
+
+    与 add_table_member 的区别:raw 模式没有可提取的结构化字段,若仍造一个
+    DatasetVersionTable,_members_of 会优先返回这张伪表(只有 file_name/format/
+    size 几列),掩盖掉每个原件的真实文件名/格式——所以这里不写表成员,让
+    _members_of 走它已有的 originals/ 枚举兜底,如实展示每个原始文件。
+    """
+    version = await _target_draft_version(session, dataset_id)
+    version.storage_uri = f"s3://{bucket}/{prefix}"
+    version.format = "raw"
+    version.rows = file_count
+    version.size = total_size
+    if note is not None:
+        version.note = note
+    await session.commit()
+    await session.refresh(version)
+    return version
 
 
 async def land_records(

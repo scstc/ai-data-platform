@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.ids import uuid7_hex
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
@@ -76,7 +77,7 @@ def _set_idempotency(key: str | None, version_id: str) -> None:
 
 
 def _new_dataset_id() -> str:
-    return f"dset-{secrets.token_hex(3)}"
+    return f"dset-{uuid7_hex()}"
 
 
 def _new_version_id() -> str:
