@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -26,7 +27,13 @@ from app.schemas.data_lake import (
 )
 from app.services import data_lake as data_lake_service
 from app.services import lake_extract
-from app.services.external_store import MAX_MANIFEST_MEMBERS, ExternalStoreError
+from app.services.external_store import (
+    MAX_MANIFEST_MEMBERS,
+    ExternalStoreError,
+    client_for,
+    parse_s3_uri,
+    platform_config,
+)
 from app.services.landing import (
     BINARY_FORMATS,
     LANDABLE_FORMATS,
@@ -250,6 +257,59 @@ async def get_snapshot(
         raise HTTPException(status_code=404, detail="快照不存在")
 
     return DataLakeSnapshotRead.model_validate(snapshot)
+
+
+@router.get("/data-lake-snapshots/{snapshot_id}/presigned-url")
+async def get_snapshot_presigned_url(
+    snapshot_id: str,
+    db: SessionDep,
+    expires: int = Query(default=3600, ge=60, le=86400),
+) -> dict[str, Any]:
+    """生成快照文件的 presigned URL(用于预览/下载)。
+
+    - 有效期默认 1 小时(3600s),可指定 60s~24h。
+    - 返回 `{url: str, filename: str, storageFormat: str}`,前端用于 kkFileView 预览
+      或直接下载。
+    """
+    from fastapi import HTTPException
+
+    result = await db.execute(
+        select(DataLakeSnapshot).where(DataLakeSnapshot.id == snapshot_id)
+    )
+    snapshot = result.scalar_one_or_none()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="快照不存在")
+
+    try:
+        cfg = platform_config()
+    except ExternalStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # 解析 S3 URI
+    bucket, key = parse_s3_uri(snapshot.storage_uri)
+    client = client_for(cfg)
+
+    # 生成 presigned URL
+    try:
+        url = client.presigned_get_object(
+            bucket, key, expires=datetime.timedelta(seconds=expires)
+        )  # noqa: DTZ011 presigned 无需时区
+    except Exception as exc:  # noqa: BLE001 MinIO 客户端异常统一上报
+        raise HTTPException(
+            status_code=500, detail=f"生成 presigned URL 失败: {exc}"
+        ) from exc
+
+    filename = (
+        snapshot.source_metadata.get("original_filename")
+        if snapshot.source_metadata
+        else f"{snapshot.source_version}.{snapshot.storage_format}"
+    )
+
+    return {
+        "url": url,
+        "filename": filename,
+        "storageFormat": snapshot.storage_format,
+    }
 
 
 @router.post("/data-lakes/{lake_id}/extract-to-dataset")

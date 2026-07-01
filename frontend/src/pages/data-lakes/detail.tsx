@@ -24,6 +24,7 @@ import { type FC, useEffect, useState } from 'react';
 import {
   extractLakeToDataset,
   getDataLakeDetail,
+  getSnapshotPresignedUrl,
 } from '@/services/data-platform';
 
 const { Text } = Typography;
@@ -83,6 +84,20 @@ const DataLakeDetailPage: FC = () => {
       .finally(() => setLoading(false));
   };
 
+  const handlePreview = async (snapshot: DataPlatform.DataLakeSnapshot) => {
+    try {
+      const res = await getSnapshotPresignedUrl(snapshot.id);
+      const { url, filename } = res;
+
+      // 直接打开 presigned URL(浏览器会根据文件类型自动预览或下载)
+      window.open(url, '_blank');
+    } catch (e: any) {
+      message.error(
+        e?.info?.errorMessage || e?.response?.data?.message || '预览失败',
+      );
+    }
+  };
+
   useEffect(() => {
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -100,6 +115,24 @@ const DataLakeDetailPage: FC = () => {
           </Text>
         </Tooltip>
       ),
+    },
+    {
+      title: '文件名',
+      dataIndex: 'sourceMetadata',
+      width: 200,
+      ellipsis: true,
+      render: (_, r) => {
+        const filename = r.sourceMetadata?.original_filename as
+          | string
+          | undefined;
+        return filename ? (
+          <Tooltip title={filename}>
+            <Text>{filename}</Text>
+          </Tooltip>
+        ) : (
+          '-'
+        );
+      },
     },
     {
       title: '数据类型',
@@ -137,22 +170,20 @@ const DataLakeDetailPage: FC = () => {
       render: (_, r) => formatSize(r.size),
     },
     {
-      title: '存储路径',
-      dataIndex: 'storageUri',
-      ellipsis: true,
-      render: (_, r) => (
-        <Tooltip title={r.storageUri}>
-          <Text code style={{ fontSize: 12 }}>
-            {r.storageUri}
-          </Text>
-        </Tooltip>
-      ),
-    },
-    {
       title: '归档时间',
       dataIndex: 'createdAt',
       width: 168,
       render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+    },
+    {
+      title: '操作',
+      width: 80,
+      fixed: 'right' as const,
+      render: (_, record) => (
+        <Button type="link" size="small" onClick={() => handlePreview(record)}>
+          预览
+        </Button>
+      ),
     },
   ];
 

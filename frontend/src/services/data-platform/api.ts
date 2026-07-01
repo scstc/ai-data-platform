@@ -2167,6 +2167,18 @@ export async function getLakeSnapshot(
   );
 }
 
+/** 获取快照文件 presigned URL(用于预览/下载) GET /api/v1/data-lake-snapshots/:snapshotId/presigned-url */
+export async function getSnapshotPresignedUrl(
+  snapshotId: string,
+  params?: { expires?: number },
+  options?: { [key: string]: any },
+) {
+  return request<{ url: string; filename: string; storageFormat: string }>(
+    `/api/v1/data-lake-snapshots/${snapshotId}/presigned-url`,
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
 /** 从湖快照抽取生成新数据集(admin) POST /api/v1/data-lakes/:lakeId/extract-to-dataset */
 export async function extractLakeToDataset(
   lakeId: string,
