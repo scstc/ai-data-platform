@@ -267,7 +267,7 @@ async def test_create_quality_job_success_and_type_filter(
         session_factory, storage_uri=storage_uri, stats_uri=None
     )
 
-    async def fake_run_quality_job(session, *, job_id, input_version, operators):
+    async def fake_run_quality_job(session, *, job_id, input_version, operators, text_keys=None, **kwargs):
         # 镜像真实实现的副作用:回写 stats_uri + 记血缘边
         assert operators == [
             {"name": "text_length_filter", "params": {"min_len": 5}}
@@ -280,7 +280,7 @@ async def test_create_quality_job_success_and_type_filter(
         return "process: []", str(tmp_path / "run.log")
 
     monkeypatch.setattr(
-        "app.api.v1.quality.run_quality_job", fake_run_quality_job
+        "app.services.job_runner.run_quality_job", fake_run_quality_job
     )
 
     resp = await client.post(
@@ -297,6 +297,15 @@ async def test_create_quality_job_success_and_type_filter(
     body = resp.json()
     assert body["success"] is True
     data = body["data"]
+    job_id = data["id"]
+    # 等待后台 _run_job 协程跑完(走 fake_run_quality_job)
+    from app.services import job_runner
+    task = job_runner._task_by_job.get(job_id)
+    if task is not None:
+        await task
+    # 重读最新状态
+    resp = await client.get(f"/api/v1/jobs/{job_id}")
+    data = resp.json()["data"]
     assert data["type"] == "quality"
     assert data["state"] == "success"
     assert data["progress"] == 100
@@ -315,7 +324,6 @@ async def test_create_quality_job_success_and_type_filter(
     # 输入概要带版本展示标签(v{日期} (#n));日期随运行日变化,只校验形态
     assert data["input"]["versionLabel"].startswith("v")
     assert data["input"]["versionLabel"].endswith("(#1)")
-    job_id = data["id"]
 
     # 版本 stats_uri 已回写 → stats 端点可用
     resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/stats")
@@ -351,10 +359,10 @@ async def test_create_quality_job_engine_failure(
         session_factory, storage_uri=storage_uri, stats_uri=None
     )
 
-    async def fake_fail(session, *, job_id, input_version, operators):
+    async def fake_fail(session, *, job_id, input_version, operators, text_keys=None, **kwargs):
         raise QualityError("dj-analyze 退出码 1")
 
-    monkeypatch.setattr("app.api.v1.quality.run_quality_job", fake_fail)
+    monkeypatch.setattr("app.services.job_runner.run_quality_job", fake_fail)
 
     resp = await client.post(
         "/api/v1/quality/jobs",
@@ -365,9 +373,18 @@ async def test_create_quality_job_engine_failure(
         },
     )
     assert resp.status_code == 200
+    job_id = resp.json()["data"]["id"]
+
+    # 等待后台 _run_job 协程把 job.state 翻成 failed
+    from app.services import job_runner
+    task = job_runner._task_by_job.get(job_id)
+    if task is not None:
+        await task
+
+    resp = await client.get(f"/api/v1/jobs/{job_id}")
     data = resp.json()["data"]
-    assert data["state"] == "failed"
-    assert "dj-analyze" in data["error"]
+    assert data["state"] == "failed", data
+    assert "dj-analyze" in (data.get("error") or "")
     assert data["input"] is None  # 失败时未记血缘边
 
     resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/stats")
