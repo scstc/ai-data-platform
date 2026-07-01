@@ -8,15 +8,16 @@ import type { UploadFile, UploadProps } from 'antd';
 import {
   Button,
   Card,
-  Input,
   message,
   Segmented,
+  Select,
   Tag,
   Typography,
   Upload,
 } from 'antd';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
+  listDatasets,
   uploadBatchDataset,
   uploadMediaDataset,
 } from '@/services/data-platform';
@@ -132,11 +133,30 @@ const ScenarioImportCard: React.FC<Props> = ({
 }) => {
   const cfg = CONFIG[semanticType];
   const [fileList, setFileList] = useState<UploadFile[]>([]);
-  const [name, setName] = useState('');
+  const [datasetId, setDatasetId] = useState<string>();
+  const [datasetOptions, setDatasetOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+  const [datasetLoading, setDatasetLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [modality, setModality] = useState(
     cfg?.modalities?.[0]?.key ?? 'image',
   );
+
+  // 目标数据集下拉:按关键词拉取已有数据集(数据集优先流程,上传落入其版本)
+  const loadDatasetOptions = useCallback((keyword?: string) => {
+    setDatasetLoading(true);
+    listDatasets({ name: keyword || undefined, pageSize: 50 })
+      .then((res) =>
+        setDatasetOptions(
+          (res.data ?? []).map((d) => ({ label: d.name, value: d.id })),
+        ),
+      )
+      .catch(() => {
+        /* 拉取失败不阻断,留空列表 */
+      })
+      .finally(() => setDatasetLoading(false));
+  }, []);
 
   if (!cfg) return null;
 
@@ -175,40 +195,31 @@ const ScenarioImportCard: React.FC<Props> = ({
       message.warning('请先选择文件');
       return;
     }
-    if (!name.trim()) {
-      message.warning('请输入数据集名称');
+    if (!datasetId) {
+      message.warning('请选择目标数据集');
       return;
     }
     const fd = new FormData();
     fileList.forEach((f) => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
-    fd.append('name', name.trim());
+    fd.append('datasetId', datasetId);
     if (cfg.media) {
       fd.append('data_type', modality); // image / audio / video
     } else {
-      // 多 format(如 GIS 的 "json,geojson"):后端依赖按文件后缀路由解析,
-      // 不能简单把多值塞进 data_type,按首个真实文件扩展名作为 data_type。
-      const firstFile = fileList[0]?.originFileObj as File | undefined;
-      const inferredFormat = firstFile
-        ? getExt(firstFile.name) || (formatList[0] ?? 'json')
-        : (formatList[0] ?? 'json');
-      fd.append('data_type', inferredFormat);
       fd.append('semantic_type', semanticType);
     }
 
     setSubmitting(true);
-    const hide = message.loading('正在上传并生成数据集…', 0);
+    const hide = message.loading('正在上传并落入数据集…', 0);
     try {
       const res = cfg.media
         ? await uploadMediaDataset(fd)
         : await uploadBatchDataset(fd);
       hide();
-      message.success(
-        `已生成数据集「${res.data?.name ?? cfg.label}」,原件已存入内置 MinIO`,
-      );
+      message.success(`已上传并落入数据集「${res.data?.name ?? cfg.label}」`);
       setFileList([]);
-      history.push('/datasets/list');
+      history.push(`/datasets/detail?id=${datasetId}`);
     } catch (e: any) {
       hide();
       message.error(e?.data?.message ?? e?.message ?? '上传失败,请重试');
@@ -227,18 +238,26 @@ const ScenarioImportCard: React.FC<Props> = ({
           文件导入 · {cfg.label}
         </span>
       }
-      extra={<Tag color="blue">上传即生成数据集</Tag>}
+      extra={<Tag color="blue">上传即落入数据集</Tag>}
     >
       <div style={{ marginBottom: 12 }}>
         <Text strong>
-          数据集名称 <Text type="danger">*</Text>
+          目标数据集 <Text type="danger">*</Text>
         </Text>
-        <Input
-          placeholder="请输入数据集名称"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
+        <Select
+          style={{ width: '100%', marginTop: 8 }}
+          placeholder="选择已有数据集(上传的文件将落入其版本)"
+          value={datasetId}
+          onChange={setDatasetId}
+          showSearch
           allowClear
-          style={{ marginTop: 8 }}
+          filterOption={false}
+          onSearch={(kw) => loadDatasetOptions(kw)}
+          onFocus={() => loadDatasetOptions()}
+          options={datasetOptions}
+          notFoundContent={
+            datasetLoading ? '加载中…' : '无匹配数据集,请先到「数据集」页新建'
+          }
         />
       </div>
       <div
@@ -314,7 +333,7 @@ const ScenarioImportCard: React.FC<Props> = ({
         icon={<CloudUploadOutlined />}
         style={{ marginTop: 16 }}
         loading={submitting}
-        disabled={fileList.length === 0}
+        disabled={fileList.length === 0 || !datasetId}
         onClick={onSubmit}
         data-testid={`scenario-import-submit-${semanticType}`}
       >

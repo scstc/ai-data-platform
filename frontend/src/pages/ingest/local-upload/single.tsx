@@ -12,19 +12,11 @@ import { PageContainer } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import type { UploadFile, UploadProps } from 'antd';
 import {
-  Alert,
   Button,
   Card,
-  Col,
-  Modal,
   message,
-  Row,
   Select,
   Space,
-  Statistic,
-  Switch,
-  Table,
-  Tag,
   Typography,
   theme,
   Upload,
@@ -36,9 +28,9 @@ import { buildBreadcrumb } from '@/utils/breadcrumb';
 const { Text } = Typography;
 const { Dragger } = Upload;
 
-/** 单一格式可选项(对齐后端 landing.LANDABLE_FORMATS 的非二进制、可规范化格式)。
+/** 支持格式展示(对齐后端 landing.LANDABLE_FORMATS 的非二进制、可规范化格式)。
  *  媒体(图/音/视频)走「多模态」接入,不在此列。
- *  icon 用文件类型图标 + 品牌色,卡片化展示一眼可辨。 */
+ *  仅作展示,不限制上传——同一批可混合任意支持的格式。 */
 const FORMAT_GROUPS: {
   label: string;
   options: { value: string; label: string; icon: ReactNode; color: string }[];
@@ -139,26 +131,9 @@ const FORMAT_GROUPS: {
   },
 ];
 
-/** 内容安全:违规类别 / 严重度展示标签(与后端 review category/severity 对齐) */
-const CATEGORY_LABEL: Record<string, string> = {
-  porn: '黄',
-  gambling: '赌',
-  drugs: '毒',
-  politics: '政',
-  terrorism: '恐',
-  pii: '隐私',
-  other: '其他',
-};
-const SEVERITY_LABEL: Record<string, string> = {
-  high: '高危',
-  medium: '中危',
-  low: '低危',
-};
-const SEVERITY_TAG_COLOR: Record<string, string> = {
-  high: 'red',
-  medium: 'orange',
-  low: 'default',
-};
+const SUPPORTED_EXTS = new Set(
+  FORMAT_GROUPS.flatMap((g) => g.options.map((o) => o.value)),
+);
 
 /** 单文件体积上限,与后端 _MAX_MEDIA_FILE_BYTES(200MB)对齐 */
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
@@ -170,12 +145,9 @@ const getExt = (filename: string): string => {
 
 /** 单一数据接入:一批同格式文件 → 原件存内置 MinIO + 合并生成一个 jsonl 数据集。 */
 const SingleUploadPage: React.FC = () => {
-  const [format, setFormat] = useState<string>();
   const [datasetId, setDatasetId] = useState<string>();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [safetyCheck, setSafetyCheck] = useState(true);
-  const [safetyUseLlm, setSafetyUseLlm] = useState(false);
   const [datasetOptions, setDatasetOptions] = useState<
     { label: string; value: string }[]
   >([]);
@@ -195,28 +167,12 @@ const SingleUploadPage: React.FC = () => {
       })
       .finally(() => setDatasetLoading(false));
   }, []);
-  const [blockReport, setBlockReport] = useState<{
-    report: DataPlatform.ReviewReportBody;
-    findings: DataPlatform.ReviewFinding[];
-    ratio: number;
-    highSeverity: number;
-  } | null>(null);
   const { token } = theme.useToken();
 
-  // 切换格式时清空已选文件(accept 与扩展名校验随之变化)
-  const onFormatChange = (value: string) => {
-    setFormat(value);
-    setFileList([]);
-  };
-
-  // 仅暂存、不自动上传:校验扩展名一致 + 单文件 200MB,提交时统一发送
+  // 仅暂存、不自动上传:校验支持的扩展名 + 单文件 200MB,提交时统一发送
   const beforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
-    if (!format) {
-      message.warning('请先选择数据格式');
-      return Upload.LIST_IGNORE;
-    }
-    if (getExt(file.name) !== format) {
-      message.error(`「${file.name}」不是 .${format} 文件,已忽略`);
+    if (!SUPPORTED_EXTS.has(getExt(file.name))) {
+      message.error(`「${file.name}」暂不支持该格式,已忽略`);
       return Upload.LIST_IGNORE;
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -227,10 +183,6 @@ const SingleUploadPage: React.FC = () => {
   };
 
   const onSubmit = async () => {
-    if (!format) {
-      message.warning('请选择数据格式');
-      return;
-    }
     if (fileList.length === 0) {
       message.warning('请至少添加一个文件');
       return;
@@ -244,14 +196,10 @@ const SingleUploadPage: React.FC = () => {
       if (f.originFileObj) fd.append('files', f.originFileObj as File);
     });
     fd.append('datasetId', datasetId);
-    fd.append('safety_check', String(safetyCheck));
-    fd.append('safety_use_llm', String(safetyUseLlm));
+    fd.append('safety_check', 'false');
 
     setSubmitting(true);
-    const hide = message.loading(
-      safetyCheck ? '正在上传并审核内容安全…' : '正在上传并落入数据集…',
-      0,
-    );
+    const hide = message.loading('正在上传并落入数据集…', 0);
     try {
       const res = await uploadBatchDataset(fd, { skipErrorHandler: true });
       hide();
@@ -263,16 +211,7 @@ const SingleUploadPage: React.FC = () => {
     } catch (e: any) {
       hide();
       const body = e?.response?.data ?? e?.data;
-      if (body?.reviewReport) {
-        setBlockReport({
-          report: body.reviewReport,
-          findings: body.findings ?? [],
-          ratio: body.ratio ?? 0,
-          highSeverity: body.highSeverity ?? 0,
-        });
-      } else {
-        message.error(body?.message ?? e?.message ?? '上传失败,请重试');
-      }
+      message.error(body?.message ?? e?.message ?? '上传失败,请重试');
     } finally {
       setSubmitting(false);
     }
@@ -286,13 +225,13 @@ const SingleUploadPage: React.FC = () => {
         { title: '单一数据' },
       ])}
       title="单一数据接入"
-      content="一批同一格式文件:原始文件存入内置 MinIO,并合并解析生成一个 jsonl 数据集。"
+      content="批量上传文件:原始文件存入内置 MinIO,并合并解析生成一个 jsonl 数据集。"
       onBack={() => history.push('/ingest/local-upload')}
     >
       <Card style={{ maxWidth: 760 }}>
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <div>
-            <Text strong>数据格式</Text>
+            <Text strong>支持格式</Text>
             <div style={{ marginTop: 8 }}>
               {FORMAT_GROUPS.map((group) => (
                 <div key={group.label} style={{ marginBottom: 14 }}>
@@ -307,52 +246,40 @@ const SingleUploadPage: React.FC = () => {
                       marginTop: 6,
                     }}
                   >
-                    {group.options.map((opt) => {
-                      const selected = format === opt.value;
-                      return (
+                    {group.options.map((opt) => (
+                      <div
+                        key={opt.value}
+                        style={{
+                          width: 84,
+                          padding: '10px 8px',
+                          textAlign: 'center',
+                          borderRadius: 8,
+                          border: `1px solid ${token.colorBorderSecondary}`,
+                          background: token.colorBgContainer,
+                        }}
+                      >
+                        <span style={{ fontSize: 22, color: opt.color }}>
+                          {opt.icon}
+                        </span>
                         <div
-                          key={opt.value}
-                          onClick={() => onFormatChange(opt.value)}
                           style={{
-                            width: 84,
-                            padding: '10px 8px',
-                            textAlign: 'center',
-                            cursor: 'pointer',
-                            borderRadius: 8,
-                            border: `1px solid ${
-                              selected
-                                ? token.colorPrimary
-                                : token.colorBorderSecondary
-                            }`,
-                            background: selected
-                              ? token.colorPrimaryBg
-                              : token.colorBgContainer,
-                            transition: 'all 0.2s',
+                            marginTop: 4,
+                            fontSize: 13,
+                            fontWeight: 500,
                           }}
                         >
-                          <span style={{ fontSize: 22, color: opt.color }}>
-                            {opt.icon}
-                          </span>
-                          <div
-                            style={{
-                              marginTop: 4,
-                              fontSize: 13,
-                              fontWeight: 500,
-                            }}
-                          >
-                            {opt.label}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 11,
-                              color: token.colorTextTertiary,
-                            }}
-                          >
-                            .{opt.value}
-                          </div>
+                          {opt.label}
                         </div>
-                      );
-                    })}
+                        <div
+                          style={{
+                            fontSize: 11,
+                            color: token.colorTextTertiary,
+                          }}
+                        >
+                          .{opt.value}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -387,152 +314,28 @@ const SingleUploadPage: React.FC = () => {
             fileList={fileList}
             beforeUpload={beforeUpload}
             onChange={({ fileList: fl }) => setFileList(fl)}
-            accept={format ? `.${format}` : undefined}
-            disabled={!format}
+            accept={Array.from(SUPPORTED_EXTS)
+              .map((e) => `.${e}`)
+              .join(',')}
           >
             <p className="ant-upload-drag-icon">
               <InboxOutlined />
             </p>
-            <p className="ant-upload-text">
-              {format ? `点击或拖拽 .${format} 文件到此处` : '请先选择数据格式'}
-            </p>
+            <p className="ant-upload-text">点击或拖拽文件到此处</p>
             <p className="ant-upload-hint">
               支持多文件批量上传,合并为一个数据集;单文件最大 200MB。
             </p>
           </Dragger>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              flexWrap: 'wrap',
-              gap: 8,
-            }}
-          >
-            <Space align="center">
-              <Switch checked={safetyCheck} onChange={setSafetyCheck} />
-              <Text strong>内容安全预检</Text>
-            </Space>
-            {safetyCheck && (
-              <Space align="center" size={6}>
-                <Switch
-                  size="small"
-                  checked={safetyUseLlm}
-                  onChange={setSafetyUseLlm}
-                />
-                <Text type="secondary" style={{ fontSize: 13 }}>
-                  LLM 深度审核(较慢)
-                </Text>
-              </Space>
-            )}
-          </div>
-          {safetyCheck && (
-            <Text type="secondary" style={{ fontSize: 12, marginTop: -8 }}>
-              高危内容或违规占比 ≥10% 将拦截创建数据集
-            </Text>
-          )}
           <Button
             type="primary"
             onClick={onSubmit}
             loading={submitting}
-            disabled={!format || fileList.length === 0}
+            disabled={fileList.length === 0}
           >
             上传并生成数据集（{fileList.length}）
           </Button>
         </Space>
       </Card>
-      <Modal
-        open={!!blockReport}
-        title="内容安全预检未通过"
-        width={640}
-        onCancel={() => setBlockReport(null)}
-        footer={[
-          <Button key="ok" type="primary" onClick={() => setBlockReport(null)}>
-            知道了
-          </Button>,
-        ]}
-      >
-        {blockReport && (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Alert
-              type="error"
-              showIcon
-              message="数据集未创建,原始文件已回收"
-              description={`扫描 ${blockReport.report.scannedRows} 行,命中违规 ${blockReport.report.flaggedRows} 行(占比 ${(blockReport.ratio * 100).toFixed(1)}%),其中高危 ${blockReport.highSeverity} 条。请清理后重新上传。`}
-            />
-            <Row gutter={16}>
-              <Col span={8}>
-                <Statistic
-                  title="违规行数"
-                  value={blockReport.report.flaggedRows}
-                />
-              </Col>
-              <Col span={8}>
-                <Statistic
-                  title="违规占比"
-                  value={`${(blockReport.ratio * 100).toFixed(1)}%`}
-                  valueStyle={{ color: '#cf1322' }}
-                />
-              </Col>
-              <Col span={8}>
-                <Statistic
-                  title="高危命中"
-                  value={blockReport.highSeverity}
-                  valueStyle={{ color: '#cf1322' }}
-                />
-              </Col>
-            </Row>
-            <div>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                违规类别
-              </Text>
-              <div style={{ marginTop: 4 }}>
-                {Object.entries(blockReport.report.byCategory || {}).map(
-                  ([k, v]) => (
-                    <Tag key={k} color="red" style={{ marginBottom: 4 }}>
-                      {CATEGORY_LABEL[k] ?? k}: {v}
-                    </Tag>
-                  ),
-                )}
-              </div>
-            </div>
-            {blockReport.findings.length > 0 && (
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  命中样例(前 {blockReport.findings.length} 条)
-                </Text>
-                <Table<DataPlatform.ReviewFinding>
-                  size="small"
-                  rowKey={(r) => `${r.rowIndex}-${r.source}`}
-                  pagination={false}
-                  dataSource={blockReport.findings}
-                  style={{ marginTop: 4 }}
-                  columns={[
-                    { title: '行', dataIndex: 'rowIndex', width: 60 },
-                    {
-                      title: '类别',
-                      dataIndex: 'category',
-                      width: 90,
-                      render: (c: string) => CATEGORY_LABEL[c] ?? c,
-                    },
-                    {
-                      title: '严重度',
-                      dataIndex: 'severity',
-                      width: 80,
-                      render: (s: string) => (
-                        <Tag color={SEVERITY_TAG_COLOR[s]}>
-                          {SEVERITY_LABEL[s] ?? s}
-                        </Tag>
-                      ),
-                    },
-                    { title: '片段', dataIndex: 'snippet', ellipsis: true },
-                  ]}
-                />
-              </div>
-            )}
-          </Space>
-        )}
-      </Modal>
     </PageContainer>
   );
 };
