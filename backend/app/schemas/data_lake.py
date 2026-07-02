@@ -80,6 +80,12 @@ class IngestToLakeRawRequest(CamelModel):
     ingest_task_id: str | None = None
 
 
+class SnapshotRenameRequest(CamelModel):
+    """快照改名入参(仅改展示文件名,写 source_metadata.original_filename)。"""
+
+    filename: str
+
+
 class DataLakeDetailRead(DataLakeRead):
     """数据湖详情：元信息 + 快照列表。"""
 

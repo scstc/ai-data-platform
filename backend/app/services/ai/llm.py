@@ -92,6 +92,27 @@ _MODERATE_CATEGORIES = {
 _MODERATE_SEVERITIES = {"high", "medium", "low"}
 
 
+def _parse_json_content(content: str | None) -> Any:
+    """宽松解析 LLM 返回的 JSON:剥 markdown 栅栏/前后杂讯后再 loads。
+
+    推理型模型(如 deepseek-v4-flash)偶发在 JSON 外带说明文字、代码栅栏或
+    返回空 content;直接 json.loads 报 "Expecting value: char 0",一批失败会让
+    整个 LLM 检测降级。这里先原文解析,失败再提取首个 JSON 对象/数组子串;
+    仍失败按原样抛(空 content 给出明确报错)——调用方各自降级,不伪造结果。
+    """
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("LLM 返回空 content(推理输出耗尽限额或被截断)")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+        end = max(text.rfind("}"), text.rfind("]"))
+        if not starts or end <= min(starts):
+            raise
+        return json.loads(text[min(starts) : end + 1])
+
+
 class OpenAICompatProvider(AIProvider):
     """调用 OpenAI 兼容 Chat Completions 接口，失败回退启发式。"""
 
@@ -166,7 +187,7 @@ class OpenAICompatProvider(AIProvider):
             )
             raise
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = _parse_json_content(content)
         if not isinstance(parsed, dict):
             raise ValueError("LLM 返回的 JSON 不是对象")
         return parsed
@@ -243,6 +264,9 @@ class OpenAICompatProvider(AIProvider):
             ],
             "temperature": 0,
             "response_format": {"type": "json_object"},
+            # 推理型模型先产 reasoning 再产 content;默认输出限额可能被推理
+            # 耗尽致 content 为空(整批降级),显式给足上限。
+            "max_tokens": 8192,
         }
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -280,7 +304,7 @@ class OpenAICompatProvider(AIProvider):
             )
             raise
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = _parse_json_content(content)
         results = parsed.get("results") if isinstance(parsed, dict) else parsed
         if not isinstance(results, list):
             raise ValueError("LLM moderate 返回缺少 results 数组")
@@ -415,7 +439,7 @@ class OpenAICompatProvider(AIProvider):
             )
             raise
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = _parse_json_content(content)
         results = parsed.get("results") if isinstance(parsed, dict) else parsed
         if not isinstance(results, list):
             raise ValueError("LLM judge 返回缺少 results 数组")

@@ -38,22 +38,33 @@ async def _seed_datasource(
         return ds
 
 
+async def _seed_lake(
+    session_factory: async_sessionmaker, lake_id: str = "lake-test01"
+) -> str:
+    """直接落库一个数据湖(治理改造:采集任务必须绑湖,数据入湖归档)。"""
+    from app.models.data_lake import DataLake
+
+    async with session_factory() as session:
+        if await session.get(DataLake, lake_id) is None:
+            session.add(DataLake(id=lake_id, name="测试湖"))
+            await session.commit()
+    return lake_id
+
+
 async def _create_task(
-    client: AsyncClient, datasource_id: str, name: str = "每日同步任务",
-    dataset_id: str | None = None,
+    client: AsyncClient, session_factory: async_sessionmaker,
+    datasource_id: str, name: str = "每日同步任务",
+    lake_id: str | None = None,
 ) -> dict:
-    """创建任务并返回 data 部分。数据集优先:未给 dataset_id 时先建一个空数据集。"""
-    if dataset_id is None:
-        ds = (await client.post(
-            "/api/v1/datasets", json={"name": f"{name}-目标集"}
-        )).json()["data"]
-        dataset_id = ds["id"]
+    """创建任务并返回 data 部分。湖优先:未给 lake_id 时先落一个测试湖。"""
+    if lake_id is None:
+        lake_id = await _seed_lake(session_factory)
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": name,
             "datasourceId": datasource_id,
-            "datasetId": dataset_id,
+            "lakeId": lake_id,
             # cron 调度本期未启用(§4.10),创建端会 422;一律用 once。
             "schedule": {"mode": "once"},
         },
@@ -67,16 +78,13 @@ async def _create_task(
 @pytest.mark.asyncio
 async def test_create_validates_datasource_exists(client: AsyncClient) -> None:
     """数据源不存在时创建返回 404 + {success:false, message}。"""
-    # 先建数据集(datasetId 必填);datasource 校验先于 dataset 校验,故走 datasource 404
-    ds = (await client.post("/api/v1/datasets", json={"name": "孤儿目标集"})).json()[
-        "data"
-    ]["id"]
+    # datasource 校验先于 lake 校验,故 lakeId 给占位值即可走 datasource 404
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": "孤儿任务",
             "datasourceId": "ds-nope00",
-            "datasetId": ds,
+            "lakeId": "lake-nope0",
             "schedule": {"mode": "once"},
         },
     )
@@ -92,7 +100,7 @@ async def test_create_sets_pending_and_redundant_name(
 ) -> None:
     """创建成功：初始 pending/0、日志为创建提示、冗余数据源名称、id 前缀正确。"""
     ds = await _seed_datasource(session_factory)
-    data = await _create_task(client, ds.id)
+    data = await _create_task(client, session_factory, ds.id)
 
     assert data["id"].startswith("task-")
     assert data["status"] == "pending"
@@ -115,7 +123,7 @@ async def test_lifecycle_unsupported_source_fails_honestly(
     (「未配置采集对象」),不伪造 running/success、不产出运行记录。
     """
     ds = await _seed_datasource(session_factory)  # type=s3,已支持但本例未配 extract
-    task = await _create_task(client, ds.id)
+    task = await _create_task(client, session_factory, ds.id)
     task_id = task["id"]
 
     # 1) pending 任务 GET 不推进进度
@@ -180,7 +188,9 @@ async def test_pg_rerun_without_extract_fails_honestly(
             )
         )
         await session.commit()
-    task = await _create_task(client, "ds-pg-noextract", name="未配置采集对象")
+    task = await _create_task(
+        client, session_factory, "ds-pg-noextract", name="未配置采集对象"
+    )
 
     resp = await client.post(f"/api/v1/ingest-tasks/{task['id']}/rerun")
     assert resp.status_code == 200
@@ -213,9 +223,11 @@ async def test_list_pagination_and_filters(
     """列表分页响应形状、name 模糊与 status 精确筛选。"""
     ds = await _seed_datasource(session_factory)
     # 造 3 个任务：两个含「同步」，一个含「导出」
-    t_sync_a = await _create_task(client, ds.id, name="对象存储同步")
-    await _create_task(client, ds.id, name="日志增量同步")
-    await _create_task(client, ds.id, name="全量导出")
+    t_sync_a = await _create_task(
+        client, session_factory, ds.id, name="对象存储同步"
+    )
+    await _create_task(client, session_factory, ds.id, name="日志增量同步")
+    await _create_task(client, session_factory, ds.id, name="全量导出")
 
     # 全量列表：分页响应形状
     resp = await client.get("/api/v1/ingest-tasks?current=1&pageSize=10")
@@ -256,14 +268,11 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PG 真实拉取:运行产 job(type=ingest),产物版本血缘指向该 job,
-    runs 端点(读 jobs 表)回放 wire 形态与收编前一致。"""
+    """PG 真实拉取(治理改造:湖优先):运行产 job(type=ingest),数据入湖为
+    source_v 快照(不再直落数据集),快照追溯字段指向任务/数据源。"""
     from urllib.parse import urlparse
 
-    from app.core.config import settings
     from tests.conftest import TEST_DATABASE_URL
-
-    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
 
     # 数据源指向测试库自身(asyncpg 直连)
     u = urlparse(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
@@ -289,15 +298,13 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
         )
         await session.commit()
 
-    did = (await client.post(
-        "/api/v1/datasets", json={"name": "PG真实采集-目标集", "dataType": "sql"}
-    )).json()["data"]["id"]
+    lake_id = await _seed_lake(session_factory, "lake-pgself")
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": "PG真实采集",
             "datasourceId": "ds-pg-self",
-            "datasetId": did,
+            "lakeId": lake_id,
             "schedule": {"mode": "once"},
             "extract": {"mode": "sql", "sql": "SELECT 1 AS num, 'hi' AS text"},
         },
@@ -305,11 +312,12 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
     assert resp.status_code == 200, resp.text
     task_id = resp.json()["data"]["id"]
 
-    # 运行:同步真实拉取
+    # 运行:同步真实拉取 → 入湖
     resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
     body = resp.json()
     assert body["data"]["status"] == "success", body
     assert body["data"]["runCount"] == 1
+    assert any("已入湖" in line for line in body["data"]["logs"])
 
     # jobs 表多了一条 type=ingest,且通用 /jobs 列表可见
     resp = await client.get("/api/v1/jobs", params={"type": "ingest"})
@@ -317,43 +325,32 @@ async def test_pg_rerun_creates_ingest_job_and_lineage(
     assert len(jobs) == 1 and jobs[0]["type"] == "ingest"
     job_id = jobs[0]["id"]
 
-    # 产物版本血缘指向本次运行的 job(而非 task)
+    # 产物是湖快照(parquet 归档),追溯字段指向任务/数据源;不产生数据集版本
     async with session_factory() as session:
         from sqlalchemy import select
 
+        from app.models.data_lake import DataLakeSnapshot
         from app.models.dataset_version import DatasetVersion as DV
 
-        version = (await session.scalars(select(DV))).one()
-        assert version.produced_by_job_id == job_id
-        assert version.rows == 1
-        # 语义维度(§4.4 新断言):PG 表落地写版本级 semantic_type='structured',
-        # 与 data_type 接入键正交。
-        assert version.semantic_type == "structured"
+        snap = (await session.scalars(select(DataLakeSnapshot))).one()
+        assert snap.lake_id == lake_id
+        assert snap.ingest_task_id == task_id
+        assert snap.datasource_id == "ds-pg-self"
+        assert snap.rows == 1
+        assert snap.storage_format == "parquet"
+        assert snap.source_version.endswith("_postgresql")
 
-        # 采集落地的数据集归到 SQL 接入栏(data_type='sql'),
-        # 否则在数据接入页任何分栏都不可见
-        from app.models.dataset import Dataset as DSModel
+        versions = (await session.scalars(select(DV))).all()
+        assert versions == []  # 湖优先:采集不再直落数据集
 
-        ds_row = await session.get(DSModel, version.dataset_id)
-        assert ds_row is not None
-        # 铁律:data_type 一字不改、不收紧(test:314 历史断言保留)
-        assert ds_row.data_type == "sql"
-
-    # runs 端点 wire 形态与收编前一致
+    # runs 端点:job 记录仍在,数据集产物为 0(数据在湖里)
     resp = await client.get(f"/api/v1/ingest-tasks/{task_id}/runs")
     body = resp.json()
     assert body["total"] == 1
     run = body["data"][0]
     assert run["id"] == job_id
     assert run["status"] == "success"
-    assert run["rows"] == 1
-    assert run["datasetCount"] == 1
-    assert run["outputs"][0]["versionNo"] == 1
-
-    # 任务详情的产物列表经 job 反查
-    resp = await client.get(f"/api/v1/ingest-tasks/{task_id}")
-    output = resp.json()["data"]["output"]
-    assert len(output) == 1 and output[0]["rows"] == 1
+    assert run["datasetCount"] == 0
 
 
 @pytest.mark.asyncio
@@ -362,7 +359,7 @@ async def test_runs_empty_for_task_without_jobs(
 ) -> None:
     """无运行记录的任务:runs 端点返回空列表。"""
     ds = await _seed_datasource(session_factory)
-    task = await _create_task(client, ds.id)
+    task = await _create_task(client, session_factory, ds.id)
     resp = await client.get(f"/api/v1/ingest-tasks/{task['id']}/runs")
     body = resp.json()
     assert body["total"] == 0 and body["data"] == []
@@ -383,18 +380,15 @@ async def test_pg_family_db_kinds_route_through_pgconnector(
     monkeypatch: pytest.MonkeyPatch,
     db_kind: str,
 ) -> None:
-    """hologres/kingbase/gaussdb 经注册表派发到 PgConnector,自引用 PG 真 SELECT 落地。
+    """hologres/kingbase/gaussdb 经注册表派发到 PgConnector,自引用 PG 真 SELECT 入湖。
 
     锁的意图:这三个 db_kind 不是空壳——它们经 resolve(("database", db_kind)) 命中
-    PgConnector(PG 线协议复用),run_ingest 走真实 asyncpg SELECT 并落地版本,
-    data_type 仍为 'sql'(接入键不变)、semantic_type 为 'structured'(语义维度)。
+    PgConnector(PG 线协议复用),run_ingest 走真实 asyncpg SELECT 并入湖为
+    source_v 快照(治理改造:湖优先),快照 source_version 尾缀 = db_kind。
     """
     from urllib.parse import urlparse
 
-    from app.core.config import settings
     from tests.conftest import TEST_DATABASE_URL
-
-    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
 
     # 数据源指向测试库自身,但 db_kind 标成被测的 PG 族品牌
     u = urlparse(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
@@ -419,15 +413,13 @@ async def test_pg_family_db_kinds_route_through_pgconnector(
         )
         await session.commit()
 
-    did = (await client.post(
-        "/api/v1/datasets", json={"name": f"{db_kind}采集-目标集"}
-    )).json()["data"]["id"]
+    lake_id = await _seed_lake(session_factory, f"lake-fam-{db_kind[:4]}")
     resp = await client.post(
         "/api/v1/ingest-tasks",
         json={
             "name": f"{db_kind}采集",
             "datasourceId": ds_id,
-            "datasetId": did,
+            "lakeId": lake_id,
             "schedule": {"mode": "once"},
             "extract": {"mode": "sql", "sql": "SELECT 42 AS answer"},
         },
@@ -435,43 +427,40 @@ async def test_pg_family_db_kinds_route_through_pgconnector(
     assert resp.status_code == 200, resp.text
     task_id = resp.json()["data"]["id"]
 
-    # 真实拉取:经 PgConnector.run_ingest 落地
+    # 真实拉取:经 PgConnector.run_ingest 入湖
     resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
     body = resp.json()
     assert body["data"]["status"] == "success", body
 
-    # 落地版本:真 SELECT 一行 + data_type/semantic_type 正交
+    # 湖快照:真 SELECT 一行,source_version 尾缀标 db_kind
     async with session_factory() as session:
         from sqlalchemy import select
 
-        from app.models.dataset import Dataset as DSModel
-        from app.models.dataset_version import DatasetVersion as DV
+        from app.models.data_lake import DataLakeSnapshot
 
-        version = (await session.scalars(select(DV))).one()
-        assert version.rows == 1
-        assert version.semantic_type == "structured"
-
-        ds_row = await session.get(DSModel, version.dataset_id)
-        assert ds_row is not None
-        assert ds_row.data_type == "sql"  # 接入键不变
+        snap = (await session.scalars(select(DataLakeSnapshot))).one()
+        assert snap.lake_id == lake_id
+        assert snap.rows == 1
+        assert snap.source_version.endswith(f"_{db_kind}")
 
 
 # ---------------------------------------------------------------------------
-# Task 4: 数据库采集改用 parquet 落地(+ jsonl 回退)
+# 治理改造:湖归档保持 parquet;存量数据集任务(仅 dataset_id)保持旧路径落 jsonl
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_pg_rerun_lands_parquet(
+async def test_pg_rerun_legacy_dataset_task_lands_jsonl(
     client: AsyncClient,
     session_factory: async_sessionmaker,
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PG 真实拉取:land_records(storage_format='parquet') → version.format='parquet'。
+    """存量任务(有 dataset_id、无 lake_id)rerun 仍直落数据集,成员为 jsonl。
 
-    沿用自引用测试库模式(与 test_pg_rerun_creates_ingest_job_and_lineage 一致),
-    额外断言落地版本 format 字段为 'parquet'。
+    锁两个意图:① lake_id 为空的存量任务不被湖改造破坏(向后兼容);
+    ② 数据集成员统一 jsonl(parquet→jsonl 契约,下游 DJ/训练交付)。
+    创建走直插 DB(新建 API 已强制 lakeId,存量任务只能来自历史数据)。
     """
     from urllib.parse import urlparse
 
@@ -486,8 +475,8 @@ async def test_pg_rerun_lands_parquet(
 
         session.add(
             DS(
-                id="ds-pg-parquet",
-                name="parquet落地测试库",
+                id="ds-pg-legacy",
+                name="存量任务测试库",
                 type="database",
                 db_kind="postgresql",
                 status="connected",
@@ -504,108 +493,45 @@ async def test_pg_rerun_lands_parquet(
         await session.commit()
 
     did = (await client.post(
-        "/api/v1/datasets", json={"name": "parquet采集-目标集"}
+        "/api/v1/datasets", json={"name": "存量采集-目标集"}
     )).json()["data"]["id"]
-    resp = await client.post(
-        "/api/v1/ingest-tasks",
-        json={
-            "name": "parquet采集",
-            "datasourceId": "ds-pg-parquet",
-            "datasetId": did,
-            "schedule": {"mode": "once"},
-            "extract": {"mode": "sql", "sql": "SELECT 1 AS n, 'hello' AS s"},
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    task_id = resp.json()["data"]["id"]
 
-    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
-    body = resp.json()
-    assert body["data"]["status"] == "success", body
-
+    # 存量任务直插 DB:dataset_id 有值、lake_id 为空(历史数据形态)
     async with session_factory() as session:
-        from sqlalchemy import select
-
-        from app.models.dataset_version import DatasetVersion as DV
-
-        version = (await session.scalars(select(DV))).one()
-        assert version.format == "parquet", f"期望 parquet,实际 {version.format!r}"
-        assert version.rows == 1
-
-
-@pytest.mark.asyncio
-async def test_pg_rerun_jsonl_fallback_on_codec_error(
-    client: AsyncClient,
-    session_factory: async_sessionmaker,
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """parquet 编解码失败时 land_records 自动回退 jsonl(ParquetCodecError → jsonl)。
-
-    monkeypatch records_to_parquet_bytes 抛 ParquetCodecError,
-    断言落地版本 format='jsonl'(采集仍 success,不报错)。
-    """
-    from urllib.parse import urlparse
-
-    from app.core.config import settings
-    from app.services.landing import ParquetCodecError
-    from tests.conftest import TEST_DATABASE_URL
-
-    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
-
-    def _codec_fail(_records: list) -> bytes:
-        raise ParquetCodecError("测试强制 parquet 失败 → 回退 jsonl")
-
-    monkeypatch.setattr("app.services.landing.records_to_parquet_bytes", _codec_fail)
-
-    u = urlparse(TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
-    async with session_factory() as session:
-        from app.models.datasource import DataSource as DS
+        from app.models.ingest_task import IngestTask
 
         session.add(
-            DS(
-                id="ds-pg-jsonl-fb",
-                name="jsonl回退测试库",
-                type="database",
-                db_kind="postgresql",
-                status="connected",
-                config={
-                    "host": u.hostname,
-                    "port": u.port,
-                    "database": u.path.lstrip("/"),
-                    "username": u.username,
-                    "password": u.password,
-                },
+            IngestTask(
+                id="task-legacy",
+                name="存量数据集任务",
+                datasource_id="ds-pg-legacy",
+                datasource_name="存量任务测试库",
+                dataset_id=did,
+                lake_id=None,
+                schedule={"mode": "once"},
+                extract={"mode": "sql", "sql": "SELECT 1 AS n, 'hello' AS s"},
+                status="pending",
+                progress=0,
+                logs=["[INFO] 任务已创建"],
                 creator="admin",
             )
         )
         await session.commit()
 
-    did = (await client.post(
-        "/api/v1/datasets", json={"name": "jsonl回退采集-目标集"}
-    )).json()["data"]["id"]
-    resp = await client.post(
-        "/api/v1/ingest-tasks",
-        json={
-            "name": "jsonl回退采集",
-            "datasourceId": "ds-pg-jsonl-fb",
-            "datasetId": did,
-            "schedule": {"mode": "once"},
-            "extract": {"mode": "sql", "sql": "SELECT 42 AS x"},
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    task_id = resp.json()["data"]["id"]
-
-    resp = await client.post(f"/api/v1/ingest-tasks/{task_id}/rerun")
+    resp = await client.post("/api/v1/ingest-tasks/task-legacy/rerun")
     body = resp.json()
     assert body["data"]["status"] == "success", body
 
     async with session_factory() as session:
         from sqlalchemy import select
 
+        from app.models.data_lake import DataLakeSnapshot
         from app.models.dataset_version import DatasetVersion as DV
 
         version = (await session.scalars(select(DV))).one()
-        assert version.format == "jsonl", f"期望 jsonl 回退,实际 {version.format!r}"
+        assert version.format == "jsonl", f"期望 jsonl,实际 {version.format!r}"
         assert version.rows == 1
+
+        # 存量路径不写湖
+        snaps = (await session.scalars(select(DataLakeSnapshot))).all()
+        assert snaps == []

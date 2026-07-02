@@ -172,11 +172,13 @@ def _lake_file_name(snapshot: DataLakeSnapshot) -> str:
       ``data-lake/{lake_id}/{source_version}/data.parquet`` → 末段恒为 ``data.parquet``,
       无区分度,故对 DB 类改用源表名 ``db_table``(如 orders)命名。
 
-    取名优先级:db_table(DB 类源表名)> original_filename(上传原文件名)
-    > storage_uri 末段 > source_version(兜底,保证永远有非空名字)。
+    取名优先级:original_filename(上传原文件名/用户改名)> db_table(DB 类
+    源表名)> storage_uri 末段 > source_version(兜底,保证永远有非空名字)。
+    DB 采集快照原本没有 original_filename,仅在用户改名后写入——此时改名优先,
+    db_table 作为血缘字段保留不动。
     """
     if snapshot.source_metadata:
-        for key in ("db_table", "original_filename"):
+        for key in ("original_filename", "db_table"):
             name = snapshot.source_metadata.get(key)
             if name:
                 return name
@@ -314,7 +316,7 @@ async def extract_and_land_from_lake(
         source_format=snapshot.storage_format,
         note=note,
         produced_by_job_id=produced_by_job_id,
-        storage_format="parquet",
+        storage_format="jsonl",
     )
 
     return version, member
@@ -440,7 +442,7 @@ async def extract_to_new_dataset(
             semantic_type=semantic_type,
             source_format=snapshot.storage_format,
             note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",
-            storage_format="parquet",
+            storage_format="jsonl",
         )
 
     return dataset

@@ -34,6 +34,7 @@ from app.api.deps import current_user, require_perm
 from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
+from app.models.data_lake import DataLake
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
@@ -52,7 +53,6 @@ from app.services import operator_catalog as oc
 from app.services import scheduler as scheduler_mod
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
-from app.services.dataset_acl import can_access
 from app.services.external_store import (
     ExternalStoreError,
     upload_jsonl_to_uploads,
@@ -182,6 +182,7 @@ def _item(
     task: IngestTask,
     output: list[dict] | None = None,
     category_name: str | None = None,
+    lake_name: str | None = None,
 ) -> dict:
     """把 ORM 任务序列化为 camelCase 单对象响应体（output 仅详情接口填充）。"""
     read = IngestTaskRead.model_validate(task)
@@ -189,6 +190,8 @@ def _item(
         read.output = output
     if category_name is not None:
         read.category_name = category_name
+    if lake_name is not None:
+        read.lake_name = lake_name
     return IngestTaskItemResponse(data=read).model_dump(by_alias=True, mode="json")
 
 
@@ -198,6 +201,19 @@ async def _category_name(session: AsyncSession, task: IngestTask) -> str | None:
         return None
     names = await build_category_name_map(session, [task.category_id])
     return names.get(task.category_id)
+
+
+async def _lake_name(session: AsyncSession, task: IngestTask) -> str | None:
+    """取任务目标湖名(无湖/湖已删返回 None)。
+
+    详情接口也须回填:列表对运行中任务会用 GET 单任务响应整行替换,
+    缺湖名会让「数据湖」列在运行期间闪回 "-"。
+    """
+    if not task.lake_id:
+        return None
+    return await session.scalar(
+        select(DataLake.name).where(DataLake.id == task.lake_id)
+    )
 
 
 async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
@@ -265,11 +281,21 @@ async def list_ingest_tasks(
     cat_names = await build_category_name_map(
         session, [r.category_id for r in rows]
     )
+    # 批量取湖名(同分类名模式),回填 lakeName
+    lake_ids = {r.lake_id for r in rows if r.lake_id}
+    lake_names: dict[str, str] = {}
+    if lake_ids:
+        lake_rows = await session.execute(
+            select(DataLake.id, DataLake.name).where(DataLake.id.in_(lake_ids))
+        )
+        lake_names = dict(lake_rows.all())
     data = []
     for r in rows:
         item = IngestTaskRead.model_validate(r)
         if r.category_id:
             item.category_name = cat_names.get(r.category_id)
+        if r.lake_id:
+            item.lake_name = lake_names.get(r.lake_id)
         data.append(item)
     return PageResponse[IngestTaskRead](data=data, total=total)
 
@@ -467,22 +493,19 @@ async def create_ingest_task(
     session: SessionDep,
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> Response:
-    """新建采集任务：校验数据源 + 目标数据集存在/可写，冗余数据源名，初始 pending/0。"""
+    """新建采集任务：校验数据源 + 目标数据湖存在，冗余数据源名，初始 pending/0。"""
     datasource = await session.get(DataSource, payload.datasource_id)
     if datasource is None:
         return _not_found()
 
-    # 数据集优先:目标数据集必须存在且调用者有写权(采集结果落进其 draft 版本)
-    dataset = await session.get(Dataset, payload.dataset_id)
-    if dataset is None:
+    # 治理改造:采集任务绑定数据湖,采集结果入湖归档(数据集经「湖抽取」单独产生)
+    from app.services.data_lake import get_lake_by_id  # noqa: PLC0415
+
+    lake = await get_lake_by_id(session, payload.lake_id)
+    if lake is None:
         return JSONResponse(
             status_code=404,
-            content={"success": False, "message": "目标数据集不存在"},
-        )
-    if not await can_access(session, user, payload.dataset_id, "edit"):
-        return JSONResponse(
-            status_code=403,
-            content={"success": False, "message": "无该数据集写入权限"},
+            content={"success": False, "message": "目标数据湖不存在"},
         )
 
     if reason := _invalid_operator_reason(payload.extract):
@@ -495,7 +518,7 @@ async def create_ingest_task(
         name=payload.name,
         datasource_id=payload.datasource_id,
         datasource_name=datasource.name,
-        dataset_id=payload.dataset_id,
+        lake_id=payload.lake_id,
         schedule=payload.schedule.model_dump(),
         extract=payload.extract.model_dump() if payload.extract else None,
         status="pending",
@@ -563,6 +586,15 @@ async def update_ingest_task(
             )
         task.datasource_id = body.datasource_id
         task.datasource_name = datasource.name
+    if body.lake_id is not None and body.lake_id != task.lake_id:
+        from app.services.data_lake import get_lake_by_id  # noqa: PLC0415
+
+        if await get_lake_by_id(session, body.lake_id) is None:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "目标数据湖不存在"},
+            )
+        task.lake_id = body.lake_id
     if body.category_id is not None:
         task.category_id = body.category_id
     # 切片 B:quality_policy 仅在显式传入时更新(None/缺省 = 不变,与现有字段一致)。
@@ -601,7 +633,10 @@ async def get_ingest_task(
     output = await _build_output(session, task.id)
     return JSONResponse(
         content=_item(
-            task, output, category_name=await _category_name(session, task)
+            task,
+            output,
+            category_name=await _category_name(session, task),
+            lake_name=await _lake_name(session, task),
         )
     )
 
@@ -693,15 +728,19 @@ async def _execute_ingest(
         else:
             task.status = "success"
             task.progress = PROGRESS_DONE
-            task.logs = [
-                *task.logs,
-                f"[INFO] 采集 {len(results)} 项,共 {total_rows} 条 → 产出 "
-                f"{len(results)} 个数据集:"
-                + "、".join(
-                    f"{ds.name}({v.rows or 0}行)" for ds, v in results
-                ),
-                "[INFO] 任务完成",
-            ]
+            # 入湖任务(task.lake_id):连接器落湖时逐快照写日志,此处只收尾;
+            # 存量数据集任务保持原「产出 N 个数据集」摘要。
+            if results:
+                summary = (
+                    f"[INFO] 采集 {len(results)} 项,共 {total_rows} 条 → 产出 "
+                    f"{len(results)} 个数据集:"
+                    + "、".join(
+                        f"{ds.name}({v.rows or 0}行)" for ds, v in results
+                    )
+                )
+            else:
+                summary = "[INFO] 采集入湖完成(快照明细见上方日志)"
+            task.logs = [*task.logs, summary, "[INFO] 任务完成"]
             job.state = "success"
             job.progress = PROGRESS_DONE
     except (IngestError, ConnectorNotReady) as exc:

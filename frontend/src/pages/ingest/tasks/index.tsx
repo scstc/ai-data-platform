@@ -1,8 +1,4 @@
-import type {
-  ActionType,
-  ProColumns,
-  ProFormInstance,
-} from '@ant-design/pro-components';
+import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import {
   ModalForm,
   PageContainer,
@@ -41,8 +37,8 @@ import {
   getIngestTask,
   ingestTaskStats,
   listCategories,
+  listDataLakes,
   listDataSources,
-  listDatasets,
   listDatasourceTables,
   listIngestRuns,
   listIngestTasks,
@@ -56,7 +52,6 @@ import {
 } from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
 import FilterOperatorPicker from './components/FilterOperatorPicker';
-import { SourcePreview } from './components/SourcePreview';
 import Dashboard, { type IngestTaskStatsData } from './Dashboard';
 
 /** 状态 → 中文标签与 Tag 颜色 */
@@ -214,16 +209,13 @@ const IngestTasksPage: React.FC = () => {
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
     [],
   );
-  // 新建向导：Modal 可见性 + 步骤间上下文（step-1 完成时记 datasourceId，step-2 完成时记 extract，
-  // 供 step-3 SourcePreview 与 step-4 落地确认按数据源类型条件渲染——StepsForm 各步是独立 form，
+  // 新建向导：Modal 可见性 + 步骤间上下文（step-1 完成时记 datasourceId，
+  // 供后续步骤按数据源类型条件渲染——StepsForm 各步是独立 form，
   // 跨步值不自动透传，故用 React state 承载）
   const [createOpen, setCreateOpen] = useState(false);
   const [wizardCtx, setWizardCtx] = useState<{
     datasourceId?: string;
-    extract?: DataPlatform.IngestExtract;
   }>({});
-  const wizardFormRef =
-    useRef<ProFormInstance<DataPlatform.IngestTaskCreate>>(null);
 
   const loadCategories = useCallback(async () => {
     try {
@@ -448,6 +440,25 @@ const IngestTasksPage: React.FC = () => {
           }));
         }}
       />
+      <ProFormSelect
+        name="lakeId"
+        label="目标数据湖"
+        placeholder="选择采集结果归档的数据湖"
+        tooltip="采集数据入湖为不可变快照(source_v 版本);需要数据集时在湖详情「抽取生成数据集」"
+        rules={[{ required: true, message: '请选择目标数据湖' }]}
+        showSearch
+        fieldProps={{ filterOption: false }}
+        request={async ({ keyWords }) => {
+          const res = await listDataLakes({
+            name: keyWords || undefined,
+            pageSize: 50,
+          });
+          return (res.data ?? []).map((d) => ({
+            label: d.name,
+            value: d.id,
+          }));
+        }}
+      />
       <ProFormTreeSelect
         name="categoryId"
         label="分类"
@@ -524,6 +535,12 @@ const IngestTasksPage: React.FC = () => {
       title: '数据源',
       dataIndex: 'datasourceName',
       search: false,
+    },
+    {
+      title: '数据湖',
+      dataIndex: 'lakeName',
+      search: false,
+      render: (_, record) => record.lakeName || '-',
     },
     {
       title: '分类',
@@ -702,7 +719,6 @@ const IngestTasksPage: React.FC = () => {
         destroyOnHidden
       >
         <StepsForm<DataPlatform.IngestTaskCreate>
-          formRef={wizardFormRef}
           formProps={{ initialValues: { schedule: { mode: 'once' } } }}
           onFinish={async (values) => {
             try {
@@ -750,15 +766,15 @@ const IngestTasksPage: React.FC = () => {
               }}
             />
             <ProFormSelect
-              name="datasetId"
-              label="目标数据集"
-              placeholder="选择采集结果落入的数据集"
-              tooltip="所选表将作为成员落入目标数据集的一个版本(多表 = 一版本多成员)"
-              rules={[{ required: true, message: '请选择目标数据集' }]}
+              name="lakeId"
+              label="目标数据湖"
+              placeholder="选择采集结果归档的数据湖"
+              tooltip="采集数据入湖为不可变快照(source_v 版本);需要数据集时在湖详情「抽取生成数据集」"
+              rules={[{ required: true, message: '请选择目标数据湖' }]}
               showSearch
               fieldProps={{ filterOption: false }}
               request={async ({ keyWords }) => {
-                const res = await listDatasets({
+                const res = await listDataLakes({
                   name: keyWords || undefined,
                   pageSize: 50,
                 });
@@ -787,7 +803,7 @@ const IngestTasksPage: React.FC = () => {
             title="采集对象"
             onFinish={async (values) => {
               // S3 / HDFS 的 path 模式：路径列表与 Glob 至少填一项。两者皆空时后端会以
-              // 「采集对象为空」400 拒绝，这里前置拦截，避免走到预览步才报错。
+              // 「采集对象为空」400 拒绝，这里前置拦截，避免走到提交才报错。
               const ds = dsMap[wizardCtx.datasourceId ?? ''];
               if (ds?.type === 's3' || ds?.type === 'hdfs') {
                 const ex = values.extract ?? {};
@@ -802,8 +818,6 @@ const IngestTasksPage: React.FC = () => {
                   return false;
                 }
               }
-              // 把 extract 写入步骤间上下文，供 step-3 SourcePreview 触发预览
-              setWizardCtx((c) => ({ ...c, extract: values.extract }));
               return true;
             }}
           >
@@ -843,28 +857,6 @@ const IngestTasksPage: React.FC = () => {
             )}
           </StepsForm.StepForm>
 
-          <StepsForm.StepForm name="preview" title="预览与字段">
-            {wizardCtx.datasourceId && wizardCtx.extract ? (
-              <SourcePreview
-                datasourceId={wizardCtx.datasourceId}
-                extract={wizardCtx.extract}
-                mode={wizardCtx.extract.mode}
-                onColumnsChange={(cols) => {
-                  // SourcePreview 勾列回写：写入当前 step 的 form 字段，
-                  // StepsForm 在最后一步会把所有 step form 值 deep-merge 后交给 onFinish
-                  wizardFormRef.current?.setFieldValue(
-                    ['extract', 'columns'],
-                    cols,
-                  );
-                }}
-              />
-            ) : (
-              <Typography.Text type="secondary">
-                请先在前两步选择数据源与采集对象
-              </Typography.Text>
-            )}
-          </StepsForm.StepForm>
-
           <StepsForm.StepForm name="confirm" title="落地确认">
             {dsMap[wizardCtx.datasourceId ?? '']?.type === 'database' && (
               <Form.Item
@@ -897,6 +889,7 @@ const IngestTasksPage: React.FC = () => {
             ? {
                 name: editRow.name,
                 datasourceId: editRow.datasourceId,
+                lakeId: editRow.lakeId ?? undefined,
                 schedule: editRow.schedule,
                 extract: editRow.extract,
                 categoryId: editRow.categoryId ?? undefined,

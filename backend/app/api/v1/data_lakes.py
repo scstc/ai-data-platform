@@ -27,6 +27,7 @@ from app.schemas.data_lake import (
     DataLakeSnapshotRead,
     DataLakeUpdate,
     ExtractToDatasetRequest,
+    SnapshotRenameRequest,
 )
 from app.services import data_lake as data_lake_service
 from app.services import lake_extract
@@ -289,6 +290,45 @@ async def get_snapshot(
     return DataLakeSnapshotRead.model_validate(snapshot)
 
 
+@router.patch(
+    "/data-lake-snapshots/{snapshot_id}", response_model=DataLakeSnapshotRead
+)
+async def rename_snapshot(
+    snapshot_id: str,
+    body: SnapshotRenameRequest,
+    db: SessionDep,
+    _admin: Annotated[None, Depends(require_admin)],
+) -> DataLakeSnapshotRead:
+    """快照改名:更新 source_metadata.original_filename(展示名)。
+
+    只改元数据,不动物理对象(storage_uri 不变);血缘字段(db_table 等)保留。
+    展示/抽取取名优先级为 original_filename > db_table,故 DB 采集快照改名后
+    也以新名字展示,而 db_table 血缘不受影响。
+    """
+    result = await db.execute(
+        select(DataLakeSnapshot).where(DataLakeSnapshot.id == snapshot_id)
+    )
+    snapshot = result.scalar_one_or_none()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="快照不存在")
+
+    filename = body.filename.strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    if "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="文件名不能包含路径分隔符")
+
+    # JSONB 整体重新赋值以触发 SQLAlchemy 变更检测(原地改 dict 不会 flush)
+    snapshot.source_metadata = {
+        **(snapshot.source_metadata or {}),
+        "original_filename": filename,
+    }
+    await db.commit()
+    await db.refresh(snapshot)
+
+    return DataLakeSnapshotRead.model_validate(snapshot)
+
+
 @router.get("/data-lake-snapshots/{snapshot_id}/presigned-url")
 async def get_snapshot_presigned_url(
     snapshot_id: str,
@@ -329,11 +369,13 @@ async def get_snapshot_presigned_url(
             status_code=500, detail=f"生成 presigned URL 失败: {exc}"
         ) from exc
 
+    # DB 采集快照的 metadata 只有 db_table(无 original_filename),
+    # 同样落到 source_version 兜底名,避免返回 filename=null
     filename = (
         snapshot.source_metadata.get("original_filename")
         if snapshot.source_metadata
-        else f"{snapshot.source_version}.{snapshot.storage_format}"
-    )
+        else None
+    ) or f"{snapshot.source_version}.{snapshot.storage_format}"
 
     return {
         "url": url,

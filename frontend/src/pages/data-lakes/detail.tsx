@@ -25,6 +25,7 @@ import {
   extractLakeToDataset,
   getDataLakeDetail,
   getSnapshotPresignedUrl,
+  renameLakeSnapshot,
 } from '@/services/data-platform';
 import { UploadChannelTag } from '@/utils/uploadChannel';
 import LakeSnapshotPreview from './components/LakeSnapshotPreview';
@@ -33,12 +34,24 @@ const { Text } = Typography;
 
 const DATA_CATEGORY_LABEL: Record<DataPlatform.DataLakeDataCategory, string> = {
   database: '数据库',
+  tabular: '表格数据',
   document: '文档',
   image: '图片',
   audio: '音频',
   video: '视频',
   text: '文本',
 };
+
+/**
+ * 快照展示文件名。与后端 lake_extract 取名优先级一致:
+ * original_filename(上传原文件名/用户改名)> db_table(DB 采集来源表名)。
+ */
+const snapshotFilename = (
+  r: DataPlatform.DataLakeSnapshot,
+): string | undefined =>
+  (r.sourceMetadata?.original_filename ?? r.sourceMetadata?.db_table) as
+    | string
+    | undefined;
 
 /** 字节数人类可读 */
 const formatSize = (bytes: number | null): string => {
@@ -67,6 +80,8 @@ const DataLakeDetailPage: FC = () => {
   >([]);
   const [extractOpen, setExtractOpen] = useState(false);
   const [previewSnapshot, setPreviewSnapshot] =
+    useState<DataPlatform.DataLakeSnapshot | null>(null);
+  const [renameTarget, setRenameTarget] =
     useState<DataPlatform.DataLakeSnapshot | null>(null);
 
   const reload = () => {
@@ -99,26 +114,12 @@ const DataLakeDetailPage: FC = () => {
 
   const snapshotColumns: ProColumns<DataPlatform.DataLakeSnapshot>[] = [
     {
-      title: '源头版本',
-      dataIndex: 'sourceVersion',
-      width: 260,
-      render: (_, r) => (
-        <Tooltip title="不可变的源头快照版本号,格式:source_v年月日_批次_类型">
-          <Text code copyable>
-            {r.sourceVersion}
-          </Text>
-        </Tooltip>
-      ),
-    },
-    {
       title: '文件名',
       dataIndex: 'sourceMetadata',
       width: 200,
       ellipsis: true,
       render: (_, r) => {
-        const filename = r.sourceMetadata?.original_filename as
-          | string
-          | undefined;
+        const filename = snapshotFilename(r);
         return filename ? (
           <Tooltip title={filename}>
             <Text>{filename}</Text>
@@ -170,7 +171,7 @@ const DataLakeDetailPage: FC = () => {
     },
     {
       title: '操作',
-      width: 160,
+      width: 200,
       fixed: 'right' as const,
       render: (_, record) => (
         <Space size="small">
@@ -187,6 +188,13 @@ const DataLakeDetailPage: FC = () => {
             onClick={() => handleDownload(record)}
           >
             下载
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => setRenameTarget(record)}
+          >
+            改名
           </Button>
         </Space>
       ),
@@ -247,7 +255,7 @@ const DataLakeDetailPage: FC = () => {
         <ProCard
           title={
             <Space>
-              <span>源头快照</span>
+              <span>文件列表</span>
               <Tag>{detail.snapshots.length} 个</Tag>
             </Space>
           }
@@ -340,12 +348,59 @@ const DataLakeDetailPage: FC = () => {
         />
       </ModalForm>
 
+      <ModalForm<{ filename: string }>
+        title="修改文件名"
+        open={!!renameTarget}
+        onOpenChange={(open) => {
+          if (!open) setRenameTarget(null);
+        }}
+        width={420}
+        modalProps={{ destroyOnHidden: true }}
+        initialValues={{
+          filename: renameTarget ? snapshotFilename(renameTarget) : undefined,
+        }}
+        onFinish={async (values) => {
+          if (!renameTarget) return false;
+          try {
+            await renameLakeSnapshot(renameTarget.id, {
+              filename: values.filename.trim(),
+            });
+            message.success('改名成功');
+            reload();
+            return true;
+          } catch (err) {
+            const e = err as {
+              response?: { data?: { detail?: string; message?: string } };
+            };
+            message.error(
+              e?.response?.data?.detail ??
+                e?.response?.data?.message ??
+                '改名失败',
+            );
+            return false;
+          }
+        }}
+      >
+        <div style={{ marginBottom: 16, color: '#666' }}>
+          仅修改展示文件名,不影响已归档的物理文件与血缘字段。
+        </div>
+        <ProFormText
+          name="filename"
+          label="文件名"
+          rules={[
+            { required: true, whitespace: true, message: '请填写文件名' },
+            {
+              pattern: /^[^/\\]+$/,
+              message: '文件名不能包含路径分隔符',
+            },
+          ]}
+        />
+      </ModalForm>
+
       <LakeSnapshotPreview
         snapshotId={previewSnapshot?.id ?? ''}
         filename={
-          previewSnapshot?.sourceMetadata?.original_filename as
-            | string
-            | undefined
+          previewSnapshot ? snapshotFilename(previewSnapshot) : undefined
         }
         storageFormat={previewSnapshot?.storageFormat}
         open={!!previewSnapshot}

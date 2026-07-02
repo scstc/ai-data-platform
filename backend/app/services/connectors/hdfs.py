@@ -340,22 +340,46 @@ class HdfsConnector:
             filename = hdfs_path.rstrip("/").rsplit("/", 1)[-1]
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "txt"
 
-            records = normalize_to_records(content, ext)
+            if task.lake_id:
+                # 治理改造:文件原样入湖归档(湖不解析,抽取时才规范化),
+                # 数据集经「湖抽取」单独产生。
+                from app.services.data_lake import (  # noqa: PLC0415
+                    ingest_to_lake_raw,
+                )
+                from app.services.landing import media_kind  # noqa: PLC0415
 
-            # 数据集优先(Task 10):每个文件作成员落进 task.dataset_id 的 draft
-            # 版本;成员名 = 文件名(去路径),空则兜底 "data"。
-            table_name = filename or "data"
-            version, _member = await add_table_member(
-                session,
-                task.dataset_id,
-                records,
-                table_name=table_name,
-                semantic_type=config.get("semantic_type"),
-                # 三轴:来源=HDFS;格式=拉取对象原始扩展名
-                source_format=ext,
-                note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
-                produced_by_job_id=job_id,
-            )
+                snapshot = await ingest_to_lake_raw(
+                    session,
+                    lake_id=task.lake_id,
+                    file_content=content,
+                    original_filename=filename or "data",
+                    data_category=media_kind(ext) or "tabular",
+                    upload_channel="api",
+                    datasource_id=datasource.id,
+                    source_metadata={"hdfs_path": hdfs_path},
+                    ingest_task_id=task.id,
+                )
+                task.logs = [
+                    *task.logs,
+                    f"[INFO] 已入湖:{snapshot.source_version}({hdfs_path})",
+                ]
+            else:
+                records = normalize_to_records(content, ext)
+
+                # 存量数据集任务:每个文件作成员落进 task.dataset_id 的 draft
+                # 版本;成员名 = 文件名(去路径),空则兜底 "data"。
+                table_name = filename or "data"
+                version, _member = await add_table_member(
+                    session,
+                    task.dataset_id,
+                    records,
+                    table_name=table_name,
+                    semantic_type=config.get("semantic_type"),
+                    # 三轴:来源=HDFS;格式=拉取对象原始扩展名
+                    source_format=ext,
+                    note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
+                    produced_by_job_id=job_id,
+                )
 
             # C5 评审 Finding 1 修复:水位推进改为每路径成功落地**之后**
             # running-max(当前水位, 本路径名)。中途失败 → 水位只反映此前已成功

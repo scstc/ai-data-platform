@@ -415,6 +415,70 @@ async def test_list_snapshots_desc_by_created(db_session):
 
 
 @pytest.mark.asyncio
+async def test_rename_snapshot_updates_display_name_keeps_lineage(db_session):
+    """快照改名:写 original_filename 作展示名,db_table 血缘保留不动。
+
+    改名后抽取取名(_lake_file_name)必须用新名字——这是"用户改的名到处生效"
+    的业务约定;而 db_table 是血缘字段,改名不能污染它。
+    """
+    from fastapi import HTTPException
+
+    from app.api.v1.data_lakes import rename_snapshot
+    from app.schemas.data_lake import SnapshotRenameRequest
+    from app.services.lake_extract import _lake_file_name
+
+    lake = await create_data_lake(db_session, name="改名测试湖")
+    snap = DataLakeSnapshot(
+        id="snap-rename1",
+        lake_id=lake.id,
+        source_version="source_v20260702_01_mysql",
+        storage_uri="s3://uploads/test/data.parquet",
+        storage_format="parquet",
+        data_category="database",
+        upload_channel="database",
+        source_metadata={"db_schema": "public", "db_table": "orders"},
+    )
+    db_session.add(snap)
+    await db_session.commit()
+
+    # 改名前:DB 快照按源表名展示
+    assert _lake_file_name(snap) == "orders"
+
+    result = await rename_snapshot(
+        snapshot_id=snap.id,
+        body=SnapshotRenameRequest(filename="  2026订单表  "),
+        db=db_session,
+        _admin=None,
+    )
+    # 展示名 = 去空白后的新名字;血缘字段原样保留
+    assert result.source_metadata["original_filename"] == "2026订单表"
+    assert result.source_metadata["db_table"] == "orders"
+    await db_session.refresh(snap)
+    assert _lake_file_name(snap) == "2026订单表"
+
+    # 非法入参:空名 / 含路径分隔符 → 400
+    for bad in ("   ", "a/b", "a\\b"):
+        with pytest.raises(HTTPException) as exc_info:
+            await rename_snapshot(
+                snapshot_id=snap.id,
+                body=SnapshotRenameRequest(filename=bad),
+                db=db_session,
+                _admin=None,
+            )
+        assert exc_info.value.status_code == 400
+
+    # 不存在的快照 → 404
+    with pytest.raises(HTTPException) as exc_info:
+        await rename_snapshot(
+            snapshot_id="snap-nothere",
+            body=SnapshotRenameRequest(filename="x"),
+            db=db_session,
+            _admin=None,
+        )
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_snapshot_by_version(db_session):
     """根据 (lake_id, source_version) 定位快照。"""
     lake = await create_data_lake(

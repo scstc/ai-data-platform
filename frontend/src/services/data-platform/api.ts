@@ -954,7 +954,7 @@ export async function listJobs(
 }
 
 /** 数据任务统一列表(跨治理+评估类型)GET /api/v1/data-tasks
- *  types=逗号分隔类型白名单;state=单值;keyword=任务名模糊。 */
+ *  types=逗号分隔类型白名单;state=单值;keyword=任务名模糊;jobId=任务ID模糊。 */
 export async function listDataTasks(
   params?: {
     current?: number;
@@ -963,6 +963,7 @@ export async function listDataTasks(
     state?: string;
     keyword?: string;
     datasetId?: string;
+    jobId?: string;
   },
   options?: { [key: string]: any },
 ) {
@@ -2246,6 +2247,18 @@ export async function getLakeSnapshot(
   return request<DataPlatform.DataLakeSnapshot>(
     `/api/v1/data-lake-snapshots/${snapshotId}`,
     { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 快照改名(admin,仅改展示文件名) PATCH /api/v1/data-lake-snapshots/:snapshotId */
+export async function renameLakeSnapshot(
+  snapshotId: string,
+  body: { filename: string },
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.DataLakeSnapshot>(
+    `/api/v1/data-lake-snapshots/${snapshotId}`,
+    { method: 'PATCH', data: body, ...(options || {}) },
   );
 }
 

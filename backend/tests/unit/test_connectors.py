@@ -376,13 +376,14 @@ def _install_fake_asyncmy(monkeypatch, rows):
 
 
 class _Task:
-    """最小 IngestTask 替身(只用到 name / extract / dataset_id)。"""
+    """最小 IngestTask 替身(只用到 name / extract / dataset_id / lake_id)。"""
 
     def __init__(self, extract):
         self.name = "MySQL采集"
         self.extract = extract
-        # 数据集优先:采集任务绑定目标数据集(Task 8/10)
+        # 存量形态:绑定目标数据集、未绑湖(湖优先路径见集成测试)
         self.dataset_id = "dset-test"
+        self.lake_id = None
 
 
 class _Datasource:
@@ -612,10 +613,11 @@ async def test_doris_run_ingest_landing_kwargs_match_signature(monkeypatch):
     results = await conn.run_ingest(_Session(), task, ds, job_id="job-9")
 
     assert results == [("DATASET", "VERSION")]
-    # 结构化源对齐:parquet + structured;落进绑定数据集;血缘经 produced_by_job_id
+    # 结构化源对齐:成员统一落 jsonl(下游 DJ/训练交付契约)+ structured;
+    # 落进绑定数据集;血缘经 produced_by_job_id
     assert captured["dataset_id"] == "dset-test"
     assert captured["semantic_type"] == "structured"
-    assert captured["storage_format"] == "parquet"
+    assert captured["storage_format"] == "jsonl"
     assert captured["produced_by_job_id"] == "job-9"
     # 来源 URI 信息保留在 note(原 source_uri 的去处)
     assert "doris://" in (captured["note"] or "")

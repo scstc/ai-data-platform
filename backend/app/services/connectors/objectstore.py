@@ -351,17 +351,33 @@ class S3Connector:
         # running-max-after-success:每对象成功归档后再推进水位,中途失败水位只反映
         # 已落地部分,失败/未处理的 key 重试时仍可被采(防 DATA LOSS)。
         for key in keys:
-            pair = await self._ingest_raw_file(
-                session,
-                task=task,
-                datasource=datasource,
-                src_config=config,
-                src_bucket=bucket,
-                key=key,
-                data_type=data_type,
-                job_id=job_id,
-            )
-            results.append(pair)
+            if task.lake_id:
+                # 治理改造:对象原样入湖归档(source_v 快照),数据集经
+                # 「湖抽取」单独产生;不再逐对象建数据集。
+                snapshot = await self._ingest_key_to_lake(
+                    session,
+                    task=task,
+                    datasource=datasource,
+                    src_config=config,
+                    src_bucket=bucket,
+                    key=key,
+                )
+                task.logs = [
+                    *task.logs,
+                    f"[INFO] 已入湖:{snapshot.source_version}({key})",
+                ]
+            else:
+                pair = await self._ingest_raw_file(
+                    session,
+                    task=task,
+                    datasource=datasource,
+                    src_config=config,
+                    src_bucket=bucket,
+                    key=key,
+                    data_type=data_type,
+                    job_id=job_id,
+                )
+                results.append(pair)
             _advance_file_watermark(task, [key], all_objects, incremental)
 
         return results
@@ -377,6 +393,58 @@ class S3Connector:
             await remove_prefix(cfg, bucket, prefix)
         except ExternalStoreError:
             pass
+
+    @staticmethod
+    async def _ingest_key_to_lake(
+        session: AsyncSession,
+        *,
+        task: IngestTask,
+        datasource: DataSource,
+        src_config: dict[str, Any],
+        src_bucket: str,
+        key: str,
+    ):
+        """对象原样入湖:下载源对象 → ingest_to_lake_raw(湖桶 source_v 快照)。
+
+        只读源、只写湖;下载失败抛 IngestError(诚实失败,不伪成功)。
+        """
+        from app.services.data_lake import ingest_to_lake_raw  # noqa: PLC0415
+        from app.services.landing import media_kind  # noqa: PLC0415
+
+        tmp_path: Path | None = None
+        try:
+            try:
+                tmp_path = await download_to_temp(src_config, src_bucket, key)
+            except ExternalStoreError as exc:
+                raise IngestError(
+                    f"S3 入湖下载失败 {src_bucket}/{key}:{exc}"
+                ) from exc
+            content = tmp_path.read_bytes()
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+        ext = _ext(key)
+        if media_kind(ext):
+            category = media_kind(ext)
+        elif ext in {"csv", "tsv", "xlsx", "xls", "jsonl", "json"}:
+            category = "tabular"
+        elif ext in {"pdf", "docx", "pptx", "doc", "md", "txt"}:
+            category = "document"
+        else:
+            category = "text"
+        return await ingest_to_lake_raw(
+            session,
+            lake_id=task.lake_id,
+            file_content=content,
+            original_filename=Path(key).name or key,
+            data_category=category,
+            # 渠道取数据源类型(oss/obs/minio/s3),未知兜底 minio
+            upload_channel=(datasource.type or "minio"),
+            datasource_id=datasource.id,
+            source_metadata={"bucket_name": src_bucket, "obj_key": key},
+            ingest_task_id=task.id,
+        )
 
     async def _ingest_raw_file(
         self,

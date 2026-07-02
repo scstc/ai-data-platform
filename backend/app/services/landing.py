@@ -713,7 +713,7 @@ async def add_table_member(
     records: list[dict],
     *,
     table_name: str,
-    storage_format: str = "parquet",
+    storage_format: str = "jsonl",
     semantic_type: str | None = None,
     source_format: str | None = None,
     produced_by_job_id: str | None = None,
@@ -725,7 +725,8 @@ async def add_table_member(
     """把一张表的记录落成当前 draft 版本的一个成员(同名覆盖)。
 
     数据集优先流程的落地出口:定位/新建 draft 版本(_target_draft_version),
-    写成员文件(parquet 失败回退 jsonl),upsert 成员行,刷新版本 rollup。
+    写成员文件(默认 jsonl;显式传 parquet 时编码失败回退 jsonl),upsert 成员行,
+    刷新版本 rollup。
     首个成员定调版本级 train_type/schema_variant/semantic_type/modalities。
     """
     from app.services.external_store import (  # 延迟 import 避免循环

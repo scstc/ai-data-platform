@@ -241,6 +241,7 @@ async def list_data_tasks(
     state: Annotated[str | None, Query()] = None,
     keyword: Annotated[str | None, Query()] = None,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
+    job_id: Annotated[str | None, Query(alias="jobId")] = None,
 ) -> PageResponse[JobRead]:
     """跨类型统一列出数据任务(治理+评估),按创建时间倒序,带输入/产出版本概要。
 
@@ -248,6 +249,7 @@ async def list_data_tasks(
     - state:单值状态过滤(pending/running/paused/success/failed/cancelled)。
     - keyword:任务名模糊匹配(name ilike)。
     - datasetId:按数据集过滤(输入或产物版本属于该数据集)。
+    - jobId:任务ID模糊匹配(id ilike,可只输 "job-" 后的 hex 片段)。
     """
     requested = {t.strip() for t in types.split(",") if t.strip()} if types else None
     sel_types = requested & set(_TASK_TYPES) if requested else set(_TASK_TYPES)
@@ -261,6 +263,8 @@ async def list_data_tasks(
         conds.append(Job.name.ilike(f"%{keyword}%"))
     if dataset_id:
         conds.append(_dataset_job_filter(dataset_id))
+    if job_id and job_id.strip():
+        conds.append(Job.id.ilike(f"%{job_id.strip()}%"))
 
     count_stmt = select(func.count()).select_from(Job).where(*conds)
     list_stmt = select(Job).where(*conds)

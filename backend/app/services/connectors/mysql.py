@@ -216,21 +216,46 @@ class MysqlConnector:
                     ]
                     # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
                     records = await apply_filter_operators(task, records)
-                    # 数据集优先(Task 10):每表作成员落进 task.dataset_id 的 draft
-                    # 版本(多表 = 一版本多成员);单查询无 suffix → 成员名 "data"。
                     table_name = suffix or "data"
-                    version, _member = await add_table_member(
-                        session,
-                        task.dataset_id,
-                        records,
-                        table_name=table_name,
-                        # 语义维度:结构化(§4.5)
-                        semantic_type="structured",
-                        source_format="db",
-                        note=f"采集落地:{task.name}(来源 {datasource.name})",
-                        produced_by_job_id=job_id,
-                        storage_format="parquet",
-                    )
+                    if task.lake_id:
+                        # 治理改造:采集入湖归档(source_v 快照),数据集经
+                        # 「湖抽取」单独产生;不再直落数据集。
+                        from app.services.data_lake import (  # noqa: PLC0415
+                            ingest_to_lake_parquet,
+                        )
+
+                        snapshot = await ingest_to_lake_parquet(
+                            session,
+                            lake_id=task.lake_id,
+                            data=records,
+                            source_type="mysql",
+                            source_metadata={
+                                "db_table": table_name,
+                                "db_engine": "mysql",
+                            },
+                            datasource_id=datasource.id,
+                            ingest_task_id=task.id,
+                        )
+                        task.logs = [
+                            *task.logs,
+                            f"[INFO] 已入湖:{snapshot.source_version}"
+                            f"(表 {table_name},{len(records)} 行)",
+                        ]
+                    else:
+                        # 存量数据集任务:每表作成员落进 task.dataset_id 的
+                        # draft 版本;单查询无 suffix → 成员名 "data"。
+                        version, _member = await add_table_member(
+                            session,
+                            task.dataset_id,
+                            records,
+                            table_name=table_name,
+                            # 语义维度:结构化(§4.5)
+                            semantic_type="structured",
+                            source_format="db",
+                            note=f"采集落地:{task.name}(来源 {datasource.name})",
+                            produced_by_job_id=job_id,
+                            storage_format="jsonl",
+                        )
             finally:
                 conn.close()
         except (ConnectorNotReady, IngestError):

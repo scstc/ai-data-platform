@@ -209,6 +209,10 @@ declare namespace DataPlatform {
     name: string;
     datasourceId: string;
     datasourceName: string;
+    /** 目标数据湖(治理改造):新任务必有;存量数据集任务为空 */
+    lakeId?: string | null;
+    /** 湖名回填(列表接口批量取名填充,同 categoryName 模式) */
+    lakeName?: string | null;
     schedule: IngestSchedule;
     extract?: IngestExtract;
     status: 'pending' | 'running' | 'success' | 'failed';
@@ -419,8 +423,6 @@ declare namespace DataPlatform {
     canResume?: boolean;
     /** 可停止(pending/running/paused)——由后端 JobRead.can_stop 派生 */
     canStop?: boolean;
-    /** 前端展示用全局序号(按创建时间倒序:最新=最大),非后端主键;列表 request 时计算 */
-    seq?: number;
   };
 
   /** 新建加工任务入参 */
@@ -930,6 +932,8 @@ declare namespace DataPlatform {
     bucket: string;
     format: string;
     size?: number;
+    /** 行数:结构化表成员/单文件版本有值;originals 原件与 manifest 媒体对象为空 */
+    rows?: number;
   };
 
   /** 数据集元数据更新入参 */
@@ -1082,8 +1086,8 @@ declare namespace DataPlatform {
   type IngestTaskCreate = {
     name: string;
     datasourceId: string;
-    /** 目标数据集(数据集优先):采集结果作表成员落进该数据集的 draft 版本 */
-    datasetId: string;
+    /** 目标数据湖(治理改造):必选,采集结果入湖归档;数据集经「湖抽取」单独产生 */
+    lakeId: string;
     schedule: IngestSchedule;
     extract?: IngestExtract;
     categoryId?: string;
@@ -1185,6 +1189,8 @@ declare namespace DataPlatform {
     usePii: boolean;
     useFlaggedWords: boolean;
     sampleLimit?: number;
+    /** 成员表名 -> 参与扫描的字段;未配置的表默认取 text/首个文本字段。旧单文件版本键固定为 "data" */
+    scanFields?: Record<string, string[]>;
   };
 
   /** 内容安全:新建审核任务入参 */
@@ -1233,6 +1239,8 @@ declare namespace DataPlatform {
     rowIndex: number;
     /** 多表版本:命中所在成员表名;单文件/旧数据为空 */
     tableName?: string;
+    /** 命中所在字段名(建任务配置了扫描字段时);默认扫描/LLM 行级命中为空 */
+    field?: string;
     category: ReviewCategory;
     severity: ReviewSeverity;
     source: ReviewSource;
@@ -1405,9 +1413,10 @@ declare namespace DataPlatform {
   // 数据湖(ODS 原始数据层)
   // ==========================================================================
 
-  /** 数据类型(快照的数据形态):database/document/image/audio/video/text */
+  /** 数据类型(快照的数据形态):database/tabular/document/image/audio/video/text */
   type DataLakeDataCategory =
     | 'database'
+    | 'tabular'
     | 'document'
     | 'image'
     | 'audio'

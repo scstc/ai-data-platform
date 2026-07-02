@@ -38,6 +38,56 @@ if TYPE_CHECKING:
     from app.models.ingest_task import IngestTask
 
 
+async def _land_rows(
+    session: AsyncSession,
+    task: IngestTask,
+    datasource: DataSource,
+    rows: list[dict],
+    *,
+    table_name: str,
+    engine: str,
+    note: str,
+    job_id: str | None,
+) -> DatasetVersion | None:
+    """一批行落地(四库共用):任务绑湖(lake_id)→ 入湖为 source_v 快照,
+    数据集经「湖抽取」单独产生;存量数据集任务 → 落 draft 版本表成员。
+    入湖路径返回 None(无 DatasetVersion 产出)。"""
+    if task.lake_id:
+        from app.services.data_lake import (  # noqa: PLC0415
+            ingest_to_lake_parquet,
+        )
+
+        snapshot = await ingest_to_lake_parquet(
+            session,
+            lake_id=task.lake_id,
+            data=rows,
+            source_type=engine,
+            source_metadata={"db_table": table_name, "db_engine": engine},
+            datasource_id=datasource.id,
+            ingest_task_id=task.id,
+        )
+        task.logs = [
+            *task.logs,
+            f"[INFO] 已入湖:{snapshot.source_version}"
+            f"(表 {table_name},{len(rows)} 行)",
+        ]
+        return None
+    from app.services.landing import add_table_member  # noqa: PLC0415
+
+    version, _member = await add_table_member(
+        session,
+        task.dataset_id,
+        rows,
+        table_name=table_name,
+        semantic_type="structured",
+        source_format="db",
+        note=note,
+        produced_by_job_id=job_id,
+        storage_format="jsonl",
+    )
+    return version
+
+
 # ---------------------------------------------------------------------------
 # 达梦(DM8)— 驱动 dmPython
 # ---------------------------------------------------------------------------
@@ -129,7 +179,6 @@ class DamengConnector(StructuralStub):
             raise ConnectorNotReady(self._not_ready_msg) from None
 
         from app.models.dataset import Dataset
-        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         queries = _build_queries(task.extract)
@@ -154,17 +203,18 @@ class DamengConnector(StructuralStub):
                 port = config.get("port", 5236)
                 target = suffix or "query"
                 table_name = suffix or "data"
-                version, _member = await add_table_member(
+                landed = await _land_rows(
                     session,
-                    task.dataset_id,
+                    task,
+                    datasource,
                     rows,
                     table_name=table_name,
-                    semantic_type="structured",
-                    source_format="db",
+                    engine="dameng",
                     note=f"dameng://{host}:{port}/{target}",
-                    produced_by_job_id=job_id,
-                    storage_format="parquet",
+                    job_id=job_id,
                 )
+                if landed is not None:
+                    version = landed
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -281,7 +331,6 @@ class SequoiaConnector(StructuralStub):
             raise ConnectorNotReady(self._not_ready_msg) from None
 
         from app.models.dataset import Dataset
-        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         extract = task.extract or {}
@@ -323,17 +372,18 @@ class SequoiaConnector(StructuralStub):
                     rec = cursor.next()
 
                 table_name = full_name or "data"
-                version, _member = await add_table_member(
+                landed = await _land_rows(
                     session,
-                    task.dataset_id,
+                    task,
+                    datasource,
                     rows,
                     table_name=table_name,
-                    semantic_type="structured",
-                    source_format="db",
+                    engine="sequoiadb",
                     note=f"sequoiadb://{host}:{port}/{full_name}",
-                    produced_by_job_id=job_id,
-                    storage_format="parquet",
+                    job_id=job_id,
                 )
+                if landed is not None:
+                    version = landed
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -439,7 +489,6 @@ class HiveConnector(StructuralStub):
             raise ConnectorNotReady(self._not_ready_msg) from None
 
         from app.models.dataset import Dataset
-        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         queries = _build_queries(task.extract)
@@ -461,17 +510,18 @@ class HiveConnector(StructuralStub):
                 db = config.get("database", "default")
                 target = suffix or "query"
                 table_name = suffix or "data"
-                version, _member = await add_table_member(
+                landed = await _land_rows(
                     session,
-                    task.dataset_id,
+                    task,
+                    datasource,
                     rows,
                     table_name=table_name,
-                    semantic_type="structured",
-                    source_format="db",
+                    engine="hive",
                     note=f"hive://{host}:{port}/{db}/{target}",
-                    produced_by_job_id=job_id,
-                    storage_format="parquet",
+                    job_id=job_id,
                 )
+                if landed is not None:
+                    version = landed
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover
@@ -598,7 +648,6 @@ class DorisConnector(StructuralStub):
             raise ConnectorNotReady(self._not_ready_msg) from None
 
         from app.models.dataset import Dataset
-        from app.services.landing import add_table_member
 
         config: dict[str, Any] = datasource.config or {}
         queries = _build_queries(task.extract)
@@ -626,17 +675,18 @@ class DorisConnector(StructuralStub):
                 db = config.get("database", "")
                 target = suffix or "query"
                 table_name = suffix or "data"
-                version, _member = await add_table_member(
+                landed = await _land_rows(
                     session,
-                    task.dataset_id,
+                    task,
+                    datasource,
                     rows,
                     table_name=table_name,
-                    semantic_type="structured",
-                    source_format="db",
+                    engine="doris",
                     note=f"doris://{host}:{port}/{db}/{target}",
-                    produced_by_job_id=job_id,
-                    storage_format="parquet",
+                    job_id=job_id,
                 )
+                if landed is not None:
+                    version = landed
         except (ConnectorNotReady, IngestError):
             raise
         except Exception as exc:  # pragma: no cover

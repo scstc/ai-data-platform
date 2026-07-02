@@ -8,14 +8,12 @@ import {
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as dpApi from '@/services/data-platform';
 
-// 测试期内共享槽：捕获 StepsForm 的 formRef / onFinish / 各 step 的 onFinish
+// 测试期内共享槽：捕获 StepsForm 的 onFinish / 各 step 的 onFinish
 type StepFinishFn = (values: any) => Promise<any>;
 const stepsState: {
-  formRef: React.MutableRefObject<any> | null;
   wizardOnFinish: StepFinishFn | null;
   stepOnFinishes: Record<string, StepFinishFn>;
 } = {
-  formRef: null,
   wizardOnFinish: null,
   stepOnFinishes: {},
 };
@@ -49,17 +47,10 @@ vi.mock('@ant-design/pro-components', () => ({
       {children}
     </div>
   ),
-  // StepsForm 桩：渲染 children(各 StepForm)，并把 onFinish / formRef 暴露给测试
+  // StepsForm 桩：渲染 children(各 StepForm)，并把 onFinish 暴露给测试
   StepsForm: Object.assign(
-    ({ children, onFinish, formRef }: any) => {
+    ({ children, onFinish }: any) => {
       stepsState.wizardOnFinish = onFinish || null;
-      if (formRef) {
-        formRef.current = {
-          setFieldValue: vi.fn(),
-          getFieldValue: vi.fn(() => undefined),
-        };
-        stepsState.formRef = formRef;
-      }
       return <div data-testid="steps-form">{children}</div>;
     },
     {
@@ -162,34 +153,6 @@ vi.mock('./Dashboard', () => ({
   default: () => <div data-testid="dashboard" />,
 }));
 
-// SourcePreview 桩：渲染占位 + 暴露 onColumnsChange 触发器
-// 验证"勾列 → 写入 extract.columns"的 wiring，不驱动真实预览
-vi.mock('./components/SourcePreview', () => ({
-  SourcePreview: ({
-    onColumnsChange,
-    datasourceId,
-    mode,
-  }: {
-    onColumnsChange?: (cols: string[]) => void;
-    datasourceId: string;
-    mode?: string;
-  }) => (
-    <div
-      data-testid="source-preview"
-      data-datasource={datasourceId}
-      data-mode={mode ?? ''}
-    >
-      <button
-        type="button"
-        data-testid="select-cols"
-        onClick={() => onColumnsChange?.(['col_a', 'col_c'])}
-      >
-        select
-      </button>
-    </div>
-  ),
-}));
-
 import IngestTasksPage from './index';
 
 const runningTask: DataPlatform.IngestTask = {
@@ -208,7 +171,6 @@ const runningTask: DataPlatform.IngestTask = {
 describe('IngestTasksPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    stepsState.formRef = null;
     stepsState.wizardOnFinish = null;
     stepsState.stepOnFinishes = {};
     vi.mocked(dpApi.listIngestTasks).mockResolvedValue({
@@ -284,14 +246,14 @@ describe('IngestTasksPage', () => {
     expect(screen.getByTestId('pro-table')).toBeInTheDocument();
   });
 
-  it('新建任务走四步向导,勾列写入 extract.columns,提交载荷含选中列', async () => {
+  it('新建任务走三步向导(预览与字段步已取消),提交载荷透传 extract', async () => {
     render(<IngestTasksPage />);
 
     // 1) 点「新建任务」按钮 → 触发 Modal 内 StepsForm 渲染
     fireEvent.click(screen.getByText('新建任务'));
     expect(await screen.findByTestId('steps-form')).toBeInTheDocument();
 
-    // 2) 断言四步全部出现（title 落在 data-title 上）
+    // 2) 断言三步全部出现（title 落在 data-title 上），预览步不再渲染
     expect(screen.getByTestId('step-base')).toHaveAttribute(
       'data-title',
       '基本信息',
@@ -300,17 +262,14 @@ describe('IngestTasksPage', () => {
       'data-title',
       '采集对象',
     );
-    expect(screen.getByTestId('step-preview')).toHaveAttribute(
-      'data-title',
-      '预览与字段',
-    );
     expect(screen.getByTestId('step-confirm')).toHaveAttribute(
       'data-title',
       '落地确认',
     );
+    expect(screen.queryByTestId('step-preview')).not.toBeInTheDocument();
 
-    // 3) 模拟前两步提交：把 datasourceId + extract 写入 wizardCtx（步骤间状态）
-    //    生产代码：step.onFinish 把 values 写入 React state，驱动 step3 SourcePreview 渲染
+    // 3) 模拟前两步提交：把 datasourceId 写入 wizardCtx（步骤间状态），
+    //    驱动落地确认步按数据源类型条件渲染
     await stepsState.stepOnFinishes.base({
       name: 't1',
       datasourceId: 'ds-pg-01',
@@ -321,30 +280,13 @@ describe('IngestTasksPage', () => {
       extract: { mode: 'table', tables: ['users'] },
     });
 
-    // 4) SourcePreview 已挂载（datasourceId 由 wizardCtx 注入）
-    const preview = await screen.findByTestId('source-preview');
-    expect(preview).toHaveAttribute('data-datasource', 'ds-pg-01');
-    expect(preview).toHaveAttribute('data-mode', 'table');
-
-    // 5) 勾列 → 触发生产代码 onColumnsChange → formRef.setFieldValue(['extract','columns'], cols)
-    fireEvent.click(screen.getByTestId('select-cols'));
-    expect(stepsState.formRef?.current.setFieldValue).toHaveBeenCalledWith(
-      ['extract', 'columns'],
-      ['col_a', 'col_c'],
-    );
-
-    // 6) 提交向导：模拟 StepsForm 在最后一步把所有 step 值 deep-merge 后调 onFinish
-    //    断言 createIngestTask 收到的载荷中 extract.columns 反映勾选结果
+    // 4) 提交向导：模拟 StepsForm 在最后一步把所有 step 值 deep-merge 后调 onFinish
     await stepsState.wizardOnFinish?.({
       name: 't1',
       datasourceId: 'ds-pg-01',
       categoryId: 'cat-1',
       schedule: { mode: 'once' },
-      extract: {
-        mode: 'table',
-        tables: ['users'],
-        columns: ['col_a', 'col_c'],
-      },
+      extract: { mode: 'table', tables: ['users'] },
     });
 
     expect(dpApi.createIngestTask).toHaveBeenCalledTimes(1);
@@ -352,7 +294,7 @@ describe('IngestTasksPage', () => {
       expect.objectContaining({
         extract: expect.objectContaining({
           mode: 'table',
-          columns: ['col_a', 'col_c'],
+          tables: ['users'],
         }),
       }),
     );
