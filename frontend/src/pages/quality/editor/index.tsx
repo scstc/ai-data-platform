@@ -10,7 +10,6 @@ import {
   Row,
   Select,
   Space,
-  Tooltip,
   Typography,
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
@@ -21,7 +20,6 @@ import {
   getDataset,
   listDatasets,
   listOperatorCatalog,
-  previewDatasetVersion,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
@@ -72,9 +70,6 @@ const QualityEditor: React.FC = () => {
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  // 选中版本的列名(供「文本字段」多选);留空=后端自动探测主文本字段
-  const [columns, setColumns] = useState<string[]>([]);
-  const [textKeys, setTextKeys] = useState<string[]>([]);
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
   >({});
@@ -102,18 +97,6 @@ const QualityEditor: React.FC = () => {
     }
     getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
   }, [datasetId]);
-
-  // 版本变化:拉一条预览取列名,供「文本字段」多选;切版本时清空已选(列可能不同)
-  useEffect(() => {
-    setTextKeys([]);
-    if (!versionId) {
-      setColumns([]);
-      return;
-    }
-    previewDatasetVersion(versionId, { limit: 1 })
-      .then((r) => setColumns(r.columns ?? []))
-      .catch(() => setColumns([]));
-  }, [versionId]);
 
   // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本;不带参则维持原交互
   const location = useLocation();
@@ -189,7 +172,6 @@ const QualityEditor: React.FC = () => {
         name,
         datasetVersionId: versionId,
         operators: steps,
-        textKeys: textKeys.length ? textKeys : undefined,
       });
       message.success('质量评估任务已创建');
       history.push('/assessment/quality');
@@ -248,19 +230,7 @@ const QualityEditor: React.FC = () => {
             };
           })}
         />
-        <Tooltip title="算子作用的字段;留空则自动探测主文本字段。数据无 text 字段(如蒸馏 instruction、GIS address)时在此显式指定。">
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder="文本字段(留空=自动)"
-            style={{ minWidth: 220, maxWidth: 360 }}
-            value={textKeys}
-            onChange={setTextKeys}
-            disabled={!versionId || columns.length === 0}
-            options={columns.map((c) => ({ label: c, value: c }))}
-            maxTagCount="responsive"
-          />
-        </Tooltip>
+        {/* 文本字段由后端自动探测,前端不再下发 text_keys 字段。 */}
       </Space>
 
       <Row gutter={16}>

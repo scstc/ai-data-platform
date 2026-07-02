@@ -110,7 +110,13 @@ def body_from_spec(job: Job) -> Any:
     if job_type == "quality":
         from app.schemas.job import QualityJobCreate
 
-        return QualityJobCreate.model_validate(spec)
+        body = QualityJobCreate.model_validate(spec)
+        # 小样本 wordcloud 边界规避:dj-analyze 的 wordcloud 在 rows 极少 + 长文本
+        # 重复字段时,token 频次全为 1,layout 失败直接 ValueError 退出码 1。
+        # rows < 阈值时强制不指定 text_keys,让 DJ 自动探测主文本字段(走短列
+        # 路径,绕开 wordcloud 崩溃)。重跑/继续也走这里,与 create_quality_job 拦截
+        # 行为一致。需 session 拿到 input_version.rows,故延迟到 _run_job 里做。
+        return body
     if job_type == "review":
         from app.schemas.review import ReviewJobCreate
 
