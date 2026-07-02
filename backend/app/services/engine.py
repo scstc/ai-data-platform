@@ -547,6 +547,28 @@ async def run_process_job(
                    优先于 operators+target_members 模式;指定时 operators/text_keys 参数被忽略。
     返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 EngineError。
     """
+    # manifest 媒体集不落 dataset_version_tables(见 landing.land_media_manifest),
+    # 一个版本天然只有一个成员(整版本一套算子,见 datasets._attach_tables 合成的
+    # MANIFEST_MEMBER_NAME 伪成员与 jobs._start_job 的对应校验)——复用已跑通的
+    # 整版本处理路径(含物化清单/媒体、产出媒体回传 MinIO),不按表成员拆分执行。
+    if input_version.format == MANIFEST_FORMAT:
+        if member_configs:
+            if len(member_configs) != 1:
+                raise EngineError("媒体(manifest)数据集仅支持单一成员的算子配置")
+            operators = member_configs[0]["operators"]
+            text_keys = member_configs[0].get("text_keys")
+        if not operators:
+            raise EngineError("媒体(manifest)数据集必须提供算子配置")
+        return await _run_process_job_legacy(
+            session,
+            job_id=job_id,
+            input_version=input_version,
+            operators=operators,
+            text_keys=text_keys,
+            use_ray=use_ray,
+            media_keys=media_keys,
+        )
+
     # 1. 查询输入版本的成员
     members = await _get_version_members(session, input_version.id)
 

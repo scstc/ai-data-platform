@@ -452,6 +452,9 @@ async def _materialized_manifest(
     带成员数/总字节上限,退出时整目录清理。"""
     cfg = await _version_cfg(version, session)
     bucket, manifest_key = parse_s3_uri(version.storage_uri)
+    # images/audios/videos 存的是相对 manifest 所在前缀的文件名(见
+    # landing.land_media_manifest 的写入约定),下载前拼回完整对象 key。
+    manifest_prefix = manifest_key.rpartition("/")[0]
     manifest_raw = await download_to_temp(cfg, bucket, manifest_key)
     try:
         lines = [
@@ -478,11 +481,16 @@ async def _materialized_manifest(
                     if not isinstance(paths, list):
                         continue
                     local_names: list[str] = []
-                    for member_key in paths:
+                    for rel_name in paths:
                         if count >= MAX_MANIFEST_MEMBERS:
                             raise ExternalStoreError(
                                 f"清单成员超过上限 {MAX_MANIFEST_MEMBERS},无法物化加工"
                             )
+                        member_key = (
+                            f"{manifest_prefix}/{rel_name}"
+                            if manifest_prefix
+                            else str(rel_name)
+                        )
                         member_tmp = await download_to_temp(cfg, bucket, member_key)
                         total_bytes += member_tmp.stat().st_size
                         if total_bytes > MAX_MATERIALIZE_BYTES:
@@ -615,7 +623,9 @@ async def persist_manifest_output(
             paths = row.get(field)
             if not isinstance(paths, list):
                 continue
-            keys: list[str] = []
+            # images/audios/videos 落盘存相对 manifest 前缀的文件名(与
+            # _materialized_manifest 的写入约定对称),__member.key 才是完整对象 key。
+            names: list[str] = []
             for local in paths:
                 p = Path(str(local))
                 if not p.is_absolute() or not p.exists():
@@ -628,7 +638,7 @@ async def persist_manifest_output(
                     cfg, bucket, key, io.BytesIO(content), len(content)
                 )
                 total_size += len(content)
-                keys.append(key)
+                names.append(p.name)
                 if member is None:
                     member = {
                         "bucket": bucket,
@@ -637,7 +647,7 @@ async def persist_manifest_output(
                         "size": len(content),
                         "format": p.suffix.lstrip("."),
                     }
-            row[field] = keys
+            row[field] = names
         if member is not None:
             row["__member"] = member
         out_rows.append(row)

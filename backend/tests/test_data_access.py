@@ -473,8 +473,9 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
     import json
 
     from app.api.v1 import datasets as dmod
+    from app.services import external_store as esmod
 
-    store = _mem_store_patch(monkeypatch, dmod)
+    store = _mem_store_patch_all(monkeypatch, dmod, esmod)
 
     ds = (await client.post(
         "/api/v1/datasets", json={"name": "我的图集", "dataType": "image"}
@@ -532,6 +533,61 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
         params={"key": "other-ds/evil.png"},
     )
     assert resp.status_code == 400
+
+
+def _mem_store_patch_all(monkeypatch, *modules) -> dict:
+    """给多个 module(如 datasets + external_store)打补丁,共享同一份内存 store。
+
+    land_media_manifest 迁到 landing.py 后,对象存储调用经由其内部延迟 import
+    的 external_store 函数,与 datasets.py 端点里仍直接调用的 upload_object/
+    platform_config 不是同一份名字绑定——两边都要打且共享同一个 store,读写
+    才能互见(如 upload-media 写完 manifest,/members 端点才能读到)。
+    """
+    import tempfile
+    from pathlib import Path as _P
+
+    store: dict[tuple[str, str], bytes] = {}
+
+    def _cfg():
+        return {"endpoint": "x", "accessKey": "a", "secretKey": "b"}
+
+    async def fake_upload(cfg, bucket, key, data, length, content_type="x"):
+        store[(bucket, key)] = data.read()
+
+    async def fake_download(cfg, bucket, key):
+        fd, name = tempfile.mkstemp()
+        import os as _os
+
+        _os.close(fd)
+        p = _P(name)
+        p.write_bytes(store[(bucket, key)])
+        return p
+
+    async def fake_presign(cfg, bucket, key, expires_seconds=600):
+        return f"http://minio/{bucket}/{key}?sig=test"
+
+    async def fake_remove(cfg, bucket, key):
+        store.pop((bucket, key), None)
+
+    async def fake_remove_prefix(cfg, bucket, prefix):
+        keys = [k for k in store if k[0] == bucket and k[1].startswith(prefix)]
+        for k in keys:
+            store.pop(k, None)
+        return len(keys)
+
+    for m in modules:
+        monkeypatch.setattr(m, "platform_config", _cfg)
+        if hasattr(m, "upload_object"):
+            monkeypatch.setattr(m, "upload_object", fake_upload)
+        if hasattr(m, "download_to_temp"):
+            monkeypatch.setattr(m, "download_to_temp", fake_download)
+        if hasattr(m, "presigned_get_url"):
+            monkeypatch.setattr(m, "presigned_get_url", fake_presign)
+        if hasattr(m, "remove_object"):
+            monkeypatch.setattr(m, "remove_object", fake_remove)
+        if hasattr(m, "remove_prefix"):
+            monkeypatch.setattr(m, "remove_prefix", fake_remove_prefix)
+    return store
 
 
 def _mem_store_patch_both(monkeypatch) -> dict:
@@ -633,7 +689,9 @@ async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch)
     store[("uploads", "ds-x/manifest.jsonl")] = (
         json.dumps(
             {
-                "images": ["ds-x/000000-a.png"],
+                # images 存相对 manifest 前缀(ds-x/)的文件名,非完整 key
+                # (完整 key 见 __member.key)
+                "images": ["000000-a.png"],
                 "text": "<__dj__image>",
                 "__member": {
                     "bucket": "uploads",
@@ -696,11 +754,11 @@ async def test_persist_manifest_output_uploads_and_rewrites(monkeypatch, tmp_pat
     assert size == len(b"\x89PNG-fake")
     # 媒体已回传到版本前缀(自包含)
     assert ("uploads", "dset-x/v2/000000-000000-pic.png") in store
-    # 清单:images 改写为对象 key + __member 指回该对象
+    # 清单:images 存相对 v2/ 前缀的文件名,__member 指回完整对象 key
     manifest_row = json.loads(
         store[("uploads", "dset-x/v2/manifest.jsonl")].decode().strip()
     )
-    assert manifest_row["images"] == ["dset-x/v2/000000-000000-pic.png"]
+    assert manifest_row["images"] == ["000000-000000-pic.png"]
     assert manifest_row["__member"]["key"] == "dset-x/v2/000000-000000-pic.png"
     assert manifest_row["__member"]["bucket"] == "uploads"
 
@@ -709,9 +767,10 @@ async def test_persist_manifest_output_uploads_and_rewrites(monkeypatch, tmp_pat
 async def test_upload_media_rejects_over_member_cap(client, monkeypatch):
     """超过成员数上限的批量 → 400(不会创建永远无法物化的数据集)。"""
     from app.api.v1 import datasets as dmod
+    from app.services import external_store as esmod
 
-    _mem_store_patch(monkeypatch, dmod)
-    monkeypatch.setattr(dmod, "MAX_MANIFEST_MEMBERS", 2)
+    _mem_store_patch_all(monkeypatch, dmod, esmod)
+    monkeypatch.setattr(esmod, "MAX_MANIFEST_MEMBERS", 2)
     did = (await client.post(
         "/api/v1/datasets", json={"name": "超额图集", "dataType": "image"}
     )).json()["data"]["id"]
@@ -730,12 +789,12 @@ async def test_upload_media_rejects_over_member_cap(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_upload_media_gc_on_storage_failure(client, monkeypatch):
     """中途上传失败 → 503 且回收已写对象(remove_prefix 命中本数据集前缀),不留孤儿。"""
-    from app.api.v1 import datasets as dmod
+    from app.services import external_store as esmod
     from app.services.external_store import ExternalStoreError
 
     calls = {"n": 0, "gc": []}
     monkeypatch.setattr(
-        dmod,
+        esmod,
         "platform_config",
         lambda: {"endpoint": "x", "accessKey": "a", "secretKey": "b"},
     )
@@ -749,8 +808,8 @@ async def test_upload_media_gc_on_storage_failure(client, monkeypatch):
         calls["gc"].append((bucket, prefix))
         return 1
 
-    monkeypatch.setattr(dmod, "upload_object", fail_upload)
-    monkeypatch.setattr(dmod, "remove_prefix", rec_remove_prefix)
+    monkeypatch.setattr(esmod, "upload_object", fail_upload)
+    monkeypatch.setattr(esmod, "remove_prefix", rec_remove_prefix)
 
     did = (await client.post(
         "/api/v1/datasets", json={"name": "回收图集", "dataType": "image"}
@@ -802,13 +861,20 @@ async def test_members_corrupt_manifest_returns_4xx(
 
 async def _upload_two_images(client, store_owner_module, monkeypatch):
     """建一个含 2 张图的 manifest 数据集,返回 (datasetId, versionId, store)。"""
-    store = _mem_store_patch(monkeypatch, store_owner_module)
+    from app.services import external_store as esmod
+
+    store = _mem_store_patch_all(monkeypatch, store_owner_module, esmod)
+    ds = (await client.post(
+        "/api/v1/datasets", json={"name": "追加测试图集", "dataType": "image"}
+    )).json()["data"]["id"]
     files = [
         ("files", ("a.png", b"PNGDATA1", "image/png")),
         ("files", ("b.jpg", b"JPGDATA22", "image/jpeg")),
     ]
     resp = await client.post(
-        "/api/v1/datasets/upload-media", files=files, data={"data_type": "image"}
+        "/api/v1/datasets/upload-media",
+        files=files,
+        data={"data_type": "image", "datasetId": ds},
     )
     d = resp.json()["data"]
     return d["id"], d["versions"][0]["id"], store
@@ -832,8 +898,8 @@ async def test_add_members_appends_to_manifest(client, monkeypatch):
         await client.get(f"/api/v1/dataset-versions/{vid}/members")
     ).json()["data"]
     assert {m["name"] for m in members} == {"a.png", "b.jpg", "c.png"}
-    # 清单对象确实增到 3 行
-    manifest = store[("uploads", f"{did}/manifest.jsonl")].decode()
+    # 清单对象确实增到 3 行(成员与 manifest.jsonl 同前缀 <did>/v1/)
+    manifest = store[("uploads", f"{did}/v1/manifest.jsonl")].decode()
     assert len([ln for ln in manifest.splitlines() if ln.strip()]) == 3
 
 

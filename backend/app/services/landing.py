@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import openpyxl
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -77,6 +77,16 @@ _MEDIA_KIND_BY_FORMAT = {
 # 单媒体原样/manifest 存储无真实文本 → 子标签为单模态(图片/音频/视频),不含 text。
 _DATA_TYPE_TO_MEDIA_FIELD = {"image": "images", "audio": "audios", "video": "videos"}
 
+# manifest 批量媒体接入:data_type → dj 特殊 token(占位符,dj-process 按此定位媒体)。
+_MEDIA_TOKEN = {
+    "image": "<__dj__image>",
+    "audio": "<__dj__audio>",
+    "video": "<__dj__video>",
+}
+
+# manifest 批量媒体接入:单文件体积上限(与 uploads.py / 前端 200MB 对齐)
+_MAX_MEDIA_FILE_BYTES = 200 * 1024 * 1024
+
 
 def media_kind(fmt: str) -> str | None:
     """媒体扩展名 → 模态名(image/audio/video);非媒体格式 → None。"""
@@ -88,6 +98,11 @@ INGESTABLE_FORMATS = LANDABLE_FORMATS | BINARY_FORMATS
 # 媒体批量接入版本 format:manifest jsonl(每行引用对象存储媒体),
 # 物化时下载成员并改写本地路径喂给 dj-process(见 external_store.materialized_version)。
 MANIFEST_FORMAT = "manifest"
+
+# manifest 版本在成员级 UI/校验(数据预览之外的清洗任务编辑器)里的合成成员名:
+# 一个 manifest 版本 = 一份媒体清单,不落 dataset_version_tables,天然只有"一个成员"
+# (整版本一套算子),见 datasets.py _attach_tables 与 jobs.py _start_job。
+MANIFEST_MEMBER_NAME = "manifest"
 
 # markitdown 实例(懒加载,首次处理文档时才初始化,避免拖慢后端启动)
 _markitdown = None
@@ -1165,6 +1180,190 @@ async def _land_raw_member(
     await session.refresh(version)
     dataset = await session.get(Dataset, dataset_id)
     return dataset, version
+
+
+async def land_media_manifest(
+    session: AsyncSession,
+    dataset_id: str,
+    *,
+    files: list[tuple[str, bytes]],
+    data_type: str,
+) -> DatasetVersion:
+    """一批媒体字节(单模态)→ manifest jsonl 版本(一文件一行,DJ 可读契约)。
+
+    `POST /datasets/upload-media` 与数据湖抽取(音/图/视频快照)共用的落地核心:
+    复用该数据集最新 draft 版本(有则续写 manifest 追加行,无则新建);manifest 是
+    整版本形态(非表成员)。`files` 为 ``(filename, content)``,仅支持单模态
+    (image/audio/video,一个数据集一种模态,见 `_DATA_TYPE_TO_MEDIA_FIELD`)。
+
+    Raises:
+        LandingError: data_type 不支持 / 空文件列表 / 超出接入上限 / 单文件或总体积超限
+        ExternalStoreError: 平台存储未配置 / 对象写入失败(写入失败时已尽力回收
+            本次已写对象,不留孤儿)——与 LandingError 分开抛,便于调用方映射
+            400(校验类)与 503(存储类)两种状态码
+    """
+    from app.services.external_store import (
+        MAX_MANIFEST_MEMBERS,
+        MAX_MATERIALIZE_BYTES,
+        ExternalStoreError,
+        download_to_temp,
+        platform_config,
+        remove_prefix,
+        upload_object,
+    )
+
+    field = _DATA_TYPE_TO_MEDIA_FIELD.get(data_type)
+    token = _MEDIA_TOKEN.get(data_type)
+    if field is None or token is None:
+        raise LandingError("媒体批量接入仅支持 image / audio / video 类型")
+    if not files:
+        raise LandingError("请至少选择一个文件")
+    if len(files) > MAX_MANIFEST_MEMBERS:
+        raise LandingError(f"一次最多接入 {MAX_MANIFEST_MEMBERS} 个文件")
+
+    cfg = platform_config()  # ExternalStoreError(未配置)原样上抛,不转 LandingError
+
+    bucket = settings.storage_minio_upload_bucket
+    existing_draft = (
+        await session.execute(
+            select(DatasetVersion)
+            .where(
+                DatasetVersion.dataset_id == dataset_id,
+                DatasetVersion.publish_status == "draft",
+            )
+            .order_by(DatasetVersion.version_no.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if existing_draft is not None:
+        version = existing_draft
+        version_no = version.version_no
+        existing_manifest_rows: list[dict] = []
+        if version.storage_uri:
+            try:
+                _uri_parts = version.storage_uri.removeprefix("s3://").split("/", 1)
+                _m_bucket, _m_key = _uri_parts[0], _uri_parts[1]
+                _tmp = await download_to_temp(cfg, _m_bucket, _m_key)
+                existing_manifest_rows = [
+                    json.loads(line)
+                    for line in _tmp.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                _tmp.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 旧清单读取失败按空清单处理,不阻断本次接入
+                existing_manifest_rows = []
+        start_idx = len(existing_manifest_rows)
+    else:
+        max_no = (
+            await session.execute(
+                select(func.max(DatasetVersion.version_no)).where(
+                    DatasetVersion.dataset_id == dataset_id
+                )
+            )
+        ).scalar()
+        version_no = (max_no or 0) + 1
+        existing_manifest_rows = []
+        start_idx = 0
+        version = None
+
+    ver_prefix = f"{dataset_id}/v{version_no}/"
+
+    async def _gc() -> None:
+        try:
+            await remove_prefix(platform_config(), bucket, ver_prefix)
+        except ExternalStoreError:
+            pass  # 尽力回收,失败不掩盖原始错误
+
+    new_rows: list[dict] = []
+    total_size = 0
+    for idx, (filename, content) in enumerate(files):
+        if len(content) > _MAX_MEDIA_FILE_BYTES:
+            await _gc()
+            raise LandingError(f"文件 {filename} 超过单文件 200MB 上限")
+        total_size += len(content)
+        if total_size > MAX_MATERIALIZE_BYTES:
+            await _gc()
+            raise LandingError("本批文件总体积超过上限,无法加工")
+        fmt = Path(filename).suffix.lstrip(".").lower()
+        base = Path(filename).name
+        local_name = f"{start_idx + idx:06d}-{base}"
+        member_key = f"{ver_prefix}{local_name}"
+        try:
+            await upload_object(
+                cfg,
+                bucket,
+                member_key,
+                io.BytesIO(content),
+                len(content),
+                content_type="application/octet-stream",
+            )
+        except ExternalStoreError:
+            await _gc()
+            raise
+        new_rows.append(
+            {
+                # images/audios/videos 存相对 manifest 所在目录的文件名(与
+                # manifest.jsonl 必然同前缀,见 land_media_manifest/add_dataset_members
+                # 都用 ver_prefix 落成员);__member.key 才是完整对象 key,供
+                # 预签名/删除等直接寻址用。见 external_store._materialized_manifest
+                # 的解析侧。
+                field: [local_name],
+                "text": token,
+                "__member": {
+                    "bucket": bucket,
+                    "key": member_key,
+                    "name": base,
+                    "size": len(content),
+                    "format": fmt,
+                },
+            }
+        )
+
+    manifest_rows = existing_manifest_rows + new_rows
+    manifest_bytes = (
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in manifest_rows) + "\n"
+    ).encode("utf-8")
+    manifest_key = f"{ver_prefix}manifest.jsonl"
+    try:
+        await upload_object(
+            cfg,
+            bucket,
+            manifest_key,
+            io.BytesIO(manifest_bytes),
+            len(manifest_bytes),
+            content_type="application/x-ndjson",
+        )
+    except ExternalStoreError:
+        await _gc()
+        raise
+
+    media_modalities = [field]
+    if version is None:
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=f"s3://{bucket}/{manifest_key}",
+            format=MANIFEST_FORMAT,
+            rows=len(manifest_rows),
+            size=total_size,
+            origin="managed",
+            source_datasource_id=None,
+            modalities=media_modalities,
+            publish_status="draft",
+            note=f"媒体批量接入:{len(files)} 个文件",
+        )
+        session.add(version)
+    else:
+        version.storage_uri = f"s3://{bucket}/{manifest_key}"
+        version.rows = len(manifest_rows)
+        version.size = (version.size or 0) + total_size
+        if media_modalities:
+            version.modalities = media_modalities
+    await session.commit()
+    await session.refresh(version)
+    return version
 
 
 async def land_upload_raw(

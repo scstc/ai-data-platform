@@ -21,7 +21,14 @@ from app.core.config import settings
 from app.models.data_lake import DataLakeSnapshot
 from app.services.data_lake import get_snapshot_by_version
 from app.services.external_store import ExternalStoreError, client_for, parse_s3_uri
-from app.services.landing import LANDABLE_FORMATS, normalize_to_records
+from app.services.landing import (
+    BINARY_FORMATS,
+    LANDABLE_FORMATS,
+    LandingError,
+    land_media_manifest,
+    media_kind,
+    normalize_to_records,
+)
 
 
 async def extract_from_lake_snapshot(
@@ -153,6 +160,26 @@ async def _read_raw_from_snapshot(
         raise ExternalStoreError(
             f"解析 {ext} 文件失败: {exc}(快照 {snapshot.id})"
         ) from exc
+
+
+async def _download_snapshot_bytes(snapshot: DataLakeSnapshot) -> bytes:
+    """从快照的 storage_uri 下载原始字节(供二进制原样落地场景复用)。"""
+    bucket, key = parse_s3_uri(snapshot.storage_uri)
+    config = {
+        "endpoint": settings.storage_minio_endpoint,
+        "accessKey": settings.storage_minio_access_key,
+        "secretKey": settings.storage_minio_secret_key,
+    }
+    client = client_for(config)
+
+    def _get():
+        response = client.get_object(bucket, key)
+        return response.read()
+
+    try:
+        return await asyncio.to_thread(_get)
+    except S3Error as exc:
+        raise ExternalStoreError(f"读取快照文件失败: {exc}") from exc
 
 
 def _inject_lineage_fields(
@@ -340,8 +367,32 @@ async def extract_to_new_dataset(
         creator=creator,
     )
 
-    # 逐快照抽取并落表成员;表名取 source_version(版本内唯一)
-    for snapshot in snapshots:
+    # 二进制快照(图片/音频/视频)按模态分组,各自落一个 manifest 版本(DJ 可读
+    # 契约,见 landing.land_media_manifest);前置解析(OCR/ASR/关键帧,见
+    # docs/数据治理.md §2.2)尚未实现,manifest 里的 text 先是占位 token。
+    binary_snapshots = [s for s in snapshots if s.storage_format in BINARY_FORMATS]
+    other_snapshots = [s for s in snapshots if s.storage_format not in BINARY_FORMATS]
+
+    by_kind: dict[str, list[DataLakeSnapshot]] = {}
+    for snapshot in binary_snapshots:
+        by_kind.setdefault(media_kind(snapshot.storage_format), []).append(snapshot)
+
+    for kind, group in by_kind.items():
+        items = [
+            (
+                f"{snapshot.source_version}.{snapshot.storage_format}",
+                await _download_snapshot_bytes(snapshot),
+            )
+            for snapshot in group
+        ]
+        try:
+            await land_media_manifest(db, dataset.id, files=items, data_type=kind)
+        except LandingError as exc:
+            # 本函数对外只承诺 ExternalStoreError(见函数 docstring),统一转换
+            raise ExternalStoreError(str(exc)) from exc
+
+    # 其余(数据库/文本/文档)逐快照抽取并落表成员;表名取 source_version(版本内唯一)
+    for snapshot in other_snapshots:
         records = await extract_from_lake_snapshot(
             db, lake_id, snapshot.source_version, inject_lineage=True
         )

@@ -30,7 +30,7 @@ from app.services.engine import (
     terminate_job,
 )
 from app.services.external_store import ExternalStoreError
-from app.services.landing import BINARY_FORMATS, MANIFEST_FORMAT
+from app.services.landing import BINARY_FORMATS, MANIFEST_FORMAT, MANIFEST_MEMBER_NAME
 from app.services.llm_config import get_active_llm_config
 
 router = APIRouter(tags=["jobs"])
@@ -256,15 +256,35 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
             content={"success": False, "message": "请指定 memberConfigs 或 operators"}
         )
 
+    input_version = await session.get(DatasetVersion, body.dataset_version_id)
+    if input_version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+
     # 校验 member_configs（如果提供）
     if body.member_configs:
-        from app.models import DatasetVersionTable
+        if input_version.format == MANIFEST_FORMAT:
+            # manifest 媒体集不落 dataset_version_tables,天然只有一个合成成员
+            # (MANIFEST_MEMBER_NAME,见 datasets._attach_tables),整版本一套算子。
+            if len(body.member_configs) != 1:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": "媒体(manifest)数据集仅支持单一成员的算子配置",
+                    },
+                )
+            member_names = {MANIFEST_MEMBER_NAME}
+        else:
+            from app.models import DatasetVersionTable
 
-        stmt = select(DatasetVersionTable).where(
-            DatasetVersionTable.dataset_version_id == body.dataset_version_id
-        )
-        members = (await session.execute(stmt)).scalars().all()
-        member_names = {m.table_name for m in members}
+            stmt = select(DatasetVersionTable).where(
+                DatasetVersionTable.dataset_version_id == body.dataset_version_id
+            )
+            members = (await session.execute(stmt)).scalars().all()
+            member_names = {m.table_name for m in members}
 
         for cfg in body.member_configs:
             if cfg.member_name not in member_names:
@@ -298,19 +318,13 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
                 content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
             )
 
-    input_version = await session.get(DatasetVersion, body.dataset_version_id)
-    if input_version is None:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "message": "数据集版本不存在"},
-        )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
     if (blocked_resp := await _multimodal_block(input_version)) is not None:
         return blocked_resp
 
     # 校验 target_members 有效性
-    if body.target_members:
+    if body.target_members and input_version.format != MANIFEST_FORMAT:
         from app.models import DatasetVersionTable
 
         stmt = select(DatasetVersionTable).where(

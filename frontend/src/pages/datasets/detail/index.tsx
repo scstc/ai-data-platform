@@ -39,6 +39,7 @@ import {
   deleteVersionMembers,
   exportVersionToS3,
   getDataset,
+  getDatasetMemberUrl,
   listBuckets,
   listCategories,
   listDataSources,
@@ -528,6 +529,26 @@ const DatasetDetail: React.FC = () => {
           <Button size="small" onClick={() => setExportVersion(v)}>
             导出到 S3
           </Button>
+          {v.format === 'manifest' && (
+            <Button
+              size="small"
+              onClick={async () => {
+                try {
+                  const key = v.storageUri.replace(/^s3:\/\/[^/]+\//, '');
+                  const res = await getDatasetMemberUrl(v.id, key);
+                  if (res.success && res.data?.url) {
+                    window.open(res.data.url, '_blank');
+                  } else {
+                    message.error('生成清单链接失败');
+                  }
+                } catch (e: any) {
+                  message.error(e?.response?.data?.message || '生成清单链接失败');
+                }
+              }}
+            >
+              查看清单
+            </Button>
+          )}
         </Space>
         {access.canAdmin && (
           <>

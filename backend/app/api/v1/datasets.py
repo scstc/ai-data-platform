@@ -76,6 +76,7 @@ from app.services.landing import (
     INGESTABLE_FORMATS,
     LANDABLE_FORMATS,
     MANIFEST_FORMAT,
+    MANIFEST_MEMBER_NAME,
     LandingError,
     ParseError,
     UnsupportedFormatError,
@@ -83,6 +84,7 @@ from app.services.landing import (
     add_raw_batch,
     add_table_member,
     create_dataset,
+    land_media_manifest,
     land_upload,
     land_upload_raw,
     normalize_to_records,
@@ -153,7 +155,10 @@ async def _attach_tables(
     """按 dataset_version_tables 批量回填各版本的 tables 数组(多表/多 parquet)。
 
     单表数据集 = 恰好一个成员(回填后存量版本亦然);多表 = 各表一个成员。
-    无成员行的版本(理论上不应有,防御)保持空 tables。
+    manifest 媒体集不落 dataset_version_tables(见 landing.land_media_manifest),
+    合成一个同名(MANIFEST_MEMBER_NAME)伪成员,好让清洗任务编辑器等按"成员级配置"
+    统一交互的界面能识别出它——一个 manifest 版本本就是一份清单,天然只有一个成员
+    (整版本一套算子,见 jobs._start_job / engine.run_process_job 对该名字的呼应处理)。
     """
     vids = [v.id for v in detail.versions]
     if not vids:
@@ -178,6 +183,16 @@ async def _attach_tables(
             )
         )
     for v in detail.versions:
+        if v.id not in by_ver and v.format == MANIFEST_FORMAT:
+            by_ver[v.id] = [
+                DatasetTableRead(
+                    table_name=MANIFEST_MEMBER_NAME,
+                    storage_uri=v.storage_uri,
+                    format=MANIFEST_FORMAT,
+                    rows=v.rows,
+                    size=v.size,
+                )
+            ]
         v.tables = by_ver.get(v.id, [])
     return detail
 
@@ -458,9 +473,7 @@ async def upload_media_as_dataset(
     (非表成员),故每次媒体接入在该数据集追加一个新版本(version_no=max+1),
     keys 落在 v<n>/ 下,避免与其它版本的 manifest 冲突。仅图/音/视频(同模态)。
     """
-    field = _MEDIA_FIELD.get(data_type or "")
-    token = _MEDIA_TOKEN.get(data_type or "")
-    if field is None or token is None:
+    if (data_type or "") not in _MEDIA_FIELD:
         return JSONResponse(
             status_code=400,
             content={
@@ -494,158 +507,24 @@ async def upload_media_as_dataset(
                     "message": f"文件 {f.filename} 不是支持的媒体格式",
                 },
             )
-    # 接入上限与物化上限对齐:超限的数据集永远无法加工,故在接入处就拦截
-    if len(files) > MAX_MANIFEST_MEMBERS:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "message": f"一次最多接入 {MAX_MANIFEST_MEMBERS} 个文件",
-            },
-        )
+
     try:
-        cfg = platform_config()
-    except ExternalStoreError as exc:
-        return JSONResponse(
-            status_code=503, content={"success": False, "message": str(exc)}
+        items = [
+            (f.filename or f"file{idx}", await f.read())
+            for idx, f in enumerate(files)
+        ]
+        await land_media_manifest(
+            session, dataset_id, files=items, data_type=data_type or ""
         )
-
-    bucket = settings.storage_minio_upload_bucket
-    # 优先复用该数据集最新的 draft 版本;若无 draft 则新建版本。
-    existing_draft = (
-        await session.execute(
-            select(DatasetVersion)
-            .where(
-                DatasetVersion.dataset_id == dataset_id,
-                DatasetVersion.publish_status == "draft",
-            )
-            .order_by(DatasetVersion.version_no.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-    if existing_draft is not None:
-        version = existing_draft
-        version_no = version.version_no
-        # 读取已有 manifest 行(如有),用于覆盖写时保留旧数据
-        existing_manifest_rows: list[dict] = []
-        if version.storage_uri:
-            try:
-                # storage_uri = s3://<bucket>/<key>
-                _uri_parts = version.storage_uri.removeprefix("s3://").split("/", 1)
-                _m_bucket, _m_key = _uri_parts[0], _uri_parts[1]
-                _tmp = await download_to_temp(cfg, _m_bucket, _m_key)
-                import json as _json
-                existing_manifest_rows = [
-                    _json.loads(line)
-                    for line in _tmp.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-                _tmp.unlink(missing_ok=True)
-            except Exception:
-                existing_manifest_rows = []
-        start_idx = len(existing_manifest_rows)
-    else:
-        max_no = (
-            await session.execute(
-                select(func.max(DatasetVersion.version_no)).where(
-                    DatasetVersion.dataset_id == dataset_id
-                )
-            )
-        ).scalar()
-        version_no = (max_no or 0) + 1
-        existing_manifest_rows = []
-        start_idx = 0
-        version = None  # 新建,下方赋值
-
-    ver_prefix = f"{dataset_id}/v{version_no}/"
-    try:
-        new_rows: list[dict] = []
-        total_size = 0
-        for idx, f in enumerate(files):
-            content = await f.read()
-            if len(content) > _MAX_MEDIA_FILE_BYTES:
-                raise ValueError(f"文件 {f.filename} 超过单文件 200MB 上限")
-            total_size += len(content)
-            if total_size > MAX_MATERIALIZE_BYTES:
-                raise ValueError("本批文件总体积超过上限,无法加工")
-            fmt = _file_ext(f.filename or "")
-            base = Path(f.filename or f"file{idx}").name
-            member_key = f"{ver_prefix}{start_idx + idx:06d}-{base}"
-            await upload_object(
-                cfg,
-                bucket,
-                member_key,
-                io.BytesIO(content),
-                len(content),
-                content_type=f.content_type or "application/octet-stream",
-            )
-            new_rows.append(
-                {
-                    field: [member_key],
-                    "text": token,
-                    "__member": {
-                        "bucket": bucket,
-                        "key": member_key,
-                        "name": base,
-                        "size": len(content),
-                        "format": fmt,
-                    },
-                }
-            )
-        manifest_rows = existing_manifest_rows + new_rows
-        manifest_bytes = _manifest_bytes(manifest_rows)
-        manifest_key = f"{ver_prefix}manifest.jsonl"
-        await upload_object(
-            cfg,
-            bucket,
-            manifest_key,
-            io.BytesIO(manifest_bytes),
-            len(manifest_bytes),
-            content_type="application/x-ndjson",
-        )
-
-        media_modalities = [_MEDIA_FIELD[data_type]] if data_type else None
-        if version is None:
-            version = DatasetVersion(
-                id=_new_version_id(),
-                dataset_id=dataset_id,
-                version_no=version_no,
-                storage_uri=f"s3://{bucket}/{manifest_key}",
-                format=MANIFEST_FORMAT,
-                rows=len(manifest_rows),
-                size=total_size,
-                origin="managed",
-                source_datasource_id=None,
-                modalities=media_modalities,
-                publish_status="draft",
-                note=f"媒体批量接入:{len(files)} 个文件",
-            )
-            session.add(version)
-        else:
-            version.storage_uri = f"s3://{bucket}/{manifest_key}"
-            version.rows = len(manifest_rows)
-            version.size = (version.size or 0) + total_size
-            if media_modalities:
-                version.modalities = media_modalities
-        await session.commit()
         await session.refresh(dataset)
-        await session.refresh(version)
-    except ValueError as exc:
-        await _gc_manifest_objects((bucket, ver_prefix))
+    except LandingError as exc:
         return JSONResponse(
             status_code=400, content={"success": False, "message": str(exc)}
         )
     except ExternalStoreError as exc:
-        await _gc_manifest_objects((bucket, ver_prefix))
         return JSONResponse(
-            status_code=503,
-            content={"success": False, "message": f"对象写入失败:{exc}"},
+            status_code=503, content={"success": False, "message": str(exc)}
         )
-    except Exception:
-        await session.rollback()
-        await _gc_manifest_objects((bucket, ver_prefix))
-        raise
 
     versions = (
         await session.execute(
@@ -1369,6 +1248,10 @@ async def add_dataset_members(
             },
         )
 
+    # 成员必须与 manifest.jsonl 同前缀(images/audios/videos 字段存相对该前缀的
+    # 文件名,见 landing.land_media_manifest 的写入约定与
+    # external_store._materialized_manifest 的解析侧)
+    manifest_prefix = manifest_key.rpartition("/")[0]
     added_keys: list[str] = []
     added_size = 0
     try:
@@ -1381,7 +1264,10 @@ async def add_dataset_members(
             fmt = _file_ext(f.filename or "")
             base = Path(f.filename or "file").name
             # 追加成员用随机前缀,避免与现有(可能已删出空档的)序号键冲突
-            member_key = f"{dataset_id}/{secrets.token_hex(4)}-{base}"
+            local_name = f"{secrets.token_hex(4)}-{base}"
+            member_key = (
+                f"{manifest_prefix}/{local_name}" if manifest_prefix else local_name
+            )
             await upload_object(
                 cfg,
                 bucket,
@@ -1394,7 +1280,7 @@ async def add_dataset_members(
             added_size += len(content)
             rows.append(
                 {
-                    field: [member_key],
+                    field: [local_name],
                     "text": token,
                     "__member": {
                         "bucket": bucket,
