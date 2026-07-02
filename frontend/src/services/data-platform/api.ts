@@ -895,9 +895,10 @@ export async function queryDatasetVersion(
 
 /** dj-analyze 分析报告(overall.csv 聚合表 + analysis/ PNG 清单)
  *  GET /api/v1/dataset-versions/{versionId}/analysis-report
- *  无报告时 data 为 null(前端回退到手算聚合)。 */
+ *  无报告时 data 为 null(前端回退到手算聚合)。member:多文件版本需指定成员。 */
 export async function getAnalysisReport(
   versionId: string,
+  params?: { member?: string },
   options?: { [key: string]: any },
 ) {
   return request<{
@@ -906,8 +907,22 @@ export async function getAnalysisReport(
     message?: string;
   }>(`/api/v1/dataset-versions/${versionId}/analysis-report`, {
     method: 'GET',
+    params: { ...params },
     ...(options || {}),
   });
+}
+
+/** 该版本各成员(表/文件)质量评估状态
+ *  GET /api/v1/dataset-versions/{versionId}/quality-members
+ *  单文件旧版本合成单一元素("data"),前端不必特判是否多文件。 */
+export async function getQualityMembers(
+  versionId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.QualityMember[]; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/quality-members`,
+    { method: 'GET', ...(options || {}) },
+  );
 }
 
 /** 加工算子目录 GET /api/v1/operators */
@@ -1407,10 +1422,11 @@ export async function getAugmentReport(
   );
 }
 
-/** 逐条质量得分 GET /api/v1/dataset-versions/{versionId}/stats */
+/** 逐条质量得分 GET /api/v1/dataset-versions/{versionId}/stats
+ *  member:多文件版本需指定成员(表/文件)。 */
 export async function getVersionStats(
   versionId: string,
-  params?: { current?: number; pageSize?: number },
+  params?: { current?: number; pageSize?: number; member?: string },
   options?: { [key: string]: any },
 ) {
   return request<DataPlatform.VersionStatsResult>(
@@ -1419,14 +1435,16 @@ export async function getVersionStats(
   );
 }
 
-/** 质量分析报告 GET /api/v1/dataset-versions/{versionId}/quality-report */
+/** 质量分析报告 GET /api/v1/dataset-versions/{versionId}/quality-report
+ *  member:多文件版本需指定成员(表/文件)。 */
 export async function getQualityReport(
   versionId: string,
+  params?: { member?: string },
   options?: { [key: string]: any },
 ) {
   return request<{ data: DataPlatform.QualityReport; success: boolean }>(
     `/api/v1/dataset-versions/${versionId}/quality-report`,
-    { method: 'GET', ...(options || {}) },
+    { method: 'GET', params: { ...params }, ...(options || {}) },
   );
 }
 

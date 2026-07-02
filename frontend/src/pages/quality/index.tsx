@@ -17,6 +17,8 @@ import {
   Empty,
   message,
   Popconfirm,
+  Select,
+  Space,
   Spin,
   Statistic,
   Table,
@@ -33,6 +35,7 @@ import {
   deleteJob,
   getAnalysisReport,
   getJob,
+  getQualityMembers,
   getQualityReport,
   getVersionStats,
   listJobs,
@@ -87,8 +90,11 @@ const renderParamField = (
 };
 
 /** Tab 1:质量报告——优先展示 dj-analyze 产出的 analysis 报告(overall 表 + PNG),
- *  无则回退到手算聚合(数值指标 + 纯 div 直方图)。 */
-const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
+ *  无则回退到手算聚合(数值指标 + 纯 div 直方图)。member:多文件版本指定成员。 */
+const ReportTab: React.FC<{ versionId: string; member?: string }> = ({
+  versionId,
+  member,
+}) => {
   const { token } = theme.useToken();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -101,7 +107,7 @@ const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
     setLoading(true);
     setAnalysis(undefined);
     setReport(undefined);
-    getAnalysisReport(versionId)
+    getAnalysisReport(versionId, { member })
       .then(async (res) => {
         if (cancelled) return;
         const d = res.data;
@@ -110,7 +116,7 @@ const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
         } else {
           // 无 dj-analyze 报告 → 回退手算聚合
           try {
-            const r = await getQualityReport(versionId);
+            const r = await getQualityReport(versionId, { member });
             if (!cancelled) setReport(r.data);
           } catch {
             if (!cancelled)
@@ -128,7 +134,7 @@ const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
     return () => {
       cancelled = true;
     };
-  }, [versionId]);
+  }, [versionId, member]);
 
   if (loading)
     return <Spin style={{ display: 'block', margin: '48px auto' }} />;
@@ -187,7 +193,7 @@ const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
               }}
               src={`/api/v1/dataset-versions/${versionId}/analysis-image?name=${encodeURIComponent(
                 im.name,
-              )}`}
+              )}${member ? `&member=${encodeURIComponent(member)}` : ''}`}
             />
           </div>
         ))}
@@ -261,8 +267,11 @@ const ReportTab: React.FC<{ versionId: string }> = ({ versionId }) => {
   );
 };
 
-/** Tab 2:逐条得分（列按 metrics 动态生成） */
-const StatsTab: React.FC<{ versionId: string }> = ({ versionId }) => {
+/** Tab 2:逐条得分（列按 metrics 动态生成）。member:多文件版本指定成员。 */
+const StatsTab: React.FC<{ versionId: string; member?: string }> = ({
+  versionId,
+  member,
+}) => {
   const [metrics, setMetrics] = useState<string[]>([]);
 
   const columns = useMemo<ProColumns<DataPlatform.VersionStatsRow>[]>(
@@ -287,6 +296,7 @@ const StatsTab: React.FC<{ versionId: string }> = ({ versionId }) => {
 
   return (
     <ProTable<DataPlatform.VersionStatsRow>
+      key={member}
       rowKey="index"
       size="small"
       search={false}
@@ -299,6 +309,7 @@ const StatsTab: React.FC<{ versionId: string }> = ({ versionId }) => {
           const res = await getVersionStats(versionId, {
             current: params.current,
             pageSize: params.pageSize,
+            member,
           });
           const next = res.metrics ?? [];
           setMetrics((prev) =>
@@ -504,6 +515,45 @@ const FilterTab: React.FC<{
   );
 };
 
+/** 成员选择器:按产出版本(非输入版本——run_quality_job 产新版本并把
+ *  stats_uri 写在其上)查成员列表;单成员(含旧版单文件合成的 "data")
+ *  时不渲染任何 UI 且回调 undefined,行为等同单文件版本。 */
+const useQualityMember = (versionId: string | undefined) => {
+  const [members, setMembers] = useState<DataPlatform.QualityMember[]>();
+  const [activeMember, setActiveMember] = useState<string>();
+
+  useEffect(() => {
+    setMembers(undefined);
+    setActiveMember(undefined);
+    if (!versionId) return;
+    getQualityMembers(versionId)
+      .then((res) => {
+        setMembers(res.data);
+        setActiveMember(res.data[0]?.memberName);
+      })
+      .catch(() => setMembers([]));
+  }, [versionId]);
+
+  const member = (members?.length ?? 0) > 1 ? activeMember : undefined;
+  const selector =
+    members && members.length > 1 ? (
+      <Space style={{ marginBottom: 12 }}>
+        <Typography.Text type="secondary">查看成员：</Typography.Text>
+        <Select
+          style={{ width: 200 }}
+          value={activeMember}
+          onChange={setActiveMember}
+          options={members.map((m) => ({
+            label: m.hasStats ? m.memberName : `${m.memberName}（未评估）`,
+            value: m.memberName,
+          }))}
+        />
+      </Space>
+    ) : null;
+
+  return { member, selector, loading: members === undefined };
+};
+
 const Quality: React.FC = () => {
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -514,6 +564,14 @@ const Quality: React.FC = () => {
     () => Object.fromEntries(qualityOps.map((o) => [o.name, o])),
     [qualityOps],
   );
+  // 质量报告/逐条得分读的是产出版本(run_quality_job 产新版本并把 stats_uri
+  // 写在其上,非输入版本)——input 存在但产出可能因任务未完成/失败而没有。
+  const resultVersionId = currentJob?.output?.versionId;
+  const {
+    member,
+    selector,
+    loading: membersLoading,
+  } = useQualityMember(resultVersionId);
 
   useEffect(() => {
     listOperators()
@@ -721,39 +779,64 @@ const Quality: React.FC = () => {
               ]}
             />
             {currentJob.input ? (
-              <Tabs
-                key={currentJob.id}
-                style={{ marginTop: 8 }}
-                items={[
-                  {
-                    key: 'report',
-                    label: '质量报告',
-                    children: (
-                      <ReportTab versionId={currentJob.input.versionId} />
-                    ),
-                  },
-                  {
-                    key: 'stats',
-                    label: '逐条得分',
-                    children: (
-                      <StatsTab versionId={currentJob.input.versionId} />
-                    ),
-                  },
-                  {
-                    key: 'filter',
-                    label: '低质过滤',
-                    children: (
-                      <FilterTab
-                        job={currentJob}
-                        input={currentJob.input}
-                        qualityOps={qualityOps}
-                        opMap={opMap}
-                        onSuccess={handleFilterSuccess}
-                      />
-                    ),
-                  },
-                ]}
-              />
+              <>
+                {resultVersionId && selector}
+                <Tabs
+                  key={`${currentJob.id}-${member ?? ''}`}
+                  style={{ marginTop: 8 }}
+                  items={[
+                    {
+                      key: 'report',
+                      label: '质量报告',
+                      children: resultVersionId ? (
+                        membersLoading ? (
+                          <Spin
+                            style={{ display: 'block', margin: '48px auto' }}
+                          />
+                        ) : (
+                          <ReportTab
+                            versionId={resultVersionId}
+                            member={member}
+                          />
+                        )
+                      ) : (
+                        <Empty description="该任务尚未产出评估结果" />
+                      ),
+                    },
+                    {
+                      key: 'stats',
+                      label: '逐条得分',
+                      children: resultVersionId ? (
+                        membersLoading ? (
+                          <Spin
+                            style={{ display: 'block', margin: '48px auto' }}
+                          />
+                        ) : (
+                          <StatsTab
+                            versionId={resultVersionId}
+                            member={member}
+                          />
+                        )
+                      ) : (
+                        <Empty description="该任务尚未产出评估结果" />
+                      ),
+                    },
+                    {
+                      key: 'filter',
+                      label: '低质过滤',
+                      children: (
+                        <FilterTab
+                          job={currentJob}
+                          input={currentJob.input}
+                          qualityOps={qualityOps}
+                          opMap={opMap}
+                          onSuccess={handleFilterSuccess}
+                        />
+                      ),
+                    },
+                  ]}
+                />
+              </>
             ) : (
               <Empty
                 style={{ marginTop: 24 }}

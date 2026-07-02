@@ -446,14 +446,23 @@ declare namespace DataPlatform {
     outputDatasetName?: string;
   };
 
-  /** 新建质量评估任务入参 */
+  /** 新建质量评估任务入参:memberConfigs(成员级,多文件版本优先)与
+   *  operators(旧版统一配置,向后兼容)二选一,不可同时指定 */
   type QualityJobCreate = {
     name: string;
     datasetVersionId: string;
-    operators: { name: string; params?: Record<string, any> }[];
+    memberConfigs?: MemberOperatorConfig[];
+    operators?: { name: string; params?: Record<string, any> }[];
+    targetMembers?: string[];
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
      *  显式指定用于数据无 text 字段的场景(如蒸馏 instruction、GIS address) */
     textKeys?: string[];
+  };
+
+  /** 质量评估:版本内一个成员(表/文件)是否已做过评估 */
+  type QualityMember = {
+    memberName: string;
+    hasStats: boolean;
   };
 
   /** 数据蒸馏目标(任务级参数) */

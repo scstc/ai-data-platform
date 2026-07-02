@@ -22,7 +22,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+from app.models.dataset_version_table import DatasetVersionTable
 from app.models.job_input import JobInput
+from app.services import job_runner
 
 DATASET_ID = "dset-q1"
 VERSION_ID = "dsv-q1"
@@ -295,6 +297,8 @@ async def test_create_quality_job_success_and_type_filter(
         await session.commit()
         return new_version, "process: []", str(tmp_path / "run.log")
 
+    # 质量任务后台异步执行(job_runner.spawn),被打桩的是 job_runner 里
+    # 引用的 run_quality_job(非 api.v1.quality 模块——那里已不再 import 它)。
     monkeypatch.setattr(
         "app.services.job_runner.run_quality_job", fake_run_quality_job
     )
@@ -323,9 +327,15 @@ async def test_create_quality_job_success_and_type_filter(
     resp = await client.get(f"/api/v1/jobs/{job_id}")
     data = resp.json()["data"]
     assert data["type"] == "quality"
-    assert data["state"] == "success"
-    assert data["progress"] == 100
-    assert data["output"] is None  # 质量任务不产新版本
+    assert data["state"] == "pending"  # 后台异步执行,POST 立即返回 pending
+
+    await job_runner.drain()
+    detail = (await client.get(f"/api/v1/jobs/{data['id']}")).json()["data"]
+    assert detail["state"] == "success"
+    assert detail["progress"] == 100
+    data = detail
+    # 质量评估产出带 stats 的新版本(非 None),经 produced_by_job_id 反查
+    assert data["output"]["datasetId"] == DATASET_ID
     assert {
         "datasetId": data["input"]["datasetId"],
         "datasetName": data["input"]["datasetName"],
@@ -341,8 +351,10 @@ async def test_create_quality_job_success_and_type_filter(
     assert data["input"]["versionLabel"].startswith("v")
     assert data["input"]["versionLabel"].endswith("(#1)")
 
-    # 版本 stats_uri 已回写 → stats 端点可用
-    resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/stats")
+    # 产出版本(非输入版本)带 stats_uri → stats 端点可用
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{data['output']['versionId']}/stats"
+    )
     assert resp.status_code == 200
     assert resp.json()["total"] == 1
 
@@ -391,17 +403,195 @@ async def test_create_quality_job_engine_failure(
     assert resp.status_code == 200
     job_id = resp.json()["data"]["id"]
 
-    # 等待后台 _run_job 协程把 job.state 翻成 failed
-    from app.services import job_runner
-    task = job_runner._task_by_job.get(job_id)
-    if task is not None:
-        await task
-
-    resp = await client.get(f"/api/v1/jobs/{job_id}")
-    data = resp.json()["data"]
-    assert data["state"] == "failed", data
-    assert "dj-analyze" in (data.get("error") or "")
+    await job_runner.drain()
+    data = (await client.get(f"/api/v1/jobs/{job_id}")).json()["data"]
+    assert data["state"] == "failed"
+    assert "dj-analyze" in data["error"]
     assert data["input"] is None  # 失败时未记血缘边
 
     resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/stats")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 多文件(成员级)质量评估:每个表成员独立 stats_uri,查询端点按 member 定位
+# ---------------------------------------------------------------------------
+MULTI_VERSION_ID = "dsv-multi1"
+
+
+async def _seed_multi_member_version(
+    session_factory: async_sessionmaker,
+    *,
+    member_a_stats: str | None,
+    member_b_stats: str | None,
+) -> None:
+    """落一个 2 成员版本(无版本级 stats_uri,quality-members 走成员表路径)。"""
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-multi1", name="多文件质量测试集"))
+        session.add(
+            DatasetVersion(
+                id=MULTI_VERSION_ID,
+                dataset_id="dset-multi1",
+                version_no=1,
+                storage_uri="s3://bucket/multi1/v1/",
+                format="multi",
+            )
+        )
+        session.add(
+            DatasetVersionTable(
+                id="dvt-a1",
+                dataset_version_id=MULTI_VERSION_ID,
+                table_name="member_a",
+                storage_uri="s3://bucket/multi1/v1/member_a.jsonl",
+                format="jsonl",
+                stats_uri=member_a_stats,
+            )
+        )
+        session.add(
+            DatasetVersionTable(
+                id="dvt-b1",
+                dataset_version_id=MULTI_VERSION_ID,
+                table_name="member_b",
+                storage_uri="s3://bucket/multi1/v1/member_b.jsonl",
+                format="jsonl",
+                stats_uri=member_b_stats,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_quality_members_lists_all_members(
+    client: AsyncClient, session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """quality-members:多成员版本列出各成员 + hasStats;无成员表旧版本合成单元素。"""
+    _, stats_a = _write_files(tmp_path, [{"a": 1}], ["ta"])
+    await _seed_multi_member_version(
+        session_factory, member_a_stats=stats_a, member_b_stats=None
+    )
+
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/quality-members"
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data == [
+        {"memberName": "member_a", "hasStats": True},
+        {"memberName": "member_b", "hasStats": False},
+    ]
+
+    # 旧版单文件版本(无成员表记录)→ 合成单元素 "data"
+    storage_uri, stats_uri = _write_files(tmp_path, [{"a": 1}], ["t"])
+    await _seed_version(session_factory, storage_uri=storage_uri, stats_uri=stats_uri)
+    resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/quality-members")
+    assert resp.json()["data"] == [{"memberName": "data", "hasStats": True}]
+
+    # 版本不存在 → 404
+    resp = await client.get("/api/v1/dataset-versions/dsv-none/quality-members")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_multi_member_stats_requires_member_param(
+    client: AsyncClient, session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """多成员版本不传 member → 400(不猜);传 member 各自查各自,互不串扰。"""
+    texts_a = [f"member-a-{i}" for i in range(3)]
+    texts_b = [f"member-b-{i}" for i in range(5)]
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    _, stats_a = _write_files(dir_a, [{"score": i} for i in range(3)], texts_a)
+    _, stats_b = _write_files(
+        dir_b, [{"score": i + 100} for i in range(5)], texts_b
+    )
+    await _seed_multi_member_version(
+        session_factory, member_a_stats=stats_a, member_b_stats=stats_b
+    )
+
+    # 不传 member → 400
+    for suffix in ("stats", "quality-report"):
+        resp = await client.get(
+            f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/{suffix}"
+        )
+        assert resp.status_code == 400, suffix
+        assert "member" in resp.json()["message"]
+
+    # 传 member=member_a → 只见 member_a 的 3 条,得分互不串扰
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/stats",
+        params={"member": "member_a"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] == 3
+    assert {row["stats"]["score"] for row in body["data"]} == {0, 1, 2}
+
+    # 传 member=member_b → 只见 member_b 的 5 条
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/stats",
+        params={"member": "member_b"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 5
+    assert {row["stats"]["score"] for row in body["data"]} == {100, 101, 102, 103, 104}
+
+    # quality-report 同理按 member 隔离
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/quality-report",
+        params={"member": "member_a"},
+    )
+    assert resp.status_code == 200
+    report_a = resp.json()["data"]
+    assert report_a["rows"] == 3
+    assert report_a["metrics"][0]["mean"] == pytest.approx(1.0)  # mean(0,1,2)
+
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/quality-report",
+        params={"member": "member_b"},
+    )
+    report_b = resp.json()["data"]
+    assert report_b["rows"] == 5
+    assert report_b["metrics"][0]["mean"] == pytest.approx(102.0)  # mean(100..104)
+
+    # 不存在的成员 → 404
+    resp = await client.get(
+        f"/api/v1/dataset-versions/{MULTI_VERSION_ID}/stats",
+        params={"member": "no_such_member"},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_single_member_version_stats_without_member_param(
+    client: AsyncClient, session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """成员表只有 1 行时,不传 member 也能查(自动选中,行为等同旧版单文件)。"""
+    _, stats_a = _write_files(tmp_path, [{"score": 7}], ["only-one"])
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-single-m", name="单成员测试集"))
+        session.add(
+            DatasetVersion(
+                id="dsv-single-m",
+                dataset_id="dset-single-m",
+                version_no=1,
+                storage_uri="s3://bucket/single/v1/",
+                format="jsonl",
+            )
+        )
+        session.add(
+            DatasetVersionTable(
+                id="dvt-single-m",
+                dataset_version_id="dsv-single-m",
+                table_name="only",
+                storage_uri="s3://bucket/single/v1/only.jsonl",
+                format="jsonl",
+                stats_uri=stats_a,
+            )
+        )
+        await session.commit()
+
+    resp = await client.get("/api/v1/dataset-versions/dsv-single-m/stats")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["total"] == 1

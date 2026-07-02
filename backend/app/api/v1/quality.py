@@ -18,6 +18,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy import select
 
 from app.api.v1.jobs import (
     SessionDep,
@@ -27,8 +28,9 @@ from app.api.v1.jobs import (
 )
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
+from app.models.dataset_version_table import DatasetVersionTable
 from app.models.job import Job
-from app.schemas.job import QualityJobCreate
+from app.schemas.job import OperatorSpec, QualityJobCreate
 from app.services import job_runner
 from app.services import operator_catalog as oc
 from app.services.llm_config import get_active_llm_config
@@ -41,6 +43,28 @@ _HIST_BUCKETS = 20
 _NO_STATS_MSG = "该版本尚未进行质量评估"
 
 
+def _validate_quality_operators(
+    operators: list[OperatorSpec], *, llm_configured: bool
+) -> str | None:
+    """校验一组质量算子:存在 / filter 类 / 资源可执行。不合规返回错误消息。"""
+    unknown = [o.name for o in operators if oc.get_operator(o.name) is None]
+    if unknown:
+        return f"未知算子:{', '.join(unknown)}"
+    non_filter = [
+        o.name for o in operators if oc.get_operator(o.name)["category"] != "filter"
+    ]
+    if non_filter:
+        return f"质量评估仅支持 filter 类算子,以下算子不适用:{', '.join(non_filter)}"
+    blocked = [
+        reason
+        for o in operators
+        if (reason := oc.runnable_reason(o.name, llm_configured=llm_configured))
+    ]
+    if blocked:
+        return "；".join(blocked)
+    return None
+
+
 @router.post("/quality/jobs")
 async def create_quality_job(
     body: QualityJobCreate, session: SessionDep
@@ -48,44 +72,23 @@ async def create_quality_job(
     """新建质量评估任务并后台异步执行:对版本逐条算 filter stats,不产新版本。
 
     异步(同治理类任务):立即返回 pending,不阻塞请求;进度经轮询 GET 反映,
-    可经 /jobs/{id}/stop|pause|resume 统一管控。stats 跑完回写输入版本 stats_uri。
+    可经 /jobs/{id}/stop|pause|resume 统一管控。stats 跑完回写输入版本/成员 stats_uri。
+
+    member_configs(成员级,多文件版本优先)与 operators(旧版统一配置,向后兼容)
+    二选一,不可同时指定。
     """
-    if not body.operators:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "请至少选择一个算子"},
-        )
-    unknown = [o.name for o in body.operators if oc.get_operator(o.name) is None]
-    if unknown:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
-        )
-    non_filter = [
-        o.name
-        for o in body.operators
-        if oc.get_operator(o.name)["category"] != "filter"
-    ]
-    if non_filter:
+    if body.member_configs and body.operators:
         return JSONResponse(
             status_code=400,
             content={
                 "success": False,
-                "message": "质量评估仅支持 filter 类算子,"
-                f"以下算子不适用:{', '.join(non_filter)}",
+                "message": "不能同时指定 memberConfigs 和 operators",
             },
         )
-    # 资源前置校验:跑不了的直接拦截并给原因(同 jobs.py)
-    llm_configured = bool(get_active_llm_config().api_key)
-    blocked = [
-        reason
-        for o in body.operators
-        if (reason := oc.runnable_reason(o.name, llm_configured=llm_configured))
-    ]
-    if blocked:
+    if not body.member_configs and not body.operators:
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": "；".join(blocked)},
+            content={"success": False, "message": "请指定 memberConfigs 或 operators"},
         )
 
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
@@ -96,6 +99,67 @@ async def create_quality_job(
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
+
+    llm_configured = bool(get_active_llm_config().api_key)
+
+    if body.member_configs:
+        stmt = select(DatasetVersionTable).where(
+            DatasetVersionTable.dataset_version_id == body.dataset_version_id
+        )
+        members = (await session.execute(stmt)).scalars().all()
+        member_names = {m.table_name for m in members}
+
+        for cfg in body.member_configs:
+            if cfg.member_name not in member_names:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": f"成员不存在:{cfg.member_name}",
+                    },
+                )
+            if not cfg.operators:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": f"成员 {cfg.member_name} 请至少选择一个算子",
+                    },
+                )
+            if err := _validate_quality_operators(
+                cfg.operators, llm_configured=llm_configured
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": f"成员 {cfg.member_name}:{err}",
+                    },
+                )
+    else:
+        if err := _validate_quality_operators(
+            body.operators, llm_configured=llm_configured
+        ):
+            return JSONResponse(
+                status_code=400, content={"success": False, "message": err}
+            )
+        if body.target_members:
+            stmt = select(DatasetVersionTable).where(
+                DatasetVersionTable.dataset_version_id == body.dataset_version_id
+            )
+            members = (await session.execute(stmt)).scalars().all()
+            if members:  # 有成员表记录时才校验(旧版单文件版本无成员表)
+                member_names = {m.table_name for m in members}
+                unknown_members = set(body.target_members) - member_names
+                if unknown_members:
+                    names = ", ".join(sorted(unknown_members))
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "success": False,
+                            "message": f"成员不存在:{names}",
+                        },
+                    )
 
     job = Job(
         id=_new_job_id(),
@@ -147,32 +211,81 @@ def _window_texts(path: Path, offset: int, limit: int) -> dict[int, str]:
     return result
 
 
-async def _get_version_with_stats(
-    version_id: str, session: SessionDep
-) -> tuple[DatasetVersion, Path] | JSONResponse:
-    """取版本并校验 stats 文件可用(且在受管目录内),失败直接给 404 响应。"""
+async def _resolve_member(
+    version_id: str, member: str | None, session: SessionDep
+) -> tuple[DatasetVersion, DatasetVersionTable | None] | JSONResponse:
+    """取版本 + 定位到具体成员(多文件场景下的一个表/文件)。
+
+    版本无成员表记录(旧版单文件版本)→ 返回 (version, None),调用方读版本级字段。
+    版本有成员表记录:
+      - 传 member → 按 table_name 精确匹配,不存在 404。
+      - 未传且只有一个成员 → 自动选中(单表数据集,行为等同旧版)。
+      - 未传且有多个成员 → 400,要求前端显式指定(不猜)。
+    """
     version = await session.get(DatasetVersion, version_id)
     if version is None:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
         )
-    stats_path = _safe_path(version.stats_uri)
+    stmt = select(DatasetVersionTable).where(
+        DatasetVersionTable.dataset_version_id == version_id
+    )
+    members = (await session.execute(stmt)).scalars().all()
+    if not members:
+        return version, None
+    if member is not None:
+        found = next((m for m in members if m.table_name == member), None)
+        if found is None:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": f"成员不存在:{member}"},
+            )
+        return version, found
+    if len(members) == 1:
+        return version, members[0]
+    return JSONResponse(
+        status_code=400,
+        content={
+            "success": False,
+            "message": "该版本含多个文件成员,请指定 member 参数",
+        },
+    )
+
+
+async def _get_version_with_stats(
+    version_id: str, session: SessionDep, member: str | None = None
+) -> tuple[DatasetVersion, Path, Path | None] | JSONResponse:
+    """取版本(+成员)并校验 stats 文件可用(且在受管目录内),失败直接给错误响应。
+
+    返回 (version, stats_path, storage_path);storage_path 供 stats 端点对齐 text
+    (成员级用 member.storage_uri,旧版单文件用 version.storage_uri)。
+    """
+    resolved = await _resolve_member(version_id, member, session)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    version, member_row = resolved
+    stats_uri = member_row.stats_uri if member_row is not None else version.stats_uri
+    storage_uri = (
+        member_row.storage_uri if member_row is not None else version.storage_uri
+    )
+    stats_path = _safe_path(stats_uri)
     if stats_path is None or not stats_path.exists():
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": _NO_STATS_MSG},
         )
-    return version, stats_path
+    return version, stats_path, _safe_path(storage_uri)
 
 
-def _analysis_dir(version: DatasetVersion) -> Path | None:
-    """从版本 stats_uri 推导 dj-analyze 产出的 analysis 目录,并校验落在受管数据目录内。
+def _analysis_dir(stats_uri: str | None) -> Path | None:
+    """从 stats_uri 推导 dj-analyze 产出的 analysis 目录,并校验落在受管数据目录内。
 
-    stats_uri 形如 <datasets_dir>/<ds>/quality/<job_id>/data_stats.jsonl,
-    analysis 即其同级 analysis/(dj-analyze 写 overall.csv + PNG 到此)。
+    成员级 stats_uri 形如 <ds>/v<n>/<job_id>-<table>/<table>_stats.jsonl;旧版单文件
+    形如 <ds>/quality/<job_id>/data_stats.jsonl。两者 analysis 均为其同级 analysis/
+    (dj-analyze 写 overall.csv + PNG 到此,见 services/quality.py 的 work_dir 约定)。
     """
-    stats_path = _safe_path(version.stats_uri)
+    stats_path = _safe_path(stats_uri)
     if stats_path is None:
         return None
     analysis = (stats_path.parent / "analysis").resolve()
@@ -181,18 +294,22 @@ def _analysis_dir(version: DatasetVersion) -> Path | None:
 
 
 @router.get("/dataset-versions/{version_id}/analysis-report")
-async def analysis_report(version_id: str, session: SessionDep) -> JSONResponse:
+async def analysis_report(
+    version_id: str,
+    session: SessionDep,
+    member: Annotated[str | None, Query()] = None,
+) -> JSONResponse:
     """dj-analyze 分析报告:overall.csv(跨算子聚合统计表)+ analysis/ 下 PNG 清单。
 
     无 analysis/(任务未完成或未产出)→ data=None + 提示,前端回退到手算聚合。
+    多文件版本未传 member 且有多个成员 → 400(与 stats 端点一致,不猜)。
     """
-    version = await session.get(DatasetVersion, version_id)
-    if version is None:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "message": "版本不存在"},
-        )
-    analysis = _analysis_dir(version)
+    resolved = await _resolve_member(version_id, member, session)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    version, member_row = resolved
+    stats_uri = member_row.stats_uri if member_row is not None else version.stats_uri
+    analysis = _analysis_dir(stats_uri)
     if analysis is None or not analysis.exists():
         return JSONResponse(
             content={
@@ -234,15 +351,15 @@ async def analysis_image(
     version_id: str,
     session: SessionDep,
     name: Annotated[str, Query()],
+    member: Annotated[str | None, Query()] = None,
 ) -> JSONResponse | FileResponse:
     """取 analysis/ 下某张 PNG(供前端 <img> 直接嵌入)。"""
-    version = await session.get(DatasetVersion, version_id)
-    if version is None:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "message": "版本不存在"},
-        )
-    analysis = _analysis_dir(version)
+    resolved = await _resolve_member(version_id, member, session)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    version, member_row = resolved
+    stats_uri = member_row.stats_uri if member_row is not None else version.stats_uri
+    analysis = _analysis_dir(stats_uri)
     if analysis is None or not analysis.exists():
         return JSONResponse(
             status_code=404,
@@ -297,19 +414,23 @@ async def version_stats(
     session: SessionDep,
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
+    member: Annotated[str | None, Query()] = None,
 ) -> JSONResponse:
-    """逐条质量得分:stats jsonl 与数据文件按行号对齐,分页返回。"""
-    found = await _get_version_with_stats(version_id, session)
+    """逐条质量得分:stats jsonl 与数据文件按行号对齐,分页返回。
+
+    多文件版本需传 member 指定成员(表/文件);单成员或旧版单文件版本可省略。
+    """
+    found = await _get_version_with_stats(version_id, session, member)
     if isinstance(found, JSONResponse):
         return found
-    version, stats_path = found
+    _version, stats_path, storage_path = found
 
     offset = (current - 1) * page_size
     # 文件扫描放线程池,避免阻塞事件循环
     items, total, metrics = await asyncio.to_thread(
         _scan_stats,
         stats_path,
-        _safe_path(version.storage_uri),
+        storage_path,
         offset,
         page_size,
     )
@@ -376,13 +497,49 @@ def _scan_report(stats_path: Path) -> dict[str, Any]:
 
 
 @router.get("/dataset-versions/{version_id}/quality-report")
-async def quality_report(version_id: str, session: SessionDep) -> JSONResponse:
-    """质量报告:对 stats jsonl 的数值型指标做分布聚合(列表/字符串跳过)。"""
-    found = await _get_version_with_stats(version_id, session)
+async def quality_report(
+    version_id: str,
+    session: SessionDep,
+    member: Annotated[str | None, Query()] = None,
+) -> JSONResponse:
+    """质量报告:对 stats jsonl 的数值型指标做分布聚合(列表/字符串跳过)。
+
+    多文件版本需传 member 指定成员(表/文件);单成员或旧版单文件版本可省略。
+    """
+    found = await _get_version_with_stats(version_id, session, member)
     if isinstance(found, JSONResponse):
         return found
-    _version, stats_path = found
+    _version, stats_path, _storage_path = found
 
     # 全量扫描 + 聚合放线程池,避免阻塞事件循环
     data = await asyncio.to_thread(_scan_report, stats_path)
+    return JSONResponse(content={"data": data, "success": True})
+
+
+@router.get("/dataset-versions/{version_id}/quality-members")
+async def quality_members(version_id: str, session: SessionDep) -> JSONResponse:
+    """该版本各成员(表/文件)是否已做过质量评估,供前端渲染成员切换 Tab。
+
+    无成员表记录(旧版单文件版本)时,合成单一元素("data",按版本级 stats_uri
+    判断),让前端不必特判"是否多文件"。版本不存在 → 404。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    stmt = (
+        select(DatasetVersionTable)
+        .where(DatasetVersionTable.dataset_version_id == version_id)
+        .order_by(DatasetVersionTable.table_name)
+    )
+    members = (await session.execute(stmt)).scalars().all()
+    if not members:
+        data = [{"memberName": "data", "hasStats": bool(version.stats_uri)}]
+    else:
+        data = [
+            {"memberName": m.table_name, "hasStats": bool(m.stats_uri)}
+            for m in members
+        ]
     return JSONResponse(content={"data": data, "success": True})

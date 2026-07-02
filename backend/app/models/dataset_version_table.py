@@ -45,6 +45,9 @@ class DatasetVersionTable(Base):
     )
     # 成员级 schema 变体(默认继承版本级)
     schema_variant: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 质量评估:该成员逐条 stats 文件路径(dj-analyze 产出,如 <table>_stats.jsonl);
+    # 未跑过质量评估的成员为空。
+    stats_uri: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

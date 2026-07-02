@@ -1,79 +1,70 @@
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useLocation } from '@umijs/max';
 import {
+  Badge,
   Button,
   Card,
   Col,
+  Empty,
   Input,
   Modal,
   message,
   Row,
   Select,
   Space,
+  Tabs,
   Typography,
 } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
+import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
+import PipelineSteps from '@/pages/processing/editor/PipelineSteps';
+import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
+import { stepsToYaml } from '@/pages/processing/editor/yaml';
 import {
   createQualityJob,
   generateQuality,
   getDataset,
   listDatasets,
   listOperatorCatalog,
+  previewDatasetVersion,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
-import OperatorLibrary from '../../processing/editor/OperatorLibrary';
-import PipelineSteps from '../../processing/editor/PipelineSteps';
-import StepParamsForm from '../../processing/editor/StepParamsForm';
 
-const { Text } = Typography;
+const { Text, Paragraph } = Typography;
 
+type MemberConfig = {
+  operators: DataPlatform.OperatorSpec[];
+  textKeys: string[];
+};
+
+/** 质量评估编辑器:成员级 Tab 配置(对齐清洗页 processing/editor),
+ *  每个数据集版本成员(表/文件)独立选择 filter 类算子。 */
 const QualityEditor: React.FC = () => {
-  // 页面内本地 state 管理已选算子
-  const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
-  const add = useCallback(
-    (name: string) => setSteps((prev) => [...prev, { name, params: {} }]),
-    [],
-  );
-  const remove = useCallback(
-    (idx: number) => setSteps((prev) => prev.filter((_, i) => i !== idx)),
-    [],
-  );
-  const updateParams = useCallback(
-    (idx: number, params: Record<string, unknown>) =>
-      setSteps((prev) =>
-        prev.map((s, i) => (i === idx ? { ...s, params } : s)),
-      ),
-    [],
-  );
-  const replaceAll = useCallback(
-    (next: DataPlatform.PipelineStep[]) => setSteps(next),
-    [],
-  );
-  const reorder = useCallback(
-    (from: number, to: number) =>
-      setSteps((prev) => {
-        const next = [...prev];
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        return next;
-      }),
-    [],
-  );
-
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
   const [datasetId, setDatasetId] = useState<string>();
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [versionMembers, setVersionMembers] = useState<
+    DataPlatform.DatasetTable[]
+  >([]);
+
+  const [memberConfigs, setMemberConfigs] = useState<
+    Record<string, MemberConfig>
+  >({});
+  const [activeMember, setActiveMember] = useState<string>();
+  const [memberActiveIdx, setMemberActiveIdx] = useState<
+    Record<string, number>
+  >({});
+
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
   >({});
-  const [activeIdx, setActiveIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
-  // 算子元信息(供 label/params 渲染):pageSize ≤ 后端 le=500 上限
   useEffect(() => {
     listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
@@ -81,7 +72,7 @@ const QualityEditor: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 500 }).then((r) =>
+    listDatasets({ current: 1, pageSize: 1000 }).then((r) =>
       setDatasets(r.data),
     );
   }, []);
@@ -95,7 +86,36 @@ const QualityEditor: React.FC = () => {
     getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
   }, [datasetId]);
 
-  // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本;不带参则维持原交互
+  // 版本变化:拉一条预览取列名(供「评估字段」多选);并按版本表成员初始化各自配置
+  useEffect(() => {
+    setVersionMembers([]);
+    setMemberConfigs({});
+    setActiveMember(undefined);
+    setMemberActiveIdx({});
+    if (!versionId || !datasetId) {
+      setColumns([]);
+      return;
+    }
+
+    getDataset(datasetId).then((r) => {
+      const version = r.data.versions?.find((v) => v.id === versionId);
+      const members = version?.tables ?? [];
+      setVersionMembers(members);
+
+      const configs: Record<string, MemberConfig> = {};
+      for (const m of members) {
+        configs[m.tableName] = { operators: [], textKeys: [] };
+      }
+      setMemberConfigs(configs);
+      setActiveMember(members[0]?.tableName);
+
+      previewDatasetVersion(versionId, { limit: 1 })
+        .then((r) => setColumns(r.columns ?? []))
+        .catch(() => setColumns([]));
+    });
+  }, [versionId, datasetId]);
+
+  // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本
   const location = useLocation();
   useEffect(() => {
     const dsId = new URLSearchParams(location.search).get('datasetId');
@@ -107,17 +127,49 @@ const QualityEditor: React.FC = () => {
   }, [versions]);
 
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
-  // 自动任务名:数据集/算子变化时重算,用户改过(nameDirty)则不再覆盖
+
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
-  const suggestedName = suggestTaskName(selectedDatasetName, '质量评估');
+  const suggestedName = useMemo(
+    () => suggestTaskName(selectedDatasetName, '质量评估'),
+    [selectedDatasetName],
+  );
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);
   }, [suggestedName, nameDirty]);
 
-  const activeStep = steps[activeIdx];
-  const activeOp = activeStep ? opMap[activeStep.name] : undefined;
+  const selectedVersionLabel = versions.find(
+    (v) => v.id === versionId,
+  )?.versionLabel;
+  const memberYamlOf = (memberName: string): string => {
+    const cfg = memberConfigs[memberName];
+    if (!cfg?.operators.length) return '# (未配置算子)';
+    const normalizedSteps: DataPlatform.PipelineStep[] = cfg.operators.map(
+      (op) => ({ name: op.name, params: op.params ?? {} }),
+    );
+    return stepsToYaml(normalizedSteps, {
+      datasetName: memberName,
+      versionLabel: selectedVersionLabel,
+      textKeys: cfg.textKeys,
+    });
+  };
+
+  const setMemberOperators = (
+    memberName: string,
+    next: DataPlatform.OperatorSpec[],
+  ) =>
+    setMemberConfigs((prev) => ({
+      ...prev,
+      [memberName]: {
+        ...(prev[memberName] ?? { textKeys: [] }),
+        operators: next,
+      },
+    }));
 
   const onGenerate = () => {
+    if (!activeMember) {
+      message.warning('请先选择数据集版本');
+      return;
+    }
     let goal = '';
     Modal.confirm({
       title: 'AI 生成质量评估算子',
@@ -137,14 +189,16 @@ const QualityEditor: React.FC = () => {
         const r = await generateQuality({ goal, datasetVersionId: versionId });
         const ops = r.data.operators;
         if (!ops.length) {
-          // 空结果不覆盖已选算子,提示而非伪装成功
           message.warning(
             r.data.explanation || '未生成可用算子,请调整目标后重试',
           );
           return Promise.reject();
         }
-        replaceAll(ops);
-        setActiveIdx(0);
+        setMemberOperators(
+          activeMember,
+          ops.map((op) => ({ name: op.name, params: op.params })),
+        );
+        setMemberActiveIdx((prev) => ({ ...prev, [activeMember]: 0 }));
         message.success(r.data.explanation || '已生成质量评估算子');
       },
     });
@@ -159,18 +213,28 @@ const QualityEditor: React.FC = () => {
       message.warning('请选择数据集版本');
       return;
     }
-    if (!steps.length) {
-      message.warning('至少添加一个算子');
+
+    const configs = Object.entries(memberConfigs)
+      .filter(([, cfg]) => cfg.operators.length > 0)
+      .map(([memberName, cfg]) => ({
+        memberName,
+        operators: cfg.operators,
+        textKeys: cfg.textKeys.length > 0 ? cfg.textKeys : undefined,
+      }));
+
+    if (configs.length === 0) {
+      message.warning('请至少为一个成员配置质量算子');
       return;
     }
+
     setSubmitting(true);
     try {
       await createQualityJob({
         name,
         datasetVersionId: versionId,
-        operators: steps,
+        memberConfigs: configs,
       });
-      message.success('质量评估任务已创建');
+      message.success('质量评估任务已创建，正在后台运行');
       history.push('/assessment/quality');
     } finally {
       setSubmitting(false);
@@ -213,7 +277,7 @@ const QualityEditor: React.FC = () => {
         />
         <Select
           placeholder="选择版本"
-          style={{ width: 220 }}
+          style={{ width: 240 }}
           value={versionId}
           onChange={setVersionId}
           options={versions.map((v) => {
@@ -230,54 +294,159 @@ const QualityEditor: React.FC = () => {
         {/* 文本字段由后端自动探测,前端不再下发 text_keys 字段。 */}
       </Space>
 
-      <Row gutter={16}>
-        <Col span={7}>
-          <Card
-            title="算子库"
-            size="small"
-            styles={{ body: { height: 460, padding: 12 } }}
-          >
-            <OperatorLibrary category="filter" onAdd={add} />
-          </Card>
-        </Col>
-        <Col span={10}>
-          <Card
-            title="已选质量算子"
-            size="small"
-            styles={{ body: { height: 460, overflow: 'auto' } }}
-          >
-            <PipelineSteps
-              steps={steps}
-              labelOf={labelOf}
-              activeIdx={activeIdx}
-              onSelect={setActiveIdx}
-              onRemove={(i) => {
-                remove(i);
-                setActiveIdx(0);
-              }}
-              onReorder={reorder}
-            />
-          </Card>
-        </Col>
-        <Col span={7}>
-          <Card
-            title="参数"
-            size="small"
-            styles={{ body: { height: 460, overflow: 'auto' } }}
-          >
-            <StepParamsForm
-              op={activeOp}
-              params={activeStep?.params ?? {}}
-              onChange={(p) => updateParams(activeIdx, p)}
-            />
-          </Card>
-        </Col>
-      </Row>
+      {versionMembers.length === 0 ? (
+        <Card size="small">
+          <Empty description="请先选择数据集和版本" />
+        </Card>
+      ) : (
+        <Card title="成员级质量算子配置" size="small">
+          <Tabs
+            activeKey={activeMember}
+            onChange={setActiveMember}
+            items={versionMembers.map((m) => ({
+              key: m.tableName,
+              label: (
+                <Space size="small">
+                  <Text>{m.tableName}</Text>
+                  <Badge
+                    count={memberConfigs[m.tableName]?.operators.length || 0}
+                    style={{ backgroundColor: '#52c41a' }}
+                  />
+                </Space>
+              ),
+              children: (() => {
+                const cfg = memberConfigs[m.tableName] ?? {
+                  operators: [],
+                  textKeys: [],
+                };
+                const memberSteps: DataPlatform.PipelineStep[] =
+                  cfg.operators.map((op) => ({
+                    name: op.name,
+                    params: op.params ?? {},
+                  }));
+                const idx = memberActiveIdx[m.tableName] ?? 0;
+                const activeStepOfMember = memberSteps[idx];
+                const activeOpOfMember = activeStepOfMember
+                  ? opMap[activeStepOfMember.name]
+                  : undefined;
+
+                return (
+                  <Space
+                    direction="vertical"
+                    style={{ width: '100%' }}
+                    size={16}
+                  >
+                    <Card title="评估字段（可选）" size="small">
+                      <Select
+                        mode="multiple"
+                        allowClear
+                        placeholder="选择评估字段（留空=自动探测）"
+                        style={{ width: '100%' }}
+                        value={cfg.textKeys}
+                        onChange={(vals) => {
+                          setMemberConfigs((prev) => ({
+                            ...prev,
+                            [m.tableName]: { ...cfg, textKeys: vals },
+                          }));
+                        }}
+                        options={columns.map((c) => ({ label: c, value: c }))}
+                      />
+                    </Card>
+
+                    <Row gutter={16}>
+                      <Col span={7}>
+                        <Card
+                          title="质量算子库"
+                          size="small"
+                          styles={{ body: { height: 360, padding: 12 } }}
+                        >
+                          <OperatorLibrary
+                            category="filter"
+                            onAdd={(name) =>
+                              setMemberOperators(m.tableName, [
+                                ...cfg.operators,
+                                { name, params: {} },
+                              ])
+                            }
+                          />
+                        </Card>
+                      </Col>
+                      <Col span={10}>
+                        <Card
+                          title="已选质量算子"
+                          size="small"
+                          styles={{ body: { height: 360, overflow: 'auto' } }}
+                        >
+                          <PipelineSteps
+                            steps={memberSteps}
+                            labelOf={labelOf}
+                            activeIdx={idx}
+                            onSelect={(i) =>
+                              setMemberActiveIdx((prev) => ({
+                                ...prev,
+                                [m.tableName]: i,
+                              }))
+                            }
+                            onRemove={(i) => {
+                              setMemberOperators(
+                                m.tableName,
+                                cfg.operators.filter((_, j) => j !== i),
+                              );
+                              setMemberActiveIdx((prev) => ({
+                                ...prev,
+                                [m.tableName]: 0,
+                              }));
+                            }}
+                            onReorder={(from, to) => {
+                              const next = [...cfg.operators];
+                              const [moved] = next.splice(from, 1);
+                              next.splice(to, 0, moved);
+                              setMemberOperators(m.tableName, next);
+                            }}
+                          />
+                        </Card>
+                      </Col>
+                      <Col span={7}>
+                        <Card
+                          title="参数"
+                          size="small"
+                          styles={{ body: { height: 360, overflow: 'auto' } }}
+                        >
+                          <StepParamsForm
+                            op={activeOpOfMember}
+                            params={activeStepOfMember?.params ?? {}}
+                            onChange={(p) =>
+                              setMemberOperators(
+                                m.tableName,
+                                cfg.operators.map((op, i) =>
+                                  i === idx ? { ...op, params: p } : op,
+                                ),
+                              )
+                            }
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+
+                    <Card title="YAML 预览" size="small">
+                      <Paragraph>
+                        <pre style={{ margin: 0, fontSize: 12 }}>
+                          {memberYamlOf(m.tableName)}
+                        </pre>
+                      </Paragraph>
+                    </Card>
+                  </Space>
+                );
+              })(),
+            }))}
+          />
+        </Card>
+      )}
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          质量评估对每条数据计算质量指标(不删除数据),结果写入该版本的
-          stats,可在评估任务详情查看报告。
+          质量评估对每条数据计算质量指标(不删除数据),结果按成员(表/文件)
+          独立写入,可在评估任务详情按成员切换查看报告。
         </Text>
       </Card>
     </PageContainer>
