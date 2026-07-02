@@ -1,11 +1,13 @@
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useLocation, useModel } from '@umijs/max';
+import { history, useLocation } from '@umijs/max';
 import {
+  Badge,
   Button,
   Card,
   Col,
   Collapse,
   Drawer,
+  Empty,
   Input,
   Modal,
   message,
@@ -14,6 +16,7 @@ import {
   Space,
   Statistic,
   Table,
+  Tabs,
   Tooltip,
   Typography,
 } from 'antd';
@@ -36,8 +39,14 @@ import { stepsToYaml } from './yaml';
 
 const { Text, Paragraph } = Typography;
 
+type MemberConfig = {
+  operators: DataPlatform.OperatorSpec[];
+  textKeys: string[];
+};
+
 /** 清洗任务编辑器(按 jobType 建任务)。数据清洗=clean。
- *  作为通用编辑器组件保留,cleaning/editor 渲染 <Editor jobType="clean" ... /> 复用。 */
+ *  作为通用编辑器组件保留,cleaning/editor 渲染 <Editor jobType="clean" ... /> 复用。
+ *  统一走成员级配置(dataset-first 架构下单表也是"1 个成员"),不再区分单表/多表两套 UI。 */
 const Editor: React.FC<{
   jobType?: string;
   title?: string;
@@ -52,21 +61,31 @@ const Editor: React.FC<{
   redirectHref = '/governance/cleaning',
   bucket,
 }) => {
-  const { steps, add, remove, reorder, updateParams, replaceAll, clear } =
-    useModel('opCart');
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false); // 用户改过则不再自动覆盖
   const [datasetId, setDatasetId] = useState<string>();
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  // 选中版本的列名(供「清洗字段」多选);清洗字段留空=后端自动探测主文本字段
+  // 选中版本的列名(供各成员「清洗字段」多选);清洗字段留空=后端自动探测主文本字段
   const [columns, setColumns] = useState<string[]>([]);
-  const [textKeys, setTextKeys] = useState<string[]>([]);
+  const [versionMembers, setVersionMembers] = useState<
+    DataPlatform.DatasetTable[]
+  >([]);
+
+  // 成员级配置:key = tableName
+  const [memberConfigs, setMemberConfigs] = useState<
+    Record<string, MemberConfig>
+  >({});
+  const [activeMember, setActiveMember] = useState<string>();
+  // 每个成员独立维护当前选中的流水线步骤下标(供右侧参数表单定位)
+  const [memberActiveIdx, setMemberActiveIdx] = useState<
+    Record<string, number>
+  >({});
+
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
   >({});
-  const [activeIdx, setActiveIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<DataPlatform.PreviewResult>();
@@ -94,17 +113,36 @@ const Editor: React.FC<{
     getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
   }, [datasetId]);
 
-  // 版本变化:拉一条预览取列名,供「清洗字段」多选;切版本时清空已选(列可能不同)
+  // 版本变化:拉一条预览取列名,供「清洗字段」多选;并按版本的表成员初始化各自配置
   useEffect(() => {
-    setTextKeys([]);
-    if (!versionId) {
+    setVersionMembers([]);
+    setMemberConfigs({});
+    setActiveMember(undefined);
+    setMemberActiveIdx({});
+    if (!versionId || !datasetId) {
       setColumns([]);
       return;
     }
-    previewDatasetVersion(versionId, { limit: 1 })
-      .then((r) => setColumns(r.columns ?? []))
-      .catch(() => setColumns([]));
-  }, [versionId]);
+
+    // 获取版本详情（包含成员列表）
+    getDataset(datasetId).then((r) => {
+      const version = r.data.versions?.find((v) => v.id === versionId);
+      const members = version?.tables ?? [];
+      setVersionMembers(members);
+
+      const configs: Record<string, MemberConfig> = {};
+      for (const m of members) {
+        configs[m.tableName] = { operators: [], textKeys: [] };
+      }
+      setMemberConfigs(configs);
+      setActiveMember(members[0]?.tableName);
+
+      // 预览第一个成员获取列名
+      previewDatasetVersion(versionId, { limit: 1 })
+        .then((r) => setColumns(r.columns ?? []))
+        .catch(() => setColumns([]));
+    });
+  }, [versionId, datasetId]);
 
   // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本;不带参则维持原交互
   const location = useLocation();
@@ -118,10 +156,8 @@ const Editor: React.FC<{
   }, [versions]);
 
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
-  const activeStep = steps[activeIdx];
-  const activeOp = activeStep ? opMap[activeStep.name] : undefined;
 
-  // 自动任务名:数据集/算子变化时重算,用户手动改过(nameDirty)则不再覆盖
+  // 自动任务名:数据集变化时重算,用户手动改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
   const suggestedName = useMemo(
     () => suggestTaskName(selectedDatasetName, '数据清洗'),
@@ -134,17 +170,39 @@ const Editor: React.FC<{
   const selectedVersionLabel = versions.find(
     (v) => v.id === versionId,
   )?.versionLabel;
-  const yamlText = useMemo(
-    () =>
-      stepsToYaml(steps, {
-        datasetName: selectedDatasetName,
-        versionLabel: selectedVersionLabel,
-        textKeys,
-      }),
-    [steps, selectedDatasetName, selectedVersionLabel, textKeys],
-  );
+  // 每个成员各自独立生成 YAML,不拼在一起
+  const memberYamlOf = (memberName: string): string => {
+    const cfg = memberConfigs[memberName];
+    if (!cfg?.operators.length) return '# (未配置算子)';
+    const normalizedSteps: DataPlatform.PipelineStep[] = cfg.operators.map(
+      (op) => ({ name: op.name, params: op.params ?? {} }),
+    );
+    return stepsToYaml(normalizedSteps, {
+      datasetName: memberName,
+      versionLabel: selectedVersionLabel,
+      textKeys: cfg.textKeys,
+    });
+  };
+
+  const setMemberOperators = (
+    memberName: string,
+    next: DataPlatform.OperatorSpec[],
+  ) =>
+    setMemberConfigs((prev) => ({
+      ...prev,
+      [memberName]: {
+        ...(prev[memberName] ?? { textKeys: [] }),
+        operators: next,
+      },
+    }));
 
   const onGenerate = () => {
+    if (!activeMember) {
+      message.warning('请先选择数据集版本');
+      return;
+    }
+    const targetMember = activeMember;
+
     let goal = '';
     Modal.confirm({
       title: 'AI 生成流水线',
@@ -164,14 +222,13 @@ const Editor: React.FC<{
         const r = await generatePipeline({ goal, datasetVersionId: versionId });
         const ops = r.data.operators;
         if (!ops.length) {
-          // 后端 sanitize 可能裁掉全部算子(返回空):不要清空已编排步骤,提示而非伪装成功
           message.warning(
             r.data.explanation || '未生成可用算子,请调整目标后重试',
           );
           return Promise.reject();
         }
-        replaceAll(ops);
-        setActiveIdx(0);
+        setMemberOperators(targetMember, ops);
+        setMemberActiveIdx((prev) => ({ ...prev, [targetMember]: 0 }));
         message.success(r.data.explanation || '已生成流水线');
       },
     });
@@ -182,23 +239,33 @@ const Editor: React.FC<{
       message.warning('请选择数据集版本');
       return;
     }
-    if (!steps.length) {
-      message.warning('至少添加一个算子');
+    if (!activeMember) {
+      message.warning('请选择一个成员进行预览');
       return;
     }
+    const cfg = memberConfigs[activeMember];
+    if (!cfg?.operators.length) {
+      message.warning('当前成员未配置算子');
+      return;
+    }
+    const previewOps: DataPlatform.PipelineStep[] = cfg.operators.map((op) => ({
+      name: op.name,
+      params: op.params ?? {},
+    }));
+    const previewTextKeys = cfg.textKeys.length ? cfg.textKeys : undefined;
+    message.info(`预览成员: ${activeMember}`);
+
     setPreviewing(true);
     try {
       const r = await previewJob({
         datasetVersionId: versionId,
-        operators: steps,
+        operators: previewOps,
         sampleSize: 20,
-        textKeys: textKeys.length ? textKeys : undefined,
+        textKeys: previewTextKeys,
       });
       setPreview(r.data);
       setPreviewOpen(true);
     } catch (e: any) {
-      // umi request 失败抛错:BizError 走 e.info.errorMessage;
-      // 后端 400 非业务包则走 axios e.response.data.message
       const msg =
         e?.info?.errorMessage || e?.response?.data?.message || e?.data?.message;
       message.error(`试跑失败:${msg || '请查看算子与数据是否匹配'}`);
@@ -216,23 +283,30 @@ const Editor: React.FC<{
       message.warning('请选择数据集版本');
       return;
     }
-    if (!steps.length) {
-      message.warning('至少添加一个算子');
+
+    const configs = Object.entries(memberConfigs)
+      .filter(([, cfg]) => cfg.operators.length > 0)
+      .map(([memberName, cfg]) => ({
+        memberName,
+        operators: cfg.operators,
+        textKeys: cfg.textKeys.length > 0 ? cfg.textKeys : undefined,
+      }));
+
+    if (configs.length === 0) {
+      message.warning('请至少为一个成员配置算子');
       return;
     }
+
     setSubmitting(true);
     try {
       await createJob({
         name,
-        datasetVersionId: versionId,
-        operators: steps,
-        outputMode: 'version',
         type: jobType,
-        // 留空=后端自动探测;选了字段则显式指定清洗作用字段
-        textKeys: textKeys.length ? textKeys : undefined,
+        datasetVersionId: versionId,
+        memberConfigs: configs,
+        outputMode: 'version',
       });
       message.success(`${noun}任务已创建，正在后台运行`);
-      clear();
       history.push(redirectHref);
     } finally {
       setSubmitting(false);
@@ -292,76 +366,165 @@ const Editor: React.FC<{
             };
           })}
         />
-        <Tooltip title="算子作用的字段;留空则自动探测主文本字段。脏字符不在标准字段(如 task)时在此显式指定。">
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder="清洗字段(留空=自动)"
-            style={{ minWidth: 220, maxWidth: 360 }}
-            value={textKeys}
-            onChange={setTextKeys}
-            disabled={!versionId || columns.length === 0}
-            options={columns.map((c) => ({ label: c, value: c }))}
-            maxTagCount="responsive"
-          />
-        </Tooltip>
       </Space>
 
-      <Row gutter={16}>
-        <Col span={7}>
-          <Card
-            title="算子库"
-            size="small"
-            styles={{ body: { height: 460, padding: 12 } }}
-          >
-            <OperatorLibrary onAdd={add} bucket={bucket} />
-          </Card>
-        </Col>
-        <Col span={10}>
-          <Card
-            title="流水线"
-            size="small"
-            styles={{ body: { height: 460, overflow: 'auto' } }}
-          >
-            <PipelineSteps
-              steps={steps}
-              labelOf={labelOf}
-              activeIdx={activeIdx}
-              onSelect={setActiveIdx}
-              onRemove={(i) => {
-                remove(i);
-                setActiveIdx(0);
-              }}
-              onReorder={reorder}
-            />
-          </Card>
-        </Col>
-        <Col span={7}>
-          <Card
-            title="参数"
-            size="small"
-            styles={{ body: { height: 460, overflow: 'auto' } }}
-          >
-            <StepParamsForm
-              op={activeOp}
-              params={activeStep?.params ?? {}}
-              onChange={(p) => updateParams(activeIdx, p)}
-            />
-          </Card>
-        </Col>
-      </Row>
+      {versionMembers.length === 0 ? (
+        <Card size="small">
+          <Empty description="请先选择数据集和版本" />
+        </Card>
+      ) : (
+        <Card title="成员级算子配置" size="small">
+          <Tabs
+            activeKey={activeMember}
+            onChange={setActiveMember}
+            items={versionMembers.map((m) => ({
+              key: m.tableName,
+              label: (
+                <Space size="small">
+                  <Text>{m.tableName}</Text>
+                  <Badge
+                    count={memberConfigs[m.tableName]?.operators.length || 0}
+                    style={{ backgroundColor: '#52c41a' }}
+                  />
+                </Space>
+              ),
+              children: (() => {
+                const cfg = memberConfigs[m.tableName] ?? {
+                  operators: [],
+                  textKeys: [],
+                };
+                const memberSteps: DataPlatform.PipelineStep[] =
+                  cfg.operators.map((op) => ({
+                    name: op.name,
+                    params: op.params ?? {},
+                  }));
+                const idx = memberActiveIdx[m.tableName] ?? 0;
+                const activeStepOfMember = memberSteps[idx];
+                const activeOpOfMember = activeStepOfMember
+                  ? opMap[activeStepOfMember.name]
+                  : undefined;
+
+                return (
+                  <Space
+                    direction="vertical"
+                    style={{ width: '100%' }}
+                    size={16}
+                  >
+                    {/* 该成员的清洗字段选择 */}
+                    <Card title="清洗字段（可选）" size="small">
+                      <Tooltip title="算子作用的字段;留空则自动探测主文本字段。脏字符不在标准字段(如 task)时在此显式指定。">
+                        <Select
+                          mode="multiple"
+                          allowClear
+                          placeholder="选择清洗字段（留空=自动探测）"
+                          style={{ width: '100%' }}
+                          value={cfg.textKeys}
+                          onChange={(vals) => {
+                            setMemberConfigs((prev) => ({
+                              ...prev,
+                              [m.tableName]: { ...cfg, textKeys: vals },
+                            }));
+                          }}
+                          options={columns.map((c) => ({ label: c, value: c }))}
+                        />
+                      </Tooltip>
+                    </Card>
+
+                    <Row gutter={16}>
+                      <Col span={7}>
+                        <Card
+                          title="算子库"
+                          size="small"
+                          styles={{ body: { height: 360, padding: 12 } }}
+                        >
+                          <OperatorLibrary
+                            onAdd={(name) =>
+                              setMemberOperators(m.tableName, [
+                                ...cfg.operators,
+                                { name, params: {} },
+                              ])
+                            }
+                            bucket={bucket}
+                          />
+                        </Card>
+                      </Col>
+                      <Col span={10}>
+                        <Card
+                          title="算子流水线"
+                          size="small"
+                          styles={{ body: { height: 360, overflow: 'auto' } }}
+                        >
+                          <PipelineSteps
+                            steps={memberSteps}
+                            labelOf={labelOf}
+                            activeIdx={idx}
+                            onSelect={(i) =>
+                              setMemberActiveIdx((prev) => ({
+                                ...prev,
+                                [m.tableName]: i,
+                              }))
+                            }
+                            onRemove={(i) => {
+                              setMemberOperators(
+                                m.tableName,
+                                cfg.operators.filter((_, j) => j !== i),
+                              );
+                              setMemberActiveIdx((prev) => ({
+                                ...prev,
+                                [m.tableName]: 0,
+                              }));
+                            }}
+                            onReorder={(from, to) => {
+                              const next = [...cfg.operators];
+                              const [moved] = next.splice(from, 1);
+                              next.splice(to, 0, moved);
+                              setMemberOperators(m.tableName, next);
+                            }}
+                          />
+                        </Card>
+                      </Col>
+                      <Col span={7}>
+                        <Card
+                          title="参数"
+                          size="small"
+                          styles={{ body: { height: 360, overflow: 'auto' } }}
+                        >
+                          <StepParamsForm
+                            op={activeOpOfMember}
+                            params={activeStepOfMember?.params ?? {}}
+                            onChange={(p) =>
+                              setMemberOperators(
+                                m.tableName,
+                                cfg.operators.map((op, i) =>
+                                  i === idx ? { ...op, params: p } : op,
+                                ),
+                              )
+                            }
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+
+                    <Card title="YAML 预览" size="small">
+                      <Paragraph>
+                        <pre style={{ margin: 0, fontSize: 12 }}>
+                          {memberYamlOf(m.tableName)}
+                        </pre>
+                      </Paragraph>
+                    </Card>
+                  </Space>
+                );
+              })(),
+            }))}
+          />
+        </Card>
+      )}
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          加工产物将作为所选数据集的新版本，可通过历史版本对比追溯加工效果。下方
-          YAML 仅为本机编排预览；真实配置在创建时由后端生成。
+          加工产物将作为所选数据集的新版本，可通过历史版本对比追溯加工效果。
+          各成员的 YAML 预览见对应 Tab 内；真实配置在创建时由后端生成。
         </Text>
-      </Card>
-
-      <Card title="YAML 预览" size="small" style={{ marginTop: 16 }}>
-        <Paragraph>
-          <pre style={{ margin: 0, fontSize: 12 }}>{yamlText}</pre>
-        </Paragraph>
       </Card>
 
       <Drawer
