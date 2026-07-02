@@ -26,6 +26,8 @@ import {
   getDataLakeDetail,
   getSnapshotPresignedUrl,
 } from '@/services/data-platform';
+import { UploadChannelTag } from '@/utils/uploadChannel';
+import LakeSnapshotPreview from './components/LakeSnapshotPreview';
 
 const { Text } = Typography;
 
@@ -37,16 +39,6 @@ const DATA_CATEGORY_LABEL: Record<DataPlatform.DataLakeDataCategory, string> = {
   video: '视频',
   text: '文本',
 };
-
-const UPLOAD_CHANNEL_LABEL: Record<DataPlatform.DataLakeUploadChannel, string> =
-  {
-    oss: 'OSS',
-    obs: 'OBS',
-    minio: 'MinIO',
-    api: 'API',
-    local: '本地',
-    database: '数据库',
-  };
 
 /** 字节数人类可读 */
 const formatSize = (bytes: number | null): string => {
@@ -74,6 +66,8 @@ const DataLakeDetailPage: FC = () => {
     DataPlatform.DataLakeSnapshot[]
   >([]);
   const [extractOpen, setExtractOpen] = useState(false);
+  const [previewSnapshot, setPreviewSnapshot] =
+    useState<DataPlatform.DataLakeSnapshot | null>(null);
 
   const reload = () => {
     if (!id) return;
@@ -84,16 +78,16 @@ const DataLakeDetailPage: FC = () => {
       .finally(() => setLoading(false));
   };
 
-  const handlePreview = async (snapshot: DataPlatform.DataLakeSnapshot) => {
+  const handleDownload = async (snapshot: DataPlatform.DataLakeSnapshot) => {
     try {
       const res = await getSnapshotPresignedUrl(snapshot.id);
-      const { url, filename } = res;
+      const { url } = res;
 
-      // 直接打开 presigned URL(浏览器会根据文件类型自动预览或下载)
+      // 直接打开 presigned URL(浏览器会根据文件类型自动下载)
       window.open(url, '_blank');
     } catch (e: any) {
       message.error(
-        e?.info?.errorMessage || e?.response?.data?.message || '预览失败',
+        e?.info?.errorMessage || e?.response?.data?.message || '下载失败',
       );
     }
   };
@@ -149,11 +143,10 @@ const DataLakeDetailPage: FC = () => {
       render: (_, r) => <Tag color="default">{r.storageFormat}</Tag>,
     },
     {
-      title: '上传渠道',
+      title: '来源',
       dataIndex: 'uploadChannel',
       width: 100,
-      render: (_, r) =>
-        UPLOAD_CHANNEL_LABEL[r.uploadChannel] ?? r.uploadChannel,
+      render: (_, r) => <UploadChannelTag channel={r.uploadChannel} />,
     },
     {
       title: '行数',
@@ -177,12 +170,25 @@ const DataLakeDetailPage: FC = () => {
     },
     {
       title: '操作',
-      width: 80,
+      width: 160,
       fixed: 'right' as const,
       render: (_, record) => (
-        <Button type="link" size="small" onClick={() => handlePreview(record)}>
-          预览
-        </Button>
+        <Space size="small">
+          <Button
+            type="link"
+            size="small"
+            onClick={() => setPreviewSnapshot(record)}
+          >
+            预览
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => handleDownload(record)}
+          >
+            下载
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -333,6 +339,18 @@ const DataLakeDetailPage: FC = () => {
           fieldProps={{ rows: 3 }}
         />
       </ModalForm>
+
+      <LakeSnapshotPreview
+        snapshotId={previewSnapshot?.id ?? ''}
+        filename={
+          previewSnapshot?.sourceMetadata?.original_filename as
+            | string
+            | undefined
+        }
+        storageFormat={previewSnapshot?.storageFormat}
+        open={!!previewSnapshot}
+        onClose={() => setPreviewSnapshot(null)}
+      />
     </PageContainer>
   );
 };

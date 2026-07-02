@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+import duckdb
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,12 +34,15 @@ from app.services.external_store import (
     MAX_MANIFEST_MEMBERS,
     ExternalStoreError,
     client_for,
+    head_records,
     parse_s3_uri,
     platform_config,
+    s3_settings_for_duckdb,
 )
 from app.services.landing import (
     BINARY_FORMATS,
     LANDABLE_FORMATS,
+    LandingError,
     media_kind,
 )
 
@@ -46,6 +52,30 @@ router = APIRouter(tags=["data-lakes"])
 def _file_ext(filename: str) -> str:
     """从文件名取小写扩展名(不含点);无扩展返回空串。"""
     return Path(filename).suffix.lstrip(".").lower()
+
+
+# 可走表格预览的结构化格式(与前端 PREVIEW_STRUCTURAL 对齐)。
+# 说明:pdf/doc/docx/ppt/pptx 虽能被 normalize_to_records 文本抽取,但抽取重、
+# 非表格语义,预览端一律拒绝(前端对这些走 kkFileView / 下载),避免大文档解析阻塞。
+PREVIEW_STRUCTURAL_FORMATS = {
+    "csv",
+    "tsv",
+    "xlsx",
+    "xls",
+    "json",
+    "jsonl",
+    "parquet",
+    "txt",
+    "log",
+}
+
+
+def _duck_safe(v: object) -> object:
+    """把 DuckDB 返回值归一为 JSON 可序列化(Decimal/datetime/bytes → str)。"""
+    if v is None or isinstance(v, (bool, int, float, str, list, dict)):
+        return v
+    return str(v)
+
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -310,6 +340,122 @@ async def get_snapshot_presigned_url(
         "filename": filename,
         "storageFormat": snapshot.storage_format,
     }
+
+
+@router.get("/data-lake-snapshots/{snapshot_id}/preview")
+async def preview_snapshot(
+    snapshot_id: str,
+    db: SessionDep,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> JSONResponse:
+    """预览快照数据(结构化文件走表格,二进制文件不支持预览)。
+
+    - jsonl/csv/parquet/xlsx 等结构化文件:返回 {data:行,columns:列,total:总行数}
+    - 二进制文件(mp4/jpg/pdf 等):返回空数据 + message 提示下载
+    """
+    result = await db.execute(
+        select(DataLakeSnapshot).where(DataLakeSnapshot.id == snapshot_id)
+    )
+    snapshot = result.scalar_one_or_none()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="快照不存在")
+
+    fmt = (snapshot.storage_format or "").lower()
+
+    # 非结构化(图片/音视频/pdf/office 文档等):不走表格预览,前端用 presigned URL
+    # 经浏览器 / kkFileView 渲染;这里直接返回空数据 + 提示,避免大文件解析阻塞。
+    if fmt not in PREVIEW_STRUCTURAL_FORMATS:
+        return JSONResponse(
+            content={
+                "data": [],
+                "columns": [],
+                "total": snapshot.rows or 0,
+                "success": True,
+                "message": "该格式不支持表格预览,请下载或使用文件预览查看",
+            }
+        )
+
+    # 解析 S3 URI
+    try:
+        cfg = platform_config()
+        bucket, key = parse_s3_uri(snapshot.storage_uri)
+    except ExternalStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # parquet:走 DuckDB(类型保真),httpfs 直查 MinIO(免整对象下载)
+    if fmt == "parquet":
+        storage_uri = snapshot.storage_uri
+        try:
+            s3 = s3_settings_for_duckdb(cfg)
+        except ExternalStoreError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"读取 parquet 失败:{exc}"
+            ) from exc
+
+        def _duck_query() -> tuple[list[dict], list[str], int]:
+            """DuckDB read_parquet + limit/offset 查询(httpfs 直查 s3://)。"""
+            endpoint, use_ssl, ak, sk = s3
+            conn = duckdb.connect()
+            try:
+                conn.execute("INSTALL httpfs; LOAD httpfs;")
+                conn.execute(f"SET s3_endpoint='{endpoint}';")
+                conn.execute("SET s3_url_style='path';")
+                conn.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'};")
+                conn.execute(f"SET s3_access_key_id='{ak}';")
+                conn.execute(f"SET s3_secret_access_key='{sk}';")
+                conn.execute(
+                    f"CREATE VIEW t AS SELECT * FROM read_parquet('{storage_uri}')"
+                )
+                cur = conn.execute(
+                    f"SELECT * FROM t LIMIT {limit} OFFSET {offset}"
+                )
+                columns = [desc[0] for desc in cur.description or []]
+                fetched = cur.fetchall()
+                rows = [
+                    {columns[i]: _duck_safe(r[i]) for i in range(len(columns))}
+                    for r in fetched
+                ]
+                return rows, columns, len(rows)
+            finally:
+                conn.close()
+
+        try:
+            rows, columns, count = await asyncio.to_thread(_duck_query)
+        except Exception as exc:  # noqa: BLE001 DuckDB/httpfs 异常统一转 400
+            raise HTTPException(
+                status_code=400, detail=f"读取 parquet 失败:{exc}"
+            ) from exc
+
+        return JSONResponse(
+            content={
+                "data": rows,
+                "columns": columns,
+                "total": snapshot.rows or (offset + count),
+                "success": True,
+            }
+        )
+
+    # 文本/表格类(jsonl/csv/tsv/txt/log/xlsx/xls):走 head_records
+    try:
+        rows = await head_records(cfg, bucket, key, fmt, offset + limit)
+        rows = rows[offset : offset + limit]
+
+        # 提取列名
+        columns = list(rows[0].keys()) if rows else []
+
+        return JSONResponse(
+            content={
+                "data": rows,
+                "columns": columns,
+                "total": snapshot.rows or len(rows),
+                "success": True,
+            }
+        )
+    except (ExternalStoreError, LandingError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"读取快照失败:{exc}"
+        ) from exc
 
 
 @router.post("/data-lakes/{lake_id}/extract-to-dataset")
