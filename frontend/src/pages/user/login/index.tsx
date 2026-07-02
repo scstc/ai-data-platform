@@ -303,6 +303,8 @@ const Login: React.FC = () => {
           defaultMessage: '登录成功！',
         });
         message.success(defaultLoginSuccessMessage);
+        // 标记本次为「刚登录」,重载后由 ExpiryReminder 检查一次到期数据集并弹窗
+        sessionStorage.setItem('adp_expiry_check_pending', '1');
         await fetchUserInfo();
         const urlParams = new URL(window.location.href).searchParams;
         const redirectUrl = getSafeRedirectUrl(urlParams.get('redirect'));

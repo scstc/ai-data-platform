@@ -757,6 +757,17 @@ export async function listDatasets(
   });
 }
 
+/** 我负责的即将到期(含已过期)数据集,登录后弹窗提醒 GET /api/v1/datasets/expiring */
+export async function listExpiringDatasets(
+  params?: { days?: number },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.ExpiringDataset[]; success: boolean }>(
+    '/api/v1/datasets/expiring',
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
 /** 数据集详情（含版本） GET /api/v1/datasets/{id} */
 export async function getDataset(id: string, options?: { [key: string]: any }) {
   return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(

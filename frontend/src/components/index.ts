@@ -17,6 +17,7 @@ export { default as AvatarList } from './AvatarList';
 export { CategoryPanel, default as CategoryManager } from './CategoryManager';
 export { default as DatasetFilter } from './DatasetFilter';
 export { default as ErrorBoundary } from './ErrorBoundary';
+export { default as ExpiryReminder } from './ExpiryReminder';
 export { default as JobDetail } from './JobDetail';
 export { default as NotificationBell } from './NotificationBell';
 export { default as OfflineBanner } from './OfflineBanner';

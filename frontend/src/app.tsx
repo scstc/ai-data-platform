@@ -13,6 +13,7 @@ dayjs.extend(relativeTime);
 import {
   AvatarDropdown,
   ErrorBoundary,
+  ExpiryReminder,
   Footer,
   LangDropdown,
   NotificationBell,
@@ -217,6 +218,7 @@ export const layout: RunTimeLayoutConfig = ({
       return (
         <>
           {children}
+          <ExpiryReminder />
           <SettingDrawer
             disableUrlParams
             enableDarkTheme

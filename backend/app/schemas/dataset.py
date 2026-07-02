@@ -108,6 +108,17 @@ class DatasetRead(CamelModel):
     tags: list[str] = []
 
 
+class ExpiringDatasetOut(CamelModel):
+    """即将到期(或已过期)数据集提醒项:登录后弹窗用的精简读模型。"""
+
+    id: str
+    name: str
+    valid_until: UtcDateTime
+    # 距到期天数(按自然日):今天到期=0,明天=1,已过期为负数
+    days_left: int
+    expired: bool
+
+
 class HostS3Request(CamelModel):
     """外部 S3 数据托管登记入参(#18):把若干 S3 对象登记为受管数据集版本(不下载)。"""
 

@@ -803,6 +803,16 @@ declare namespace DataPlatform {
     myLevel?: AclLevel | null;
   };
 
+  /** 即将到期(含已过期)数据集提醒项:登录后弹窗用 */
+  type ExpiringDataset = {
+    id: string;
+    name: string;
+    validUntil: string;
+    /** 距到期自然日数:今天=0、明天=1、已过期为负数 */
+    daysLeft: number;
+    expired: boolean;
+  };
+
   /** 数据集 ACL 授权级别 */
   type AclLevel = 'view' | 'edit' | 'admin';
 

@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import zipfile
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -46,6 +46,7 @@ from app.schemas.dataset import (
     DatasetTableRead,
     DatasetUpdate,
     DatasetVersionRead,
+    ExpiringDatasetOut,
     ExportS3Request,
     HostS3Request,
     PlatformHostRequest,
@@ -1626,6 +1627,48 @@ async def list_datasets(
         item.tags = tags_map.get(r.id, [])
         data.append(item)
     return PageResponse[DatasetRead](data=data, total=total or 0)
+
+
+@router.get("/datasets/expiring")
+async def list_expiring_datasets(
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+    days: int = Query(14, ge=1, le=365),
+) -> dict:
+    """当前用户负责(owner/creator)的即将到期数据集,登录后弹窗提醒用。
+
+    命中口径:valid_until 非空且 <= 今天 + days(含已过期,expired=true)。
+    按 valid_until 升序(最紧急在前)。路由声明在 /datasets/{dataset_id} 之前,
+    否则 "expiring" 会被当成 dataset_id 捕获。
+    """
+    now = datetime.now(UTC).replace(tzinfo=None)
+    threshold = now + timedelta(days=days)
+    rows = (
+        await session.scalars(
+            select(Dataset)
+            .where(
+                Dataset.valid_until.is_not(None),
+                Dataset.valid_until <= threshold,
+                or_(
+                    Dataset.owner == user.username,
+                    Dataset.creator == user.username,
+                ),
+            )
+            .order_by(Dataset.valid_until.asc())
+        )
+    ).all()
+    today = now.date()
+    items = [
+        ExpiringDatasetOut(
+            id=r.id,
+            name=r.name,
+            valid_until=r.valid_until,
+            days_left=(r.valid_until.date() - today).days,
+            expired=r.valid_until.date() < today,
+        )
+        for r in rows
+    ]
+    return {"data": items, "success": True}
 
 
 @router.get("/datasets/{dataset_id}")
