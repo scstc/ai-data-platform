@@ -2011,8 +2011,14 @@ async def preview_version(
                 if cfg is None:
                     raise ExternalStoreError("平台存储(MinIO)未配置")
                 s3 = s3_settings_for_duckdb(cfg)
+                # 如果指定了 key(成员级预览),用 key 构造完整路径;否则用 storage_uri
+                if key:
+                    bucket, _vk = parse_s3_uri(version.storage_uri)
+                    parquet_path = f"s3://{bucket}/{key}"
+                else:
+                    parquet_path = version.storage_uri
                 rows, columns, _total = await asyncio.to_thread(
-                    _duck_query, version.storage_uri, "parquet",
+                    _duck_query, parquet_path, "parquet",
                     "SELECT * FROM t", limit, offset, s3,
                 )
             except ExternalStoreError as exc:

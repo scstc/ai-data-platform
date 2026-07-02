@@ -24,12 +24,9 @@ from app.services import job_runner
 from app.services import operator_catalog as oc
 from app.services.capabilities import get_capabilities
 from app.services.engine import (
-    EngineError,
     multimodal_ready,
-    run_preview,
     terminate_job,
 )
-from app.services.external_store import ExternalStoreError
 from app.services.landing import BINARY_FORMATS, MANIFEST_FORMAT, MANIFEST_MEMBER_NAME
 from app.services.llm_config import get_active_llm_config
 
@@ -106,16 +103,6 @@ class JobItemResponse(CamelModel):
 
     data: JobRead
     success: bool = True
-
-
-class PreviewRequest(CamelModel):
-    """样例试跑入参:在某数据集版本前 N 行上跑算子,不建版本、不写 DB。"""
-
-    dataset_version_id: str
-    operators: list[OperatorSpec]
-    sample_size: int = 20
-    # 清洗作用字段(留空=自动探测);与 create_job 一致,使试跑与正式任务效果对齐
-    text_keys: list[str] | None = None
 
 
 def _new_job_id() -> str:
@@ -346,7 +333,15 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
 
     # 资源前置校验:按 LLM 配置 + 数据类型把算子路由到合适后端,跑不了的提前拦截给原因。
     # media_ok:输入是 manifest 媒体集(_multimodal_block 已确保此时 torch 就绪)。
-    if (blocked_resp := _operator_block(body.operators, input_version)) is not None:
+    # 收集所有算子（member_configs 优先，否则用 operators）
+    all_operators: list[OperatorSpec] = []
+    if body.member_configs:
+        for cfg in body.member_configs:
+            all_operators.extend(cfg.operators)
+    elif body.operators:
+        all_operators = body.operators
+
+    if all_operators and (blocked_resp := _operator_block(all_operators, input_version)) is not None:
         return blocked_resp
 
     # G6:请求 Ray 分布式但环境未就绪(未开启 / DJ venv 未装 ray)→ 提前 400,
@@ -516,54 +511,6 @@ async def resume_job(job_id: str, session: SessionDep) -> JSONResponse:
     await session.refresh(job)
     job_runner.spawn(job.id)
     return JSONResponse(content=_item(job))
-
-
-@router.post("/jobs/preview")
-async def preview_job(body: PreviewRequest, session: SessionDep) -> JSONResponse:
-    """样例试跑:在数据集版本前 N 行上跑算子流水线,返回加工前后样本。
-
-    不建 DatasetVersion、不写 DB;校验与 create_job 一致。
-    """
-    if not body.operators:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "请至少选择一个算子"},
-        )
-    known = oc.operator_names()
-    unknown = [o.name for o in body.operators if o.name not in known]
-    if unknown:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
-        )
-    size = max(1, min(body.sample_size, 200))
-    input_version = await session.get(DatasetVersion, body.dataset_version_id)
-    if input_version is None:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "message": "数据集版本不存在"},
-        )
-    if (blocked_resp := _binary_block(input_version)) is not None:
-        return blocked_resp
-    if (blocked_resp := await _multimodal_block(input_version)) is not None:
-        return blocked_resp
-    if (blocked_resp := _operator_block(body.operators, input_version)) is not None:
-        return blocked_resp
-
-    try:
-        result = await run_preview(
-            session,
-            input_version=input_version,
-            operators=[o.model_dump() for o in body.operators],
-            sample_size=size,
-            text_keys=body.text_keys,
-        )
-    except (EngineError, ExternalStoreError) as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": str(exc)},
-        )
-    return JSONResponse({"data": result, "success": True})
 
 
 @router.get("/jobs/{job_id}")

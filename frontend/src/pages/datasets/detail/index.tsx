@@ -371,7 +371,12 @@ const DatasetDetail: React.FC = () => {
         }
         extra={
           <Space size="small">
-            <a onClick={() => { setEditingVersion(v); setEditVersionOpen(true); }}>
+            <a
+              onClick={() => {
+                setEditingVersion(v);
+                setEditVersionOpen(true);
+              }}
+            >
               编辑
             </a>
             {v.publishStatus === 'draft' && (
@@ -387,10 +392,15 @@ const DatasetDetail: React.FC = () => {
                     message.success('版本已删除');
                     setDetail((prev) => {
                       if (!prev) return prev;
-                      return { ...prev, versions: prev.versions.filter((x) => x.id !== v.id) };
+                      return {
+                        ...prev,
+                        versions: prev.versions.filter((x) => x.id !== v.id),
+                      };
                     });
                     if (activeVersion === v.id) {
-                      const remaining = (detail?.versions ?? []).filter((x) => x.id !== v.id);
+                      const remaining = (detail?.versions ?? []).filter(
+                        (x) => x.id !== v.id,
+                      );
                       setActiveVersion(remaining[remaining.length - 1]?.id);
                     }
                   } catch (e: any) {
@@ -542,7 +552,9 @@ const DatasetDetail: React.FC = () => {
                     message.error('生成清单链接失败');
                   }
                 } catch (e: any) {
-                  message.error(e?.response?.data?.message || '生成清单链接失败');
+                  message.error(
+                    e?.response?.data?.message || '生成清单链接失败',
+                  );
                 }
               }}
             >

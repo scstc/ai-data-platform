@@ -127,23 +127,6 @@ async def suggest_dataset_name(
     )
 
 
-@router.post("/generate-pipeline", response_model=GeneratePipelineResponse)
-async def generate_pipeline(
-    body: GeneratePipelineRequest,
-    provider: ProviderDep,
-) -> GeneratePipelineResponse:
-    """据目标场景生成算子流水线(LLM 或启发式),经确定性校验后返回。"""
-    ready = oc.ready_operator_context()
-    raw = await provider.generate_pipeline(body.goal, ready)
-    steps = oc.sanitize_pipeline(raw.get("operators", []))
-    explanation = str(raw.get("explanation", ""))
-    return GeneratePipelineResponse(
-        data=GeneratedPipeline.model_validate(
-            {"operators": steps, "explanation": explanation}
-        )
-    )
-
-
 @router.post("/generate-quality", response_model=GeneratePipelineResponse)
 async def generate_quality(
     body: GeneratePipelineRequest,

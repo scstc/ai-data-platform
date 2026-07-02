@@ -5,16 +5,11 @@ import {
   Button,
   Card,
   Col,
-  Collapse,
-  Drawer,
   Empty,
-  Input,
-  Modal,
   message,
   Row,
   Select,
   Space,
-  Statistic,
   Table,
   Tabs,
   Tooltip,
@@ -24,12 +19,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createJob,
-  generatePipeline,
   getDataset,
   listDatasets,
   listOperatorCatalog,
   previewDatasetVersion,
-  previewJob,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from './OperatorLibrary';
@@ -87,9 +80,6 @@ const Editor: React.FC<{
     Record<string, DataPlatform.CatalogOperator>
   >({});
   const [submitting, setSubmitting] = useState(false);
-  const [previewing, setPreviewing] = useState(false);
-  const [preview, setPreview] = useState<DataPlatform.PreviewResult>();
-  const [previewOpen, setPreviewOpen] = useState(false);
 
   // 算子元信息(供 label/params 渲染):一次取全量(212 ≤ 后端 pageSize 上限 500)
   useEffect(() => {
@@ -196,84 +186,6 @@ const Editor: React.FC<{
       },
     }));
 
-  const onGenerate = () => {
-    if (!activeMember) {
-      message.warning('请先选择数据集版本');
-      return;
-    }
-    const targetMember = activeMember;
-
-    let goal = '';
-    Modal.confirm({
-      title: 'AI 生成流水线',
-      content: (
-        <Input.TextArea
-          placeholder="描述加工目标,如:中文语料清洗去重"
-          onChange={(e) => {
-            goal = e.target.value;
-          }}
-        />
-      ),
-      onOk: async () => {
-        if (!goal.trim()) {
-          message.warning('请填写加工目标');
-          return Promise.reject();
-        }
-        const r = await generatePipeline({ goal, datasetVersionId: versionId });
-        const ops = r.data.operators;
-        if (!ops.length) {
-          message.warning(
-            r.data.explanation || '未生成可用算子,请调整目标后重试',
-          );
-          return Promise.reject();
-        }
-        setMemberOperators(targetMember, ops);
-        setMemberActiveIdx((prev) => ({ ...prev, [targetMember]: 0 }));
-        message.success(r.data.explanation || '已生成流水线');
-      },
-    });
-  };
-
-  const onPreview = async () => {
-    if (!versionId) {
-      message.warning('请选择数据集版本');
-      return;
-    }
-    if (!activeMember) {
-      message.warning('请选择一个成员进行预览');
-      return;
-    }
-    const cfg = memberConfigs[activeMember];
-    if (!cfg?.operators.length) {
-      message.warning('当前成员未配置算子');
-      return;
-    }
-    const previewOps: DataPlatform.PipelineStep[] = cfg.operators.map((op) => ({
-      name: op.name,
-      params: op.params ?? {},
-    }));
-    const previewTextKeys = cfg.textKeys.length ? cfg.textKeys : undefined;
-    message.info(`预览成员: ${activeMember}`);
-
-    setPreviewing(true);
-    try {
-      const r = await previewJob({
-        datasetVersionId: versionId,
-        operators: previewOps,
-        sampleSize: 20,
-        textKeys: previewTextKeys,
-      });
-      setPreview(r.data);
-      setPreviewOpen(true);
-    } catch (e: any) {
-      const msg =
-        e?.info?.errorMessage || e?.response?.data?.message || e?.data?.message;
-      message.error(`试跑失败:${msg || '请查看算子与数据是否匹配'}`);
-    } finally {
-      setPreviewing(false);
-    }
-  };
-
   const onSubmit = async () => {
     if (!name.trim()) {
       message.warning('请填写任务名');
@@ -317,12 +229,6 @@ const Editor: React.FC<{
     <PageContainer
       header={{ title }}
       extra={[
-        <Button key="ai" onClick={onGenerate}>
-          ✨ AI 生成
-        </Button>,
-        <Button key="preview" loading={previewing} onClick={onPreview}>
-          🔍 试跑样例
-        </Button>,
         <Button
           key="submit"
           type="primary"
@@ -526,140 +432,6 @@ const Editor: React.FC<{
           各成员的 YAML 预览见对应 Tab 内；真实配置在创建时由后端生成。
         </Text>
       </Card>
-
-      <Drawer
-        width={900}
-        title="样例试跑预览"
-        open={previewOpen}
-        onClose={() => setPreviewOpen(false)}
-      >
-        {preview &&
-          (() => {
-            const { before, after, beforeCount, afterCount } = preview;
-            const mainText = (row: Record<string, any>) =>
-              typeof row.text === 'string' ? row.text : JSON.stringify(row);
-            const ellCell = (v: string) => (
-              <Tooltip title={v}>
-                <span
-                  style={{
-                    display: 'block',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {v}
-                </span>
-              </Tooltip>
-            );
-            const unchanged = afterCount === beforeCount;
-            const delta = beforeCount - afterCount;
-            let trend = '';
-            if (unchanged) {
-              trend = '(行数不变·纯清洗)';
-            } else if (delta > 0) {
-              trend = `(删除 ${delta} 行)`;
-            } else {
-              trend = `(新增 ${-delta} 行)`;
-            }
-            return (
-              <>
-                <Statistic
-                  title="样例行数"
-                  value={`${beforeCount} 行 → 加工后 ${afterCount} 行 ${trend}`}
-                  valueStyle={{ fontSize: 16 }}
-                />
-                <div style={{ marginTop: 16 }}>
-                  {unchanged ? (
-                    <Table
-                      size="small"
-                      pagination={false}
-                      rowKey="key"
-                      dataSource={before.map((b, i) => ({
-                        key: i,
-                        idx: i + 1,
-                        before: mainText(b),
-                        after: mainText(after[i] ?? {}),
-                      }))}
-                      columns={[
-                        { title: '序号', dataIndex: 'idx', width: 60 },
-                        {
-                          title: '加工前',
-                          dataIndex: 'before',
-                          ellipsis: true,
-                          render: (v: string) => ellCell(v),
-                        },
-                        {
-                          title: '加工后',
-                          dataIndex: 'after',
-                          ellipsis: true,
-                          render: (v: string) => ellCell(v),
-                        },
-                      ]}
-                    />
-                  ) : (
-                    <>
-                      <Typography.Title level={5}>加工后结果</Typography.Title>
-                      <Table
-                        size="small"
-                        pagination={false}
-                        rowKey="key"
-                        dataSource={after.map((a, i) => ({
-                          key: i,
-                          idx: i + 1,
-                          text: mainText(a),
-                        }))}
-                        columns={[
-                          { title: '序号', dataIndex: 'idx', width: 60 },
-                          {
-                            title: '文本',
-                            dataIndex: 'text',
-                            ellipsis: true,
-                            render: (v: string) => ellCell(v),
-                          },
-                        ]}
-                      />
-                      <Collapse
-                        style={{ marginTop: 16 }}
-                        items={[
-                          {
-                            key: 'before',
-                            label: '查看加工前样例',
-                            children: (
-                              <Table
-                                size="small"
-                                pagination={false}
-                                rowKey="key"
-                                dataSource={before.map((b, i) => ({
-                                  key: i,
-                                  idx: i + 1,
-                                  text: mainText(b),
-                                }))}
-                                columns={[
-                                  {
-                                    title: '序号',
-                                    dataIndex: 'idx',
-                                    width: 60,
-                                  },
-                                  {
-                                    title: '文本',
-                                    dataIndex: 'text',
-                                    ellipsis: true,
-                                    render: (v: string) => ellCell(v),
-                                  },
-                                ]}
-                              />
-                            ),
-                          },
-                        ]}
-                      />
-                    </>
-                  )}
-                </div>
-              </>
-            );
-          })()}
-      </Drawer>
     </PageContainer>
   );
 };
