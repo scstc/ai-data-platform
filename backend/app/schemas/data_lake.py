@@ -99,5 +99,5 @@ class ExtractToDatasetRequest(CamelModel):
     dataset_name: str
     description: str | None = None
     # 字段映射模板(可选):如 "用户提问：{question}，客服回答：{answer}"
-    # 自动生成 text 字段。适用于结构化快照(database 来源)。
+    # 自动生成 text 字段。适用于表格类快照(database/tabular:数据库表、CSV、Excel等)。
     field_mapping: str | None = None

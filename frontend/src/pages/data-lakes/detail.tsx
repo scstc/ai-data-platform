@@ -291,7 +291,11 @@ const DataLakeDetailPage: FC = () => {
         </ProCard>
       </Space>
 
-      <ModalForm<{ datasetName: string; description?: string; fieldMapping?: string }>
+      <ModalForm<{
+        datasetName: string;
+        description?: string;
+        fieldMapping?: string;
+      }>
         title="从湖快照抽取生成数据集"
         open={extractOpen}
         onOpenChange={setExtractOpen}
@@ -347,12 +351,14 @@ const DataLakeDetailPage: FC = () => {
           placeholder="选填"
           fieldProps={{ rows: 3 }}
         />
-        {selectedSnapshots.some((s) => s.dataCategory === 'database') && (
+        {selectedSnapshots.some(
+          (s) => s.dataCategory === 'database' || s.dataCategory === 'tabular',
+        ) && (
           <ProFormTextArea
             name="fieldMapping"
             label="字段映射模板（可选）"
             placeholder="用户提问：{question}，客服回答：{answer}"
-            tooltip="仅对数据库类快照生效。使用 {字段名} 占位符，自动拼接成 text 字段"
+            tooltip="对表格类快照（数据库、CSV、Excel 等）生效。使用 {字段名} 占位符，自动拼接成 text 字段"
             fieldProps={{ rows: 3, maxLength: 500 }}
           />
         )}

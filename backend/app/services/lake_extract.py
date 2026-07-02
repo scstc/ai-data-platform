@@ -45,6 +45,8 @@ async def _apply_field_mapping_transform(
 
     Raises:
         ExternalStoreError: 算子执行失败
+
+    适用于表格类数据(database/tabular):数据库表、CSV、TSV、Excel、JSONL 等。
     """
     if not records or not template.strip():
         return records
@@ -383,7 +385,7 @@ async def extract_to_new_dataset(
        见 _lake_file_name;同名冲突时追加 _2/_3… 后缀避免覆盖)
     3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
        extract_from_lake_snapshot 注入到 records
-    4. 字段映射(可选):用模板拼接多字段为 text,适用 database 类快照
+    4. 字段映射(可选):用模板拼接多字段为 text,适用表格类快照(database/tabular)
 
     Args:
         db: 数据库会话
@@ -474,11 +476,12 @@ async def extract_to_new_dataset(
             db, lake_id, snapshot.source_version, inject_lineage=True
         )
 
-        # 应用字段映射(仅 database 类快照 + 配置了模板时执行)
+        # 应用字段映射(表格类快照:database/tabular + 配置了模板时执行)
+        # tabular 包含 csv/tsv/xlsx/xls/jsonl 等结构化文件
         if (
             field_mapping
             and field_mapping.strip()
-            and snapshot.data_category == "database"
+            and snapshot.data_category in ("database", "tabular")
         ):
             records = await _apply_field_mapping_transform(
                 records, field_mapping
