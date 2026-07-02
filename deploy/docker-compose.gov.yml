@@ -1,0 +1,48 @@
+# adp-gov 平行栈:治理整改分支专用,复用现有 adp 栈的 postgres(adp_gov 库)/MinIO/kkFileView。
+# 只起 backend + frontend,不重复 infra 容器。
+# 启动:docker compose -p adp-gov -f deploy/docker-compose.gov.yml --env-file deploy/.env.gov up -d --build
+name: adp-gov
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    image: adp-gov-backend:latest
+    container_name: adp-gov-backend
+    environment:
+      # 复用现有 adp-postgres(宿主机发布 55433),库切到 adp_gov
+      DATABASE_URL: postgresql+asyncpg://${PG_USER:-adp}:${PG_PASSWORD:-adp_dev_pw}@${PG_HOST:-10.60.1.60}:${PG_PORT:-55433}/${PG_DB:-adp_gov}
+      UPLOAD_DIR: /data/uploads
+      DATASETS_DIR: /data/datasets
+      DJ_PROCESS_BIN: /opt/dj/.venv/bin/dj-process
+      ENGINE_NP: ${ENGINE_NP:-2}
+      ENGINE_CONCURRENCY: ${ENGINE_CONCURRENCY:-3}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://10.60.1.60:8082"]}
+      AUTH_SECRET: ${AUTH_SECRET:-adp-dev-insecure-secret-change-me}
+      STORAGE_MINIO_ENDPOINT: ${STORAGE_MINIO_ENDPOINT:-}
+      STORAGE_MINIO_ACCESS_KEY: ${STORAGE_MINIO_ACCESS_KEY:-}
+      STORAGE_MINIO_SECRET_KEY: ${STORAGE_MINIO_SECRET_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - adp_gov_data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    image: adp-gov-frontend:latest
+    container_name: adp-gov-frontend
+    ports:
+      - "${WEB_PORT:-8082}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  adp_gov_data:
