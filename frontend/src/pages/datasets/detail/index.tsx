@@ -39,11 +39,11 @@ import {
   deleteVersionMembers,
   exportVersionToS3,
   getDataset,
-  getDatasetMemberUrl,
   listBuckets,
   listCategories,
   listDataSources,
   listTags,
+  previewDatasetVersion,
   publishVersion,
   setVersionVerdict,
   unpublishVersion,
@@ -91,6 +91,77 @@ const PUBLISH_STATUS_TAG: Record<string, { color: string; text: string }> = {
   unpublished: { color: 'default', text: '已下架' },
 };
 
+/** manifest 清单弹框预览:分页读清单行(name/format/size),就地查看不下载。
+ *  数据走版本 preview 端点(manifest 版本返回成员清单),服务端分页(上限 1000 条)。 */
+const ManifestPreviewModal: React.FC<{
+  version?: DataPlatform.DatasetVersion;
+  onClose: () => void;
+}> = ({ version, onClose }) => {
+  const [rows, setRows] = useState<Record<string, any>[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [loading, setLoading] = useState(false);
+
+  // 切换版本回到第一页
+  useEffect(() => {
+    setPage(1);
+  }, [version?.id]);
+
+  useEffect(() => {
+    if (!version) return;
+    setLoading(true);
+    previewDatasetVersion(version.id, {
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    })
+      .then((res) => {
+        setRows(res.data ?? []);
+        setTotal(res.total ?? 0);
+      })
+      .catch(() => message.error('读取清单失败'))
+      .finally(() => setLoading(false));
+  }, [version, page, pageSize]);
+
+  return (
+    <Modal
+      title={`文件清单 · ${version?.versionLabel ?? ''}`}
+      open={!!version}
+      onCancel={onClose}
+      footer={null}
+      width={680}
+    >
+      <Table
+        size="small"
+        rowKey={(r, i) => `${r.name}-${i}`}
+        loading={loading}
+        dataSource={rows}
+        columns={[
+          { title: '文件名', dataIndex: 'name', ellipsis: true },
+          { title: '格式', dataIndex: 'format', width: 90 },
+          {
+            title: '大小',
+            dataIndex: 'size',
+            width: 110,
+            render: (s?: number) => fmtSize(s),
+          },
+        ]}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          showTotal: (t) => `共 ${t} 个文件`,
+          onChange: (p, ps) => {
+            setPage(ps !== pageSize ? 1 : p);
+            setPageSize(ps);
+          },
+        }}
+      />
+    </Modal>
+  );
+};
+
 /** 数据集详情页:元数据 + 版本(含发布门) + 按语义类型分发的数据视图。
  *  取代原列表内的详情抽屉,不同类型数据集进入同一路由、按 semanticType 渲染不同数据视图。 */
 const DatasetDetail: React.FC = () => {
@@ -112,6 +183,9 @@ const DatasetDetail: React.FC = () => {
   const [verdictNote, setVerdictNote] = useState('');
   // 导出到 S3:记录当前要导出的版本(打开 ModalForm)
   const [exportVersion, setExportVersion] =
+    useState<DataPlatform.DatasetVersion>();
+  // manifest 清单弹框预览:记录当前查看清单的版本
+  const [manifestVersion, setManifestVersion] =
     useState<DataPlatform.DatasetVersion>();
   const [creatingVersion, setCreatingVersion] = useState(false);
   const [editVersionOpen, setEditVersionOpen] = useState(false);
@@ -540,24 +614,7 @@ const DatasetDetail: React.FC = () => {
             导出到分布式存储
           </Button>
           {v.format === 'manifest' && (
-            <Button
-              size="small"
-              onClick={async () => {
-                try {
-                  const key = v.storageUri.replace(/^s3:\/\/[^/]+\//, '');
-                  const res = await getDatasetMemberUrl(v.id, key);
-                  if (res.success && res.data?.url) {
-                    window.open(res.data.url, '_blank');
-                  } else {
-                    message.error('生成清单链接失败');
-                  }
-                } catch (e: any) {
-                  message.error(
-                    e?.response?.data?.message || '生成清单链接失败',
-                  );
-                }
-              }}
-            >
+            <Button size="small" onClick={() => setManifestVersion(v)}>
               查看清单
             </Button>
           )}
@@ -1041,6 +1098,11 @@ const DatasetDetail: React.FC = () => {
           owner={detail.owner}
         />
       )}
+
+      <ManifestPreviewModal
+        version={manifestVersion}
+        onClose={() => setManifestVersion(undefined)}
+      />
     </PageContainer>
   );
 };
