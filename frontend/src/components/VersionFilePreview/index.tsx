@@ -394,9 +394,13 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
                 )}
                 <List.Item.Meta
                   title={m.name}
-                  description={`${(m.format || '').toUpperCase()} · ${fmtSize(
-                    m.size,
-                  )}`}
+                  description={[
+                    (m.format || '').toUpperCase(),
+                    fmtSize(m.size),
+                    ...(m.rows != null
+                      ? [`${m.rows.toLocaleString()} 行`]
+                      : []),
+                  ].join(' · ')}
                 />
               </List.Item>
             )}

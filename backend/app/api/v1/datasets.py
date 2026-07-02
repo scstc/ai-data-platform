@@ -946,6 +946,7 @@ async def _members_of(
                     bucket=bucket,
                     format=tm.format,
                     size=tm.size,
+                    rows=tm.rows,
                 )
             )
         return out
@@ -998,6 +999,7 @@ async def _members_of(
                 bucket=bucket,
                 format=version.format,
                 size=version.size,
+                rows=version.rows,
             )
         ]
     # manifest 媒体集:从清单 __member 取
@@ -1030,6 +1032,34 @@ async def list_version_members(
             status_code=400,
             content={"success": False, "message": f"读取成员失败:{exc}"},
         )
+    # manifest 版本:同目录下的 jsonl(清单本身/伴随标注文件)一并列出,可预览/
+    # 下载。只加在本端点(展示层):zip 下载/导出复用 _members_of,清单在那两处
+    # 已作为 data.jsonl 单独打包,若从 _members_of 冒出会重复。
+    if version.format == MANIFEST_FORMAT:
+        cfg = await _version_storage_cfg(version, session)
+        try:
+            if cfg is None:
+                raise ExternalStoreError("平台存储(MinIO)未配置")
+            bucket, mkey = parse_s3_uri(version.storage_uri)
+            prefix = mkey.rsplit("/", 1)[0] + "/" if "/" in mkey else ""
+            seen = {m.key for m in members}
+            for o in await list_objects(cfg, bucket, prefix):
+                okey = str(o.get("key") or "")
+                if okey.endswith(".jsonl") and okey not in seen:
+                    members.append(
+                        DatasetMemberRead(
+                            name=Path(okey).name,
+                            key=okey,
+                            bucket=bucket,
+                            format="jsonl",
+                            size=o.get("size"),
+                            # 清单自身行数即版本 rows(媒体成员数);伴随文件未知
+                            rows=version.rows if okey == mkey else None,
+                        )
+                    )
+        except ExternalStoreError:
+            # 列目录失败只影响附加 jsonl 展示,不拖垮清单成员列表(同 originals 口径)
+            pass
     return JSONResponse(
         content={
             "data": [m.model_dump(by_alias=True) for m in members],
@@ -1042,8 +1072,8 @@ async def list_version_members(
 async def delete_version_members(
     version_id: str,
     session: SessionDep,
-    user: UserDep,
     keys: Annotated[list[str], Query()],
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """删除版本内的一个或多个成员文件(单删/批量)。
 
@@ -1077,6 +1107,19 @@ async def delete_version_members(
         return JSONResponse(
             status_code=503, content={"success": False, "message": str(exc)}
         )
+
+    # manifest 版本的清单 jsonl 是版本自身(storage_uri 所指对象),在成员列表可见
+    # 但不可删——删了整版清单即损坏
+    if version.format == MANIFEST_FORMAT:
+        try:
+            _b, own_key = parse_s3_uri(version.storage_uri)
+        except ExternalStoreError:
+            own_key = ""
+        if own_key and own_key in keys:
+            return JSONResponse(
+                status_code=409,
+                content={"success": False, "message": "清单文件是版本自身,不能删除"},
+            )
 
     # 查 DatasetVersionTable 成员(按 storage_uri 末段 key 匹配)
     table_rows: list[DatasetVersionTable] = list(
@@ -1979,8 +2022,9 @@ async def preview_version(
             content={"success": False, "message": "版本不存在"},
         )
 
-    # manifest(媒体集):返回成员清单表(name/format/size),不走 normalize_to_records
-    if version.format == MANIFEST_FORMAT:
+    # manifest(媒体集):返回成员清单表(name/format/size),不走 normalize_to_records。
+    # 带 key(如同目录清单/伴随 jsonl)则放行到下方按原件预览分支,按文件内容解析
+    if version.format == MANIFEST_FORMAT and not key:
         cfg = await _version_storage_cfg(version, session)
         if cfg is None:
             return JSONResponse(

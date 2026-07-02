@@ -161,6 +161,8 @@ class DatasetMemberRead(CamelModel):
     bucket: str
     format: str
     size: int | None = None
+    # 行数:结构化表成员/单文件版本有值;originals 原件与 manifest 媒体对象为 None
+    rows: int | None = None
 
 
 class DatasetDetailRead(DatasetRead):
