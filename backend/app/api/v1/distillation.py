@@ -329,7 +329,12 @@ async def get_distillation_report(
             operator_chain=[o["name"] for o in (job.spec or {}).get("operators", [])],
             warnings=["任务尚未完成"] if job.state != "success" else [],
         )
-        return JSONResponse(content={"data": empty.model_dump(mode="json"), "success": True})
+        return JSONResponse(
+            content={
+                "data": empty.model_dump(mode="json", by_alias=True),
+                "success": True,
+            }
+        )
     out_dir = Path(settings.datasets_dir) / version.dataset_id / f"v{version.version_no}"
     report_path = out_dir / "report.json"
     if not report_path.exists():
@@ -344,4 +349,27 @@ async def get_distillation_report(
             status_code=500,
             content={"success": False, "message": f"报告解析失败:{exc}"},
         )
-    return JSONResponse(content={"data": raw, "success": True})
+    # report.json 是服务端落盘文件(字段 snake_case);返回给前端必须 camelCase,
+    # 避免前端 camelCase 字段访问全是 undefined 导致 Modal 渲染空白/数字显示成 NaN。
+    try:
+        parsed = DistillationReport.model_validate(raw)
+    except ValidationError:
+        # 兼容老版本或外部写入的 report.json:schema 不匹配时退回到字段重命名兜底,
+        # 不抛 500 阻断前端。
+        rename = {
+            "job_id": "jobId",
+            "input_version_id": "inputVersionId",
+            "output_version_id": "outputVersionId",
+            "input_count": "inputCount",
+            "output_count": "outputCount",
+            "keep_ratio_actual": "keepRatioActual",
+            "dedup_removed": "dedupRemoved",
+            "filter_removed": "filterRemoved",
+            "elapsed_seconds": "elapsedSeconds",
+            "operator_chain": "operatorChain",
+        }
+        parsed_dict = {rename.get(k, k): v for k, v in raw.items()}
+        return JSONResponse(content={"data": parsed_dict, "success": True})
+    return JSONResponse(
+        content={"data": parsed.model_dump(mode="json", by_alias=True), "success": True}
+    )

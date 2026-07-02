@@ -233,6 +233,24 @@ const DataTasks: React.FC = () => {
 
   const columns: ProColumns<DataPlatform.Job>[] = [
     {
+      // 全局序号(按创建时间倒序:最新=最大),由 request 计算后挂在 record.seq。
+      // 读 record.seq 而非渲染 index——筛选后只剩一行时 index 会重置为 0,
+      // 导致编号错乱(此前 bug:搜任意 ID 都显示成第 1 行的编号)。
+      title: '任务ID',
+      width: 80,
+      search: false,
+      render: (_, r) => r.seq ?? '-',
+    },
+    {
+      // 筛选区占位:按全局序号(record.seq)过滤,request 内会跨页定位命中行。
+      // 不渲染成表格列——表格列用上面的「任务ID」列展示。
+      title: '任务ID',
+      dataIndex: 'jobId',
+      hideInTable: true,
+      valueType: 'digit',
+      fieldProps: { placeholder: '按全局编号', allowClear: true },
+    },
+    {
       title: '任务名',
       dataIndex: 'name',
       width: 240,
@@ -410,7 +428,7 @@ const DataTasks: React.FC = () => {
       <Dashboard stats={stats} />
 
       <ProTable<DataPlatform.Job>
-        headerTitle="任务统一管理（治理 + 评估）"
+        headerTitle="数据任务管理"
         actionRef={actionRef}
         rowKey="id"
         options={{ reload: true }}
@@ -435,25 +453,63 @@ const DataTasks: React.FC = () => {
         )}
         polling={polling}
         request={async (params) => {
-          const res = await listDataTasks({
-            current: params.current,
-            pageSize: params.pageSize,
+          const current = params.current ?? 1;
+          const pageSize = params.pageSize ?? 10;
+          const common = {
             keyword: params.name,
             types: Array.isArray(params.type)
               ? params.type.join(',')
               : params.type,
             state: params.state,
             datasetId: params.datasetId,
-          });
-          const rows = res.data ?? [];
+          };
+
+          // 拉指定页并给每行打「倒序全局编号」:最新创建=total,依次递减。
+          // 编号挂在 record.seq(稳定),不随筛选/渲染 index 变化。
+          const fetchPage = async (page: number) => {
+            const res = await listDataTasks({
+              current: page,
+              pageSize,
+              ...common,
+            });
+            const total = res.total ?? 0;
+            const rows = (res.data ?? []).map((r, idx) => ({
+              ...r,
+              seq: total - (page - 1) * pageSize - idx,
+            }));
+            return { total, rows, success: res.success };
+          };
+
+          const { total, rows, success } = await fetchPage(current);
+
+          let data = rows;
+          if (params.jobId) {
+            const want = Number(params.jobId);
+            let matched = rows.filter((r) => r.seq === want);
+            // 当前页未命中且编号在有效区间 → 按「倒序全局位置」跨页定位
+            // (后端 pageSize 上限 100,不能一次拉全量,只能算页跳转)
+            if (matched.length === 0 && want >= 1 && want <= total) {
+              const targetPage = Math.floor((total - want) / pageSize) + 1;
+              if (targetPage !== current) {
+                const t = await fetchPage(targetPage);
+                matched = t.rows.filter((r) => r.seq === want);
+              }
+            }
+            data = matched;
+          }
+
           setPolling(
-            rows.some((j) => j.state === 'running' || j.state === 'pending')
+            data.some((j) => j.state === 'running' || j.state === 'pending')
               ? 3000
               : undefined,
           );
           // 概览统计与列表同源刷新(首次加载、reload、轮询都会带上)
           refreshStats();
-          return { data: rows, total: res.total, success: res.success };
+          return {
+            data,
+            total: params.jobId ? data.length : total,
+            success,
+          };
         }}
         columns={columns}
       />

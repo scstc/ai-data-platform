@@ -24,8 +24,10 @@ from app.services.external_store import upload_file_to_uploads
 from app.services.engine import (
     EngineError,
     _new_version_id,
+    _read_head_records,
     _run_dj,
     build_config,
+    detect_text_key,
     materialized_version,
 )
 
@@ -40,6 +42,7 @@ async def run_augment_job(
     target_members: list[str] | None = None,
     goal: AugmentGoal,
     output_dataset_id: str | None = None,
+    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, AugmentReport]:
     """对输入版本跑增强算子链 → 写回 dataset 新版本。
 
@@ -315,11 +318,17 @@ async def _run_augment_job_legacy(
     operator_chain = [op["name"] for op in operators]
 
     async with materialized_version(input_version, session) as input_path:
+        # text_keys 用户显式指定优先;留空则按字段名优先级自动探测主文本字段
+        detected_key = None if text_keys else detect_text_key(
+            _read_head_records(Path(input_path), 50)
+        )
         cfg = build_config(
             project_name=job_id,
             input_path=str(input_path),
             output_path=str(out_path),
             operators=operators,
+            text_key=detected_key,
+            text_keys=text_keys,
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")

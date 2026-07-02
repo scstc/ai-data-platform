@@ -42,6 +42,9 @@ class MakeJobCreate(CamelModel):
 
     goal: MakeGoal
     output_dataset_id: str | None = None
+    # DJ text_keys:算子作用的主文本字段;留空则后端按字段名优先级自动探测。
+    # 用于数据无 text 字段的场景(如 GIS address)。
+    text_keys: list[str] | None = None
 
 
 class MakeReport(CamelModel):

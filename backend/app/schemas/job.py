@@ -62,6 +62,9 @@ class QualityJobCreate(CamelModel):
     # 旧版：统一配置（向后兼容）
     operators: list[OperatorSpec] | None = None
     target_members: list[str] | None = None
+    # DJ text_keys:算子作用的主文本字段;留空则后端按字段名优先级自动探测。
+    # 用于数据无 text 字段的场景(如蒸馏 instruction、GIS address)。
+    text_keys: list[str] | None = None
 
 
 class JobRead(CamelModel):

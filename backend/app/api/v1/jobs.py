@@ -136,7 +136,11 @@ async def _build_output(session: AsyncSession, job_id: str) -> dict | None:
 
 
 async def _build_input(session: AsyncSession, job_id: str) -> dict | None:
-    """查该任务的输入版本(经 job_inputs 血缘边反查,镜像 _build_output)。"""
+    """查该任务的输入版本(经 job_inputs 血缘边反查,镜像 _build_output)。
+
+    失败/取消的任务暂未写 job_inputs 血缘 → 回退到 spec.dataset_version_id 反查,
+    让前端任务详情仍能展示「指定过哪个版本」(否则失败任务详情永远显示「无输入版本」)。
+    """
     stmt = (
         select(DatasetVersion, Dataset)
         .join(JobInput, JobInput.dataset_version_id == DatasetVersion.id)
@@ -145,7 +149,29 @@ async def _build_input(session: AsyncSession, job_id: str) -> dict | None:
     )
     row = (await session.execute(stmt)).first()
     if row is None:
-        return None
+        # 回退:从 spec 里取 dataset_version_id(dataset_version_id 蛇形键,
+        # 与 spec model_dump 的字段一致),即便失败也能让前端展示指定过的版本
+        job = await session.get(Job, job_id)
+        spec = job.spec if job else None
+        fallback_id = None
+        if isinstance(spec, dict):
+            fallback_id = spec.get("dataset_version_id") or spec.get(
+                "datasetVersionId"
+            )
+        if not fallback_id:
+            return None
+        v = await session.get(DatasetVersion, fallback_id)
+        if v is None:
+            return None
+        d = await session.get(Dataset, v.dataset_id)
+        return {
+            "datasetId": d.id if d else None,
+            "datasetName": d.name if d else None,
+            "versionId": v.id,
+            "versionNo": v.version_no,
+            "versionLabel": format_version_label(v.version_no, v.created_at),
+            "fallback": True,  # 标记为 spec 反查(非成功血缘),供前端可选样式提示
+        }
     version, dataset = row
     return {
         "datasetId": dataset.id,

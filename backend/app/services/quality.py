@@ -29,7 +29,6 @@ from app.services.engine import (
     _new_member_id,
     _new_version_id,
     _read_head_records,
-    _read_jsonl_head,
     _running_procs,
     _semaphore,
     build_config,
@@ -37,6 +36,40 @@ from app.services.engine import (
 )
 from app.services.external_store import materialized_version
 from app.services.landing import parquet_bytes_to_records
+
+
+# 质量评估专用:质量评估不会跑 wordcloud 的失败模式与小样本/长文本列组合有关
+# (dj-analyze 的 wordcloud 在整段重复 + 频次全 1 时报 ValueError 退出)。
+# 用户不该感知 text_keys 字段,但平台需要给 DJ 一个稳定不踩坑的 text_key。
+# "短列"=按惯例是短文本的字段名(问题/标题/句子等),不论数据集大小。
+# 找不到再回退到 detect_text_key 兜底(以保持兼容特殊数据集),仍可能踩坑的
+# 情形建议上层用 jobs 重跑 / 选用别的数据集。
+_QUALITY_TEXT_KEY_PREFERRED = (
+    "text",
+    "title",
+    "sentence",
+    "question",
+    "prompt",
+    "document",
+    "passage",
+)
+
+
+def detect_quality_text_key(records: list[dict[str, Any]]) -> str | None:
+    """质量评估专用的主文本字段探测:只在「按惯例是短列」的字段名里挑,避免
+    选到 answer / body / content / description / raw 这类长列触发 wordcloud
+    ValueError 退出码 1。找不到时回退到通用 detect_text_key。
+    """
+    if not records:
+        return None
+    present: set[str] = set()
+    for r in records[:50]:
+        if isinstance(r, dict):
+            present.update(k.lstrip("﻿") for k in r.keys() if isinstance(k, str))
+    for cand in _QUALITY_TEXT_KEY_PREFERRED:
+        if cand in present:
+            return cand
+    return detect_text_key(records)
 
 
 class QualityError(RuntimeError):
@@ -85,6 +118,7 @@ async def run_quality_job(
     operators: list[dict[str, Any]] | None = None,
     member_configs: list[dict[str, Any]] | None = None,
     target_members: list[str] | None = None,
+    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """质量评估任务：对输入版本的指定成员运行质量评估算子，产出新版本。
 
@@ -277,6 +311,7 @@ async def _run_quality_job_legacy(
     job_id: str,
     input_version: DatasetVersion,
     operators: list[dict[str, Any]] | None = None,
+    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """旧版单文件质量评估逻辑（无成员表的版本）。"""
     if not operators:
@@ -292,13 +327,19 @@ async def _run_quality_job_legacy(
     log_path = out_dir / "run.log"
 
     async with materialized_version(input_version, session) as input_path:
-        text_key = detect_text_key(_read_jsonl_head(input_path, 50))
+        # text_keys 用户显式指定优先;留空则走质量评估专用探测(短列白名单),
+        # 避免选到 answer / body / content 这类长列触发 dj-analyze wordcloud
+        # 在小样本上 ValueError 退出。
+        detected_key = None if text_keys else detect_quality_text_key(
+            _read_head_records(input_path, 50)
+        )
         cfg = build_config(
             project_name=job_id,
             input_path=str(input_path),
             output_path=str(export_path),
             operators=operators,
-            text_key=text_key,
+            text_key=detected_key,
+            text_keys=text_keys,
         )
         cfg["work_dir"] = out_dir.as_posix()
         cfg["job_id"] = job_id

@@ -227,6 +227,7 @@ const QualityEditor: React.FC = () => {
             };
           })}
         />
+        {/* 文本字段由后端自动探测,前端不再下发 text_keys 字段。 */}
       </Space>
 
       <Row gutter={16}>

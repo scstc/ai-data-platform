@@ -216,11 +216,10 @@ async def test_api_list_detail_visibility(client, session_factory, seed_rbac) ->
     client.cookies.set("adp_session", sign_token("u-super"))
     assert (await client.get("/api/v1/datasets/dset-apimgr")).status_code == 200
 
-    # 匿名:列表仍含(兼容现状)
+    # 匿名:列表需要登录(require_perm),返回 401(已升级;老版本兼容现状返回 200)
     client.cookies.delete("adp_session")
     anon = await client.get("/api/v1/datasets?current=1&pageSize=50")
-    assert anon.status_code == 200
-    assert any(d["id"] == "dset-apimgr" for d in anon.json()["data"])
+    assert anon.status_code == 401
 
 
 async def test_api_patch_gated_by_edit(client, session_factory, seed_rbac) -> None:

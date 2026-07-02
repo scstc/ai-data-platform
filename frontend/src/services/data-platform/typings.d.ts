@@ -419,6 +419,8 @@ declare namespace DataPlatform {
     canResume?: boolean;
     /** 可停止(pending/running/paused)——由后端 JobRead.can_stop 派生 */
     canStop?: boolean;
+    /** 前端展示用全局序号(按创建时间倒序:最新=最大),非后端主键;列表 request 时计算 */
+    seq?: number;
   };
 
   /** 新建加工任务入参 */
@@ -449,6 +451,9 @@ declare namespace DataPlatform {
     name: string;
     datasetVersionId: string;
     operators: { name: string; params?: Record<string, any> }[];
+    /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
+     *  显式指定用于数据无 text 字段的场景(如蒸馏 instruction、GIS address) */
+    textKeys?: string[];
   };
 
   /** 数据蒸馏目标(任务级参数) */
@@ -467,6 +472,9 @@ declare namespace DataPlatform {
     operators: { name: string; params?: Record<string, any> }[];
     goal: DistillationGoal;
     outputDatasetId?: string;
+    /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
+     *  蒸馏数据通常无 text 字段(如 instruction),建议显式指定 */
+    textKeys?: string[];
   };
   /** 蒸馏报告(任务跑完后) */
   type DistillationReport = {
@@ -596,6 +604,9 @@ declare namespace DataPlatform {
     operators: { name: string; params?: Record<string, any> }[];
     goal: MakeGoal;
     outputDatasetId?: string;
+    /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
+     *  显式指定用于数据无 text 字段的场景(如 GIS address) */
+    textKeys?: string[];
   };
   /** 合成报告 */
   type MakeReport = {
@@ -626,6 +637,9 @@ declare namespace DataPlatform {
     operators: { name: string; params?: Record<string, any> }[];
     goal: AugmentGoal;
     outputDatasetId?: string;
+    /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
+     *  显式指定用于数据无 text 字段的场景(如 GIS address) */
+    textKeys?: string[];
   };
   /** 增强报告 */
   type AugmentReport = {

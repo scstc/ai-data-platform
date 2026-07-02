@@ -90,10 +90,17 @@ async def db_session(session_factory):
 
 
 @pytest_asyncio.fixture
-async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
-    """覆盖 get_session 依赖、指向测试库的 httpx AsyncClient。"""
+async def client(session_factory, seed_users) -> AsyncGenerator[AsyncClient, None]:
+    """覆盖 get_session 依赖、指向测试库的 httpx AsyncClient。
+
+    默认以 admin(usr-test01)身份登录——很多接口(require_perm)在没登录
+    时 401,登录 admin 通配 WILDCARD 直接过。个别需要切用户的用例
+    (如 RBAC 可见性)用 client.cookies.set('adp_session', sign_token(...))
+    自己覆盖。
+    """
     from app.core.db import get_session
     from app.main import app
+    from app.services.auth import sign_token
 
     async def _override_get_session() -> AsyncGenerator[AsyncSession, None]:
         async with session_factory() as session:
@@ -102,6 +109,7 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides[get_session] = _override_get_session
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        ac.cookies.set("adp_session", sign_token("admin"))
         yield ac
     app.dependency_overrides.clear()
 
@@ -191,11 +199,33 @@ async def seed_rbac(session_factory) -> None:
                      perms="system:user:add", sort=1, visible="0", status="0"),
                 Menu(id="m-hidden", parent_id="m-sys", name="隐藏页", menu_type="C",
                      path="/system/hidden", component="system/hidden", sort=2, visible="1", status="0"),
+                # 给测试数据集相关接口用的最小权限集(挂在 r-dc / r-self,
+                # 实际生产由菜单管理页面配,这里 seed_rbac 仅为打通单测)。
+                Menu(id="m-dataset", parent_id=None, name="数据集", menu_type="C",
+                     path="/dataset", component="dataset/index", sort=10, visible="0", status="0"),
+                Menu(id="m-dataset-list", parent_id="m-dataset", name="数据集列表", menu_type="F",
+                     perms="dataset:list", sort=1, visible="0", status="0"),
+                Menu(id="m-dataset-detail", parent_id="m-dataset", name="数据集详情", menu_type="F",
+                     perms="dataset:detail", sort=2, visible="0", status="0"),
+                Menu(id="m-upload-list", parent_id=None, name="上传", menu_type="C",
+                     path="/upload", component="upload/index", sort=11, visible="0", status="0"),
+                Menu(id="m-upload-perm", parent_id="m-upload-list", name="上传列表", menu_type="F",
+                     perms="upload:list", sort=1, visible="0", status="0"),
                 RoleDept(role_id="r-custom", dept_id="d-a"),
                 RoleMenu(role_id="r-dc", menu_id="m-sys"),
                 RoleMenu(role_id="r-dc", menu_id="m-user"),
                 RoleMenu(role_id="r-dc", menu_id="m-add"),
                 RoleMenu(role_id="r-dc", menu_id="m-hidden"),
+                RoleMenu(role_id="r-dc", menu_id="m-dataset"),
+                RoleMenu(role_id="r-dc", menu_id="m-dataset-list"),
+                RoleMenu(role_id="r-dc", menu_id="m-dataset-detail"),
+                RoleMenu(role_id="r-dc", menu_id="m-upload-list"),
+                RoleMenu(role_id="r-dc", menu_id="m-upload-perm"),
+                RoleMenu(role_id="r-self", menu_id="m-dataset"),
+                RoleMenu(role_id="r-self", menu_id="m-dataset-list"),
+                RoleMenu(role_id="r-self", menu_id="m-dataset-detail"),
+                RoleMenu(role_id="r-self", menu_id="m-upload-list"),
+                RoleMenu(role_id="r-self", menu_id="m-upload-perm"),
                 User(id="u-super", username="u-super", password_hash="x", role="admin", dept_id="d-root"),
                 User(id="u-mgr", username="u-mgr", password_hash="x", role="user", dept_id="d-root"),
                 User(id="u-staff", username="u-staff", password_hash="x", role="user", dept_id="d-a"),
