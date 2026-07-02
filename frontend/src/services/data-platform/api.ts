@@ -2300,6 +2300,7 @@ export async function extractLakeToDataset(
     snapshotIds: string[];
     datasetName: string;
     description?: string | null;
+    fieldMapping?: string | null;
   },
   options?: { [key: string]: any },
 ) {

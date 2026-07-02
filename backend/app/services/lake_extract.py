@@ -31,6 +31,49 @@ from app.services.landing import (
 )
 
 
+async def _apply_field_mapping_transform(
+    records: list[dict[str, Any]], template: str
+) -> list[dict[str, Any]]:
+    """对记录应用字段映射模板,生成 text 字段(调用 engine.filter_records)。
+
+    Args:
+        records: 原始记录列表
+        template: 映射模板(如 "用户提问：{question}，客服回答：{answer}")
+
+    Returns:
+        应用映射后的记录列表(新增 text 字段)
+
+    Raises:
+        ExternalStoreError: 算子执行失败
+    """
+    if not records or not template.strip():
+        return records
+
+    import re
+
+    # 构造 lambda_str(与 ingest_tasks._apply_field_mapping 同逻辑)
+    fields = re.findall(r"\{(\w+)\}", template)
+    safe_template = template
+    for field in fields:
+        safe_template = safe_template.replace(
+            f"{{{field}}}", f'{{row.get("{field}", "")}}'
+        )
+    lambda_str = f"lambda row: {{**row, 'text': f'{safe_template}'}}"
+
+    operators = [{"name": "python_lambda_mapper", "params": {"lambda_str": lambda_str}}]
+
+    # 调用 engine.filter_records 执行算子
+    from app.services.engine import EngineError, filter_records
+
+    try:
+        result, _log = await filter_records(
+            records, operators, project_name="lake-extract"
+        )
+        return result
+    except EngineError as exc:
+        raise ExternalStoreError(f"字段映射失败: {exc}") from exc
+
+
 async def extract_from_lake_snapshot(
     db: AsyncSession,
     lake_id: str,
@@ -330,6 +373,7 @@ async def extract_to_new_dataset(
     dataset_name: str,
     description: str | None = None,
     creator: str = "admin",
+    field_mapping: str | None = None,
 ) -> Any:
     """从若干湖快照抽取生成**新**数据集(治理改造契约地基)。
 
@@ -339,6 +383,7 @@ async def extract_to_new_dataset(
        见 _lake_file_name;同名冲突时追加 _2/_3… 后缀避免覆盖)
     3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
        extract_from_lake_snapshot 注入到 records
+    4. 字段映射(可选):用模板拼接多字段为 text,适用 database 类快照
 
     Args:
         db: 数据库会话
@@ -347,6 +392,7 @@ async def extract_to_new_dataset(
         dataset_name: 新数据集名称
         description: 数据集描述
         creator: 创建人
+        field_mapping: 字段映射模板(如 "用户提问：{question}，客服回答：{answer}")
 
     Returns:
         新建的 Dataset 对象
@@ -427,6 +473,17 @@ async def extract_to_new_dataset(
         records = await extract_from_lake_snapshot(
             db, lake_id, snapshot.source_version, inject_lineage=True
         )
+
+        # 应用字段映射(仅 database 类快照 + 配置了模板时执行)
+        if (
+            field_mapping
+            and field_mapping.strip()
+            and snapshot.data_category == "database"
+        ):
+            records = await _apply_field_mapping_transform(
+                records, field_mapping
+            )
+
         base = _safe_table_name(_lake_file_name(snapshot))
         table_name = base
         seq = 2

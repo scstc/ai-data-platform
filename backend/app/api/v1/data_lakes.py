@@ -523,6 +523,7 @@ async def extract_to_dataset(
             snapshot_ids=body.snapshot_ids,
             dataset_name=body.dataset_name,
             description=body.description,
+            field_mapping=body.field_mapping,
         )
     except ExternalStoreError as exc:
         from fastapi import HTTPException
