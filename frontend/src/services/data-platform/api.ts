@@ -618,14 +618,6 @@ export async function generatePipeline(
   );
 }
 
-/** AI:据目标推荐质量评估算子 POST /api/v1/ai/generate-quality */
-export async function generateQuality(body: DataPlatform.GeneratePipelineParams) {
-  return request<{ data: DataPlatform.GeneratedPipeline; success: boolean }>(
-    '/api/v1/ai/generate-quality',
-    { method: 'POST', data: body },
-  );
-}
-
 /** AI:据文件名/格式/分类建议数据集名 POST /api/v1/ai/suggest-dataset-name */
 export async function suggestDatasetName(
   body: DataPlatform.SuggestDatasetNameParams,

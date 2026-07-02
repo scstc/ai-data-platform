@@ -49,13 +49,6 @@ _SUGGEST_NAME_SYSTEM_PROMPT = (
     "起一个简洁、概括性的中文数据集名称（不超过 20 字，不带文件扩展名、不带引号）。"
     '只输出一个 JSON 对象：{"name":string(中文)}，不要任何额外解释或 markdown 代码块。'
 )
-_PIPELINE_SYSTEM_PROMPT = (
-    "你是 data-juicer 数据加工流水线助手。用户给出加工目标,你只能从"
-    "【可用算子清单】里选择算子,按合理顺序组成线性流水线。"
-    "严格只输出 JSON:{\"operators\":[{\"name\":\"<算子名>\",\"params\":{}}],"
-    "\"explanation\":\"<一句中文说明>\"}。"
-    "name 必须是清单中的算子名;不确定参数就给 {};不要编造清单外的算子。"
-)
 # 内容安全审核(#4):分批把若干文本分类为 黄/赌/毒/政/恐 或 正常。
 _MODERATE_SYSTEM_PROMPT = (
     "你是内容安全审核助手。给定带编号的若干文本,逐条判断是否含违规内容,"
@@ -207,23 +200,6 @@ class OpenAICompatProvider(AIProvider):
             logger.warning("LLM qa 返回缺少 answer 字段，回退启发式")
             return await self._heuristic.qa(question)
         return {"answer": answer}
-
-    async def generate_pipeline(
-        self, goal: str, ready_ops: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        try:
-            catalog = "\n".join(
-                f"- {o['name']} | {o['label']} | 场景:{o['scenario']} | "
-                f"参数:{','.join(o['params']) or '无'}"
-                for o in ready_ops
-            )
-            user = f"加工目标:{goal}\n\n【可用算子清单】\n{catalog}"
-            return await self._chat_json(
-                _PIPELINE_SYSTEM_PROMPT, user, feature="generate_pipeline"
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("LLM generate_pipeline 失败，回退启发式：%s", exc)
-            return await self._heuristic.generate_pipeline(goal, ready_ops)
 
     async def suggest_dataset_name(
         self, filenames: list[str], data_type: str, category: str | None

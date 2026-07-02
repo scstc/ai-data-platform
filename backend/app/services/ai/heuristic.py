@@ -395,45 +395,6 @@ def answer_question(question_raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 算子流水线生成（goal 关键词 → 场景分组）
-# ---------------------------------------------------------------------------
-
-# goal 关键词 → 场景分组(命中则取该场景下若干 ready 算子)
-_GOAL_SCENARIO_KEYWORDS: list[tuple[tuple[str, ...], str]] = [
-    (("去重", "重复", "dedup"), "去重"),
-    (("脱敏", "隐私", "敏感"), "隐私脱敏"),
-    (("繁简", "中文", "简体", "繁体"), "中文处理"),
-    (("质量", "过滤", "筛"), "质量过滤"),
-    (("清洗", "html", "url", "空白"), "文本清洗"),
-]
-
-
-def generate_pipeline_from_goal(
-    goal_raw: str, ready_ops: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """启发式:按 goal 关键词命中场景,取该场景下最多 4 个 ready 算子串成流水线。"""
-    goal = (goal_raw or "").lower()
-    scenarios: list[str] = [
-        s for kws, s in _GOAL_SCENARIO_KEYWORDS if any(k in goal for k in kws)
-    ]
-    if not scenarios:
-        scenarios = ["文本清洗", "质量过滤"]
-    picked: list[dict[str, Any]] = []
-    for sc in scenarios:
-        for op in ready_ops:
-            seen = {p["name"] for p in picked}
-            if op.get("scenario") == sc and op["name"] not in seen:
-                picked.append({"name": op["name"], "params": {}})
-            if len(picked) >= 6:
-                break
-    explanation = (
-        f"按目标「{goal_raw}」匹配场景 {scenarios},"
-        f"推荐 {len(picked)} 个可运行算子(启发式,可自行调整)。"
-    )
-    return {"operators": picked, "explanation": explanation}
-
-
-# ---------------------------------------------------------------------------
 # 数据集命名（首个文件名清洗）
 # ---------------------------------------------------------------------------
 
@@ -469,11 +430,6 @@ class HeuristicProvider(AIProvider):
 
     async def qa(self, question: str) -> dict[str, str]:
         return {"answer": answer_question(question)}
-
-    async def generate_pipeline(
-        self, goal: str, ready_ops: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        return generate_pipeline_from_goal(goal, ready_ops)
 
     async def suggest_dataset_name(
         self, filenames: list[str], data_type: str, category: str | None

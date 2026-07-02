@@ -15,9 +15,7 @@ from fastapi import APIRouter, Depends
 
 from app.core.config import settings
 from app.schemas.ai import (
-    GeneratedPipeline,
     GeneratedTaskConfig,
-    GeneratePipelineRequest,
     GenerateTaskRequest,
     InferredSchema,
     InferSchemaRequest,
@@ -27,7 +25,6 @@ from app.schemas.ai import (
     SuggestedDatasetName,
 )
 from app.schemas.common import CamelModel
-from app.services import operator_catalog as oc
 from app.services.ai import AIProvider, get_ai_provider
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -74,13 +71,6 @@ class SuggestDatasetNameResponse(CamelModel):
     success: bool = True
 
 
-class GeneratePipelineResponse(CamelModel):
-    """流水线生成响应。"""
-
-    data: GeneratedPipeline
-    success: bool = True
-
-
 @router.post("/infer-schema", response_model=InferSchemaResponse)
 async def infer_schema(
     body: InferSchemaRequest,
@@ -124,27 +114,4 @@ async def suggest_dataset_name(
     )
     return SuggestDatasetNameResponse(
         data=SuggestedDatasetName.model_validate(result)
-    )
-
-
-@router.post("/generate-quality", response_model=GeneratePipelineResponse)
-async def generate_quality(
-    body: GeneratePipelineRequest,
-    provider: ProviderDep,
-) -> GeneratePipelineResponse:
-    """据目标生成质量评估流水线:只推 filter 类、可运行的算子。"""
-    ready = oc.ready_operator_context(category="filter")
-    raw = await provider.generate_pipeline(body.goal, ready)
-    steps = oc.sanitize_pipeline(raw.get("operators", []))
-    # 再加一道:只保留 filter 类(防 provider 越出限定上下文)
-    steps = [
-        s
-        for s in steps
-        if (op := oc.get_operator(s["name"])) and op["category"] == "filter"
-    ]
-    explanation = str(raw.get("explanation", ""))
-    return GeneratePipelineResponse(
-        data=GeneratedPipeline.model_validate(
-            {"operators": steps, "explanation": explanation}
-        )
     )

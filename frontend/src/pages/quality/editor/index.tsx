@@ -7,7 +7,6 @@ import {
   Col,
   Empty,
   Input,
-  Modal,
   message,
   Row,
   Select,
@@ -23,7 +22,6 @@ import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
 import { stepsToYaml } from '@/pages/processing/editor/yaml';
 import {
   createQualityJob,
-  generateQuality,
   getDataset,
   listDatasets,
   listOperatorCatalog,
@@ -165,45 +163,6 @@ const QualityEditor: React.FC = () => {
       },
     }));
 
-  const onGenerate = () => {
-    if (!activeMember) {
-      message.warning('请先选择数据集版本');
-      return;
-    }
-    let goal = '';
-    Modal.confirm({
-      title: 'AI 生成质量评估算子',
-      content: (
-        <Input.TextArea
-          placeholder="描述评估目标,如:评估中文语料的文本质量与重复度"
-          onChange={(e) => {
-            goal = e.target.value;
-          }}
-        />
-      ),
-      onOk: async () => {
-        if (!goal.trim()) {
-          message.warning('请填写评估目标');
-          return Promise.reject();
-        }
-        const r = await generateQuality({ goal, datasetVersionId: versionId });
-        const ops = r.data.operators;
-        if (!ops.length) {
-          message.warning(
-            r.data.explanation || '未生成可用算子,请调整目标后重试',
-          );
-          return Promise.reject();
-        }
-        setMemberOperators(
-          activeMember,
-          ops.map((op) => ({ name: op.name, params: op.params })),
-        );
-        setMemberActiveIdx((prev) => ({ ...prev, [activeMember]: 0 }));
-        message.success(r.data.explanation || '已生成质量评估算子');
-      },
-    });
-  };
-
   const onSubmit = async () => {
     if (!name.trim()) {
       message.warning('请填写任务名');
@@ -245,9 +204,6 @@ const QualityEditor: React.FC = () => {
     <PageContainer
       header={{ title: '新建质量评估' }}
       extra={[
-        <Button key="ai" onClick={onGenerate}>
-          ✨ AI 生成
-        </Button>,
         <Button
           key="submit"
           type="primary"
