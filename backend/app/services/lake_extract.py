@@ -162,6 +162,28 @@ async def _read_raw_from_snapshot(
         ) from exc
 
 
+def _lake_file_name(snapshot: DataLakeSnapshot) -> str:
+    """取快照在数据湖中的原始文件名(对象键末段),用于命名数据集内的文件/成员。
+
+    数据湖的对象键约定(见 data_lake.py):
+    - 原格式文件(本地/API/对象存储上传):
+      ``data-lake/{lake_id}/{source_version}/{original_filename}`` → 末段即原文件名
+    - 结构化入湖(DB → parquet):
+      ``data-lake/{lake_id}/{source_version}/data.parquet`` → 末段恒为 ``data.parquet``,
+      无区分度,故对 DB 类改用源表名 ``db_table``(如 orders)命名。
+
+    取名优先级:db_table(DB 类源表名)> original_filename(上传原文件名)
+    > storage_uri 末段 > source_version(兜底,保证永远有非空名字)。
+    """
+    if snapshot.source_metadata:
+        for key in ("db_table", "original_filename"):
+            name = snapshot.source_metadata.get(key)
+            if name:
+                return name
+    tail = snapshot.storage_uri.rstrip("/").rsplit("/", 1)[-1]
+    return tail or snapshot.source_version
+
+
 async def _download_snapshot_bytes(snapshot: DataLakeSnapshot) -> bytes:
     """从快照的 storage_uri 下载原始字节(供二进制原样落地场景复用)。"""
     bucket, key = parse_s3_uri(snapshot.storage_uri)
@@ -311,7 +333,8 @@ async def extract_to_new_dataset(
 
     数据湖 → 数据集的核心链路:
     1. 建空数据集(用户指定 name/description)
-    2. 每个快照作为一个表成员落进数据集(表名 = source_version)
+    2. 每个快照作为一个表成员落进数据集(文件名 = 数据湖中的原始文件名,
+       见 _lake_file_name;同名冲突时追加 _2/_3… 后缀避免覆盖)
     3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
        extract_from_lake_snapshot 注入到 records
 
@@ -380,7 +403,7 @@ async def extract_to_new_dataset(
     for kind, group in by_kind.items():
         items = [
             (
-                f"{snapshot.source_version}.{snapshot.storage_format}",
+                _lake_file_name(snapshot),
                 await _download_snapshot_bytes(snapshot),
             )
             for snapshot in group
@@ -391,16 +414,29 @@ async def extract_to_new_dataset(
             # 本函数对外只承诺 ExternalStoreError(见函数 docstring),统一转换
             raise ExternalStoreError(str(exc)) from exc
 
-    # 其余(数据库/文本/文档)逐快照抽取并落表成员;表名取 source_version(版本内唯一)
+    # 其余(数据库/文本/文档)逐快照抽取并落表成员;成员名取数据湖原始文件名
+    # (_lake_file_name → _safe_table_name 去扩展名/非法字符)。原文件名可能重复
+    # (如同一文件多次入湖得到不同 source_version),而 table_name 版本内必须唯一
+    # (add_table_member 同名会覆盖),故追加 _2/_3… 后缀去重,避免静默丢数据。
+    from app.services.landing import _safe_table_name
+
+    used_names: set[str] = set()
     for snapshot in other_snapshots:
         records = await extract_from_lake_snapshot(
             db, lake_id, snapshot.source_version, inject_lineage=True
         )
+        base = _safe_table_name(_lake_file_name(snapshot))
+        table_name = base
+        seq = 2
+        while table_name in used_names:
+            table_name = f"{base}_{seq}"
+            seq += 1
+        used_names.add(table_name)
         await add_table_member(
             db,
             dataset.id,
             records,
-            table_name=snapshot.source_version,
+            table_name=table_name,
             semantic_type=semantic_type,
             source_format=snapshot.storage_format,
             note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",

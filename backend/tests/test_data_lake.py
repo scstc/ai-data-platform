@@ -239,6 +239,115 @@ async def test_get_lake_missing(db_session):
 
 
 @pytest.mark.asyncio
+async def test_extract_names_members_by_lake_file_name(db_session, monkeypatch):
+    """抽取生成数据集:成员名取数据湖原始文件名,而非 source_version;
+    同名文件(不同版本)追加 _2/_3 后缀去重,不静默覆盖。"""
+    from types import SimpleNamespace
+
+    from app.services import lake_extract, landing
+
+    lake = await create_data_lake(db_session, name="命名湖")
+    # 两个快照原始文件名相同(同文件二次入湖 → 不同 source_version),验证去重
+    snap_a = DataLakeSnapshot(
+        id="snap-name01",
+        lake_id=lake.id,
+        source_version="source_v20260701_01_csv",
+        storage_uri="s3://adp-data-lake/data-lake/x/source_v20260701_01_csv/销售.csv",
+        storage_format="csv",
+        data_category="database",
+        upload_channel="local",
+        source_metadata={"original_filename": "销售.csv"},
+    )
+    snap_b = DataLakeSnapshot(
+        id="snap-name02",
+        lake_id=lake.id,
+        source_version="source_v20260701_02_csv",
+        storage_uri="s3://adp-data-lake/data-lake/x/source_v20260701_02_csv/销售.csv",
+        storage_format="csv",
+        data_category="database",
+        upload_channel="local",
+        source_metadata={"original_filename": "销售.csv"},
+    )
+    db_session.add_all([snap_a, snap_b])
+    await db_session.commit()
+
+    captured: list[str] = []
+
+    async def fake_create_dataset(session, **kwargs):
+        return SimpleNamespace(id="dset-name01", name=kwargs["name"])
+
+    async def fake_extract(session, lake_id, source_version, *, inject_lineage=True):
+        return [{"v": source_version}]
+
+    async def fake_add_table_member(session, dataset_id, records, *, table_name, **kw):
+        captured.append(table_name)
+        return (None, None)
+
+    monkeypatch.setattr(landing, "create_dataset", fake_create_dataset)
+    monkeypatch.setattr(lake_extract, "extract_from_lake_snapshot", fake_extract)
+    monkeypatch.setattr(landing, "add_table_member", fake_add_table_member)
+
+    await lake_extract.extract_to_new_dataset(
+        db_session,
+        lake_id=lake.id,
+        snapshot_ids=[snap_a.id, snap_b.id],
+        dataset_name="按文件名命名的数据集",
+    )
+
+    # 用文件名(去扩展名)而非 source_version;第二个同名追加 _2
+    assert captured == ["销售", "销售_2"]
+    assert not any(name.startswith("source_v") for name in captured)
+
+
+@pytest.mark.asyncio
+async def test_extract_names_db_members_by_db_table(db_session, monkeypatch):
+    """DB 类快照(对象键恒为 data.parquet,无区分度)取源表名 db_table 命名成员。"""
+    from types import SimpleNamespace
+
+    from app.services import lake_extract, landing
+
+    lake = await create_data_lake(db_session, name="DB 命名湖")
+    snap = DataLakeSnapshot(
+        id="snap-dbt01",
+        lake_id=lake.id,
+        source_version="source_v20260701_01_mysql",
+        storage_uri="s3://adp-data-lake/data-lake/x/source_v20260701_01_mysql/data.parquet",
+        storage_format="parquet",
+        data_category="database",
+        upload_channel="database",
+        source_metadata={"db_schema": "public", "db_table": "orders"},
+    )
+    db_session.add(snap)
+    await db_session.commit()
+
+    captured: list[str] = []
+
+    async def fake_create_dataset(session, **kwargs):
+        return SimpleNamespace(id="dset-dbt01", name=kwargs["name"])
+
+    async def fake_extract(session, lake_id, source_version, *, inject_lineage=True):
+        return [{"v": source_version}]
+
+    async def fake_add_table_member(session, dataset_id, records, *, table_name, **kw):
+        captured.append(table_name)
+        return (None, None)
+
+    monkeypatch.setattr(landing, "create_dataset", fake_create_dataset)
+    monkeypatch.setattr(lake_extract, "extract_from_lake_snapshot", fake_extract)
+    monkeypatch.setattr(landing, "add_table_member", fake_add_table_member)
+
+    await lake_extract.extract_to_new_dataset(
+        db_session,
+        lake_id=lake.id,
+        snapshot_ids=[snap.id],
+        dataset_name="按源表名命名的数据集",
+    )
+
+    # 取 db_table=orders,而非对象键末段 data 或 source_version
+    assert captured == ["orders"]
+
+
+@pytest.mark.asyncio
 async def test_snapshot_unique_per_lake_version(db_session):
     """(lake_id, source_version) 组合唯一，不能重复插入相同 source_version。"""
     lake = await create_data_lake(

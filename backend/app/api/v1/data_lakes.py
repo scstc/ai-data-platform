@@ -468,7 +468,7 @@ async def extract_to_dataset(
     """从湖快照抽取生成新数据集(治理改造契约地基,见 docs/数据治理.md §5)。
 
     数据湖 → 数据集的标准链路:
-    - 每个选中的快照作为一个表成员落进新数据集(表名 = source_version)
+    - 每个选中的快照作为一个表成员落进新数据集(文件名 = 数据湖原始文件名)
     - 血缘字段(source_version/db_schema/db_table 等)自动注入到记录中
     - 语义类型自动推断:全 database → structured,含非 database → unstructured
     """
