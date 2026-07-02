@@ -37,6 +37,8 @@ class ReviewFinding(Base):
     table_name: Mapped[str | None] = mapped_column(String, nullable=True)
     # 命中行号(从 0 开始,与被审 jsonl 行对齐)
     row_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 命中所在字段名(建任务配置了扫描字段时);默认扫描/LLM 行级命中为 NULL
+    field: Mapped[str | None] = mapped_column(String, nullable=True)
     # 类别:porn | gambling | drugs | politics | terrorism | pii | other
     category: Mapped[str] = mapped_column(String, nullable=False)
     # 严重度:high | medium | low

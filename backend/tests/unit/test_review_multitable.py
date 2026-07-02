@@ -4,7 +4,8 @@
 - 规则库条目(ruleWords/ruleRegex)按各自 category/severity 命中,与临时自定义并存。
 - rules_to_config:review_rules 行 → config 片段转换(word/regex/未知 kind)。
 - _split_action:tag 全保留;delete 切分净化行/被删行,行数守恒。
-- _member_scan_config:delete 强制全量(sampleLimit=行数),tag 原样。
+- _member_scan_config:delete 强制全量(sampleLimit=行数),tag 保样本上限;
+  scanFields(dict)按表名解析为本成员字段列表。
 - _verdicts:被审/产出版本 verdict 三态口径(含部分成员、delete 净化语义)。
 """
 
@@ -136,14 +137,25 @@ def test_split_action_delete_conserves_rows() -> None:
 
 
 def test_member_scan_config_delete_forces_full_scan() -> None:
-    """delete 强制全量:sampleLimit 提到行数,snake_case 残留键清除;tag 原样。"""
-    cfg = {"sampleLimit": 5, "sample_limit": 5, "useLlm": False}
-    forced = _member_scan_config(cfg, "delete", 100)
+    """delete 强制全量:sampleLimit 提到行数,snake_case 残留键清除;tag 保样本上限;
+    scanFields 按表名解析为本成员字段列表,未配置的表为 None。"""
+    cfg = {
+        "sampleLimit": 5,
+        "sample_limit": 5,
+        "useLlm": False,
+        "scanFields": {"users": ["bio"]},
+    }
+    forced = _member_scan_config(cfg, "delete", 100, "users")
     assert forced["sampleLimit"] == 100
     assert "sample_limit" not in forced
+    assert forced["scanFields"] == ["bio"]
     # 原 config 不被就地修改
     assert cfg["sampleLimit"] == 5
-    assert _member_scan_config(cfg, "tag", 100) is cfg
+    assert cfg["scanFields"] == {"users": ["bio"]}
+    # tag:保样本上限;未配置字段的表 scanFields=None(默认取文本)
+    tag_cfg = _member_scan_config(cfg, "tag", 100, "orders")
+    assert tag_cfg["sampleLimit"] == 5
+    assert tag_cfg["scanFields"] is None
 
 
 def test_verdicts_matrix() -> None:
@@ -176,7 +188,9 @@ def test_scan_delete_flow_end_to_end_pure() -> None:
     rows = [{"text": "赌博网站"}, {"text": "正常内容"}, {"text": "赌博推广"}]
     findings, tagged, report = _run(
         rows,
-        _member_scan_config({"useFlaggedWords": True, "sampleLimit": 1}, "delete", 3),
+        _member_scan_config(
+            {"useFlaggedWords": True, "sampleLimit": 1}, "delete", 3, "data"
+        ),
     )
     assert report["sampleLimitApplied"] is False  # 全量
     kept, removed = _split_action(tagged, "delete")

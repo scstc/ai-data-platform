@@ -40,6 +40,8 @@ class ReviewJobConfig(CamelModel):
     delete 删除(产出净化版本,命中行写 removed 存档,强制全量扫描)。
     ruleWords / ruleRegex:规则库条目,建任务时按 ruleIds 解析冻结于此
     (重跑/继续复用冻结值,不受规则库后续增删影响)。
+    scanFields:成员表名 -> 参与扫描的字段列表;未配置的表沿用默认取文本逻辑
+    (text 优先,否则首个字符串字段)。旧单文件版本用固定键 "data"。
     """
 
     categories: list[str] = []
@@ -52,6 +54,7 @@ class ReviewJobConfig(CamelModel):
     use_pii: bool = True
     use_flagged_words: bool = True
     sample_limit: int | None = None
+    scan_fields: dict[str, list[str]] = {}
 
 
 class ReviewJobCreate(CamelModel):
@@ -95,6 +98,7 @@ class ReviewFindingRead(CamelModel):
     version_id: str
     table_name: str | None = None
     row_index: int
+    field: str | None = None
     category: str
     severity: str
     source: str

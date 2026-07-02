@@ -38,6 +38,7 @@ import {
   listReviewFindings,
   listReviewJobs,
   listReviewRules,
+  previewDatasetVersion,
   updateReviewRule,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
@@ -320,6 +321,14 @@ const FindingsTable: React.FC<{ jobId: string; tables?: string[] }> = ({
     },
     { title: '行号', dataIndex: 'rowIndex', width: 80, search: false },
     {
+      title: '字段',
+      dataIndex: 'field',
+      width: 100,
+      ellipsis: true,
+      search: false,
+      render: (_, r) => r.field ?? '-',
+    },
+    {
       title: '类别',
       dataIndex: 'category',
       width: 90,
@@ -418,6 +427,14 @@ const ContentSafety: React.FC = () => {
   const [action, setAction] = useState<DataPlatform.ReviewAction>('tag');
   // 多表版本:参与审核的成员表(默认全选)
   const [targetMembers, setTargetMembers] = useState<string[]>([]);
+  // 逐表扫描字段(表名 -> 字段列表;不选 = 默认取 text/首个文本字段;单文件键 "data")
+  const [scanFieldsMap, setScanFieldsMap] = useState<Record<string, string[]>>(
+    {},
+  );
+  // 逐表候选字段(预览 columns;拉取失败为空,选择器退化为自由输入)
+  const [memberColumns, setMemberColumns] = useState<Record<string, string[]>>(
+    {},
+  );
   // 规则库:启用中的条目 + 本次任务勾选(默认全选启用项)
   const [rules, setRules] = useState<DataPlatform.ReviewRule[]>([]);
   const [ruleIds, setRuleIds] = useState<string[]>([]);
@@ -492,6 +509,48 @@ const ContentSafety: React.FC = () => {
     );
   }, [versionId]);
 
+  // 切换版本 → 清空字段选择,并逐成员拉候选字段(预览 columns;失败静默,
+  // 选择器退化为自由输入,不阻塞建任务)
+  useEffect(() => {
+    setScanFieldsMap({});
+    setMemberColumns({});
+    if (!versionId) return;
+    const v = versions.find((x) => x.id === versionId);
+    if (!v || isBinaryFormat(v.format)) return;
+    const tables = v.tables ?? [];
+    if (!tables.length) {
+      // 旧单文件版本:整版预览取列,固定键 "data"(与后端口径一致)
+      previewDatasetVersion(versionId, { limit: 20 })
+        .then((r) => setMemberColumns({ data: r.columns ?? [] }))
+        .catch(() => undefined);
+      return;
+    }
+    for (const t of tables) {
+      if (!t.storageUri?.startsWith('s3://')) continue;
+      // 成员预览 key = storageUri 去掉 s3://<bucket>/ 前缀
+      const key = t.storageUri.replace(/^s3:\/\/[^/]+\//, '');
+      previewDatasetVersion(versionId, { limit: 20, key })
+        .then((r) =>
+          setMemberColumns((prev) => ({
+            ...prev,
+            [t.tableName]: r.columns ?? [],
+          })),
+        )
+        .catch(() => undefined);
+    }
+  }, [versionId]);
+
+  // 展示字段选择器的表:多表 = 被勾选的成员;单表 = 该成员;无成员 = 固定键 "data"
+  const curVersion = versions.find((v) => v.id === versionId);
+  const auditedTables: string[] =
+    !versionId || !curVersion || isBinaryFormat(curVersion.format)
+      ? []
+      : memberNames.length > 1
+        ? targetMembers
+        : memberNames.length === 1
+          ? memberNames
+          : ['data'];
+
   // 载入某 job 的报告(被选中时 / 轮询时)
   const loadReport = useCallback(async (jobId: string) => {
     const res = await getReviewReport(jobId).catch(() => undefined);
@@ -520,6 +579,12 @@ const ContentSafety: React.FC = () => {
     if (!versionId) return;
     setSubmitting(true);
     const hide = message.loading('正在创建审核任务…', 0);
+    // 只带被审表里有选择的项;全空则不传(后端走默认取文本逻辑)
+    const scanFields = Object.fromEntries(
+      Object.entries(scanFieldsMap).filter(
+        ([t, fs]) => fs.length > 0 && auditedTables.includes(t),
+      ),
+    );
     try {
       const res = await createReviewJob({
         datasetVersionId: versionId,
@@ -533,6 +598,7 @@ const ContentSafety: React.FC = () => {
           usePii,
           useFlaggedWords,
           sampleLimit,
+          scanFields: Object.keys(scanFields).length ? scanFields : undefined,
         },
         // 全选(或无成员)不传 → 后端审全部;部分勾选才圈范围
         targetMembers:
@@ -663,7 +729,7 @@ const ContentSafety: React.FC = () => {
       dataIndex: 'input',
       render: (_, r) =>
         r.input
-          ? `${r.input.datasetName}（${r.input.datasetId} ${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
+          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
           : '-',
     },
     {
@@ -748,6 +814,42 @@ const ContentSafety: React.FC = () => {
               message={`仅审核选中的 ${targetMembers.length}/${memberNames.length} 个成员表;产出版本只包含被审成员,且被审版本将标记为「未完整扫描」`}
             />
           )}
+        {auditedTables.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <Title level={5} style={{ marginTop: 0 }}>
+              扫描字段
+            </Title>
+            <Space direction="vertical" size={8}>
+              {auditedTables.map((t) => (
+                <Space key={t}>
+                  <Text
+                    strong
+                    style={{ display: 'inline-block', minWidth: 120 }}
+                  >
+                    {t === 'data' && !memberNames.length ? '默认(单文件)' : t}
+                  </Text>
+                  <Select
+                    mode="tags"
+                    allowClear
+                    placeholder="不选 = 默认扫 text/首个文本字段"
+                    style={{ width: 420 }}
+                    maxTagCount="responsive"
+                    value={scanFieldsMap[t] ?? []}
+                    onChange={(vals) =>
+                      setScanFieldsMap((prev) => ({
+                        ...prev,
+                        [t]: vals as string[],
+                      }))
+                    }
+                    options={(memberColumns[t] ?? [])
+                      .filter((c) => c !== '__member')
+                      .map((c) => ({ label: c, value: c }))}
+                  />
+                </Space>
+              ))}
+            </Space>
+          </div>
+        )}
 
         <Row gutter={24}>
           <Col span={12}>
