@@ -74,3 +74,7 @@ class Job(Base):
     image_tag: Mapped[str | None] = mapped_column(String, nullable=True)
     # 执行器类型:single(默认单机) | ray(分布式)
     executor_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 目标成员：指定要处理的表成员名列表(成员级算子配置);None=处理所有成员
+    target_members: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # 成员级独立算子配置：[{memberName, operators, textKeys?}]
+    member_configs: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)

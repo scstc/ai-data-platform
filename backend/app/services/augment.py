@@ -35,11 +35,264 @@ async def run_augment_job(
     *,
     job_id: str,
     input_version: DatasetVersion,
-    operators: list[dict[str, Any]],
+    operators: list[dict[str, Any]] | None = None,
+    member_configs: list[dict[str, Any]] | None = None,
+    target_members: list[str] | None = None,
     goal: AugmentGoal,
     output_dataset_id: str | None = None,
 ) -> tuple[DatasetVersion, str, str, AugmentReport]:
-    """对输入版本跑增强算子链 → 写回 dataset 新版本。"""
+    """对输入版本跑增强算子链 → 写回 dataset 新版本。
+
+    member_configs: 新版成员独立配置，格式 [{member_name, operators}, ...]
+    target_members: 要处理的成员名列表；None=处理所有成员
+    goal: 全局增强目标参数（不按成员区分）
+    产物 origin='synthetic',返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
+    """
+    dataset_id = output_dataset_id or input_version.dataset_id
+    target_ds = await session.get(Dataset, dataset_id)
+    if target_ds is None:
+        raise EngineError(f"输出数据集不存在:{dataset_id}")
+
+    # 1. 查询版本成员
+    from app.services.engine import _get_version_members
+
+    members = await _get_version_members(session, input_version.id)
+
+    # 如果版本无成员表（旧版本），回退到原逻辑
+    if not members:
+        return await _run_augment_job_legacy(
+            session,
+            job_id=job_id,
+            input_version=input_version,
+            operators=operators,
+            goal=goal,
+            output_dataset_id=output_dataset_id,
+        )
+
+    # 2. 确定处理模式
+    if member_configs:
+        config_map = {cfg["member_name"]: cfg for cfg in member_configs}
+        members_to_process = [m for m in members if m.table_name in config_map]
+        if not members_to_process:
+            raise EngineError("未找到 member_configs 中指定的成员")
+    else:
+        if not operators:
+            raise EngineError("未提供 member_configs 时必须提供 operators 参数")
+        if target_members:
+            members_to_process = [m for m in members if m.table_name in target_members]
+        else:
+            members_to_process = members
+        if not members_to_process:
+            raise EngineError("未找到要处理的成员")
+        config_map = {
+            m.table_name: {"operators": operators}
+            for m in members_to_process
+        }
+
+    # 3. 创建新版本目录
+    max_vno = await session.scalar(
+        select(func.max(DatasetVersion.version_no)).where(
+            DatasetVersion.dataset_id == dataset_id
+        )
+    )
+    new_vno = (max_vno or 0) + 1
+    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    started = time.time()
+
+    # 4. 对每个成员独立处理
+    from app.services.engine import (
+        _get_member_output_path,
+        _materialize_member,
+        _new_member_id,
+    )
+    from app.services.external_store import (
+        upload_jsonl_member,
+        upload_parquet_member,
+    )
+    from app.services.landing import parquet_bytes_to_records
+
+    all_logs: list[str] = []
+    all_yamls: list[str] = []
+    new_members_data: list[dict[str, Any]] = []
+    total_input_count = 0
+    total_output_count = 0
+    all_operator_names: list[str] = []
+
+    for member in members_to_process:
+        member_cfg = config_map[member.table_name]
+        member_operators = member_cfg["operators"]
+
+        # 物化成员文件
+        input_path = await _materialize_member(session, member)
+
+        # 输出路径
+        out_format = member.format if member.format in ("parquet", "jsonl") else "jsonl"
+        output_path = _get_member_output_path(
+            dataset_id, new_vno, member.table_name, out_format
+        )
+        yaml_path = out_dir / f"{member.table_name}_job.yaml"
+
+        # 构建 DJ 配置（增强用 dj-process）
+        cfg = build_config(
+            project_name=f"{job_id}-{member.table_name}",
+            input_path=str(input_path),
+            output_path=str(output_path),
+            operators=member_operators,
+        )
+        yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+        yaml_path.write_text(yaml_content, encoding="utf-8")
+
+        all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
+
+        # 计数输入行
+        if input_path.suffix == ".jsonl":
+            member_input_count = sum(
+                1 for line in input_path.open(encoding="utf-8") if line.strip()
+            )
+        else:
+            # parquet
+            member_input_count = len(parquet_bytes_to_records(input_path.read_bytes()))
+        total_input_count += member_input_count
+
+        # 运行 dj-process
+        code, log = await _run_dj(yaml_path, job_id=f"{job_id}-{member.table_name}")
+
+        operator_names = [op["name"] for op in member_operators]
+        all_logs.append(
+            f"=== {member.table_name} ===\n算子: {operator_names}\n输入: {member_input_count} 行\n{log}"
+        )
+        all_operator_names.extend(operator_names)
+
+        if code != 0 or not output_path.exists():
+            tail = "\n".join(log.strip().splitlines()[-8:])
+            raise EngineError(
+                f"成员 {member.table_name} 增强失败(dj-process 退出码 {code})\n{tail}"
+            )
+
+        # 上传产出文件
+        if out_format == "parquet":
+            data_bytes = output_path.read_bytes()
+            storage_uri = await upload_parquet_member(
+                dataset_id, new_vno, member.table_name, data_bytes
+            )
+            rows = len(parquet_bytes_to_records(data_bytes))
+        else:
+            data_bytes = output_path.read_bytes()
+            storage_uri = await upload_jsonl_member(
+                dataset_id, new_vno, member.table_name, data_bytes
+            )
+            rows = sum(
+                1 for line in output_path.open(encoding="utf-8") if line.strip()
+            )
+
+        total_output_count += rows
+
+        new_members_data.append(
+            {
+                "table_name": member.table_name,
+                "storage_uri": storage_uri,
+                "format": out_format,
+                "rows": rows,
+                "size": len(data_bytes),
+                "schema_variant": member.schema_variant,
+            }
+        )
+
+    # 5. 创建新版本和成员记录
+    from app.models.dataset_version_table import DatasetVersionTable
+
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset_id,
+        version_no=new_vno,
+        storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
+        format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
+        rows=sum(m["rows"] for m in new_members_data),
+        size=sum(m["size"] for m in new_members_data),
+        origin="synthetic",
+        produced_by_job_id=job_id,
+        note=f"增强产出(来自 v{input_version.version_no})",
+    )
+    session.add(version)
+    await session.flush()
+
+    for m_data in new_members_data:
+        member_rec = DatasetVersionTable(
+            id=_new_member_id(),
+            dataset_version_id=version.id,
+            **m_data,
+        )
+        session.add(member_rec)
+
+    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+    await session.commit()
+    await session.refresh(version)
+
+    # 6. 汇总日志和YAML
+    combined_log = "\n\n".join(all_logs)
+    log_path = out_dir / "run.log"
+    log_path.write_text(combined_log, encoding="utf-8")
+
+    combined_yaml = "\n\n---\n\n".join(all_yamls)
+
+    # 7. 生成报告
+    warnings: list[str] = []
+    if total_output_count == 0:
+        warnings.append("增强后样本数为 0,可能 LLM 调用失败或 prompt 不匹配")
+    # 增强 1→1,扩增比通常 = 1
+    expansion_ratio = (
+        (total_output_count / total_input_count) if total_input_count > 0 else None
+    )
+    if expansion_ratio is not None and abs(expansion_ratio - 1.0) > 0.1:
+        warnings.append(
+            f"增强通常 1→1,实际扩增比 {expansion_ratio:.2f},请检查算子链"
+        )
+
+    # 去重算子名（保持顺序）
+    unique_operators = []
+    seen = set()
+    for op_name in all_operator_names:
+        if op_name not in seen:
+            unique_operators.append(op_name)
+            seen.add(op_name)
+
+    report = AugmentReport(
+        job_id=job_id,
+        input_version_id=input_version.id,
+        output_version_id=version.id,
+        mode=goal.mode,
+        input_count=total_input_count,
+        output_count=total_output_count,
+        expansion_ratio=expansion_ratio,
+        elapsed_seconds=round(time.time() - started, 2),
+        operator_chain=unique_operators,
+        warnings=warnings,
+        raw={"goal": goal.model_dump(mode="json")},
+    )
+    report_path = out_dir / "report.json"
+    report_path.write_text(
+        json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return version, combined_yaml, str(log_path), report
+
+
+async def _run_augment_job_legacy(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    input_version: DatasetVersion,
+    operators: list[dict[str, Any]] | None = None,
+    goal: AugmentGoal,
+    output_dataset_id: str | None = None,
+) -> tuple[DatasetVersion, str, str, AugmentReport]:
+    """旧版单文件增强逻辑（无成员表的版本）。"""
+    if not operators:
+        raise EngineError("旧版单文件版本必须提供 operators 参数")
+
     dataset_id = output_dataset_id or input_version.dataset_id
     target_ds = await session.get(Dataset, dataset_id)
     if target_ds is None:
@@ -92,7 +345,7 @@ async def run_augment_job(
         size=out_path.stat().st_size,
         origin="synthetic",  # 增强也归类为 synthetic(原始/合成 二分足够)
         produced_by_job_id=job_id,
-        note=f"增强产出(来自 v{input_version.version_no},job={job_id})",
+        note=f"增强产出(来自 v{input_version.version_no})",
     )
     session.add(version)
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
@@ -127,3 +380,4 @@ async def run_augment_job(
         encoding="utf-8",
     )
     return version, yaml_text, str(log_path), report
+

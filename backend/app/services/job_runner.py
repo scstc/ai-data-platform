@@ -235,13 +235,31 @@ async def _run_job(job_id: str) -> None:
                 job.image_tag = settings.image_tag
                 job.executor_type = "ray" if _caps.ray else "single"
                 await session.commit()
-                operators = [o.model_dump() for o in getattr(body, "operators", [])]
+
+                # 统一提取配置：优先 member_configs，回退到 operators+target_members
+                member_configs_arg: list[dict[str, Any]] | None = None
+                operators_arg: list[dict[str, Any]] | None = None
+                target_members_arg: list[str] | None = None
+
+                member_configs = getattr(body, "member_configs", None)
+                if member_configs:
+                    # 新版：成员独立配置
+                    member_configs_arg = [cfg.model_dump() for cfg in member_configs]
+                else:
+                    # 旧版：统一配置
+                    operators = getattr(body, "operators", None)
+                    if operators:
+                        operators_arg = [o.model_dump() for o in operators]
+                    target_members_arg = getattr(body, "target_members", None)
+
                 if job.type == "distillation":
                     _v, yaml_text, log_path, _report = await run_distillation_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=operators,
+                        operators=operators_arg,
+                        member_configs=member_configs_arg,
+                        target_members=target_members_arg,
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                     )
@@ -250,7 +268,9 @@ async def _run_job(job_id: str) -> None:
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=operators,
+                        operators=operators_arg,
+                        member_configs=member_configs_arg,
+                        target_members=target_members_arg,
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                     )
@@ -259,16 +279,20 @@ async def _run_job(job_id: str) -> None:
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=operators,
+                        operators=operators_arg,
+                        member_configs=member_configs_arg,
+                        target_members=target_members_arg,
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                     )
                 elif job.type == "quality":
-                    yaml_text, log_path = await run_quality_job(
+                    _version, yaml_text, log_path = await run_quality_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=operators,
+                        operators=operators_arg,
+                        member_configs=member_configs_arg,
+                        target_members=target_members_arg,
                     )
                 elif job.type == "construct":
                     # 构造层:确定性列映射 → 训练 schema,无 operators
@@ -305,11 +329,12 @@ async def _run_job(job_id: str) -> None:
                         config=body.config.model_dump(by_alias=True),
                     )
                 else:  # process / clean
+                    # process/clean 已支持 member_configs，使用统一提取的配置
                     _v, yaml_text, log_path = await run_process_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
-                        operators=operators,
+                        operators=operators_arg,
                         text_keys=getattr(body, "text_keys", None),
                         use_ray=getattr(body, "use_ray", False),
                         media_keys={
@@ -317,6 +342,8 @@ async def _run_job(job_id: str) -> None:
                             "audio_key": getattr(body, "audio_key", None),
                             "video_key": getattr(body, "video_key", None),
                         },
+                        target_members=target_members_arg,
+                        member_configs=member_configs_arg,
                     )
             job.state = "success"
             job.progress = 100

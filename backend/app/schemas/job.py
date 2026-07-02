@@ -16,16 +16,32 @@ class OperatorSpec(CamelModel):
     params: dict[str, Any] | None = None
 
 
+class MemberOperatorConfig(CamelModel):
+    """单个成员的算子配置。"""
+
+    member_name: str
+    operators: list[OperatorSpec]
+    # 可选：成员级别的清洗字段
+    text_keys: list[str] | None = None
+
+
 class JobCreate(CamelModel):
     """新建加工任务入参:对某个数据集版本跑一串算子。"""
 
     name: str
     type: str = "process"
     dataset_version_id: str
-    operators: list[OperatorSpec]
+
+    # 新版：成员级独立配置（优先）
+    member_configs: list[MemberOperatorConfig] | None = None
+
+    # 旧版：统一配置（向后兼容）
+    operators: list[OperatorSpec] | None = None
+    target_members: list[str] | None = None
     # 清洗作用字段(DJ text_keys):留空则后端按字段名优先级自动探测;
     # 显式指定则原样用(可多字段),用于脏字符不在标准字段(如 task)的场景。
     text_keys: list[str] | None = None
+
     # G6 分布式:切 DJ ray executor;仅在 capabilities.ray 就绪时放行(_start_job 校验)。
     use_ray: bool = False
     # G7 多模态:自定义媒体字段键(默认 images/audios/videos);仅 manifest 输入注入。
@@ -39,7 +55,13 @@ class QualityJobCreate(CamelModel):
 
     name: str
     dataset_version_id: str
-    operators: list[OperatorSpec]
+
+    # 新版：成员级独立配置（优先）
+    member_configs: list[MemberOperatorConfig] | None = None
+
+    # 旧版：统一配置（向后兼容）
+    operators: list[OperatorSpec] | None = None
+    target_members: list[str] | None = None
 
 
 class JobRead(CamelModel):

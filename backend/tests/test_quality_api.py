@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 
 import pytest
@@ -267,17 +268,32 @@ async def test_create_quality_job_success_and_type_filter(
         session_factory, storage_uri=storage_uri, stats_uri=None
     )
 
-    async def fake_run_quality_job(session, *, job_id, input_version, operators):
-        # 镜像真实实现的副作用:回写 stats_uri + 记血缘边
+    async def fake_run_quality_job(session, *, job_id, input_version, operators, member_configs=None, target_members=None):
+        # 镜像真实实现的副作用:创建新版本 + 记血缘边
         assert operators == [
             {"name": "text_length_filter", "params": {"min_len": 5}}
         ]
-        input_version.stats_uri = stats_uri
+        # 创建新版本（简化版，实际实现会复制输入版本）
+        from app.models.dataset_version import DatasetVersion
+        new_version = DatasetVersion(
+            id=f"dsv-{secrets.token_hex(3)}",
+            dataset_id=input_version.dataset_id,
+            version_no=(input_version.version_no or 0) + 1,
+            storage_uri=input_version.storage_uri,
+            format=input_version.format,
+            rows=input_version.rows,
+            size=input_version.size,
+            origin="managed",
+            produced_by_job_id=job_id,
+            stats_uri=stats_uri,
+            note="质量评估产出",
+        )
+        session.add(new_version)
         session.add(
             JobInput(job_id=job_id, dataset_version_id=input_version.id)
         )
         await session.commit()
-        return "process: []", str(tmp_path / "run.log")
+        return new_version, "process: []", str(tmp_path / "run.log")
 
     monkeypatch.setattr(
         "app.api.v1.quality.run_quality_job", fake_run_quality_job

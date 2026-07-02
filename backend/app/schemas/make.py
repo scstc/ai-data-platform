@@ -10,7 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.schemas.common import CamelModel
-from app.schemas.job import OperatorSpec
+from app.schemas.job import MemberOperatorConfig, OperatorSpec
+
 
 
 class MakeGoal(CamelModel):
@@ -31,7 +32,14 @@ class MakeJobCreate(CamelModel):
 
     name: str
     dataset_version_id: str
-    operators: list[OperatorSpec]
+
+    # 新版：成员级独立配置（优先）
+    member_configs: list[MemberOperatorConfig] | None = None
+
+    # 旧版：统一配置（向后兼容）
+    operators: list[OperatorSpec] | None = None
+    target_members: list[str] | None = None
+
     goal: MakeGoal
     output_dataset_id: str | None = None
 

@@ -317,6 +317,19 @@ declare namespace DataPlatform {
     params: Record<string, unknown>;
   };
 
+  /** 算子规格:算子名 + 参数(加工任务通用) */
+  type OperatorSpec = {
+    name: string;
+    params?: Record<string, any>;
+  };
+
+  /** 成员独立算子配置(多表成员场景):每个表成员可配置不同的算子链和文本字段 */
+  type MemberOperatorConfig = {
+    memberName: string;
+    operators: OperatorSpec[];
+    textKeys?: string[];
+  };
+
   /** AI 生成流水线入参 */
   type GeneratePipelineParams = {
     goal: string;
@@ -413,10 +426,18 @@ declare namespace DataPlatform {
     name: string;
     type?: string;
     datasetVersionId: string;
-    operators: { name: string; params?: Record<string, any> }[];
+
+    // 新版：成员独立配置(多表成员场景，每表独立算子链+text_keys)
+    memberConfigs?: MemberOperatorConfig[];
+
+    // 旧版：统一配置(向后兼容，单表或所有表共用一套算子)
+    operators?: OperatorSpec[];
     /** 清洗作用字段(DJ text_keys):留空后端自动探测主文本字段;
      *  显式指定(可多字段)用于脏字符不在标准字段(如 task)的场景 */
     textKeys?: string[];
+    /** 目标成员名列表(多表成员场景):指定只处理这些表;留空=处理所有表 */
+    targetMembers?: string[];
+
     /** 产物去向:version=写回原数据集新版本(默认);new_dataset=另存为新数据集 */
     outputMode?: 'version' | 'new_dataset';
     /** outputMode=new_dataset 时的新数据集名称 */

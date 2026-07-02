@@ -243,18 +243,61 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
     任务可经 POST /jobs/{id}/stop 停止;create_job 与 rerun_job 共用此入口
     (rerun 用原任务存下的 spec 重建 body)。
     """
-    if not body.operators:
+    # 校验算子配置（二选一）
+    if body.member_configs and body.operators:
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": "请至少选择一个算子"},
+            content={"success": False, "message": "不能同时指定 memberConfigs 和 operators"}
         )
-    known = oc.operator_names()
-    unknown = [o.name for o in body.operators if o.name not in known]
-    if unknown:
+
+    if not body.member_configs and not body.operators:
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
+            content={"success": False, "message": "请指定 memberConfigs 或 operators"}
         )
+
+    # 校验 member_configs（如果提供）
+    if body.member_configs:
+        from app.models import DatasetVersionTable
+
+        stmt = select(DatasetVersionTable).where(
+            DatasetVersionTable.dataset_version_id == body.dataset_version_id
+        )
+        members = (await session.execute(stmt)).scalars().all()
+        member_names = {m.table_name for m in members}
+
+        for cfg in body.member_configs:
+            if cfg.member_name not in member_names:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": f"成员不存在: {cfg.member_name}"}
+                )
+
+            if not cfg.operators:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": f"成员 {cfg.member_name} 未指定算子"}
+                )
+
+            # 校验算子存在性
+            known = oc.operator_names()
+            unknown = [o.name for o in cfg.operators if o.name not in known]
+            if unknown:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": f"成员 {cfg.member_name} 包含未知算子: {', '.join(unknown)}"}
+                )
+
+    # 校验 operators（旧版统一配置模式）
+    if body.operators:
+        known = oc.operator_names()
+        unknown = [o.name for o in body.operators if o.name not in known]
+        if unknown:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
+            )
+
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:
         return JSONResponse(
@@ -265,6 +308,27 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
         return blocked_resp
     if (blocked_resp := await _multimodal_block(input_version)) is not None:
         return blocked_resp
+
+    # 校验 target_members 有效性
+    if body.target_members:
+        from app.models import DatasetVersionTable
+
+        stmt = select(DatasetVersionTable).where(
+            DatasetVersionTable.dataset_version_id == body.dataset_version_id
+        )
+        members = (await session.execute(stmt)).scalars().all()
+
+        if members:  # 版本有成员表记录
+            member_names = {m.table_name for m in members}
+            unknown = set(body.target_members) - member_names
+            if unknown:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": f"成员不存在: {', '.join(sorted(unknown))}"
+                    }
+                )
 
     # 资源前置校验:按 LLM 配置 + 数据类型把算子路由到合适后端,跑不了的提前拦截给原因。
     # media_ok:输入是 manifest 媒体集(_multimodal_block 已确保此时 torch 就绪)。
