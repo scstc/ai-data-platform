@@ -2765,11 +2765,14 @@ async def _download_zip(
     version: DatasetVersion,
     members: list[DatasetMemberRead],
     session: AsyncSession,
+    extra_files: list[tuple[str, bytes]] | None = None,
 ) -> JSONResponse | FileResponse:
     """打包版本全部成员为 zip 流式下发(单文件也打包——下载体验一致)。
 
     s3 成员从对象存储拉字节(cached_bytes),本地成员读盘;同名成员自动加序号去重;
     拉取/读取失败的成员跳过;响应结束(BackgroundTask)清理临时文件。
+    extra_files 为额外打包的 (文件名, 字节) 条目(如 manifest 版本的清单 jsonl),
+    先于成员写入,占用同名去重命名空间。
     """
     has_s3 = any(m.bucket for m in members)
     cfg = await _version_storage_cfg(version, session) if has_s3 else None
@@ -2788,6 +2791,9 @@ async def _download_zip(
     skipped: list[str] = []
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname, payload in extra_files or []:
+                zf.writestr(fname, payload)
+                used.add(fname)
             for m in members:
                 if m.bucket:  # s3 成员
                     try:
@@ -2919,6 +2925,33 @@ async def download_version(
             status_code=503,
             content={"success": False, "message": f"读取成员失败:{exc}"},
         )
+    # manifest(媒体集)版本:媒体成员 + 清单 jsonl 一并打包(清单里才有文本/
+    # 标注字段,只发媒体等于丢数据)。剥掉内部 __member 记账字段;媒体在 zip 内
+    # 用对象 key 文件名,与清单行 images 引用一致,解包后可直接喂 dj-process。
+    if version.format == MANIFEST_FORMAT:
+        cfg = await _version_storage_cfg(version, session)
+        if cfg is None:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "平台存储(MinIO)未配置"},
+            )
+        try:
+            rows = await _read_manifest_rows(cfg, version.storage_uri)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": f"读取清单失败:{exc}"},
+            )
+        clean_rows = [{k: v for k, v in r.items() if k != "__member"} for r in rows]
+        members = [
+            m.model_copy(update={"name": Path(m.key).name}) for m in members
+        ]
+        return await _download_zip(
+            version,
+            members,
+            session,
+            extra_files=[("data.jsonl", _manifest_bytes(clean_rows))],
+        )
     # 单成员 s3 版本:直接预签名 302,让训练平台/浏览器直连 MinIO 拉文件
     # (免后端中转打包,跨机器通用,S3 协议)。多成员/本地版本仍走 zip 打包。
     if len(members) == 1 and members[0].bucket:
@@ -2978,9 +3011,11 @@ async def export_version_to_s3(
             status_code=503,
             content={"success": False, "message": f"读取成员失败:{exc}"},
         )
+    is_manifest = version.format == MANIFEST_FORMAT
     has_s3 = any(m.bucket for m in members)
-    src_cfg = await _version_storage_cfg(version, session) if has_s3 else None
-    if has_s3 and src_cfg is None:
+    need_src = has_s3 or is_manifest
+    src_cfg = await _version_storage_cfg(version, session) if need_src else None
+    if need_src and src_cfg is None:
         return JSONResponse(
             status_code=503,
             content={"success": False, "message": "平台存储(MinIO)未配置"},
@@ -2995,6 +3030,34 @@ async def export_version_to_s3(
     used: set[str] = set()
     # 记录被跳过的成员及原因(全部跳过时诚实回因,fail-loud)
     skipped: list[str] = []
+    # manifest(媒体集):清单 jsonl(剥内部 __member 字段)一并导出;媒体改用对象
+    # key 文件名,与清单行 images 引用一致——与 download 打包行为对齐,导出目录
+    # 可直接喂 dj-process。
+    if is_manifest:
+        try:
+            rows = await _read_manifest_rows(src_cfg, version.storage_uri)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": f"读取清单失败:{exc}"},
+            )
+        clean_rows = [
+            {k: v for k, v in r.items() if k != "__member"} for r in rows
+        ]
+        data = _manifest_bytes(clean_rows)
+        dest_key = f"{prefix}/data.jsonl" if prefix else "data.jsonl"
+        try:
+            await upload_object(
+                ds.config, body.bucket, dest_key, io.BytesIO(data), len(data)
+            )
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=502,
+                content={"success": False, "message": f"导出失败:{exc}"},
+            )
+        exported += 1
+        used.add("data.jsonl")
+        members = [m.model_copy(update={"name": Path(m.key).name}) for m in members]
     for m in members:
         if m.bucket:  # s3 成员:从源对象存储取字节(命中物化缓存则免重复下载)
             try:
