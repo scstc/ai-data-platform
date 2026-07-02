@@ -152,6 +152,11 @@ nginx(frontend:80)  →  /api → backend:18003  →  postgres:16(:55433→5432)
 - 后端 ruff / 前端 biome + tsc 都得过
 - **勿手改** `frontend/src/services/ant-design-pro/`
 
+### 临时验证脚本用完即删
+
+为验证/调试临时写的一次性脚本（跑一次看结果那种），**验证完立即删除**，不要留在仓库里。
+需要长期留存的用例，写成 `backend/tests/test_*.py` 正式单测；临时脚本一律放 scratchpad 目录再删。
+
 ## 数据库操作（统一 dbx）
 
 **所有 DB 操作走 DBX MCP**（`dbx_*` 工具集），不直接 `psql`。连接信息：
