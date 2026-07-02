@@ -327,13 +327,8 @@ async def test_create_quality_job_success_and_type_filter(
     resp = await client.get(f"/api/v1/jobs/{job_id}")
     data = resp.json()["data"]
     assert data["type"] == "quality"
-    assert data["state"] == "pending"  # 后台异步执行,POST 立即返回 pending
-
-    await job_runner.drain()
-    detail = (await client.get(f"/api/v1/jobs/{data['id']}")).json()["data"]
-    assert detail["state"] == "success"
-    assert detail["progress"] == 100
-    data = detail
+    assert data["state"] == "success"
+    assert data["progress"] == 100
     # 质量评估产出带 stats 的新版本(非 None),经 produced_by_job_id 反查
     assert data["output"]["datasetId"] == DATASET_ID
     assert {
@@ -407,7 +402,10 @@ async def test_create_quality_job_engine_failure(
     data = (await client.get(f"/api/v1/jobs/{job_id}")).json()["data"]
     assert data["state"] == "failed"
     assert "dj-analyze" in data["error"]
-    assert data["input"] is None  # 失败时未记血缘边
+    # 失败时未记血缘边(job_inputs);input 回退到 spec.dataset_version_id
+    # 反查展示「指定过哪个版本」,标 fallback=True 区分于成功血缘
+    assert data["input"]["versionId"] == VERSION_ID
+    assert data["input"]["fallback"] is True
 
     resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/stats")
     assert resp.status_code == 404
