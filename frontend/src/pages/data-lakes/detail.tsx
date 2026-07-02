@@ -294,22 +294,31 @@ const DataLakeDetailPage: FC = () => {
       <ModalForm<{
         datasetName: string;
         description?: string;
-        fieldMapping?: string;
+        fieldMappings?: Record<string, string>;
       }>
         title="从湖快照抽取生成数据集"
         open={extractOpen}
         onOpenChange={setExtractOpen}
-        width={520}
+        width={720}
         modalProps={{ destroyOnHidden: true }}
         onFinish={async (values) => {
           if (!id) return false;
           const hide = message.loading('正在抽取...', 0);
           try {
+            // 过滤掉空模板
+            const fieldMapping = values.fieldMappings
+              ? Object.fromEntries(
+                  Object.entries(values.fieldMappings).filter(
+                    ([, template]) => template && template.trim(),
+                  ),
+                )
+              : undefined;
+
             const res = await extractLakeToDataset(id, {
               snapshotIds: selectedSnapshots.map((s) => s.id),
               datasetName: values.datasetName,
               description: values.description,
-              fieldMapping: values.fieldMapping,
+              fieldMapping: fieldMapping && Object.keys(fieldMapping).length > 0 ? fieldMapping : undefined,
             });
             hide();
             message.success(
@@ -351,16 +360,52 @@ const DataLakeDetailPage: FC = () => {
           placeholder="选填"
           fieldProps={{ rows: 3 }}
         />
-        {selectedSnapshots.some(
+
+        {/* 逐文件配置字段映射 */}
+        {selectedSnapshots.filter(
           (s) => s.dataCategory === 'database' || s.dataCategory === 'tabular',
-        ) && (
-          <ProFormTextArea
-            name="fieldMapping"
-            label="字段映射模板（可选）"
-            placeholder="用户提问：{question}，客服回答：{answer}"
-            tooltip="对表格类快照（数据库、CSV、Excel 等）生效。使用 {字段名} 占位符，自动拼接成 text 字段"
-            fieldProps={{ rows: 3, maxLength: 500 }}
-          />
+        ).length > 0 && (
+          <>
+            <Typography.Title level={5} style={{ marginTop: 16 }}>
+              字段映射配置（可选）
+            </Typography.Title>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              为表格类快照配置字段映射模板，使用 {'{字段名}'} 占位符拼接多字段为
+              text
+            </Typography.Text>
+            <div style={{ marginTop: 12 }}>
+              {selectedSnapshots
+                .filter(
+                  (s) =>
+                    s.dataCategory === 'database' ||
+                    s.dataCategory === 'tabular',
+                )
+                .map((snapshot) => (
+                  <div
+                    key={snapshot.id}
+                    style={{
+                      marginBottom: 12,
+                      padding: 12,
+                      border: '1px solid #d9d9d9',
+                      borderRadius: 4,
+                    }}
+                  >
+                    <div style={{ marginBottom: 8 }}>
+                      <Space>
+                        <Text strong>{snapshotFilename(snapshot) || snapshot.id}</Text>
+                        <Tag>{DATA_CATEGORY_LABEL[snapshot.dataCategory]}</Tag>
+                        <Tag color="default">{snapshot.storageFormat}</Tag>
+                      </Space>
+                    </div>
+                    <ProFormTextArea
+                      name={['fieldMappings', snapshot.id]}
+                      placeholder="用户提问：{question}，客服回答：{answer}"
+                      fieldProps={{ rows: 2, maxLength: 500 }}
+                    />
+                  </div>
+                ))}
+            </div>
+          </>
         )}
       </ModalForm>
 

@@ -375,7 +375,7 @@ async def extract_to_new_dataset(
     dataset_name: str,
     description: str | None = None,
     creator: str = "admin",
-    field_mapping: str | None = None,
+    field_mapping: dict[str, str] | None = None,
 ) -> Any:
     """从若干湖快照抽取生成**新**数据集(治理改造契约地基)。
 
@@ -385,7 +385,7 @@ async def extract_to_new_dataset(
        见 _lake_file_name;同名冲突时追加 _2/_3… 后缀避免覆盖)
     3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
        extract_from_lake_snapshot 注入到 records
-    4. 字段映射(可选):用模板拼接多字段为 text,适用表格类快照(database/tabular)
+    4. 字段映射(可选):为每个快照单独配置模板,拼接多字段为 text
 
     Args:
         db: 数据库会话
@@ -394,7 +394,7 @@ async def extract_to_new_dataset(
         dataset_name: 新数据集名称
         description: 数据集描述
         creator: 创建人
-        field_mapping: 字段映射模板(如 "用户提问：{question}，客服回答：{answer}")
+        field_mapping: 字段映射模板字典(key=快照ID, value=模板字符串)
 
     Returns:
         新建的 Dataset 对象
@@ -476,16 +476,15 @@ async def extract_to_new_dataset(
             db, lake_id, snapshot.source_version, inject_lineage=True
         )
 
-        # 应用字段映射(表格类快照:database/tabular + 配置了模板时执行)
+        # 应用字段映射(表格类快照:database/tabular + 该快照配置了模板时执行)
         # tabular 包含 csv/tsv/xlsx/xls/jsonl 等结构化文件
+        template = field_mapping.get(snapshot.id) if field_mapping else None
         if (
-            field_mapping
-            and field_mapping.strip()
+            template
+            and template.strip()
             and snapshot.data_category in ("database", "tabular")
         ):
-            records = await _apply_field_mapping_transform(
-                records, field_mapping
-            )
+            records = await _apply_field_mapping_transform(records, template)
 
         base = _safe_table_name(_lake_file_name(snapshot))
         table_name = base
