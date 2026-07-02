@@ -45,21 +45,15 @@ _DISTILL_TYPE = "distillation"
 
 
 # ---------------------------------------------------------------------------
-# 算子白名单 + 资源前置校验(蒸馏特有)
+# 资源前置校验(蒸馏特有)
 # ---------------------------------------------------------------------------
 def _distill_operator_block(
     operators: list,  # list[OperatorSpec]——避免循环 import,运行时只读 .name
 ) -> str | None:
     """返回不可执行的原因;None 表示全部可执行。
 
-    流程:先查白名单(蒸馏的硬约束),再查 runnable_reason(GPU/LLM 资源门)。
+    算子不限白名单,仅按运行时能力(GPU/LLM 资源门)拦截。
     """
-    not_in_list = [o.name for o in operators if not oc.is_distillation_operator(o.name)]
-    if not_in_list:
-        return (
-            f"算子不在蒸馏白名单内:{', '.join(not_in_list)};"
-            f"仅允许 text 规则 filter + 文本去重 + 5 类 selector"
-        )
     llm_configured = bool(get_active_llm_config().api_key)
     blocked = [
         reason
@@ -80,11 +74,7 @@ async def _start_distillation(
             status_code=400,
             content={"success": False, "message": "请至少选择一个算子"},
         )
-    unknown = [
-        o.name
-        for o in body.operators
-        if not oc.is_distillation_operator(o.name) and oc.get_operator(o.name) is None
-    ]
+    unknown = [o.name for o in body.operators if oc.get_operator(o.name) is None]
     if unknown:
         return JSONResponse(
             status_code=400,

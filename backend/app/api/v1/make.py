@@ -49,13 +49,7 @@ _MAKE_TYPE = "synthesis"
 
 
 def _make_operator_block(operators: list) -> str | None:
-    """白名单 + 资源前置校验(合成特有)。"""
-    not_in_list = [o.name for o in operators if not oc.is_make_operator(o.name)]
-    if not_in_list:
-        return (
-            f"算子不在合成白名单内:{', '.join(not_in_list)};"
-            f"合成仅允许 LLM 造新数据类算子(generate_qa_from_* / optimize_prompt)"
-        )
+    """资源前置校验(合成特有):算子不限白名单,仅按运行时能力(LLM/GPU)拦截。"""
     llm_configured = bool(get_active_llm_config().api_key)
     if not llm_configured:
         return "数据合成需 LLM 支持:请先在运维监控 / LLM 配置页设置 OPENAI_API_KEY"
@@ -78,11 +72,7 @@ async def _start_make(
             status_code=400,
             content={"success": False, "message": "请至少选择一个算子"},
         )
-    unknown = [
-        o.name
-        for o in body.operators
-        if not oc.is_make_operator(o.name) and oc.get_operator(o.name) is None
-    ]
+    unknown = [o.name for o in body.operators if oc.get_operator(o.name) is None]
     if unknown:
         return JSONResponse(
             status_code=400, content={"success": False, "message": f"未知算子:{', '.join(unknown)}"}

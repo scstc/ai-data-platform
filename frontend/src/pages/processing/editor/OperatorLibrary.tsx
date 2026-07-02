@@ -1,14 +1,5 @@
 import { PlusOutlined } from '@ant-design/icons';
-import {
-  Button,
-  Input,
-  List,
-  Select,
-  Space,
-  Switch,
-  Tag,
-  Typography,
-} from 'antd';
+import { Button, Input, List, Select, Space, Tag, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import {
   getOperatorCatalogMeta,
@@ -17,9 +8,10 @@ import {
 
 const { Text } = Typography;
 
-/** 左栏:检索/场景/只看可运行,点 + 添加算子到流水线。
- *  传 ``bucket``(cleansing/distillation/make/augment)时锁定为该业务桶:只展示对应任务算子,
- *  并隐藏自由「场景」下拉(加工页不传 bucket → 展示全部算子)。 */
+/** 左栏:检索/场景,点 + 添加算子到流水线。展示全量算子目录,不按业务桶或
+ *  可运行状态过滤(各任务均可自由选用任意算子)。
+ *  传 ``bucket``(cleansing/distillation/make/augment)时隐藏自由「场景」下拉
+ *  (加工页不传 bucket → 展示全部算子)。 */
 const OperatorLibrary: React.FC<{
   onAdd: (name: string) => void;
   category?: string;
@@ -28,7 +20,6 @@ const OperatorLibrary: React.FC<{
   const [scenarios, setScenarios] = useState<Record<string, number>>({});
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
-  const [onlyReady, setOnlyReady] = useState(true);
   const [data, setData] = useState<DataPlatform.CatalogOperator[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -40,16 +31,14 @@ const OperatorLibrary: React.FC<{
     setLoading(true);
     listOperatorCatalog({
       category,
-      bucket,
       scenario,
       keyword,
-      runnable: onlyReady ? 'ready' : undefined,
       current: 1,
       pageSize: 200,
     })
       .then((r) => setData(r.data))
       .finally(() => setLoading(false));
-  }, [category, bucket, scenario, keyword, onlyReady]);
+  }, [category, scenario, keyword]);
 
   const scenarioOptions = useMemo(
     () =>
@@ -77,10 +66,6 @@ const OperatorLibrary: React.FC<{
             onChange={setScenario}
           />
         )}
-        <Space size={6}>
-          <Switch size="small" checked={onlyReady} onChange={setOnlyReady} />
-          <Text type="secondary">只看可运行</Text>
-        </Space>
       </Space>
       <div style={{ flex: 1, overflow: 'auto' }}>
         <List
