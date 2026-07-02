@@ -1,9 +1,8 @@
 import { ExperimentOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useModel, useParams } from '@umijs/max';
+import { history, useParams } from '@umijs/max';
 import {
   Alert,
-  Button,
   Card,
   Col,
   Divider,
@@ -76,7 +75,6 @@ const ChipRow: React.FC<{ label: string; children: React.ReactNode }> = ({
 
 const OperatorDetail: React.FC = () => {
   const { name } = useParams<{ name: string }>();
-  const { add } = useModel('opCart');
   const [operator, setOperator] = useState<DataPlatform.CatalogOperator>();
   const [loading, setLoading] = useState(false);
 
@@ -92,13 +90,6 @@ const OperatorDetail: React.FC = () => {
     return <div>算子名称缺失</div>;
   }
 
-  const onAdd = () => {
-    if (operator) {
-      add(operator.name);
-      history.push('/operators');
-    }
-  };
-
   const runTag = operator ? RUNNABLE_TAG[operator.runnable] : null;
   const demos = operator?.effectDemo ?? [];
 
@@ -107,11 +98,6 @@ const OperatorDetail: React.FC = () => {
       loading={loading}
       title="算子详情页"
       onBack={() => history.back()}
-      extra={
-        <Button type="primary" onClick={onAdd}>
-          加入加工任务
-        </Button>
-      }
     >
       {operator && (
         <Space orientation="vertical" size="large" style={{ width: '100%' }}>

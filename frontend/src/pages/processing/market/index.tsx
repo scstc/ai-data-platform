@@ -1,17 +1,15 @@
 import { UploadOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useModel } from '@umijs/max';
+import { history } from '@umijs/max';
 import {
   Alert,
   Button,
   Card,
   Col,
   Divider,
-  Dropdown,
   Empty,
   Input,
   Menu,
-  message,
   Pagination,
   Row,
   Segmented,
@@ -98,24 +96,7 @@ const metaLine = (op: DataPlatform.CatalogOperator) =>
 
 const PAGE_SIZE = 24;
 
-/** 「去新建任务」下拉的目标治理任务:消费市场购物车的 5 个任务。
- *  跳转后各编辑器经 useOpCartIntake 按 bucket 过滤购物车(质量评估无桶=全收),
- *  不适用的算子在目标页诚实跳过并提示。标注/内容安全无算子流水线,不在此列。 */
-const INTAKE_TARGETS: { key: string; label: string; route: string }[] = [
-  { key: 'cleaning', label: '数据清洗', route: '/governance/cleaning/editor' },
-  { key: 'quality', label: '质量评估', route: '/assessment/quality/editor' },
-  {
-    key: 'distillation',
-    label: '数据蒸馏',
-    route: '/governance/distillation/editor',
-  },
-  { key: 'make', label: '数据合成', route: '/governance/make/editor' },
-  { key: 'augment', label: '数据增强', route: '/governance/augment/editor' },
-];
-
 const Market: React.FC = () => {
-  const { steps, add, clear } = useModel('opCart');
-
   // 全量算子(一次性拉取)
   const [allOps, setAllOps] = useState<DataPlatform.CatalogOperator[]>([]);
   const [loading, setLoading] = useState(false);
@@ -237,11 +218,6 @@ const Market: React.FC = () => {
     return `共 ${allOps.length} 个算子 · ${readyCount} 个现在可运行`;
   }, [allOps]);
 
-  const onAdd = (op: DataPlatform.CatalogOperator) => {
-    add(op.name);
-    message.success(`已加入「${op.zhLabel}」`);
-  };
-
   // 「环境能力」指示:把灰/绿的成因显式化(GPU 已启用则 GPU 类算子转可运行)
   const CAP_LABELS: [keyof DataPlatform.OperatorCapabilities, string][] = [
     ['cuda', 'GPU'],
@@ -268,34 +244,7 @@ const Market: React.FC = () => {
   );
 
   return (
-    <PageContainer
-      content={headerContent}
-      footer={
-        steps.length
-          ? [
-              <Space key="cart">
-                <Text type="secondary">已选 {steps.length} 个算子</Text>
-                <Button onClick={clear}>清空</Button>
-                <Dropdown
-                  trigger={['click']}
-                  menu={{
-                    items: INTAKE_TARGETS.map((t) => ({
-                      key: t.key,
-                      label: t.label,
-                    })),
-                    onClick: ({ key }) => {
-                      const target = INTAKE_TARGETS.find((t) => t.key === key);
-                      if (target) history.push(target.route);
-                    },
-                  }}
-                >
-                  <Button type="primary">去新建任务</Button>
-                </Dropdown>
-              </Space>,
-            ]
-          : undefined
-      }
-    >
+    <PageContainer content={headerContent}>
       <Row gutter={16}>
         {/* 左:场景分面(用 inline Menu,与平台左导航统一) */}
         <Col xs={24} md={6} lg={5} xl={4}>
@@ -441,30 +390,9 @@ const Market: React.FC = () => {
                         <Divider
                           style={{ marginBlock: 12, marginTop: 'auto' }}
                         />
-                        <div
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                          }}
-                        >
-                          <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
-                            {tag.label}
-                          </Tag>
-                          {/* 加入不做运行时门控:能否执行取决于所选数据集 / 环境配置,
-                              提交时(jobs._operator_block)按数据集类型 + 能力精确校验并报错;
-                              市场无数据集上下文,这里只展示可运行状态徽标,不预禁用 */}
-                          <Button
-                            size="small"
-                            type="primary"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onAdd(op);
-                            }}
-                          >
-                            加入
-                          </Button>
-                        </div>
+                        <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
+                          {tag.label}
+                        </Tag>
                       </Card>
                     );
                   })}

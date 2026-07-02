@@ -26,7 +26,6 @@ import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from '../../processing/editor/OperatorLibrary';
 import PipelineSteps from '../../processing/editor/PipelineSteps';
 import StepParamsForm from '../../processing/editor/StepParamsForm';
-import { useOpCartIntake } from '../../processing/editor/useOpCartIntake';
 import AugmentGoalPanel from './AugmentGoalPanel';
 
 const { Text } = Typography;
@@ -47,8 +46,6 @@ const AugmentEditor: React.FC = () => {
   >({});
   const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
-  // 市场购物车交接:只带入 augment 桶的算子,其余跳过并提示
-  useOpCartIntake('augment', '增强', setSteps);
   const [goal, setGoal] = useState<DataPlatform.AugmentGoal>(DEFAULT_GOAL);
   const [outputDatasetId, setOutputDatasetId] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
