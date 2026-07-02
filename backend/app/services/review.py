@@ -5,7 +5,8 @@ safety 字段(供打标版本写盘),最后聚合成审核报告(report)。
 
 四路:
 - rules:用户 customWords(子串,大小写不敏感) + customRegex(命名正则,逐条 try,
-  坏正则跳过并记 warning) + 内置 sensitive_words.json(source=flagged_words)。
+  坏正则跳过并记 warning) + 规则库条目 ruleWords/ruleRegex(带各自 category/
+  severity,见 models.review_rule) + 内置 sensitive_words.json(source=flagged_words)。
 - pii:pii.detect_pii(当 config.usePii)。source=pii,category=pii。
 - llm:当 config.useLlm,调 provider.moderate_texts;失败整体跳过(降级)。
 
@@ -69,6 +70,25 @@ def _load_flagged_words() -> dict[str, list[str]]:
     }
 
 
+def rules_to_config(
+    rules: list[Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """把 review_rules 行(或同形对象)转成 config 的 (ruleWords, ruleRegex) 片段。
+
+    word 规则 → {word, category, severity};regex 规则 → {name, pattern, category,
+    severity}。未知 kind 跳过。纯转换不查库,供建任务与上传预检共用。
+    """
+    words: list[dict[str, Any]] = []
+    regexes: list[dict[str, Any]] = []
+    for r in rules:
+        entry = {"category": r.category, "severity": r.severity}
+        if r.kind == "word":
+            words.append({"word": r.pattern, **entry})
+        elif r.kind == "regex":
+            regexes.append({"name": r.name, "pattern": r.pattern, **entry})
+    return words, regexes
+
+
 def _pick_text(row: dict[str, Any]) -> str:
     """取行文本字段:优先 'text',否则首个 str 值;都没有返回空串。"""
     value = row.get("text")
@@ -89,9 +109,13 @@ def _snippet(text: str, start: int, end: int) -> str:
 
 def _compile_custom_regex(
     specs: list[dict[str, Any]],
-) -> tuple[list[tuple[str, re.Pattern[str]]], list[str]]:
-    """编译用户自定义正则,坏正则跳过并记 warning。返回 (编译结果, warnings)。"""
-    compiled: list[tuple[str, re.Pattern[str]]] = []
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """编译自定义/规则库正则,坏正则跳过并记 warning。
+
+    每条 spec 可带 category/severity(规则库条目),缺省沿用旧默认
+    (other / _REGEX_SEVERITY)。返回 ([{name, pattern, category, severity}], warnings)。
+    """
+    compiled: list[dict[str, Any]] = []
     warnings: list[str] = []
     for spec in specs:
         name = str(spec.get("name") or "regex")
@@ -100,7 +124,14 @@ def _compile_custom_regex(
             warnings.append(f"正则「{name}」缺少 pattern,已跳过")
             continue
         try:
-            compiled.append((name, re.compile(pattern)))
+            compiled.append(
+                {
+                    "name": name,
+                    "pattern": re.compile(pattern),
+                    "category": str(spec.get("category") or "other"),
+                    "severity": str(spec.get("severity") or _REGEX_SEVERITY),
+                }
+            )
         except re.error as exc:
             warnings.append(f"正则「{name}」无效({exc}),已跳过")
             logger.warning("自定义正则编译失败 name=%s: %s", name, exc)
@@ -110,18 +141,22 @@ def _compile_custom_regex(
 def _scan_rules(
     text: str,
     *,
-    custom_words: list[str],
-    custom_regex: list[tuple[str, re.Pattern[str]]],
+    word_specs: list[dict[str, Any]],
+    regex_specs: list[dict[str, Any]],
     flagged_words: dict[str, list[str]],
     use_flagged: bool,
 ) -> list[dict[str, Any]]:
-    """规则路:自定义敏感词(keyword) + 自定义正则(regex) + 内置词表(flagged_words)。"""
+    """规则路:敏感词(keyword) + 正则(regex) + 内置词表(flagged_words)。
+
+    word_specs/regex_specs 已把「任务临时自定义」与「规则库条目」归一
+    (每条带 category/severity;临时项为旧默认值)。
+    """
     hits: list[dict[str, Any]] = []
     lower = text.lower()
 
-    # 自定义敏感词:子串、大小写不敏感
-    for word in custom_words:
-        w = word.strip()
+    # 敏感词:子串、大小写不敏感
+    for spec in word_specs:
+        w = str(spec["word"]).strip()
         if not w:
             continue
         pos = lower.find(w.lower())
@@ -129,27 +164,27 @@ def _scan_rules(
             hits.append(
                 {
                     "source": "keyword",
-                    "category": "other",
-                    "severity": _KEYWORD_SEVERITY,
+                    "category": spec["category"],
+                    "severity": spec["severity"],
                     "detail": w,
                     "snippet": _snippet(text, pos, pos + len(w)),
                 }
             )
 
-    # 自定义正则:逐条 search(坏正则编译期已剔除;运行期异常再兜一层跳过该条)
-    for name, pattern in custom_regex:
+    # 正则:逐条 search(坏正则编译期已剔除;运行期异常再兜一层跳过该条)
+    for spec in regex_specs:
         try:
-            m = pattern.search(text)
+            m = spec["pattern"].search(text)
         except Exception:  # noqa: BLE001 — 单条正则运行期异常不应中断整行审核
-            logger.warning("自定义正则运行期异常 name=%s,跳过该条", name)
+            logger.warning("自定义正则运行期异常 name=%s,跳过该条", spec["name"])
             continue
         if m:
             hits.append(
                 {
                     "source": "regex",
-                    "category": "other",
-                    "severity": _REGEX_SEVERITY,
-                    "detail": name,
+                    "category": spec["category"],
+                    "severity": spec["severity"],
+                    "detail": spec["name"],
                     "snippet": _snippet(text, m.start(), m.end()),
                 }
             )
@@ -258,9 +293,35 @@ async def scan_version(
     scanned_count = min(total, sample_limit)
     sample_applied = total > sample_limit
 
-    custom_words = [str(w) for w in (config.get("customWords") or [])]
-    custom_regex, warnings = _compile_custom_regex(
-        list(config.get("customRegex") or [])
+    def _cfg(camel: str, snake: str) -> list[Any]:
+        """容忍 camelCase / snake_case 两形态取列表配置(同 sampleLimit 的兼容口径)。"""
+        val = config.get(camel)
+        if not isinstance(val, list):
+            val = config.get(snake)
+        return val if isinstance(val, list) else []
+
+    # 任务临时自定义词 + 规则库词条 → 统一 word_specs(临时项用旧默认 category/severity)
+    word_specs: list[dict[str, Any]] = [
+        {"word": str(w), "category": "other", "severity": _KEYWORD_SEVERITY}
+        for w in _cfg("customWords", "custom_words")
+    ]
+    for spec in _cfg("ruleWords", "rule_words"):
+        if isinstance(spec, dict) and spec.get("word"):
+            word_specs.append(
+                {
+                    "word": str(spec["word"]),
+                    "category": str(spec.get("category") or "other"),
+                    "severity": str(spec.get("severity") or _KEYWORD_SEVERITY),
+                }
+            )
+    regex_specs, warnings = _compile_custom_regex(
+        [
+            s
+            for s in (
+                _cfg("customRegex", "custom_regex") + _cfg("ruleRegex", "rule_regex")
+            )
+            if isinstance(s, dict)
+        ]
     )
     use_flagged = bool(config.get("useFlaggedWords", True))
     use_pii = bool(config.get("usePii"))
@@ -308,8 +369,8 @@ async def scan_version(
         text = texts[i]
         hits = _scan_rules(
             text,
-            custom_words=custom_words,
-            custom_regex=custom_regex,
+            word_specs=word_specs,
+            regex_specs=regex_specs,
             flagged_words=flagged_words,
             use_flagged=use_flagged,
         )

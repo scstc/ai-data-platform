@@ -32,6 +32,9 @@ class ReviewFinding(Base):
     job_id: Mapped[str] = mapped_column(String, nullable=False)
     # 被审版本 id(命中发生在该版本的第 row_index 行)
     version_id: Mapped[str] = mapped_column(String, nullable=False)
+    # 命中所在的版本成员表名(多表版本);单文件/旧数据为 NULL,
+    # 此时 row_index 为版本内绝对行号,否则为成员内相对行号
+    table_name: Mapped[str | None] = mapped_column(String, nullable=True)
     # 命中行号(从 0 开始,与被审 jsonl 行对齐)
     row_index: Mapped[int] = mapped_column(Integer, nullable=False)
     # 类别:porn | gambling | drugs | politics | terrorism | pii | other

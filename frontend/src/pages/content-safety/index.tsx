@@ -11,12 +11,16 @@ import {
   Empty,
   Input,
   InputNumber,
+  Modal,
   message,
+  Popconfirm,
+  Radio,
   Row,
   Select,
   Space,
   Statistic,
   Switch,
+  Table,
   Tag,
   Typography,
 } from 'antd';
@@ -25,12 +29,16 @@ import { DatasetFilter } from '@/components';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createReviewJob,
+  createReviewRule,
+  deleteReviewRule,
   getDataset,
   getJob,
   getReviewReport,
   listDatasets,
   listReviewFindings,
   listReviewJobs,
+  listReviewRules,
+  updateReviewRule,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 
@@ -113,9 +121,203 @@ const CountTags: React.FC<{
   );
 };
 
-/** 命中明细表(按类别·来源·严重度筛,接 listReviewFindings) */
-const FindingsTable: React.FC<{ jobId: string }> = ({ jobId }) => {
+/** 规则库管理弹窗:自定义敏感词/正则的 CRUD + 启用开关。
+ * 改动通过 onChanged 通知外层刷新可选规则列表。 */
+const RulesManager: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}> = ({ open, onClose, onChanged }) => {
+  const [rules, setRules] = useState<DataPlatform.ReviewRule[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [draft, setDraft] = useState<DataPlatform.ReviewRuleCreate>({
+    name: '',
+    kind: 'word',
+    pattern: '',
+    category: 'other',
+    severity: 'medium',
+  });
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await listReviewRules({ current: 1, pageSize: 100 });
+      setRules(res.data ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) reload();
+  }, [open, reload]);
+
+  const onAdd = async () => {
+    if (!draft.name.trim() || !draft.pattern.trim()) {
+      message.warning('请填写规则名称与内容');
+      return;
+    }
+    try {
+      await createReviewRule({
+        ...draft,
+        name: draft.name.trim(),
+        pattern: draft.pattern.trim(),
+      });
+      message.success('规则已添加');
+      setDraft((d) => ({ ...d, name: '', pattern: '' }));
+      reload();
+      onChanged();
+    } catch (e: any) {
+      message.error(e?.info?.errorMessage || e?.data?.message || '添加失败');
+    }
+  };
+
+  const onToggle = async (rule: DataPlatform.ReviewRule, enabled: boolean) => {
+    await updateReviewRule(rule.id, { enabled }).catch(() =>
+      message.error('更新失败'),
+    );
+    reload();
+    onChanged();
+  };
+
+  const onDelete = async (rule: DataPlatform.ReviewRule) => {
+    await deleteReviewRule(rule.id).catch(() => message.error('删除失败'));
+    reload();
+    onChanged();
+  };
+
+  return (
+    <Modal
+      title="内容安全规则库"
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      width={860}
+    >
+      <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+        规则库沉淀可复用的自定义敏感词 /
+        正则(带类别与严重度)。启用中的规则会自动参与
+        上传前置预检;建审核任务时可勾选参与。已建任务不受后续增删影响(创建时冻结)。
+      </Paragraph>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Input
+          placeholder="规则名称"
+          style={{ width: 140 }}
+          value={draft.name}
+          onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+        />
+        <Select
+          style={{ width: 100 }}
+          value={draft.kind}
+          onChange={(kind) => setDraft((d) => ({ ...d, kind }))}
+          options={[
+            { label: '敏感词', value: 'word' },
+            { label: '正则', value: 'regex' },
+          ]}
+        />
+        <Input
+          placeholder={
+            draft.kind === 'word' ? '敏感词(子串匹配)' : '正则表达式'
+          }
+          style={{ width: 240 }}
+          value={draft.pattern}
+          onChange={(e) => setDraft((d) => ({ ...d, pattern: e.target.value }))}
+        />
+        <Select
+          style={{ width: 100 }}
+          value={draft.category}
+          onChange={(category) => setDraft((d) => ({ ...d, category }))}
+          options={CATEGORY_OPTIONS}
+        />
+        <Select
+          style={{ width: 90 }}
+          value={draft.severity}
+          onChange={(severity) => setDraft((d) => ({ ...d, severity }))}
+          options={(
+            Object.keys(SEVERITY_META) as DataPlatform.ReviewSeverity[]
+          ).map((s) => ({ label: SEVERITY_META[s].text, value: s }))}
+        />
+        <Button type="primary" onClick={onAdd}>
+          添加
+        </Button>
+      </Space>
+      <Table<DataPlatform.ReviewRule>
+        rowKey="id"
+        size="small"
+        loading={loading}
+        dataSource={rules}
+        pagination={false}
+        columns={[
+          { title: '名称', dataIndex: 'name', width: 140, ellipsis: true },
+          {
+            title: '类型',
+            dataIndex: 'kind',
+            width: 80,
+            render: (k) => (k === 'word' ? '敏感词' : '正则'),
+          },
+          { title: '内容', dataIndex: 'pattern', ellipsis: true },
+          {
+            title: '类别',
+            dataIndex: 'category',
+            width: 90,
+            render: (c) => renderCategory(c),
+          },
+          {
+            title: '严重度',
+            dataIndex: 'severity',
+            width: 90,
+            render: (s) => renderSeverity(s),
+          },
+          {
+            title: '启用',
+            dataIndex: 'enabled',
+            width: 80,
+            render: (_, r) => (
+              <Switch
+                size="small"
+                checked={r.enabled}
+                onChange={(v) => onToggle(r, v)}
+              />
+            ),
+          },
+          {
+            title: '操作',
+            key: 'op',
+            width: 80,
+            render: (_, r) => (
+              <Popconfirm
+                title="删除该规则？已建任务不受影响。"
+                onConfirm={() => onDelete(r)}
+              >
+                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+              </Popconfirm>
+            ),
+          },
+        ]}
+      />
+    </Modal>
+  );
+};
+
+/** 命中明细表(按表·类别·来源·严重度筛,接 listReviewFindings)。
+ * tables 为报告 byTable 的表名列表,多表时开放「所属表」筛选。 */
+const FindingsTable: React.FC<{ jobId: string; tables?: string[] }> = ({
+  jobId,
+  tables,
+}) => {
   const columns: ProColumns<DataPlatform.ReviewFinding>[] = [
+    {
+      title: '所属表',
+      dataIndex: 'tableName',
+      width: 110,
+      ellipsis: true,
+      valueType: 'select',
+      search: tables && tables.length > 0 ? undefined : false,
+      valueEnum: Object.fromEntries(
+        (tables ?? []).map((t) => [t, { text: t }]),
+      ),
+      render: (_, r) => r.tableName ?? '-',
+    },
     { title: '行号', dataIndex: 'rowIndex', width: 80, search: false },
     {
       title: '类别',
@@ -178,6 +380,7 @@ const FindingsTable: React.FC<{ jobId: string }> = ({ jobId }) => {
           category: params.category,
           source: params.source,
           severity: params.severity,
+          tableName: params.tableName,
         });
         return { data: res.data, total: res.total, success: res.success };
       }}
@@ -211,6 +414,37 @@ const ContentSafety: React.FC = () => {
   >([]);
   const [sampleLimit, setSampleLimit] = useState<number>(500);
   const [submitting, setSubmitting] = useState(false);
+  // 处置方式:tag 打标(产出带 safety 字段版本) / delete 删除(产出净化版+存档)
+  const [action, setAction] = useState<DataPlatform.ReviewAction>('tag');
+  // 多表版本:参与审核的成员表(默认全选)
+  const [targetMembers, setTargetMembers] = useState<string[]>([]);
+  // 规则库:启用中的条目 + 本次任务勾选(默认全选启用项)
+  const [rules, setRules] = useState<DataPlatform.ReviewRule[]>([]);
+  const [ruleIds, setRuleIds] = useState<string[]>([]);
+  const [rulesOpen, setRulesOpen] = useState(false);
+
+  const reloadRules = useCallback(() => {
+    listReviewRules({ current: 1, pageSize: 100, enabled: true })
+      .then((r) => {
+        const list = r.data ?? [];
+        setRules(list);
+        // 默认全选启用项;保留用户已有勾选中仍存在的部分
+        setRuleIds((prev) => {
+          const alive = prev.filter((id) => list.some((x) => x.id === id));
+          return alive.length ? alive : list.map((x) => x.id);
+        });
+      })
+      .catch(() => setRules([]));
+  }, []);
+
+  useEffect(() => {
+    reloadRules();
+  }, [reloadRules]);
+
+  // 当前选中版本的成员表(单表/旧版本为空或单元素,不展示选择器)
+  const memberNames = (
+    versions.find((v) => v.id === versionId)?.tables ?? []
+  ).map((t) => t.tableName);
 
   // —— 报告区 state ——
   const [activeJob, setActiveJob] = useState<DataPlatform.Job>();
@@ -249,6 +483,15 @@ const ContentSafety: React.FC = () => {
     if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
   }, [versions]);
 
+  // 切换版本 → 成员默认全选
+  useEffect(() => {
+    setTargetMembers(
+      (versions.find((v) => v.id === versionId)?.tables ?? []).map(
+        (t) => t.tableName,
+      ),
+    );
+  }, [versionId]);
+
   // 载入某 job 的报告(被选中时 / 轮询时)
   const loadReport = useCallback(async (jobId: string) => {
     const res = await getReviewReport(jobId).catch(() => undefined);
@@ -270,31 +513,11 @@ const ContentSafety: React.FC = () => {
     );
 
   // 开始审核 → createReviewJob → 轮询 getJob 状态 → 完成后载报告
-  const onSubmit = async () => {
-    if (!versionId) {
-      message.warning('请选择数据集版本');
-      return;
-    }
-    const customWords = customWordsText
-      .split('\n')
-      .map((w) => w.trim())
-      .filter(Boolean);
-    const cleanedRegex = customRegex.filter(
-      (r) => r.name.trim() && r.pattern.trim(),
-    );
-    if (
-      !useLlm &&
-      !useFlaggedWords &&
-      !usePii &&
-      !customWords.length &&
-      !cleanedRegex.length
-    ) {
-      message.warning(
-        '请至少启用一种检测手段(LLM/内置词表/PII)或填写自定义敏感词/正则',
-      );
-      return;
-    }
-
+  const doSubmit = async (
+    customWords: string[],
+    cleanedRegex: DataPlatform.ReviewCustomRegex[],
+  ) => {
+    if (!versionId) return;
     setSubmitting(true);
     const hide = message.loading('正在创建审核任务…', 0);
     try {
@@ -305,11 +528,18 @@ const ContentSafety: React.FC = () => {
           categories,
           customWords,
           customRegex: cleanedRegex,
+          action,
           useLlm,
           usePii,
           useFlaggedWords,
           sampleLimit,
         },
+        // 全选(或无成员)不传 → 后端审全部;部分勾选才圈范围
+        targetMembers:
+          memberNames.length > 1 && targetMembers.length < memberNames.length
+            ? targetMembers
+            : undefined,
+        ruleIds: ruleIds.length ? ruleIds : undefined,
       });
       hide();
       message.success('审核任务已创建');
@@ -324,6 +554,50 @@ const ContentSafety: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const onSubmit = () => {
+    if (!versionId) {
+      message.warning('请选择数据集版本');
+      return;
+    }
+    if (memberNames.length > 1 && !targetMembers.length) {
+      message.warning('请至少选择一个参与审核的成员表');
+      return;
+    }
+    const customWords = customWordsText
+      .split('\n')
+      .map((w) => w.trim())
+      .filter(Boolean);
+    const cleanedRegex = customRegex.filter(
+      (r) => r.name.trim() && r.pattern.trim(),
+    );
+    if (
+      !useLlm &&
+      !useFlaggedWords &&
+      !usePii &&
+      !customWords.length &&
+      !cleanedRegex.length &&
+      !ruleIds.length
+    ) {
+      message.warning(
+        '请至少启用一种检测手段(LLM/内置词表/PII)或填写自定义敏感词/正则/勾选规则库',
+      );
+      return;
+    }
+    if (action === 'delete') {
+      Modal.confirm({
+        title: '确认以「删除」方式处置命中行？',
+        content:
+          '将产出剔除全部命中行的净化版本(强制全量扫描,忽略样本上限);被删行会完整' +
+          '存档(<表名>.removed.jsonl)并逐条记录在命中明细中,原版本不受影响。',
+        okText: '确认删除处置',
+        okButtonProps: { danger: true },
+        onOk: () => doSubmit(customWords, cleanedRegex),
+      });
+      return;
+    }
+    doSubmit(customWords, cleanedRegex);
   };
 
   // 轮询单 job 状态(2s),终态停止并载报告;复用 getJob(同 ingest 推进式轮询思路)
@@ -453,7 +727,27 @@ const ContentSafety: React.FC = () => {
               };
             })}
           />
+          {memberNames.length > 1 && (
+            <Select
+              mode="multiple"
+              placeholder="参与审核的成员表"
+              style={{ minWidth: 260 }}
+              maxTagCount="responsive"
+              value={targetMembers}
+              onChange={setTargetMembers}
+              options={memberNames.map((m) => ({ label: m, value: m }))}
+            />
+          )}
         </Space>
+        {memberNames.length > 1 &&
+          targetMembers.length < memberNames.length && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`仅审核选中的 ${targetMembers.length}/${memberNames.length} 个成员表;产出版本只包含被审成员,且被审版本将标记为「未完整扫描」`}
+            />
+          )}
 
         <Row gutter={24}>
           <Col span={12}>
@@ -488,6 +782,18 @@ const ContentSafety: React.FC = () => {
             />
 
             <Title level={5} style={{ marginTop: 16 }}>
+              命中处置
+            </Title>
+            <Radio.Group
+              value={action}
+              onChange={(e) => setAction(e.target.value)}
+              options={[
+                { label: '打标(保留原行,附加 safety 字段)', value: 'tag' },
+                { label: '删除(产出净化版,被删行存档留痕)', value: 'delete' },
+              ]}
+            />
+
+            <Title level={5} style={{ marginTop: 16 }}>
               样本上限
             </Title>
             <Space>
@@ -496,13 +802,52 @@ const ContentSafety: React.FC = () => {
                 style={{ width: 160 }}
                 value={sampleLimit}
                 onChange={(v) => setSampleLimit(v ?? 500)}
+                disabled={action === 'delete'}
               />
-              <Text type="secondary">超过则只扫前 N 行,报告会显式标注</Text>
+              <Text type="secondary">
+                {action === 'delete'
+                  ? '删除处置强制全量扫描,样本上限不生效'
+                  : '超过则只扫前 N 行,报告会显式标注'}
+              </Text>
             </Space>
           </Col>
 
           <Col span={12}>
-            <Title level={5}>自定义敏感词(换行分隔)</Title>
+            <Title level={5}>
+              规则库{' '}
+              <Button
+                size="small"
+                type="link"
+                onClick={() => setRulesOpen(true)}
+              >
+                管理
+              </Button>
+            </Title>
+            {rules.length ? (
+              <Select
+                mode="multiple"
+                style={{ width: '100%' }}
+                placeholder="勾选参与本次审核的规则库条目"
+                maxTagCount="responsive"
+                optionFilterProp="label"
+                value={ruleIds}
+                onChange={setRuleIds}
+                options={rules.map((r) => ({
+                  label: `${r.name}(${r.kind === 'word' ? '词' : '正则'}·${
+                    CATEGORY_META[r.category]?.text ?? r.category
+                  })`,
+                  value: r.id,
+                }))}
+              />
+            ) : (
+              <Text type="secondary">
+                暂无启用中的规则,点「管理」沉淀可复用的敏感词/正则
+              </Text>
+            )}
+
+            <Title level={5} style={{ marginTop: 16 }}>
+              自定义敏感词(换行分隔)
+            </Title>
             <Input.TextArea
               rows={4}
               placeholder={'每行一个敏感词\n例如:\n违禁词A\n违禁词B'}
@@ -644,6 +989,18 @@ const ContentSafety: React.FC = () => {
                     }}
                   />
                 </Col>
+                {body.action === 'delete' && (
+                  <Col>
+                    <Statistic
+                      title="已删除行"
+                      value={body.deletedRows ?? 0}
+                      valueStyle={{
+                        color:
+                          (body.deletedRows ?? 0) > 0 ? '#cf1322' : undefined,
+                      }}
+                    />
+                  </Col>
+                )}
               </Row>
 
               <Paragraph>
@@ -673,10 +1030,34 @@ const ContentSafety: React.FC = () => {
                   }
                 />
               </Paragraph>
+              {body.byTable && Object.keys(body.byTable).length > 0 && (
+                <Paragraph>
+                  <Text strong>按成员表(命中行):</Text>{' '}
+                  <CountTags counts={body.byTable} label={(k) => k} />
+                </Paragraph>
+              )}
+              {body.removedArchives &&
+                Object.keys(body.removedArchives).length > 0 && (
+                  <Paragraph>
+                    <Text strong>被删行存档:</Text>{' '}
+                    <Space size={[4, 8]} wrap>
+                      {Object.entries(body.removedArchives).map(([t, uri]) => (
+                        <Tag key={t} title={uri}>
+                          {t}.removed.jsonl
+                        </Tag>
+                      ))}
+                    </Space>
+                    <Text type="secondary">
+                      (存于产出版本目录,连同命中明细构成删除留痕)
+                    </Text>
+                  </Paragraph>
+                )}
 
               {report?.taggedVersionId && (
                 <Paragraph>
-                  <Text strong>打标版本:</Text>{' '}
+                  <Text strong>
+                    {body.action === 'delete' ? '净化版本:' : '打标版本:'}
+                  </Text>{' '}
                   <Text code>{report.taggedVersionId}</Text>{' '}
                   <a
                     onClick={(e) => {
@@ -684,14 +1065,17 @@ const ContentSafety: React.FC = () => {
                       history.push('/datasets/list');
                     }}
                   >
-                    查看打标版本
+                    {body.action === 'delete' ? '查看净化版本' : '查看打标版本'}
                   </a>
                 </Paragraph>
               )}
 
               <Divider style={{ margin: '8px 0 16px' }} />
               <Title level={5}>命中明细</Title>
-              <FindingsTable jobId={activeJob.id} />
+              <FindingsTable
+                jobId={activeJob.id}
+                tables={Object.keys(body.byTable ?? {})}
+              />
             </>
           )}
         </Card>
@@ -700,6 +1084,12 @@ const ContentSafety: React.FC = () => {
           <Empty description="新建审核任务,或从上方任务列表点选以查看报告" />
         </Card>
       )}
+
+      <RulesManager
+        open={rulesOpen}
+        onClose={() => setRulesOpen(false)}
+        onChanged={reloadRules}
+      />
     </PageContainer>
   );
 };

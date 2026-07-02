@@ -1172,11 +1172,15 @@ declare namespace DataPlatform {
     pattern: string;
   };
 
+  /** 内容安全:命中行处置方式(tag 打标 / delete 删除并产净化版) */
+  type ReviewAction = 'tag' | 'delete';
+
   /** 内容安全:审核任务配置 */
   type ReviewJobConfig = {
     categories: ReviewCategory[];
     customWords: string[];
     customRegex: ReviewCustomRegex[];
+    action?: ReviewAction;
     useLlm: boolean;
     usePii: boolean;
     useFlaggedWords: boolean;
@@ -1188,6 +1192,10 @@ declare namespace DataPlatform {
     datasetVersionId: string;
     name?: string;
     config: ReviewJobConfig;
+    /** 多表版本:只审这些成员(表名);缺省=全部成员 */
+    targetMembers?: string[];
+    /** 选用的规则库条目 id(后端解析冻结进任务配置) */
+    ruleIds?: string[];
   };
 
   /** 内容安全:审核报告统计体 */
@@ -1199,6 +1207,14 @@ declare namespace DataPlatform {
     byCategory: Record<string, number>;
     bySeverity: Record<string, number>;
     bySource: Record<string, number>;
+    /** 多表版本:逐成员命中行数 */
+    byTable?: Record<string, number>;
+    /** 处置方式(tag/delete) */
+    action?: ReviewAction;
+    /** action=delete:删除的命中行数 */
+    deletedRows?: number | null;
+    /** action=delete:逐表被删行存档位置 */
+    removedArchives?: Record<string, string>;
     warnings?: string[];
   };
 
@@ -1215,6 +1231,8 @@ declare namespace DataPlatform {
   /** 内容安全:逐条命中记录 */
   type ReviewFinding = {
     rowIndex: number;
+    /** 多表版本:命中所在成员表名;单文件/旧数据为空 */
+    tableName?: string;
     category: ReviewCategory;
     severity: ReviewSeverity;
     source: ReviewSource;
@@ -1229,7 +1247,33 @@ declare namespace DataPlatform {
     category?: ReviewCategory;
     source?: ReviewSource;
     severity?: ReviewSeverity;
+    tableName?: string;
   };
+
+  /** 内容安全:规则库条目(自定义敏感词/正则,可复用) */
+  type ReviewRule = {
+    id: string;
+    name: string;
+    kind: 'word' | 'regex';
+    pattern: string;
+    category: ReviewCategory;
+    severity: ReviewSeverity;
+    enabled: boolean;
+    createdAt: string;
+  };
+
+  /** 内容安全:新建规则库条目入参 */
+  type ReviewRuleCreate = {
+    name: string;
+    kind: 'word' | 'regex';
+    pattern: string;
+    category?: ReviewCategory;
+    severity?: ReviewSeverity;
+    enabled?: boolean;
+  };
+
+  /** 内容安全:更新规则库条目入参(只传要改的字段) */
+  type ReviewRuleUpdate = Partial<ReviewRuleCreate>;
 
   /** 文件管理:对象条目（#10） */
   type FileEntry = {

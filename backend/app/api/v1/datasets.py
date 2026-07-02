@@ -34,6 +34,7 @@ from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.review_rule import ReviewRule
 from app.models.role import Role
 from app.models.tag import DatasetTag, Tag
 from app.models.user import User
@@ -90,7 +91,7 @@ from app.services.landing import (
     land_upload_raw,
     normalize_to_records,
 )
-from app.services.review import precheck_records
+from app.services.review import precheck_records, rules_to_config
 from app.services.semantic_registry import (
     SemanticValidationError,
     apply_semantic_spec,
@@ -686,11 +687,20 @@ async def upload_batch_as_dataset(
             # (默认关)。拦截口径:高危命中 或 违规占比 ≥ _BLOCK_RATIO(见
             # review.precheck_records)。
             if safety_check:
+                # 规则库启用项自动并入预检(与正式审核同口径的自定义规则/敏感数据)
+                _rules = (
+                    await session.scalars(
+                        select(ReviewRule).where(ReviewRule.enabled)
+                    )
+                ).all()
+                rule_words, rule_regex = rules_to_config(list(_rules))
                 pre_cfg = {
                     "useFlaggedWords": True,
                     "usePii": True,
                     "useLlm": safety_use_llm,
                     "sampleLimit": safety_sample_limit if safety_sample_limit else 500,
+                    "ruleWords": rule_words,
+                    "ruleRegex": rule_regex,
                 }
                 provider = get_ai_provider(settings) if safety_use_llm else None
                 async with _semaphore:

@@ -337,6 +337,7 @@ async def _run_job(job_id: str) -> None:
                         job=job,
                         version=input_version,
                         config=body.config.model_dump(by_alias=True),
+                        target_members=target_members_arg,
                     )
                 else:  # process / clean
                     # process/clean 已支持 member_configs，使用统一提取的配置

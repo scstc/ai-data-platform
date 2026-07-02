@@ -22,6 +22,7 @@ from app.models.notification import Notification
 from app.models.operator import Operator
 from app.models.rbac_links import RoleDept, RoleMenu, UserRole
 from app.models.review_finding import ReviewFinding
+from app.models.review_rule import ReviewRule
 from app.models.role import Role
 from app.models.upload import UploadRecord
 from app.models.user import User
@@ -49,6 +50,7 @@ __all__ = [
     "Notification",
     "Operator",
     "ReviewFinding",
+    "ReviewRule",
     "Role",
     "RoleDept",
     "RoleMenu",

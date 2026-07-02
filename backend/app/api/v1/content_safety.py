@@ -6,13 +6,17 @@
 - GET  /content-safety/jobs:分页列 type=review job。
 - GET  /content-safety/jobs/{id}/report:job 状态 + review_report + 打标版本 id。
 - GET  /content-safety/jobs/{id}/findings:分页 review_findings,过滤
-  category/source/severity,按 row_index 升序。
+  category/source/severity/tableName,按 row_index 升序。
+- /content-safety/rules:自定义规则库 CRUD(敏感词/正则,带类别与严重度);
+  建任务按 ruleIds 冻结进 spec,上传前置预检自动合并全部启用项。
 
 设计见 docs/plan/07-内容安全设计.md §3.3。
 """
 
 from __future__ import annotations
 
+import re
+import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -32,12 +36,26 @@ from app.api.v1.jobs import (
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.review_finding import ReviewFinding
+from app.models.review_rule import ReviewRule
 from app.schemas.common import PageResponse
 from app.schemas.job import JobRead
-from app.schemas.review import ReviewFindingRead, ReviewJobCreate
+from app.schemas.review import (
+    ReviewFindingRead,
+    ReviewJobCreate,
+    ReviewRuleCreate,
+    ReviewRuleRead,
+    ReviewRuleUpdate,
+    RuleRegexSpec,
+    RuleWordSpec,
+)
 from app.services import job_runner
+from app.services.review import rules_to_config
 
 router = APIRouter(tags=["content-safety"])
+
+
+def _new_rule_id() -> str:
+    return f"rr-{secrets.token_hex(3)}"
 
 
 @router.post("/content-safety/jobs")
@@ -57,6 +75,20 @@ async def create_review_job(
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
+
+    # 规则库条目按 ruleIds 解析并冻结进 config(重跑/继续复用冻结值,
+    # 不受规则库后续增删影响);未启用/不存在的 id 静默忽略
+    if body.rule_ids:
+        rules = (
+            await session.scalars(
+                select(ReviewRule).where(
+                    ReviewRule.id.in_(body.rule_ids), ReviewRule.enabled
+                )
+            )
+        ).all()
+        rule_words, rule_regex = rules_to_config(list(rules))
+        body.config.rule_words = [RuleWordSpec(**w) for w in rule_words]
+        body.config.rule_regex = [RuleRegexSpec(**r) for r in rule_regex]
 
     job = Job(
         id=_new_job_id(),
@@ -147,8 +179,10 @@ async def list_findings(
     category: Annotated[str | None, Query()] = None,
     source: Annotated[str | None, Query()] = None,
     severity: Annotated[str | None, Query()] = None,
+    table_name: Annotated[str | None, Query(alias="tableName")] = None,
 ) -> PageResponse[ReviewFindingRead]:
-    """分页列出某审核任务的命中,可按 category/source/severity 过滤,按行号升序。"""
+    """分页列出某审核任务的命中,可按 category/source/severity/tableName 过滤,
+    按(表名, 行号)升序。"""
     conds = [ReviewFinding.job_id == job_id]
     if category:
         conds.append(ReviewFinding.category == category)
@@ -156,6 +190,8 @@ async def list_findings(
         conds.append(ReviewFinding.source == source)
     if severity:
         conds.append(ReviewFinding.severity == severity)
+    if table_name:
+        conds.append(ReviewFinding.table_name == table_name)
 
     total = (
         await session.scalar(
@@ -166,10 +202,136 @@ async def list_findings(
         await session.scalars(
             select(ReviewFinding)
             .where(*conds)
-            .order_by(ReviewFinding.row_index.asc())
+            .order_by(
+                ReviewFinding.table_name.asc().nulls_first(),
+                ReviewFinding.row_index.asc(),
+            )
             .offset((current - 1) * page_size)
             .limit(page_size)
         )
     ).all()
     data = [ReviewFindingRead.model_validate(r) for r in rows]
     return PageResponse[ReviewFindingRead](data=data, total=total)
+
+
+# ── 规则库 CRUD ──────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/content-safety/rules",
+    response_model=PageResponse[ReviewRuleRead],
+    dependencies=[Depends(require_perm("governance:contentsafety:list"))],
+)
+async def list_review_rules(
+    session: SessionDep,
+    current: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 20,
+    kind: Annotated[str | None, Query()] = None,
+    enabled: Annotated[bool | None, Query()] = None,
+    keyword: Annotated[str | None, Query()] = None,
+) -> PageResponse[ReviewRuleRead]:
+    """分页列出规则库条目,可按 kind/enabled/关键词(名称或 pattern)过滤。"""
+    conds = []
+    if kind:
+        conds.append(ReviewRule.kind == kind)
+    if enabled is not None:
+        conds.append(ReviewRule.enabled == enabled)
+    if keyword:
+        like = f"%{keyword}%"
+        conds.append(ReviewRule.name.ilike(like) | ReviewRule.pattern.ilike(like))
+    total = (
+        await session.scalar(select(func.count()).select_from(ReviewRule).where(*conds))
+    ) or 0
+    rows = (
+        await session.scalars(
+            select(ReviewRule)
+            .where(*conds)
+            .order_by(ReviewRule.created_at.desc())
+            .offset((current - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+    data = [ReviewRuleRead.model_validate(r) for r in rows]
+    return PageResponse[ReviewRuleRead](data=data, total=total)
+
+
+def _bad_regex(kind: str, pattern: str) -> str | None:
+    """kind=regex 时试编译 pattern,坏正则返回错误信息(建/改规则时前置校验)。"""
+    if kind != "regex":
+        return None
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return f"正则无效:{exc}"
+    return None
+
+
+@router.post("/content-safety/rules")
+async def create_review_rule(
+    body: ReviewRuleCreate, session: SessionDep
+) -> JSONResponse:
+    """新建规则库条目(POST 经审计中间件留痕)。regex 规则坏 pattern 直接 400。"""
+    if (msg := _bad_regex(body.kind, body.pattern)) is not None:
+        return JSONResponse(status_code=400, content={"success": False, "message": msg})
+    rule = ReviewRule(
+        id=_new_rule_id(),
+        name=body.name,
+        kind=body.kind,
+        pattern=body.pattern,
+        category=body.category,
+        severity=body.severity,
+        enabled=body.enabled,
+    )
+    session.add(rule)
+    await session.commit()
+    await session.refresh(rule)
+    return JSONResponse(
+        content={
+            "data": ReviewRuleRead.model_validate(rule).model_dump(
+                by_alias=True, mode="json"
+            ),
+            "success": True,
+        }
+    )
+
+
+@router.patch("/content-safety/rules/{rule_id}")
+async def update_review_rule(
+    rule_id: str, body: ReviewRuleUpdate, session: SessionDep
+) -> JSONResponse:
+    """更新规则库条目(只改给出的字段;含启用/停用)。"""
+    rule = await session.get(ReviewRule, rule_id)
+    if rule is None:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "规则不存在"}
+        )
+    patch = body.model_dump(exclude_unset=True)
+    kind = patch.get("kind", rule.kind)
+    pattern = patch.get("pattern", rule.pattern)
+    if (msg := _bad_regex(kind, pattern)) is not None:
+        return JSONResponse(status_code=400, content={"success": False, "message": msg})
+    for field, value in patch.items():
+        setattr(rule, field, value)
+    await session.commit()
+    await session.refresh(rule)
+    return JSONResponse(
+        content={
+            "data": ReviewRuleRead.model_validate(rule).model_dump(
+                by_alias=True, mode="json"
+            ),
+            "success": True,
+        }
+    )
+
+
+@router.delete("/content-safety/rules/{rule_id}")
+async def delete_review_rule(rule_id: str, session: SessionDep) -> JSONResponse:
+    """删除规则库条目。已建任务不受影响(规则在建任务时已冻结进 spec)。"""
+    rule = await session.get(ReviewRule, rule_id)
+    if rule is None:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "规则不存在"}
+        )
+    await session.delete(rule)
+    await session.commit()
+    return JSONResponse(content={"success": True})

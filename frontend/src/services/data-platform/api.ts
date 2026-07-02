@@ -1562,6 +1562,67 @@ export async function listReviewFindings(
   );
 }
 
+/** 内容安全:规则库列表 GET /api/v1/content-safety/rules */
+export async function listReviewRules(
+  params?: {
+    current?: number;
+    pageSize?: number;
+    kind?: string;
+    enabled?: boolean;
+    keyword?: string;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.PageResult<DataPlatform.ReviewRule>>(
+    '/api/v1/content-safety/rules',
+    { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
+/** 内容安全:新建规则库条目 POST /api/v1/content-safety/rules */
+export async function createReviewRule(
+  body: DataPlatform.ReviewRuleCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.ReviewRule; success: boolean }>(
+    '/api/v1/content-safety/rules',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 内容安全:更新规则库条目(含启用/停用) PATCH /api/v1/content-safety/rules/{id} */
+export async function updateReviewRule(
+  id: string,
+  body: DataPlatform.ReviewRuleUpdate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.ReviewRule; success: boolean }>(
+    `/api/v1/content-safety/rules/${id}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 内容安全:删除规则库条目 DELETE /api/v1/content-safety/rules/{id} */
+export async function deleteReviewRule(
+  id: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(`/api/v1/content-safety/rules/${id}`, {
+    method: 'DELETE',
+    ...(options || {}),
+  });
+}
+
 /** 操作审计日志列表（仅管理员）GET /api/v1/audit */
 export async function listAuditLogs(
   params?: DataPlatform.AuditLogListParams,
