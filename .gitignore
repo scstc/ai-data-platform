@@ -21,3 +21,7 @@ deploy/.env.gov
 # 含明文凭证(SSH/DB 密码等)的本地运维文档,不纳入版本管理
 # (脱敏版若要进仓库,另起文件名,避免被本规则忽略)
 /docs/数据库安装信息汇总*.md
+
+# scripts 跑出的临时 JSON(由 parse_op_docs / render_op_demos 生成)
+/backend/scripts/_op_demos.json
+/backend/scripts/_media_demos.json

@@ -300,7 +300,14 @@ declare namespace DataPlatform {
     /** 标签(由场景分组 + 类别派生) */
     tags?: string[];
     /** 效果展示:处理前/处理后样例(仅部分算子有,无则不展示) */
-    effectDemo?: { before: string; after: string }[];
+    effectDemo?: {
+      before: string;
+      after: string;
+      /** 可选:媒体资源本地路径(以 / 开头,前端静态服务) */
+      before_url?: string;
+      after_url?: string;
+      media_type?: 'image' | 'video' | 'audio';
+    }[];
     /** 是否用户自定义上传(false/空=data-juicer 内置) */
     isCustom?: boolean;
     /** 自定义算子上传者 username;内置算子为空 */

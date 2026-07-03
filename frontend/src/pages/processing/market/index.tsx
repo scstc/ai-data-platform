@@ -5,6 +5,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Col,
   Divider,
   Empty,
@@ -23,22 +24,16 @@ import {
   getOperatorCapabilities,
   listOperatorCatalog,
 } from '@/services/data-platform';
+import {
+  CATEGORY_LABEL,
+  MODALITY_LABEL,
+  RESOURCE_LABEL,
+  RUNNABLE_TAG,
+} from './_labels';
 
 const { Paragraph, Text } = Typography;
 
-/** 算子执行要求 → 彩色分类标签(按"需要什么"归类,一眼区分可直接跑 / 需 AI / 需 GPU / 需媒体) */
-const RUNNABLE_TAG: Record<
-  DataPlatform.CatalogOperator['runnable'],
-  { label: string; color: string }
-> = {
-  ready: { label: '可直接执行', color: 'green' },
-  needs_api: { label: '需要 AI', color: 'geekblue' },
-  needs_media: { label: '需要媒体', color: 'orange' },
-  needs_compute: { label: '需要算力', color: 'volcano' },
-};
-
-/** 类别筛选项:全部 + 执行要求(value 对应 runnable;'all' 不过滤)。
- *  市场只看环境能力(ready/needs_api/needs_compute);数据集格式适配在提交期校验,故无"需要媒体"。 */
+/** 顶部 segmented:执行要求。 */
 const RUNNABLE_FILTER_OPTIONS = [
   { label: '全部', value: 'all' },
   { label: '可直接执行', value: 'ready' },
@@ -46,14 +41,26 @@ const RUNNABLE_FILTER_OPTIONS = [
   { label: '需要算力', value: 'needs_compute' },
 ];
 
-/** 算子执行要求 → 彩色标签。needs_compute 拆细:Ray 算子要 Ray 集群、vllm 要 vLLM 服务、
- * 其余(gpu/hf_model)要 GPU——避免顶部 GPU✓ 时徽标仍笼统写"需要算力"造成矛盾。 */
+/** DJ 算子 8 大类型(category 字段),与 Operators.md §Overview 一一对应。 */
+const DJ_CATEGORIES = [
+  'aggregator',
+  'deduplicator',
+  'filter',
+  'formatter',
+  'grouper',
+  'mapper',
+  'pipeline',
+  'selector',
+];
+
+/** needs_compute 拆细:Ray 算子要 Ray 集群、vllm 要 vLLM 服务、其余要 GPU。
+ *  优先用 resourceClass / frameworks,避免 name 前缀魔法。 */
 function runnableTag(op: DataPlatform.CatalogOperator): {
   label: string;
   color: string;
 } {
   if (op.runnable === 'needs_compute') {
-    if (op.name.startsWith('ray_'))
+    if ((op.frameworks ?? []).includes('ray'))
       return { label: '需要 Ray 集群', color: 'volcano' };
     if (op.resourceClass === 'vllm')
       return { label: '需要 vLLM 服务', color: 'volcano' };
@@ -62,38 +69,12 @@ function runnableTag(op: DataPlatform.CatalogOperator): {
   return RUNNABLE_TAG[op.runnable];
 }
 
-const RESOURCE_LABEL: Record<string, string> = {
-  cpu: 'CPU',
-  api_llm: 'LLM API',
-  hf_model: 'HF 模型',
-  gpu: 'GPU',
-  vllm: 'vLLM',
-};
-
-const PARAM_COLUMNS = [
-  { title: '参数', dataIndex: 'name', width: 160 },
-  { title: '类型', dataIndex: 'type', width: 150, ellipsis: true },
-  { title: '默认值', dataIndex: 'default', width: 120, ellipsis: true },
-  { title: '说明', dataIndex: 'desc', ellipsis: true },
-];
-
-/** 一行 muted 元信息:资源类 + 模态 */
-const MODALITY_LABEL: Record<string, string> = {
-  text: '文本',
-  image: '图像',
-  video: '视频',
-  audio: '音频',
-  multimodal: '多模态',
-};
-
-const metaLine = (op: DataPlatform.CatalogOperator) =>
-  [
-    RESOURCE_LABEL[op.resourceClass] ?? op.resourceClass,
-    ...(op.modality ?? []).map((m) => MODALITY_LABEL[m] ?? m),
-  ]
-    .filter(Boolean)
-    .join(' · ');
-
+const MODALITY_CHIPS = (['text', 'image', 'audio', 'video', 'multimodal'] as const)
+  .map((v) => ({ value: v, label: MODALITY_LABEL[v] ?? v }));
+const RESOURCE_CHIPS = (['cpu', 'api_llm', 'hf_model', 'gpu', 'vllm'] as const).map(
+  (v) => ({ value: v, label: RESOURCE_LABEL[v] }),
+);
+const ALL_KEY = '__all__';
 const PAGE_SIZE = 24;
 
 const Market: React.FC = () => {
@@ -102,26 +83,30 @@ const Market: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
 
-  // 当前环境执行能力(GPU/LLM/vLLM/Ray),用于「环境能力」指示
+  // 当前环境执行能力(GPU/LLM/vLLM/Ray)
   const [caps, setCaps] = useState<DataPlatform.OperatorCapabilities>();
 
   // 过滤条件
-  const [scenario, setScenario] = useState<string>();
-  const [keyword, setKeyword] = useState<string>();
-  const [runnableFilter, setRunnableFilter] = useState('all');
+  const [category, setCategory] = useState<string | null>(null);
+  const [modalities, setModalities] = useState<string[]>([]);
+  const [resources, setResources] = useState<string[]>([]);
+  const [runnableFilter, setRunnableFilter] = useState<string>('all');
+  const [onlyRecommended, setOnlyRecommended] = useState(false);
+  const [keyword, setKeyword] = useState<string | null>(null);
 
   // 分页
   const [current, setCurrent] = useState(1);
 
-  // 拉全量目录:按 total 翻页取齐(目录是构建期快照,当前 212 条;
-  // 后端单页上限 500,目录将来超限也不会被静默截断)
+  // 拉全量目录(后端单页上限 500)
   const loadCatalog = useCallback(async () => {
     setLoading(true);
     setLoadError(false);
     try {
       getOperatorCapabilities()
         .then((r) => setCaps(r.data))
-        .catch(() => undefined);
+        .catch((err) =>
+          console.warn('[market] capabilities probe failed', err),
+        );
       const first = await listOperatorCatalog({ pageSize: 500, current: 1 });
       const ops = [...(first.data ?? [])];
       while (ops.length < (first.total ?? 0)) {
@@ -144,162 +129,224 @@ const Market: React.FC = () => {
     loadCatalog();
   }, [loadCatalog]);
 
-  // 先按开关 + 关键字过滤(不含场景),用于计算分面计数
-  const switchFiltered = useMemo(() => {
+  /** 公共过滤(不含 category 自身):chips + 搜索 + 推荐。 */
+  const baseFiltered = useMemo(() => {
+    const kw = keyword?.toLowerCase();
     return allOps.filter((op) => {
       if (runnableFilter !== 'all' && op.runnable !== runnableFilter)
         return false;
-      if (keyword) {
-        const kw = keyword.toLowerCase();
-        if (
-          !op.name.toLowerCase().includes(kw) &&
-          !op.zhLabel.toLowerCase().includes(kw) &&
-          !(op.summaryZh ?? '').toLowerCase().includes(kw)
-        )
-          return false;
+      if (onlyRecommended && !op.recommend) return false;
+      if (
+        modalities.length > 0 &&
+        !modalities.some((m) => (op.modality ?? []).includes(m))
+      )
+        return false;
+      if (resources.length > 0 && !resources.includes(op.resourceClass))
+        return false;
+      if (kw) {
+        const hay = (
+          op.name +
+          (op.zhLabel ?? '') +
+          (op.summaryZh ?? '') +
+          (op.tags ?? []).join(' ')
+        ).toLowerCase();
+        if (!hay.includes(kw)) return false;
       }
       return true;
     });
-  }, [allOps, runnableFilter, keyword]);
+  }, [
+    allOps,
+    modalities,
+    resources,
+    runnableFilter,
+    onlyRecommended,
+    keyword,
+  ]);
 
-  // 分面计数:在 switchFiltered 上按场景分组
-  const scenarioCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const op of switchFiltered) {
-      const sg = op.scenarioGroup ?? '';
-      counts[sg] = (counts[sg] ?? 0) + 1;
+  /** 列表展示(在公共过滤之上再叠 category)。 */
+  const filtered = useMemo(() => {
+    if (!category) return baseFiltered;
+    return baseFiltered.filter((op) => op.category === category);
+  }, [baseFiltered, category]);
+
+  /** 菜单计数(基于 baseFiltered,切类时其它类与"全部"数字保持稳定)。 */
+  const categoryLiveCounts = useMemo(() => {
+    const counts: Record<string, number> = { [ALL_KEY]: baseFiltered.length };
+    for (const k of DJ_CATEGORIES) counts[k] = 0;
+    for (const op of baseFiltered) {
+      if (op.category && counts[op.category] !== undefined)
+        counts[op.category] += 1;
     }
     return counts;
-  }, [switchFiltered]);
+  }, [baseFiltered]);
 
-  // 场景全集(成员与排序按全量算子数固定,不随开关增减——0 计数类目保留置灰)
-  const allScenarios = useMemo(() => {
-    const totals: Record<string, number> = {};
-    for (const op of allOps) {
-      const sg = op.scenarioGroup ?? '';
-      totals[sg] = (totals[sg] ?? 0) + 1;
-    }
-    return Object.entries(totals)
-      .sort((a, b) => b[1] - a[1])
-      .map(([name]) => name);
-  }, [allOps]);
-
-  // 左侧菜单项(计数随开关/搜索实时变化,与列表同源)
-  const menuItems = useMemo(() => {
-    return [
-      { key: 'all', label: `全部　${switchFiltered.length}` },
-      ...allScenarios.map((name) => {
-        const count = scenarioCounts[name] ?? 0;
-        return {
-          key: name,
-          label: `${name}　${count}`,
-          style: count === 0 ? { opacity: 0.45 } : undefined,
-        };
-      }),
-    ];
-  }, [allScenarios, scenarioCounts, switchFiltered.length]);
-
-  // 最终展示列表(在 switchFiltered 基础上再加场景过滤)
-  const filtered = useMemo(() => {
-    if (!scenario) return switchFiltered;
-    return switchFiltered.filter((op) => op.scenarioGroup === scenario);
-  }, [switchFiltered, scenario]);
-
-  // 当前页数据
-  const pageData = useMemo(() => {
+  const currentPageData = useMemo(() => {
     const start = (current - 1) * PAGE_SIZE;
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, current]);
 
-  // 页头统计(来自全量,不受过滤影响)
   const headerStats = useMemo(() => {
     if (allOps.length === 0) return null;
     const readyCount = allOps.filter((op) => op.runnable === 'ready').length;
     return `共 ${allOps.length} 个算子 · ${readyCount} 个现在可运行`;
   }, [allOps]);
 
-  // 「环境能力」指示:把灰/绿的成因显式化(GPU 已启用则 GPU 类算子转可运行)
-  const CAP_LABELS: [keyof DataPlatform.OperatorCapabilities, string][] = [
-    ['cuda', 'GPU'],
-    ['llm', 'LLM'],
-    ['vllm', 'vLLM'],
-    ['ray', 'Ray'],
-  ];
-  const headerContent = (
-    <Space direction="vertical" size={4}>
-      <Text type="secondary">{headerStats ?? ' '}</Text>
-      {caps && (
-        <Space size={6} wrap>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            环境能力:
-          </Text>
-          {CAP_LABELS.map(([key, label]) => (
-            <Tag key={key} color={caps[key] ? 'success' : 'default'}>
-              {label} {caps[key] ? '✓' : '✗'}
-            </Tag>
-          ))}
-        </Space>
-      )}
-    </Space>
-  );
+  // 顶部 chips 重置:任何 filter 变化都翻回第 1 页
+  const resetPage = () => setCurrent(1);
 
   return (
-    <PageContainer content={headerContent}>
+    <PageContainer
+      content={
+        <Space direction="vertical" size={4}>
+          <Text type="secondary">{headerStats ?? ' '}</Text>
+          {caps && (
+            <Space size={6} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                环境能力:
+              </Text>
+              {(
+                [
+                  ['cuda', 'GPU'],
+                  ['llm', 'LLM'],
+                  ['vllm', 'vLLM'],
+                  ['ray', 'Ray'],
+                ] as [keyof DataPlatform.OperatorCapabilities, string][]
+              ).map(([k, label]) => (
+                <Tag key={k} color={caps[k] ? 'success' : 'default'}>
+                  {label} {caps[k] ? '✓' : '✗'}
+                </Tag>
+              ))}
+            </Space>
+          )}
+        </Space>
+      }
+    >
       <Row gutter={16}>
-        {/* 左:场景分面(用 inline Menu,与平台左导航统一) */}
+        {/* 左:DJ 算子类型(Operators.md §Overview 8 类)一级菜单 */}
         <Col xs={24} md={6} lg={5} xl={4}>
-          <Card styles={{ body: { padding: 0 } }}>
+          <Card
+            title={<Text strong>算子类型</Text>}
+            styles={{ body: { padding: 0 } }}
+          >
             <Menu
               mode="inline"
-              selectedKeys={[scenario ?? 'all']}
-              items={menuItems}
+              selectedKeys={[category ?? ALL_KEY]}
               style={{ borderInlineEnd: 'none' }}
               onClick={({ key }) => {
-                setScenario(key === 'all' ? undefined : key);
-                setCurrent(1);
+                setCategory(key === ALL_KEY ? null : key);
+                resetPage();
               }}
+              items={[
+                {
+                  key: ALL_KEY,
+                  label: (
+                    <Space>
+                      <span>📦</span>
+                      <span>全部算子</span>
+                      <Text type="secondary">
+                        {categoryLiveCounts[ALL_KEY]}
+                      </Text>
+                    </Space>
+                  ),
+                },
+                ...DJ_CATEGORIES.map((k) => {
+                  const live = categoryLiveCounts[k] ?? 0;
+                  return {
+                    key: k,
+                    label: (
+                      <Space>
+                        <span>{CATEGORY_LABEL[k] ?? k}</span>
+                        <Text type="secondary">{live}</Text>
+                      </Space>
+                    ),
+                    style: live === 0 ? { opacity: 0.45 } : undefined,
+                  };
+                }),
+              ]}
             />
           </Card>
         </Col>
 
-        {/* 右:工具栏 + 卡片栅格 */}
+        {/* 右:多维 chips + 卡片栅格 */}
         <Col xs={24} md={18} lg={19} xl={20}>
           <Card>
             <Space
-              style={{
-                marginBottom: 16,
-                width: '100%',
-                justifyContent: 'space-between',
-              }}
-              wrap
+              direction="vertical"
+              size={12}
+              style={{ width: '100%' }}
             >
-              <Input.Search
-                allowClear
-                placeholder="搜索算子名 / 中文说明"
-                style={{ width: 280 }}
-                onSearch={(v) => {
-                  setKeyword(v || undefined);
-                  setCurrent(1);
-                }}
-              />
-              <Space size="large" wrap>
-                <Segmented
-                  size="small"
-                  value={runnableFilter}
-                  options={RUNNABLE_FILTER_OPTIONS}
-                  onChange={(v) => {
-                    setRunnableFilter(v as string);
-                    setCurrent(1);
+              {/* 搜索 + runnable + 推荐 + 上传 */}
+              <Space
+                wrap
+                style={{ width: '100%', justifyContent: 'space-between' }}
+              >
+                <Input.Search
+                  allowClear
+                  placeholder="搜索算子名 / 中文标签 / 描述"
+                  style={{ width: 280 }}
+                  onSearch={(v) => {
+                    setKeyword(v || null);
+                    resetPage();
                   }}
                 />
-                <Button
-                  icon={<UploadOutlined />}
-                  onClick={() => history.push('/operators/upload')}
-                >
-                  上传自定义算子
-                </Button>
+                <Space size="middle" wrap>
+                  <Segmented
+                    size="small"
+                    value={runnableFilter}
+                    options={RUNNABLE_FILTER_OPTIONS}
+                    onChange={(v) => {
+                      setRunnableFilter(v as string);
+                      resetPage();
+                    }}
+                  />
+                  <Checkbox
+                    checked={onlyRecommended}
+                    onChange={(e) => {
+                      setOnlyRecommended(e.target.checked);
+                      resetPage();
+                    }}
+                  >
+                    只看推荐
+                  </Checkbox>
+                  <Button
+                    icon={<UploadOutlined />}
+                    onClick={() => history.push('/operators/upload')}
+                  >
+                    上传自定义算子
+                  </Button>
+                </Space>
+              </Space>
+
+              {/* 模态 + 资源 收窄 */}
+              <Space wrap size={6}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  模态:
+                </Text>
+                <Checkbox.Group
+                  options={MODALITY_CHIPS}
+                  value={modalities}
+                  onChange={(v) => {
+                    setModalities(v as string[]);
+                    resetPage();
+                  }}
+                />
+              </Space>
+              <Space wrap size={6}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  资源:
+                </Text>
+                <Checkbox.Group
+                  options={RESOURCE_CHIPS}
+                  value={resources}
+                  onChange={(v) => {
+                    setResources(v as string[]);
+                    resetPage();
+                  }}
+                />
               </Space>
             </Space>
+
+            <Divider style={{ margin: '12px 0' }} />
 
             {loadError ? (
               <Alert
@@ -315,11 +362,7 @@ const Market: React.FC = () => {
               />
             ) : !loading && filtered.length === 0 ? (
               <Empty
-                description={
-                  scenario && (scenarioCounts[scenario] ?? 0) === 0
-                    ? '该场景在当前筛选下无算子,可调整筛选条件'
-                    : '没有符合条件的算子'
-                }
+                description="当前筛选下无算子,调整筛选项或换类型"
                 style={{ padding: '48px 0' }}
               />
             ) : (
@@ -332,7 +375,7 @@ const Market: React.FC = () => {
                     gap: 16,
                   }}
                 >
-                  {pageData.map((op) => {
+                  {currentPageData.map((op) => {
                     const tag = runnableTag(op);
                     return (
                       <Card
@@ -362,6 +405,7 @@ const Market: React.FC = () => {
                             {op.zhLabel}
                           </Text>
                           {op.isCustom && <Tag color="purple">自定义</Tag>}
+                          {op.recommend && <Tag color="gold">推荐</Tag>}
                         </div>
                         <Text
                           type="secondary"
@@ -385,12 +429,22 @@ const Market: React.FC = () => {
                           {op.zhUsageTip || op.summaryZh}
                         </Paragraph>
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                          {metaLine(op)}
+                          {[
+                            RESOURCE_LABEL[op.resourceClass] ?? op.resourceClass,
+                            ...(op.modality ?? []).map(
+                              (m) => MODALITY_LABEL[m] ?? m,
+                            ),
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
                         </Text>
                         <Divider
                           style={{ marginBlock: 12, marginTop: 'auto' }}
                         />
-                        <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
+                        <Tag
+                          color={tag.color}
+                          style={{ marginInlineEnd: 0 }}
+                        >
                           {tag.label}
                         </Tag>
                       </Card>
