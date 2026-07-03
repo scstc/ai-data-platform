@@ -19,7 +19,7 @@ export const TYPE_META: Record<
  *   sequoiadb(pysequoiadb,厂商 client 库)。
  * GaussDB 按引擎分两个 kind:gaussdb = for PostgreSQL(asyncpg)、
  *   gaussdb_mysql = for MySQL(asyncmy)。
- * 暂不开放:hive(服务器未部署)、hologres(阿里云专用)。
+ * 承诺级(驱动就位即激活,同 Doris):hive(pyhive)、hologres(PG 线协议,asyncpg)。
  * Partial<Record>:旧数据源记录仍可显示,缺映射时调用方 fallback 到 dbKind 原值。
  */
 export const DB_KIND_LABEL: Partial<Record<DataPlatform.DbKind, string>> = {
@@ -31,6 +31,8 @@ export const DB_KIND_LABEL: Partial<Record<DataPlatform.DbKind, string>> = {
   sequoiadb: 'SequoiaDB（巨杉）',
   gaussdb: 'GaussDB (for PostgreSQL)',
   gaussdb_mysql: 'GaussDB (for MySQL)',
+  hive: 'Apache Hive',
+  hologres: '阿里云 Hologres',
 };
 
 /** 数据库品牌下拉选项(仅可真连品牌) */
@@ -154,19 +156,8 @@ export const DB_KIND_CARDS: {
   { kind: 'sequoiadb', title: 'SequoiaDB(巨杉)', ready: true },
   // GaussDB 卡片默认落 for PostgreSQL,配置页下拉可切 for MySQL
   { kind: 'gaussdb', title: 'GaussDB', ready: true },
-  // ── 暂未就绪(驱动/服务器/认证未就位,不隐藏、仅灰显)─────────────────────
-  {
-    kind: 'hive',
-    title: 'Hive',
-    ready: false,
-    reason: '需 Hadoop/Hive 集群,本环境未部署',
-  },
-  {
-    kind: 'hologres',
-    title: 'Hologres',
-    ready: false,
-    reason: '阿里云专用,本地无实例',
-  },
+  { kind: 'hive', title: 'Hive', ready: true },
+  { kind: 'hologres', title: 'Hologres', ready: true },
 ];
 
 /** 配置页标题(按类型) */

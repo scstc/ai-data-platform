@@ -102,6 +102,8 @@ const DB_BRAND_TOKEN: Partial<Record<DataPlatform.DbKind, string>> = {
   sequoiadb: 'SequoiaDB',
   gaussdb: 'GaussDB',
   gaussdb_mysql: 'GaussDB',
+  hive: 'Hive',
+  hologres: 'Hologres',
 };
 
 /** 编辑态标题用的中文短标识 */
