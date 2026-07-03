@@ -1429,8 +1429,9 @@ declare namespace DataPlatform {
     | 'video'
     | 'text';
 
-  /** 上传渠道:oss/obs/minio/api/local/database */
+  /** 上传渠道:s3/oss/obs/minio/api/local/database */
   type DataLakeUploadChannel =
+    | 's3'
     | 'oss'
     | 'obs'
     | 'minio'

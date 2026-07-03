@@ -23,6 +23,7 @@ export const UPLOAD_CHANNEL_META: Record<
   UploadChannelMeta
 > = {
   database: { label: '数据库', color: 'blue', icon: <DatabaseOutlined /> },
+  s3: { label: 'S3', color: 'cyan', icon: <CloudServerOutlined /> },
   oss: { label: 'OSS', color: 'cyan', icon: <CloudServerOutlined /> },
   obs: { label: 'OBS', color: 'cyan', icon: <CloudServerOutlined /> },
   minio: { label: 'MinIO', color: 'cyan', icon: <CloudServerOutlined /> },
