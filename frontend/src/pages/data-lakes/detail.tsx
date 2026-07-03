@@ -318,7 +318,10 @@ const DataLakeDetailPage: FC = () => {
               snapshotIds: selectedSnapshots.map((s) => s.id),
               datasetName: values.datasetName,
               description: values.description,
-              fieldMapping: fieldMapping && Object.keys(fieldMapping).length > 0 ? fieldMapping : undefined,
+              fieldMapping:
+                fieldMapping && Object.keys(fieldMapping).length > 0
+                  ? fieldMapping
+                  : undefined,
             });
             hide();
             message.success(
@@ -392,7 +395,9 @@ const DataLakeDetailPage: FC = () => {
                   >
                     <div style={{ marginBottom: 8 }}>
                       <Space>
-                        <Text strong>{snapshotFilename(snapshot) || snapshot.id}</Text>
+                        <Text strong>
+                          {snapshotFilename(snapshot) || snapshot.id}
+                        </Text>
                         <Tag>{DATA_CATEGORY_LABEL[snapshot.dataCategory]}</Tag>
                         <Tag color="default">{snapshot.storageFormat}</Tag>
                       </Space>
