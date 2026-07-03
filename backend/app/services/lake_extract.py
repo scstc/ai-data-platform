@@ -3,7 +3,7 @@
 第二层职责：
 - 从数据湖中按需筛选、抽取指定版本的原始数据
 - 完成格式解析与初步结构化（Parquet → 记录、csv/xlsx/jsonl → 解析为记录）
-- 注入血缘追踪字段（source_version, source_category, upload_channel 等）
+- 注入 DJ 标准 meta 元数据（src/date/version 三元组，嵌套在 "meta" 键下）
 - 生成中间 JSONL 供数据集落地
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 from typing import Any
 
 import pyarrow.parquet as pq
@@ -30,18 +31,27 @@ from app.services.landing import (
     normalize_to_records,
 )
 
+_logger = logging.getLogger(__name__)
+
+# 元数据统一嵌套在记录的 "meta" 键下(DJ 标准格式,如 Arxiv 数据集的
+# {"text": ..., "meta": {"src": ..., "date": ..., "version": ...}}),由
+# _inject_lineage_fields 注入(仅 src/date/version 三元组,version 可反查
+# 快照追溯血缘)。字段映射裁列时只保留 text + meta,丢弃原始源列。
+_KEPT_KEYS = frozenset({"text", "meta"})
+
 
 async def _apply_field_mapping_transform(
     records: list[dict[str, Any]], template: str
 ) -> list[dict[str, Any]]:
-    """对记录应用字段映射模板,生成 text 字段(调用 engine.filter_records)。
+    """对记录应用字段映射模板,生成 text 字段并裁列为 text + meta。
 
     Args:
-        records: 原始记录列表
+        records: 原始记录列表(已注入 meta 元数据)
         template: 映射模板(如 "用户提问：{question}，客服回答：{answer}")
 
     Returns:
-        应用映射后的记录列表(新增 text 字段)
+        裁列后的记录列表:只含 text(算子生成)+ meta(src/date/version),
+        丢弃 question/answer/category 等原始源列。
 
     Raises:
         ExternalStoreError: 算子执行失败
@@ -71,9 +81,17 @@ async def _apply_field_mapping_transform(
         result, _log = await filter_records(
             records, operators, project_name="lake-extract"
         )
-        return result
     except EngineError as exc:
         raise ExternalStoreError(f"字段映射失败: {exc}") from exc
+
+    # 裁列:只留 text + meta,丢弃原始源列(question/answer 等)。
+    # 缺 text 键(理论上算子必产)时保留原记录,不静默吞成空。
+    return [
+        {k: v for k, v in rec.items() if k in _KEPT_KEYS}
+        if "text" in rec
+        else rec
+        for rec in result
+    ]
 
 
 async def extract_from_lake_snapshot(
@@ -254,57 +272,23 @@ async def _download_snapshot_bytes(snapshot: DataLakeSnapshot) -> bytes:
 def _inject_lineage_fields(
     records: list[dict[str, Any]], snapshot: DataLakeSnapshot
 ) -> list[dict[str, Any]]:
-    """向记录中注入血缘追踪字段。
+    """向记录中注入嵌套 "meta" 元数据（DJ 标准格式）。
 
-    根据数据治理规范，注入以下通用血缘字段：
-    - source_version: 源头快照版本号
-    - source_category: 数据源类型（database/file/media）
-    - upload_channel: 上传渠道（oss/obs/minio/api/local/database）
-    - data_lake_snapshot_id: 快照 ID（用于追溯）
-
-    差异化溯源字段从 source_metadata 提取：
-    - 数据库数据：db_schema, db_table, db_engine
-    - 对象存储数据：bucket_name, obj_key
-    - 本地/API 文件：original_filename
+    meta 只含三元组（对齐 data-juicer 样例数据集的 {"src", "date", "version"}）：
+    - src: 数据来源（原文件名/源表名，见 _lake_file_name）
+    - date: 入湖日期（快照 created_at，YYYY-MM-DD）
+    - version: 源头快照版本号（source_version，可反查快照追溯全量血缘）
     """
-    enriched = []
-    for record in records:
-        # 深拷贝避免修改原记录
-        enriched_record = {**record}
+    meta: dict[str, Any] = {
+        "src": _lake_file_name(snapshot),
+        "date": (
+            snapshot.created_at.strftime("%Y-%m-%d") if snapshot.created_at else None
+        ),
+        "version": snapshot.source_version,
+    }
 
-        # 通用血缘字段
-        enriched_record["source_version"] = snapshot.source_version
-        enriched_record["source_category"] = snapshot.data_category
-        enriched_record["upload_channel"] = snapshot.upload_channel
-        enriched_record["data_lake_snapshot_id"] = snapshot.id
-
-        # 差异化溯源字段（从 source_metadata 提取）
-        if snapshot.source_metadata:
-            # 数据库数据
-            if "db_schema" in snapshot.source_metadata:
-                enriched_record["db_schema"] = snapshot.source_metadata["db_schema"]
-            if "db_table" in snapshot.source_metadata:
-                enriched_record["db_table"] = snapshot.source_metadata["db_table"]
-            if "db_engine" in snapshot.source_metadata:
-                enriched_record["db_engine"] = snapshot.source_metadata["db_engine"]
-
-            # 对象存储数据
-            if "bucket_name" in snapshot.source_metadata:
-                enriched_record["bucket_name"] = snapshot.source_metadata[
-                    "bucket_name"
-                ]
-            if "obj_key" in snapshot.source_metadata:
-                enriched_record["obj_key"] = snapshot.source_metadata["obj_key"]
-
-            # 本地/API 文件
-            if "original_filename" in snapshot.source_metadata:
-                enriched_record["original_filename"] = snapshot.source_metadata[
-                    "original_filename"
-                ]
-
-        enriched.append(enriched_record)
-
-    return enriched
+    # 每条记录持有独立的 meta 副本，避免共享引用被下游误改
+    return [{**record, "meta": dict(meta)} for record in records]
 
 
 async def extract_and_land_from_lake(
@@ -484,6 +468,9 @@ async def extract_to_new_dataset(
             and template.strip()
             and snapshot.data_category in ("database", "tabular")
         ):
+            _logger.info(
+                "[字段映射] snapshot=%s 应用模板,裁列为 text + 血缘字段", snapshot.id
+            )
             records = await _apply_field_mapping_transform(records, template)
 
         base = _safe_table_name(_lake_file_name(snapshot))

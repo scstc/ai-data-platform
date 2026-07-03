@@ -165,15 +165,14 @@ async def test_extract_from_lake_snapshot_accepts_doc_formats(db_session, monkey
     records = await lake_extract.extract_from_lake_snapshot(
         db_session, lake.id, "source_v20260701_01_pdf"
     )
-    assert records == [
-        {
-            "text": "解析出的段落",
-            "source_version": "source_v20260701_01_pdf",
-            "source_category": "document",
-            "upload_channel": "local",
-            "data_lake_snapshot_id": "snap-pdf001",
-        }
-    ]
+    assert len(records) == 1
+    assert records[0]["text"] == "解析出的段落"
+    # meta 仅含 DJ 三元组;created_at 由 DB server_default 生成,按快照值验证
+    assert records[0]["meta"] == {
+        "src": "1.pdf",
+        "date": snap.created_at.strftime("%Y-%m-%d"),
+        "version": "source_v20260701_01_pdf",
+    }
 
 
 @pytest.mark.asyncio
@@ -516,7 +515,7 @@ async def test_get_snapshot_by_version(db_session):
 
 
 def test_inject_lineage_database_fields():
-    """数据库来源：注入通用血缘 + db_schema/db_table/db_engine。"""
+    """数据库来源：meta 注入 DJ 三元组,src 取源表名。"""
     snapshot = DataLakeSnapshot(
         id="snap-lineage1",
         lake_id="lake-test",
@@ -539,22 +538,23 @@ def test_inject_lineage_database_fields():
 
     assert len(enriched) == 2
     for record in enriched:
-        # 通用血缘字段
-        assert record["source_version"] == "source_v20260701_01_mysql"
-        assert record["source_category"] == "database"
-        assert record["upload_channel"] == "database"
-        assert record["data_lake_snapshot_id"] == "snap-lineage1"
-        # 差异化溯源字段
-        assert record["db_schema"] == "finance"
-        assert record["db_table"] == "transactions"
-        assert record["db_engine"] == "MySQL 8.0"
-    # 原字段保留
+        # meta 仅含三元组:src 取源表名(DB 类无 original_filename);
+        # date 为 None(内存构造未落库,created_at 为空)
+        assert record["meta"] == {
+            "src": "transactions",
+            "date": None,
+            "version": "source_v20260701_01_mysql",
+        }
+    # 原字段保留在顶层
     assert enriched[0]["id"] == 1
     assert enriched[1]["name"] == "李四"
+    # meta 各记录独立副本,改一条不影响其他
+    enriched[0]["meta"]["src"] = "mutated"
+    assert enriched[1]["meta"]["src"] == "transactions"
 
 
 def test_inject_lineage_object_store_fields():
-    """对象存储来源：注入 bucket_name/obj_key。"""
+    """对象存储来源：meta 只留三元组,bucket/obj_key 等血缘不进记录。"""
     snapshot = DataLakeSnapshot(
         id="snap-obj-01",
         lake_id="lake-test",
@@ -571,10 +571,13 @@ def test_inject_lineage_object_store_fields():
     records = [{"id": 1}]
     enriched = _inject_lineage_fields(records, snapshot)
 
-    assert enriched[0]["bucket_name"] == "user-data"
-    assert enriched[0]["obj_key"] == "raw/2026/report.parquet"
-    # 不应有数据库字段
-    assert "db_schema" not in enriched[0]
+    # 无 original_filename/db_table 时 src 回退到 storage_uri 末段;
+    # bucket_name/obj_key 等血缘信息由 version 反查快照获取,不冗余进记录
+    assert enriched[0]["meta"] == {
+        "src": "data.parquet",
+        "date": None,
+        "version": "source_v20260701_01_s3",
+    }
 
 
 def test_inject_lineage_no_source_metadata():
@@ -592,9 +595,12 @@ def test_inject_lineage_no_source_metadata():
     records = [{"col": "value"}]
     enriched = _inject_lineage_fields(records, snapshot)
 
-    assert enriched[0]["source_version"] == "source_v20260701_01_test"
+    assert enriched[0]["meta"] == {
+        "src": "data.parquet",
+        "date": None,
+        "version": "source_v20260701_01_test",
+    }
     assert enriched[0]["col"] == "value"
-    assert "db_schema" not in enriched[0]
 
 
 def test_inject_lineage_original_records_untouched():
@@ -613,5 +619,5 @@ def test_inject_lineage_original_records_untouched():
     _inject_lineage_fields(original_records, snapshot)
 
     # 原记录不应被污染
-    assert "source_version" not in original_records[0]
+    assert "meta" not in original_records[0]
     assert original_records[0] == {"col": "value"}
