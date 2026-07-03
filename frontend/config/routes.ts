@@ -83,11 +83,10 @@ export default [
         name: 'datasources',
         component: './ingest/datasources',
       },
+      // 原接入方式选择落地页已并入数据源管理页顶部,旧链接重定向兜底
       {
         path: '/ingest/datasources/new',
-        name: 'datasource-new',
-        hideInMenu: true,
-        component: './ingest/datasources/new',
+        redirect: '/ingest/datasources',
       },
       {
         path: '/ingest/datasources/new/:type',

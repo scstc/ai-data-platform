@@ -66,15 +66,16 @@ from app.services.llm_config import get_active_llm_config
 
 _logger = logging.getLogger(__name__)
 
-# 可直连拉取记录的数据库品牌:PG 族走 asyncpg,goldendb 走 asyncmy
+# 可直连拉取记录的数据库品牌:PG 族走 asyncpg,MySQL 族(goldendb/gaussdb_mysql)走 asyncmy
 _PG_KINDS = {"postgresql", "hologres", "kingbase", "gaussdb"}
-_CSV_DATASET_KINDS = _PG_KINDS | {"goldendb"}
+_MYSQL_KINDS = {"goldendb", "gaussdb_mysql"}
+_CSV_DATASET_KINDS = _PG_KINDS | _MYSQL_KINDS
 
 
 async def _fetch_db_records(datasource: DataSource, task: IngestTask) -> list[dict]:
-    """按数据库品牌派发,拉取记录(不落地)。仅 PG 族 / goldendb 支持。"""
+    """按数据库品牌派发,拉取记录(不落地)。仅 PG 族 / MySQL 族支持。"""
     db_kind = (datasource.db_kind or "").lower()
-    if db_kind == "goldendb":
+    if db_kind in _MYSQL_KINDS:
         from app.services.connectors.mysql import fetch_records
     else:
         from app.services.connectors.pg import fetch_records
@@ -869,7 +870,7 @@ async def preview_ingest_source(payload: dict, session: SessionDep) -> Response:
             db_kind = (datasource.db_kind or "").lower()
             if db_kind in _PG_KINDS:
                 from app.services.connectors.pg import _connect  # noqa: PLC0415
-            elif db_kind == "goldendb":
+            elif db_kind in _MYSQL_KINDS:
                 from app.services.connectors.mysql import _connect  # noqa: PLC0415
             else:
                 return JSONResponse(

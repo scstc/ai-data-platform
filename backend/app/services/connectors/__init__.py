@@ -31,7 +31,8 @@ REGISTRY: dict[tuple[str, str | None], Connector] = {
     ("database", "postgresql"): PgConnector(),
     ("database", "hologres"): PgConnector(),  # PG 线协议,复用 asyncpg(品牌承诺级)
     ("database", "kingbase"): PgConnector(),  # 同上
-    ("database", "gaussdb"): PgConnector(),  # 同上(端口由 config 提供)
+    ("database", "gaussdb"): PgConnector(),  # GaussDB(for PostgreSQL),PG 线协议
+    ("database", "gaussdb_mysql"): MysqlConnector(),  # GaussDB(for MySQL),MySQL 协议
     ("database", "goldendb"): MysqlConnector(),  # MySQL 协议(有本地 MySQL 可测)
     ("database", "doris"): DorisConnector(),  # 降档:结构就绪/承诺级
     ("database", "dameng"): DamengConnector(),

@@ -15,9 +15,11 @@ export const TYPE_META: Record<
  * 数据库品牌 → 中文名(仅保留已实测可真连的品牌)
  *
  * 实测可连(10.60.1.63):postgresql(asyncpg)、kingbase(PG 线协议)、dameng(dmPython)、
- *   doris(asyncmy,MySQL 协议)、goldendb(asyncmy,需自有 MySQL/GoldenDB 实例)。
- * 暂不开放:gaussdb(openGauss SASL,asyncpg 不支持)、sequoiadb(驱动 pysequoiadb 非
- *   PyPI,需厂商 client 库)、hive(服务器未部署)、hologres(阿里云专用)。
+ *   doris(asyncmy,MySQL 协议)、goldendb(asyncmy,需自有 MySQL/GoldenDB 实例)、
+ *   sequoiadb(pysequoiadb,厂商 client 库)。
+ * GaussDB 按引擎分两个 kind:gaussdb = for PostgreSQL(asyncpg)、
+ *   gaussdb_mysql = for MySQL(asyncmy)。
+ * 暂不开放:hive(服务器未部署)、hologres(阿里云专用)。
  * Partial<Record>:旧数据源记录仍可显示,缺映射时调用方 fallback 到 dbKind 原值。
  */
 export const DB_KIND_LABEL: Partial<Record<DataPlatform.DbKind, string>> = {
@@ -26,6 +28,9 @@ export const DB_KIND_LABEL: Partial<Record<DataPlatform.DbKind, string>> = {
   kingbase: '人大金仓 KingbaseES',
   doris: 'Apache Doris',
   dameng: '达梦 DM8',
+  sequoiadb: 'SequoiaDB（巨杉）',
+  gaussdb: 'GaussDB (for PostgreSQL)',
+  gaussdb_mysql: 'GaussDB (for MySQL)',
 };
 
 /** 数据库品牌下拉选项(仅可真连品牌) */
@@ -44,7 +49,7 @@ export const STATUS_META: Record<
 };
 
 // ---------------------------------------------------------------------------
-// 接入方式选择落地页(/ingest/datasources/new):按类目分组的卡片
+// 接入方式选择(数据源管理页顶部):按类目分组的卡片
 // ---------------------------------------------------------------------------
 
 /** S3 兼容对象存储的厂商档(后端同为 type=s3,仅前端呈现/默认 Endpoint 不同) */
@@ -146,19 +151,10 @@ export const DB_KIND_CARDS: {
   { kind: 'kingbase', title: 'Kingbase(金仓)', ready: true },
   { kind: 'doris', title: 'Doris', ready: true },
   { kind: 'dameng', title: 'DM(达梦)', ready: true },
+  { kind: 'sequoiadb', title: 'SequoiaDB(巨杉)', ready: true },
+  // GaussDB 卡片默认落 for PostgreSQL,配置页下拉可切 for MySQL
+  { kind: 'gaussdb', title: 'GaussDB', ready: true },
   // ── 暂未就绪(驱动/服务器/认证未就位,不隐藏、仅灰显)─────────────────────
-  {
-    kind: 'gaussdb',
-    title: 'GaussDB',
-    ready: false,
-    reason: 'openGauss SASL 认证,asyncpg 暂不支持',
-  },
-  {
-    kind: 'sequoiadb',
-    title: 'SequoiaDB(巨杉)',
-    ready: false,
-    reason: '驱动 pysequoiadb 非 PyPI,需厂商 client 库',
-  },
   {
     kind: 'hive',
     title: 'Hive',

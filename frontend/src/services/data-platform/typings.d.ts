@@ -94,6 +94,7 @@ declare namespace DataPlatform {
     | 'goldendb'
     | 'kingbase'
     | 'gaussdb'
+    | 'gaussdb_mysql'
     | 'hologres'
     | 'sequoiadb'
     | 'hive'

@@ -99,6 +99,9 @@ const DB_BRAND_TOKEN: Partial<Record<DataPlatform.DbKind, string>> = {
   kingbase: 'Kingbase',
   doris: 'Doris',
   dameng: 'Dameng',
+  sequoiadb: 'SequoiaDB',
+  gaussdb: 'GaussDB',
+  gaussdb_mysql: 'GaussDB',
 };
 
 /** 编辑态标题用的中文短标识 */
@@ -478,7 +481,11 @@ const DataSourceConfigPage: FC = () => {
   // API 推送:无需凭证浏览面板,单栏说明
   const isApi = type === 'api';
   const crumbLast =
-    type === 's3' ? s3Provider.toUpperCase() : type.toUpperCase();
+    type === 's3'
+      ? s3Provider.toUpperCase()
+      : type === 'database'
+        ? (dbKindFromQuery && DB_BRAND_TOKEN[dbKindFromQuery]) || '数据库'
+        : type.toUpperCase();
 
   // 编辑态刷新(?id= 还在但 state 丢失):无 detail 接口无法回填,提示返回列表
   if (editId && !editRecord) {
@@ -505,16 +512,14 @@ const DataSourceConfigPage: FC = () => {
   return (
     <PageContainer
       breadcrumb={buildBreadcrumb(
-        // 与菜单层级对齐:数据接入 › 数据源管理 › <被编辑名 / 新建连接+类型>
+        // 与菜单层级对齐:数据接入 › 数据源管理 › <被编辑名 / 新建 <类型> 连接>
+        // (原「新建连接」落地页已并入数据源管理页顶部,不再单列一级)
         [
           { title: '数据接入', path: '/ingest' },
           { title: '数据源管理', path: '/ingest/datasources' },
           ...(isEdit
             ? [{ title: editRecord?.name || '编辑' }]
-            : [
-                { title: '新建连接', path: '/ingest/datasources/new' },
-                { title: crumbLast },
-              ]),
+            : [{ title: `新建 ${crumbLast} 连接` }]),
         ],
       )}
       title={

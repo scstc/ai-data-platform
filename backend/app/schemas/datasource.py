@@ -13,6 +13,7 @@ DbKind = Literal[
     "goldendb",
     "kingbase",
     "gaussdb",
+    "gaussdb_mysql",
     "hologres",
     "sequoiadb",
     "hive",

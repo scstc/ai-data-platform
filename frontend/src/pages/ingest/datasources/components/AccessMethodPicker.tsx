@@ -7,12 +7,10 @@ import {
   InboxOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
-import { PageContainer } from '@ant-design/pro-components';
 import { history } from '@umijs/max';
 import { Badge, Card, Tag, Tooltip, Typography } from 'antd';
 import type { FC } from 'react';
-import { buildBreadcrumb } from '@/utils/breadcrumb';
-import { DB_KIND_CARDS, STORAGE_CARDS } from '../components/constants';
+import { DB_KIND_CARDS, STORAGE_CARDS } from './constants';
 
 const { Text, Title } = Typography;
 
@@ -43,19 +41,12 @@ const STORAGE_ICON: Record<string, React.ReactNode> = {
   hdfs: <ClusterOutlined style={{ fontSize: 22, color: '#1677ff' }} />,
 };
 
-/** 接入方式选择落地页:按类目分组的卡片,点选跳到对应配置页 */
-const NewDataSourcePage: FC = () => {
+/** 接入方式选择:按类目分组的卡片,点选跳到对应配置页(渲染在数据源管理页顶部) */
+const AccessMethodPicker: FC = () => {
   const go = (path: string) => history.push(path);
 
   return (
-    <PageContainer
-      breadcrumb={buildBreadcrumb([
-        { title: '数据接入', path: '/ingest/datasources' },
-        { title: '选择接入方式' },
-      ])}
-      title="选择数据接入方式"
-      content="对接你的数据生态:从云厂商、传统数据库,到手动上传,开启数据接入流程。"
-    >
+    <>
       {/* 云 / 分布式存储 */}
       <SectionTitle>云 / 分布式存储</SectionTitle>
       <div
@@ -185,11 +176,10 @@ const NewDataSourcePage: FC = () => {
         </div>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           <SectionTitle>外部 API</SectionTitle>
+          {/* Coming soon:暂不开放,置灰禁点(与数据库「暂未就绪」卡片同一套样式) */}
           <Card
-            hoverable
             data-testid="method-api"
-            onClick={() => go('/ingest/datasources/new/api')}
-            style={{ flex: 1 }}
+            style={{ flex: 1, opacity: 0.5, cursor: 'not-allowed' }}
             styles={{
               body: {
                 padding: 20,
@@ -212,12 +202,15 @@ const NewDataSourcePage: FC = () => {
               <Tag color="blue" style={{ fontSize: 11, letterSpacing: 0.5 }}>
                 <ApiOutlined /> REAL-TIME
               </Tag>
+              <Tag color="orange" style={{ fontSize: 11, letterSpacing: 0.5 }}>
+                COMING SOON
+              </Tag>
             </div>
           </Card>
         </div>
       </div>
-    </PageContainer>
+    </>
   );
 };
 
-export default NewDataSourcePage;
+export default AccessMethodPicker;

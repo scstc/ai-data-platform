@@ -1,4 +1,3 @@
-import { PlusOutlined } from '@ant-design/icons';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { Access, history, useAccess } from '@umijs/max';
@@ -16,6 +15,7 @@ import {
   toCategoryTreeData,
 } from '@/utils/categoryTree';
 import { formatDateTime } from '@/utils/format';
+import AccessMethodPicker from './components/AccessMethodPicker';
 import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
 
 const DataSourcesPage: FC = () => {
@@ -42,8 +42,6 @@ const DataSourcesPage: FC = () => {
   }, [loadCategories]);
 
   // 新建/编辑都走分类型配置页(/new/:type):编辑把整条记录经路由 state 传入回填,?id= 标记编辑态
-  const openCreate = () => history.push('/ingest/datasources/new');
-
   const openEdit = (record: DataPlatform.DataSource) => {
     history.push(
       `/ingest/datasources/new/${record.type}?id=${encodeURIComponent(record.id)}`,
@@ -191,6 +189,12 @@ const DataSourcesPage: FC = () => {
 
   return (
     <PageContainer>
+      {/* 接入方式选择直接放列表上方(原 /new 落地页内容);新建为 admin 操作,非 admin 不展示 */}
+      <Access accessible={!!access.canAdmin}>
+        <div style={{ marginBottom: 24 }}>
+          <AccessMethodPicker />
+        </div>
+      </Access>
       <ProTable<DataPlatform.DataSource, DataPlatform.DataSourceListParams>
         headerTitle="数据源列表"
         actionRef={actionRef}
@@ -199,11 +203,6 @@ const DataSourcesPage: FC = () => {
         toolBarRender={() => [
           <Access key="category" accessible={!!access.canAdmin}>
             <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
-          </Access>,
-          <Access key="create" accessible={!!access.canAdmin}>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              新建数据源
-            </Button>
           </Access>,
         ]}
         request={async (params) => {
