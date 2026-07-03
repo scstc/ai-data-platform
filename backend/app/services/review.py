@@ -100,20 +100,6 @@ def _pick_text(row: dict[str, Any]) -> str:
     return ""
 
 
-def _pick_texts(
-    row: dict[str, Any], fields: list[str] | None
-) -> list[tuple[str | None, str]]:
-    """取行待扫文本:fields 给定时逐字段取(仅字符串值参扫),否则退回默认单文本。
-
-    返回 [(字段名, 文本)];默认路径字段名为 None(命中不落 field,与旧数据一致)。
-    """
-    if not fields:
-        return [(None, _pick_text(row))]
-    return [
-        (f, val) for f in fields if isinstance((val := row.get(f)), str)
-    ]
-
-
 def _snippet(text: str, start: int, end: int) -> str:
     """截取命中片段(含少量上下文),长度上限 _SNIPPET_MAX。"""
     lo = max(0, start - 20)
@@ -270,12 +256,7 @@ def _summarize_row(hits: list[dict[str, Any]], scanned: bool) -> dict[str, Any]:
         "maxSeverity": max_sev,
         "sources": sources,
         "hits": [
-            {
-                "source": h["source"],
-                "category": h["category"],
-                "detail": h["detail"],
-                "field": h.get("field"),
-            }
+            {"source": h["source"], "category": h["category"], "detail": h["detail"]}
             for h in hits
         ],
     }
@@ -289,17 +270,14 @@ async def scan_version(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """审核一批行,返回 (findings, taggedRows, report)。
 
-    - findings:逐条命中 [{rowIndex, category, severity, source, detail,
-      snippet, field}](与 ReviewFinding 字段对齐,行号为相对 rows 的下标;
-      field 为命中字段名,默认扫描/LLM 行级命中为 None)。
+    - findings:逐条命中 [{rowIndex, category, severity, source, detail, snippet}]
+      (与 ReviewFinding 字段对齐,行号为相对 rows 的下标)。
     - taggedRows:每个 row 的浅拷贝 + safety 字段(未扫行 scanned=false)。
     - report:{totalRows, scannedRows, flaggedRows, sampleLimitApplied,
       byCategory, bySeverity, bySource, warnings}。
 
     config 键:customWords[], customRegex[{name,pattern}], useLlm, usePii,
-    useFlaggedWords, sampleLimit, scanFields[](本批次的扫描字段列表,由上游
-    按成员表解析注入;缺省 = _pick_text 默认取文本)。LLM 失败时整体跳过
-    llm source(降级)。
+    useFlaggedWords, sampleLimit。LLM 失败时整体跳过 llm source(降级)。
     """
     total = len(rows)
     # 同时容忍 camelCase (sampleLimit) 与 snake_case (sample_limit):
@@ -350,36 +328,10 @@ async def scan_version(
     use_llm = bool(config.get("useLlm"))
     flagged_words = _load_flagged_words() if use_flagged else {}
 
-    # scanFields:本批次(单成员)的扫描字段列表;非 list(缺省/整 dict 形态)= 默认取文本
-    raw_fields = config.get("scanFields")
-    if not isinstance(raw_fields, list):
-        raw_fields = config.get("scan_fields")
-    scan_fields = (
-        [str(f) for f in raw_fields if str(f)]
-        if isinstance(raw_fields, list)
-        else None
-    ) or None
-
     # 仅扫前 scanned_count 行;其文本一次性取出供规则/PII/LLM 复用
     scan_rows = rows[:scanned_count]
-    # 逐行 (字段名, 文本) 对;截断超长文本(见 _MAX_SCAN_CHARS):防拖垮正则/PII 扫描
-    field_texts = [
-        [(f, t[:_MAX_SCAN_CHARS]) for f, t in _pick_texts(r, scan_fields)]
-        for r in scan_rows
-    ]
-    # LLM 行级送审文本:多字段拼成 "字段: 值" 多行;默认单文本与旧行为一致
-    texts = [
-        "\n".join(f"{f}: {t}" if f else t for f, t in pairs)
-        for pairs in field_texts
-    ]
-    # 配置的字段在已扫行中从未出现(或均非文本)→ 显式告警,不静默
-    if scan_fields and scan_rows:
-        seen_fields = {f for pairs in field_texts for f, _ in pairs}
-        warnings.extend(
-            f"扫描字段「{f}」在已扫描行中不存在或非文本,已跳过"
-            for f in scan_fields
-            if f not in seen_fields
-        )
+    # 截断超长文本(见 _MAX_SCAN_CHARS):防超长字段拖垮正则/PII 扫描
+    texts = [_pick_text(r)[:_MAX_SCAN_CHARS] for r in scan_rows]
 
     # LLM 路:整批 moderate;任一环节失败 → 整体跳过(降级),不影响其余 source
     llm_verdicts: list[dict[str, Any]] | None = None
@@ -414,21 +366,16 @@ async def scan_version(
             tagged_rows.append(tagged)
             continue
 
-        # 规则/PII 逐字段扫描,命中带字段名;默认路径字段名为 None
-        hits: list[dict[str, Any]] = []
-        for field, text in field_texts[i]:
-            sub = _scan_rules(
-                text,
-                word_specs=word_specs,
-                regex_specs=regex_specs,
-                flagged_words=flagged_words,
-                use_flagged=use_flagged,
-            )
-            if use_pii:
-                sub.extend(_scan_pii(text))
-            for h in sub:
-                h["field"] = field
-            hits.extend(sub)
+        text = texts[i]
+        hits = _scan_rules(
+            text,
+            word_specs=word_specs,
+            regex_specs=regex_specs,
+            flagged_words=flagged_words,
+            use_flagged=use_flagged,
+        )
+        if use_pii:
+            hits.extend(_scan_pii(text))
         if llm_verdicts is not None:
             verdict = llm_verdicts[i]
             if verdict.get("flagged"):
@@ -438,9 +385,7 @@ async def scan_version(
                         "category": verdict.get("category") or "other",
                         "severity": verdict.get("severity") or "medium",
                         "detail": verdict.get("reason") or "",
-                        "snippet": texts[i][:_SNIPPET_MAX],
-                        # LLM 是行级结论(多字段拼接送审),不归属单一字段
-                        "field": None,
+                        "snippet": text[:_SNIPPET_MAX],
                     }
                 )
 
@@ -453,7 +398,6 @@ async def scan_version(
                     "source": h["source"],
                     "detail": h["detail"],
                     "snippet": h["snippet"],
-                    "field": h.get("field"),
                 }
             )
             by_category[h["category"]] = by_category.get(h["category"], 0) + 1

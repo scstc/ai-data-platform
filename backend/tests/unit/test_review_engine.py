@@ -6,7 +6,6 @@
 - 自定义正则(regex)命中 + 坏正则不崩(记 warning)。
 - PII(pii)命中。
 - 文本字段优先 text,否则首个 str 值。
-- scanFields:逐字段扫描(命中带 field),未选字段不参扫;缺字段记 warning。
 - sampleLimit 生效:只扫前 N 行,sampleLimitApplied=true,未扫行 scanned=false。
 - 报告聚合 byCategory/bySource/bySeverity 与 taggedRows 的 safety 结构。
 """
@@ -97,51 +96,6 @@ def test_text_field_fallback_to_first_str() -> None:
     rows = [{"id": 1, "content": "包含毒品交易内容", "score": 0.5}]
     findings, _tagged, _report = _run(rows, {"useFlaggedWords": True})
     assert any(f["category"] == "drugs" for f in findings)
-
-
-# ---- scanFields:逐字段扫描(建任务按成员表配置扫描字段) ----
-
-
-def test_scan_fields_only_selected_fields_scanned() -> None:
-    """只有选中字段参扫(命中带 field);未选字段的违规是盲区,不产生命中。"""
-    rows = [{"title": "正常标题", "content": "赌博网站推广", "remark": "毒品交易"}]
-    findings, tagged, _report = _run(
-        rows, {"useFlaggedWords": True, "scanFields": ["content"]}
-    )
-    assert findings
-    assert all(f["field"] == "content" for f in findings)
-    # remark 的"毒品"未扫 → 不应有 drugs 命中
-    assert all(f["category"] == "gambling" for f in findings)
-    assert tagged[0]["safety"]["hits"][0]["field"] == "content"
-
-
-def test_scan_fields_multiple_fields_hit_separately() -> None:
-    """多个选中字段各自扫描,命中分别归属对应字段;未选字段(c)排除。"""
-    rows = [{"a": "赌博", "b": "毒品", "c": "赌博网站"}]
-    findings, _tagged, _report = _run(
-        rows, {"useFlaggedWords": True, "scanFields": ["a", "b"]}
-    )
-    assert {f["field"] for f in findings} == {"a", "b"}
-
-
-def test_scan_fields_missing_or_non_text_warns() -> None:
-    """配置的字段不存在/非文本 → 记 warning 不静默,其余字段照常扫。"""
-    rows = [{"text": "赌博", "score": 0.5}]
-    findings, _tagged, report = _run(
-        rows, {"useFlaggedWords": True, "scanFields": ["text", "nope", "score"]}
-    )
-    assert any("nope" in w for w in report["warnings"])
-    assert any("score" in w for w in report["warnings"])
-    assert findings and findings[0]["field"] == "text"
-
-
-def test_scan_fields_absent_keeps_default_behavior() -> None:
-    """未配置 scanFields → 旧行为(text 优先),findings.field 为 None。"""
-    rows = [{"text": "赌博"}]
-    findings, tagged, report = _run(rows, {"useFlaggedWords": True})
-    assert findings and findings[0]["field"] is None
-    assert report["flaggedRows"] == 1
-    assert tagged[0]["safety"]["hits"][0]["field"] is None
 
 
 def test_sample_limit_applied_and_unscanned_rows() -> None:

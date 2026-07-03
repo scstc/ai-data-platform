@@ -93,22 +93,15 @@ def _split_action(
 
 
 def _member_scan_config(
-    config: dict[str, Any], action: str, total_rows: int, table_name: str
+    config: dict[str, Any], action: str, total_rows: int
 ) -> dict[str, Any]:
-    """成员扫描配置:按表名解析 scanFields(dict → 本成员的字段列表);
-    delete 模式强制全量(sampleLimit=行数)。旧单文件路径表名用 "data"。"""
-    cfg = dict(config)
-    fields_map = cfg.get("scanFields")
-    if not isinstance(fields_map, dict):
-        fields_map = cfg.get("scan_fields")
-    cfg["scanFields"] = (
-        fields_map.get(table_name) if isinstance(fields_map, dict) else None
-    )
-    cfg.pop("scan_fields", None)
-    if action == "delete":
-        cfg["sampleLimit"] = max(total_rows, 1)
-        cfg.pop("sample_limit", None)
-    return cfg
+    """成员扫描配置:delete 模式强制全量(sampleLimit=行数),tag 模式原样。"""
+    if action != "delete":
+        return config
+    forced = dict(config)
+    forced["sampleLimit"] = max(total_rows, 1)
+    forced.pop("sample_limit", None)
+    return forced
 
 
 def _add_findings(
@@ -133,7 +126,6 @@ def _add_findings(
                 source=f["source"],
                 detail=f["detail"],
                 snippet=f["snippet"],
-                field=f.get("field"),
             )
         )
 
@@ -237,7 +229,7 @@ async def run_review(
 
         findings, tagged_rows, report = await scan_version(
             rows,
-            _member_scan_config(config, action, len(rows), member.table_name),
+            _member_scan_config(config, action, len(rows)),
             provider=provider,
         )
         _add_findings(
@@ -369,9 +361,8 @@ async def _run_review_legacy(
         rows = _read_jsonl(src_path)
     provider = get_ai_provider(settings)
 
-    # 旧单文件版本无成员表,scanFields 用固定键 "data"(与 removedArchives 口径一致)
     findings, tagged_rows, report = await scan_version(
-        rows, _member_scan_config(config, action, len(rows), "data"), provider=provider
+        rows, _member_scan_config(config, action, len(rows)), provider=provider
     )
     _add_findings(
         session, findings, job_id=job.id, version_id=version.id, table_name=None

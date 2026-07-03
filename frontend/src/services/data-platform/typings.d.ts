@@ -1189,8 +1189,6 @@ declare namespace DataPlatform {
     usePii: boolean;
     useFlaggedWords: boolean;
     sampleLimit?: number;
-    /** 成员表名 -> 参与扫描的字段;未配置的表默认取 text/首个文本字段。旧单文件版本键固定为 "data" */
-    scanFields?: Record<string, string[]>;
   };
 
   /** 内容安全:新建审核任务入参 */
