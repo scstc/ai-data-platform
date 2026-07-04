@@ -2293,12 +2293,13 @@ export async function getSnapshotPreview(
   });
 }
 
-/** 从湖快照抽取生成新数据集(admin) POST /api/v1/data-lakes/:lakeId/extract-to-dataset */
+/** 从湖快照抽取生成数据集,目标数据集二选一(新建/追加到已有) POST /api/v1/data-lakes/:lakeId/extract-to-dataset */
 export async function extractLakeToDataset(
   lakeId: string,
   body: {
     snapshotIds: string[];
-    datasetName: string;
+    datasetId?: string | null;
+    datasetName?: string | null;
     description?: string | null;
     fieldMapping?: Record<string, string> | null;
   },

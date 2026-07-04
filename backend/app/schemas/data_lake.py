@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from pydantic import model_validator
+
 from app.schemas.common import CamelModel, UtcDateTime
 
 
@@ -93,12 +95,24 @@ class DataLakeDetailRead(DataLakeRead):
 
 
 class ExtractToDatasetRequest(CamelModel):
-    """从湖抽取生成数据集入参(治理改造契约地基)。"""
+    """从湖抽取生成数据集入参(治理改造契约地基)。
+
+    目标数据集二选一(model_validator 拒绝混合或全空):
+    - 新建:``dataset_name`` 填,``dataset_id`` 空 → 建新数据集
+    - 追加到已有:``dataset_id`` 填,``dataset_name`` 空 → 落进该数据集当前 draft 版本
+    """
 
     snapshot_ids: list[str]
-    dataset_name: str
+    dataset_id: str | None = None
+    dataset_name: str | None = None
     description: str | None = None
     # 字段映射模板(可选):key=快照ID, value=模板字符串
     # 如 {"snap-123": "用户提问：{question}，客服回答：{answer}"}
     # 适用于表格类快照(database/tabular:数据库表、CSV、Excel等)。
     field_mapping: dict[str, str] | None = None
+
+    @model_validator(mode="after")
+    def _check_target_one_of(self) -> ExtractToDatasetRequest:
+        if bool(self.dataset_id) == bool(self.dataset_name):
+            raise ValueError("dataset_id 与 dataset_name 必须二选一")
+        return self

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.data_lake import DataLakeSnapshot
+from app.models.dataset import Dataset
 from app.services.data_lake import get_snapshot_by_version
 from app.services.external_store import ExternalStoreError, client_for, parse_s3_uri
 from app.services.landing import (
@@ -356,15 +357,17 @@ async def extract_to_new_dataset(
     *,
     lake_id: str,
     snapshot_ids: list[str],
-    dataset_name: str,
+    dataset_name: str | None = None,
+    dataset_id: str | None = None,
     description: str | None = None,
     creator: str = "admin",
     field_mapping: dict[str, str] | None = None,
 ) -> Any:
-    """从若干湖快照抽取生成**新**数据集(治理改造契约地基)。
+    """从若干湖快照抽取生成数据集,目标数据集**新建或追加到已有**(治理改造契约地基)。
 
     数据湖 → 数据集的核心链路:
-    1. 建空数据集(用户指定 name/description)
+    1. 建空数据集(dataset_name 指定 name/description)或取已有数据集(dataset_id,
+       此时复用其既有 semantic_type,不再按快照类别重新推断,保证追加语义一致)
     2. 每个快照作为一个表成员落进数据集(文件名 = 数据湖中的原始文件名,
        见 _lake_file_name;同名冲突时追加 _2/_3… 后缀避免覆盖)
     3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
@@ -375,16 +378,18 @@ async def extract_to_new_dataset(
         db: 数据库会话
         lake_id: 数据湖 ID
         snapshot_ids: 参与抽取的快照 id 列表(必须都属于 lake_id)
-        dataset_name: 新数据集名称
-        description: 数据集描述
+        dataset_name: 新数据集名称(与 dataset_id 二选一,由路由层校验)
+        dataset_id: 目标已有数据集 id(与 dataset_name 二选一)
+        description: 数据集描述(仅新建时生效)
         creator: 创建人
         field_mapping: 字段映射模板字典(key=快照ID, value=模板字符串)
 
     Returns:
-        新建的 Dataset 对象
+        目标 Dataset 对象(新建或已有)
 
     Raises:
-        ExternalStoreError: 湖不存在 / 快照不存在 / 快照跨湖 / 空快照列表
+        ExternalStoreError: 湖不存在 / 快照不存在 / 快照跨湖 / 空快照列表 /
+            目标数据集不存在
     """
     from sqlalchemy import select
 
@@ -409,20 +414,25 @@ async def extract_to_new_dataset(
     if stray:
         raise ExternalStoreError(f"以下快照不属于 {lake_id}: {stray}")
 
-    # 语义类型推断:全 database 类快照 → structured;含非 database → unstructured
-    categories = {s.data_category for s in snapshots}
-    semantic_type = (
-        "structured" if categories == {"database"} else "unstructured"
-    )
-
-    # 建数据集
-    dataset = await create_dataset(
-        db,
-        name=dataset_name,
-        semantic_type=semantic_type,
-        description=description,
-        creator=creator,
-    )
+    if dataset_id:
+        dataset = await db.get(Dataset, dataset_id)
+        if dataset is None:
+            raise ExternalStoreError(f"目标数据集不存在: {dataset_id}")
+        # 追加到已有数据集:复用其既有 semantic_type,不再按本次快照类别重新推断
+        semantic_type = dataset.semantic_type
+    else:
+        # 语义类型推断:全 database 类快照 → structured;含非 database → unstructured
+        categories = {s.data_category for s in snapshots}
+        semantic_type = (
+            "structured" if categories == {"database"} else "unstructured"
+        )
+        dataset = await create_dataset(
+            db,
+            name=dataset_name or "未命名数据集",
+            semantic_type=semantic_type,
+            description=description,
+            creator=creator,
+        )
 
     # 二进制快照(图片/音频/视频)按模态分组,各自落一个 manifest 版本(DJ 可读
     # 契约,见 landing.land_media_manifest);前置解析(OCR/ASR/关键帧,见

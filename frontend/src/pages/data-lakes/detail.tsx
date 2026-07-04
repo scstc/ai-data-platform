@@ -4,6 +4,9 @@ import {
   ProCard,
   type ProColumns,
   ProDescriptions,
+  ProFormDependency,
+  ProFormRadio,
+  ProFormSelect,
   ProFormText,
   ProFormTextArea,
   ProTable,
@@ -25,6 +28,7 @@ import {
   extractLakeToDataset,
   getDataLakeDetail,
   getSnapshotPresignedUrl,
+  listDatasets,
   renameLakeSnapshot,
 } from '@/services/data-platform';
 import { UploadChannelTag } from '@/utils/uploadChannel';
@@ -292,7 +296,9 @@ const DataLakeDetailPage: FC = () => {
       </Space>
 
       <ModalForm<{
-        datasetName: string;
+        targetMode: 'new' | 'existing';
+        datasetId?: string;
+        datasetName?: string;
         description?: string;
         fieldMappings?: Record<string, string>;
       }>
@@ -301,6 +307,7 @@ const DataLakeDetailPage: FC = () => {
         onOpenChange={setExtractOpen}
         width={720}
         modalProps={{ destroyOnHidden: true }}
+        initialValues={{ targetMode: 'new' }}
         onFinish={async (values) => {
           if (!id) return false;
           const hide = message.loading('正在抽取...', 0);
@@ -316,7 +323,10 @@ const DataLakeDetailPage: FC = () => {
 
             const res = await extractLakeToDataset(id, {
               snapshotIds: selectedSnapshots.map((s) => s.id),
-              datasetName: values.datasetName,
+              datasetId:
+                values.targetMode === 'existing' ? values.datasetId : undefined,
+              datasetName:
+                values.targetMode === 'new' ? values.datasetName : undefined,
               description: values.description,
               fieldMapping:
                 fieldMapping && Object.keys(fieldMapping).length > 0
@@ -348,21 +358,60 @@ const DataLakeDetailPage: FC = () => {
       >
         <div style={{ marginBottom: 16, color: '#666' }}>
           将从 <b>{selectedSnapshots.length}</b> 个快照抽取数据,
-          每个快照作为一个表成员落进新数据集(表名 = source_version)。
+          每个快照作为一个表成员落进目标数据集(表名 = source_version)。
           血缘字段自动透传。
         </div>
-        <ProFormText
-          name="datasetName"
-          label="数据集名称"
-          rules={[{ required: true, message: '请填写数据集名称' }]}
-          placeholder="如:2026-Q3 财务数据"
+        <ProFormRadio.Group
+          name="targetMode"
+          label="目标数据集"
+          options={[
+            { label: '新建数据集', value: 'new' },
+            { label: '选择已有数据集', value: 'existing' },
+          ]}
         />
-        <ProFormTextArea
-          name="description"
-          label="描述"
-          placeholder="选填"
-          fieldProps={{ rows: 3 }}
-        />
+        <ProFormDependency name={['targetMode']}>
+          {({ targetMode }) =>
+            targetMode === 'existing' ? (
+              <ProFormSelect
+                name="datasetId"
+                label="选择数据集"
+                placeholder="搜索并选择已有数据集(抽取结果作为新表成员追加)"
+                rules={[{ required: true, message: '请选择目标数据集' }]}
+                showSearch
+                fieldProps={{ filterOption: false }}
+                request={async ({ keyWords }) => {
+                  const res = await listDatasets({
+                    name: keyWords || undefined,
+                    pageSize: 50,
+                  });
+                  return (res.data ?? []).map((d) => ({
+                    label: d.name,
+                    value: d.id,
+                  }));
+                }}
+              />
+            ) : (
+              <ProFormText
+                name="datasetName"
+                label="数据集名称"
+                rules={[{ required: true, message: '请填写数据集名称' }]}
+                placeholder="如:2026-Q3 财务数据"
+              />
+            )
+          }
+        </ProFormDependency>
+        <ProFormDependency name={['targetMode']}>
+          {({ targetMode }) =>
+            targetMode === 'existing' ? null : (
+              <ProFormTextArea
+                name="description"
+                label="描述"
+                placeholder="选填"
+                fieldProps={{ rows: 3 }}
+              />
+            )
+          }
+        </ProFormDependency>
 
         {/* 逐文件配置字段映射 */}
         {selectedSnapshots.filter(

@@ -133,6 +133,97 @@ async def test_extract_to_new_dataset_rejects_cross_lake_snapshots(db_session):
 
 
 @pytest.mark.asyncio
+async def test_extract_to_existing_dataset_appends_without_recomputing_semantic(
+    db_session, monkeypatch
+):
+    """dataset_id 指向已有数据集时:不建新数据集,复用其 semantic_type,
+    落成表成员追加进该数据集(而非按本次快照类别重新推断)。"""
+    from types import SimpleNamespace
+
+    from app.models.dataset import Dataset
+    from app.services import lake_extract, landing
+
+    lake = await create_data_lake(db_session, name="追加目标湖")
+    snap = DataLakeSnapshot(
+        id="snap-append01",
+        lake_id=lake.id,
+        source_version="source_v20260701_01_csv",
+        storage_uri="s3://adp-data-lake/data-lake/x/source_v20260701_01_csv/新增.csv",
+        storage_format="csv",
+        data_category="database",
+        upload_channel="local",
+        source_metadata={"original_filename": "新增.csv"},
+    )
+    db_session.add(snap)
+    existing = Dataset(
+        id="dset-existing01",
+        name="既有数据集",
+        semantic_type="multimodal",
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    created_calls: list[dict] = []
+    captured: list[tuple[str, str | None]] = []
+
+    async def fake_create_dataset(session, **kwargs):
+        created_calls.append(kwargs)
+        return SimpleNamespace(id="dset-should-not-exist", name=kwargs["name"])
+
+    async def fake_extract(session, lake_id, source_version, *, inject_lineage=True):
+        return [{"v": source_version}]
+
+    async def fake_add_table_member(
+        session, dataset_id, records, *, table_name, semantic_type=None, **kw
+    ):
+        captured.append((dataset_id, semantic_type))
+        return (None, None)
+
+    monkeypatch.setattr(landing, "create_dataset", fake_create_dataset)
+    monkeypatch.setattr(lake_extract, "extract_from_lake_snapshot", fake_extract)
+    monkeypatch.setattr(landing, "add_table_member", fake_add_table_member)
+
+    dataset = await lake_extract.extract_to_new_dataset(
+        db_session,
+        lake_id=lake.id,
+        snapshot_ids=[snap.id],
+        dataset_id=existing.id,
+    )
+
+    assert dataset.id == existing.id
+    assert created_calls == []  # 未新建数据集
+    assert captured == [(existing.id, "multimodal")]  # 复用既有 semantic_type
+
+
+@pytest.mark.asyncio
+async def test_extract_to_dataset_rejects_missing_dataset_id(db_session):
+    """dataset_id 指向不存在的数据集 → 拒绝。"""
+    from app.services.external_store import ExternalStoreError
+    from app.services.lake_extract import extract_to_new_dataset
+
+    lake = await create_data_lake(db_session, name="追加目标缺失湖")
+    snap = DataLakeSnapshot(
+        id="snap-append02",
+        lake_id=lake.id,
+        source_version="source_v20260701_02_csv",
+        storage_uri="s3://adp-data-lake/data-lake/x/source_v20260701_02_csv/data.csv",
+        storage_format="csv",
+        data_category="database",
+        upload_channel="local",
+    )
+    db_session.add(snap)
+    await db_session.commit()
+
+    with pytest.raises(ExternalStoreError, match="目标数据集不存在"):
+        await extract_to_new_dataset(
+            db_session,
+            lake_id=lake.id,
+            snapshot_ids=[snap.id],
+            dataset_id="dset-does-not-exist",
+        )
+
+
+@pytest.mark.asyncio
 async def test_extract_from_lake_snapshot_accepts_doc_formats(db_session, monkeypatch):
     """pdf/doc/docx/ppt/pptx/html 快照走原格式解析分支,不再被判"不支持的存储格式"。
 
