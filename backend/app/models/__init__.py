@@ -20,6 +20,7 @@ from app.models.llm_usage import LlmUsage
 from app.models.menu import Menu
 from app.models.notification import Notification
 from app.models.operator import Operator
+from app.models.pipeline import Pipeline
 from app.models.rbac_links import RoleDept, RoleMenu, UserRole
 from app.models.review_finding import ReviewFinding
 from app.models.review_rule import ReviewRule
@@ -49,6 +50,7 @@ __all__ = [
     "Menu",
     "Notification",
     "Operator",
+    "Pipeline",
     "ReviewFinding",
     "ReviewRule",
     "Role",

@@ -31,6 +31,8 @@ class JobCreate(CamelModel):
     name: str
     type: str = "process"
     dataset_version_id: str
+    # 治理工场:经流水线一键执行时回指来源(pipelines.id);手工建任务留空
+    pipeline_id: str | None = None
 
     # 新版：成员级独立配置（优先）
     member_configs: list[MemberOperatorConfig] | None = None
@@ -84,6 +86,8 @@ class JobRead(CamelModel):
     dj_version: str | None = None
     image_tag: str | None = None
     executor_type: str | None = None
+    # 治理工场:经流水线一键执行时回指来源(pipelines.id);手工建任务为空
+    pipeline_id: str | None = None
     # 产物概要：{datasetId, datasetName, versionId, versionNo, rows}
     output: dict[str, Any] | None = None
     # 输入版本概要(经 job_inputs 反查)：{datasetId, datasetName, versionId, versionNo}

@@ -121,6 +121,7 @@ async def _start_distillation(
         created_by="admin",
         # 完整存 body(goal + output_dataset_id + 算子链),供 rerun 整参重跑
         spec=body.model_dump(mode="json"),
+        pipeline_id=body.pipeline_id,
     )
     session.add(job)
     await session.commit()

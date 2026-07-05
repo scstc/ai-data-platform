@@ -78,3 +78,5 @@ class Job(Base):
     target_members: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     # 成员级独立算子配置：[{memberName, operators, textKeys?}]
     member_configs: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    # 治理工场:经流水线(pipelines.id)一键执行时回指来源;手工建任务为空
+    pipeline_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)

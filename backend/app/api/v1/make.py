@@ -103,6 +103,7 @@ async def _start_make(
         progress=0,
         created_by="admin",
         spec=body.model_dump(mode="json"),
+        pipeline_id=body.pipeline_id,
     )
     session.add(job)
     await session.commit()

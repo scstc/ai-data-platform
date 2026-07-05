@@ -390,6 +390,7 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
         created_by="admin",
         # 存原始执行规格(算子 + 输出去向 + 输入版本),供 rerun 原样重跑
         spec=body.model_dump(mode="json"),
+        pipeline_id=body.pipeline_id,
     )
     session.add(job)
     await session.commit()

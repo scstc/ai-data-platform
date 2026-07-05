@@ -32,6 +32,8 @@ class MakeJobCreate(CamelModel):
 
     name: str
     dataset_version_id: str
+    # 治理工场:经流水线一键执行时回指来源(pipelines.id);手工建任务留空
+    pipeline_id: str | None = None
 
     # 新版：成员级独立配置（优先）
     member_configs: list[MemberOperatorConfig] | None = None
