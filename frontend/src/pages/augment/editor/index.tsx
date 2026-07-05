@@ -10,6 +10,7 @@ const DEFAULT_GOAL: DataPlatform.AugmentGoal = {
 
 const AugmentEditor: React.FC = () => (
   <LlmScenarioEditor<DataPlatform.AugmentGoal>
+    scenario="augmentation"
     bucket="augment"
     pageTitle="新建数据增强"
     submitLabel="创建任务"

@@ -1,11 +1,18 @@
 """预置流水线模板:治理工场开箱即用的算子编排,不入库(纯代码常量)。
 
-仅覆盖 scenario='clean'(规则类 mapper,参数确定、可预置)。蒸馏/合成/增强三个
-LLM 场景本期不做预置——蒸馏的 goal.score_field 依赖具体打分字段、合成/增强的
-goal.note 依赖业务目标,预置一个通用默认值反而误导用户,故留空,由用户在
+覆盖 scenario='clean'(规则类 mapper,参数确定)与 scenario='augmentation'
+(LLM 改写 / 规则增强,goal 恒 {'mode':'augment'},无业务相关字段依赖故可预置)。
+蒸馏、合成两个 LLM 场景仍不做预置——蒸馏的 goal.score_field 依赖具体打分字段、
+合成的 goal 依赖 merge 布局,预置一个通用默认值反而误导用户,故留空,由用户在
 工场里另存为自定义流水线。
 
-模板算子逐个核对自 ``operator_catalog.CLEANSING_OPS``(见该模块常量注释),
+增强预置的 LLM 算子(calibrate_qa / optimize_qa / optimize_response)模型名与端点由
+engine 按平台激活的 LLM 配置自动注入(见 engine._subprocess_env / api_model 覆盖),
+故预置只需固定「哪些算子 + 非模型类参数」;optimize_* 默认 is_hf_model=True(走本地
+HF 权重),预置显式置 False 改走平台 API。规则增强(nlpcda_zh)不用 LLM,但增强场景
+统一要求配置 LLM Key 才放行(见 augment._augment_operator_block),与其余增强算子同口径。
+
+模板算子逐个核对自 ``operator_catalog`` 的 CLEANSING_OPS / AUGMENT_OPS(见该模块注释),
 不在此白名单内的能力项一律跳过、不臆造算子名:
 - 移除不可见字符 / 去表情:CLEANSING_OPS 内无专用算子,复用
   ``remove_specific_chars_mapper``(指定字符删除)传入不同 ``chars_to_remove``。
@@ -74,6 +81,74 @@ PRESET_PIPELINES: list[dict[str, Any]] = [
                 {"name": "document_minhash_deduplicator", "params": None},
             ],
             "goal": None,
+            "text_keys": None,
+        },
+        "is_preset": True,
+        "created_by": "system",
+        "created_at": _PRESET_CREATED_AT,
+        "updated_at": _PRESET_CREATED_AT,
+    },
+    {
+        "id": "preset-augment-optimize-qa",
+        "name": "问答对优化",
+        "description": (
+            "LLM 同时优化问答对的问题与答案表述,提升清晰度、完整度与信息量"
+            "(1→1 改写,不改变语义)。"
+        ),
+        "scenario": "augmentation",
+        "spec": {
+            # is_hf_model=False:改走平台 API(engine 注入 api_or_hf_model=平台模型名),
+            # 否则默认走本地 HF 权重(Qwen)会触发模型下载。
+            "operators": [
+                {"name": "optimize_qa_mapper", "params": {"is_hf_model": False}},
+            ],
+            "goal": {"mode": "augment"},
+            "text_keys": None,
+        },
+        "is_preset": True,
+        "created_by": "system",
+        "created_at": _PRESET_CREATED_AT,
+        "updated_at": _PRESET_CREATED_AT,
+    },
+    {
+        "id": "preset-augment-calibrate-qa",
+        "name": "问答事实校准",
+        "description": (
+            "依据上下文对问答对做事实校准,纠正幻觉与过时表述,提升答案可信度。"
+        ),
+        "scenario": "augmentation",
+        "spec": {
+            # calibrate_* 系 API 型算子(api_model),端点/模型由 engine 按平台 LLM 注入。
+            "operators": [
+                {"name": "calibrate_qa_mapper", "params": None},
+            ],
+            "goal": {"mode": "augment"},
+            "text_keys": None,
+        },
+        "is_preset": True,
+        "created_by": "system",
+        "created_at": _PRESET_CREATED_AT,
+        "updated_at": _PRESET_CREATED_AT,
+    },
+    {
+        "id": "preset-augment-nlpcda-zh",
+        "name": "中文规则增强",
+        "description": (
+            "近义词替换 + 随机字序扰动的规则式中文增强,无需模型即可按样本扩增变体。"
+        ),
+        "scenario": "augmentation",
+        "spec": {
+            # 规则增强(不调 LLM):布尔开关默认全 False(不增强),预置显式开两种扰动。
+            "operators": [
+                {
+                    "name": "nlpcda_zh_mapper",
+                    "params": {
+                        "replace_similar_word": True,
+                        "swap_random_char": True,
+                    },
+                },
+            ],
+            "goal": {"mode": "augment"},
             "text_keys": None,
         },
         "is_preset": True,

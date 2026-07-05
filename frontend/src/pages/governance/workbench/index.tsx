@@ -28,7 +28,7 @@ import ExecuteModal from './ExecuteModal';
 
 const { Paragraph } = Typography;
 
-type ScenarioKey = 'clean' | 'distillation';
+type ScenarioKey = 'clean' | 'distillation' | 'augmentation';
 
 type ScenarioMeta = {
   key: ScenarioKey;
@@ -39,8 +39,8 @@ type ScenarioMeta = {
 };
 
 /** 场景元信息(与后端 Job.type / Pipeline.scenario 对齐)。
- *  数据合成(改为多文件按行拼接,非算子流水线形态)与数据增强已退出工场,
- *  走侧边栏独立菜单 /governance/make、/governance/augment。 */
+ *  数据合成(改为多文件按行拼接,非算子流水线形态)仍走侧边栏独立菜单
+ *  /governance/make;数据增强(LLM 改写,仍是算子流水线形态)已切回工场。 */
 const SCENARIOS: ScenarioMeta[] = [
   {
     key: 'clean',
@@ -55,6 +55,13 @@ const SCENARIOS: ScenarioMeta[] = [
     jobsPath: '/governance/distillation/jobs',
     editorPath: '/governance/distillation/editor',
     taskType: '数据蒸馏',
+  },
+  {
+    key: 'augmentation',
+    label: '数据增强',
+    jobsPath: '/governance/augment/jobs',
+    editorPath: '/governance/augment/editor',
+    taskType: '数据增强',
   },
 ];
 
@@ -222,7 +229,9 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
               description={
                 activeMeta
                   ? `暂无「${activeMeta.label}」流水线模板${
-                      activeMeta.key === 'clean' ? '' : '(LLM 场景无预置属预期)'
+                      activeMeta.key === 'distillation'
+                        ? '(LLM 场景无预置属预期)'
+                        : ''
                     }，新建编排后可保存为流水线复用`
                   : '暂无流水线模板'
               }
