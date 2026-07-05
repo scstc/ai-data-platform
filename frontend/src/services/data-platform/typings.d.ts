@@ -729,6 +729,37 @@ declare namespace DataPlatform {
     warnings: string[];
     raw?: Record<string, any>;
   };
+  /** 训练集生成(trainset)目标 */
+  type TrainsetGoal = {
+    mode?: 'synthesize';
+    targetPerSample?: number;
+    targetTotal?: number;
+    note?: string;
+  };
+  /** 新建训练集生成任务入参 */
+  type TrainsetJobCreate = {
+    name: string;
+    datasetVersionId: string;
+    operators: { name: string; params?: Record<string, any> }[];
+    goal: TrainsetGoal;
+    outputDatasetId?: string;
+    /** 文本字段(DJ text_keys):留空后端自动探测主文本字段 */
+    textKeys?: string[];
+  };
+  /** 训练集生成报告 */
+  type TrainsetReport = {
+    jobId: string;
+    inputVersionId: string;
+    outputVersionId?: string;
+    mode: string;
+    inputCount: number;
+    outputCount?: number;
+    expansionRatio?: number;
+    elapsedSeconds?: number;
+    operatorChain: string[];
+    warnings: string[];
+    raw?: Record<string, any>;
+  };
 
   /** 逐条质量得分行 */
   type VersionStatsRow = {

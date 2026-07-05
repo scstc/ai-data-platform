@@ -1515,6 +1515,112 @@ export async function getAugmentReport(
   );
 }
 
+// ---------------------------------------------------------------------------
+// 训练集生成(trainset):LLM 从源数据造 QA/COT/偏好训练样本(Job.type='trainset')
+// ---------------------------------------------------------------------------
+/** 新建训练集生成任务 POST /api/v1/trainset/jobs */
+export async function createTrainsetJob(
+  body: DataPlatform.TrainsetJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    '/api/v1/trainset/jobs',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 分页列出训练集生成任务 GET /api/v1/trainset/jobs */
+export async function listTrainsetJobs(
+  params: { current?: number; pageSize?: number; datasetId?: string } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.Job[];
+    total: number;
+    success: boolean;
+  }>('/api/v1/trainset/jobs', {
+    method: 'GET',
+    params: { current: 1, pageSize: 10, ...params },
+    ...(options || {}),
+  });
+}
+
+/** 训练集生成任务详情 GET /api/v1/trainset/jobs/{id} */
+export async function getTrainsetJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/trainset/jobs/${jobId}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 重跑训练集生成任务 POST /api/v1/trainset/jobs/{id}/rerun */
+export async function rerunTrainsetJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/trainset/jobs/${jobId}/rerun`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 停止训练集生成任务 POST /api/v1/trainset/jobs/{id}/stop */
+export async function stopTrainsetJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/trainset/jobs/${jobId}/stop`,
+    { method: 'POST', ...(options || {}) },
+  );
+}
+
+/** 删除训练集生成任务 DELETE /api/v1/trainset/jobs/{id} */
+export async function deleteTrainsetJob(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ success: boolean }>(
+    `/api/v1/trainset/jobs/${jobId}`,
+    { method: 'DELETE', ...(options || {}) },
+  );
+}
+
+/** 批量删除训练集生成任务 POST /api/v1/trainset/jobs/batch-delete */
+export async function batchDeleteTrainsetJobs(
+  ids: string[],
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { deleted: number }; success: boolean }>(
+    '/api/v1/trainset/jobs/batch-delete',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: { ids },
+      ...(options || {}),
+    },
+  );
+}
+
+/** 读取训练集生成报告 GET /api/v1/trainset/jobs/{id}/report */
+export async function getTrainsetReport(
+  jobId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.TrainsetReport; success: boolean }>(
+    `/api/v1/trainset/jobs/${jobId}/report`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
 /** 逐条质量得分 GET /api/v1/dataset-versions/{versionId}/stats
  *  member:多文件版本需指定成员(表/文件)。 */
 export async function getVersionStats(

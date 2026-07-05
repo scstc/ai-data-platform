@@ -80,6 +80,8 @@ export default {
   'menu.governance.augment': '数据增强',
   'menu.governance.augment-jobs': '历史任务',
   'menu.governance.augment-editor': '新建数据增强',
+  'menu.governance.trainset': '训练集生成',
+  'menu.governance.trainset-editor': '新建训练集生成',
   'menu.governance.annotation': '数据标注',
   'menu.assessment': '数据评估',
   'menu.assessment.quality': '质量评估',

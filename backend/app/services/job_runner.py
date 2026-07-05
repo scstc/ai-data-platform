@@ -43,6 +43,7 @@ from app.services.judge_runner import JudgeError, run_judge
 from app.services.make import run_make_job
 from app.services.quality import QualityError, run_quality_job
 from app.services.review_runner import ReviewError, run_review
+from app.services.trainset import run_trainset_job
 
 # 后台任务引用(防被 GC 回收)
 _tasks: set[asyncio.Task] = set()
@@ -112,6 +113,10 @@ def body_from_spec(job: Job) -> Any:
         from app.schemas.augment import AugmentJobCreate
 
         return AugmentJobCreate.model_validate(spec)
+    if job_type == "trainset":
+        from app.schemas.trainset import TrainsetJobCreate
+
+        return TrainsetJobCreate.model_validate(spec)
     if job_type == "construct":
         from app.schemas.construct import ConstructJobCreate
 
@@ -284,6 +289,18 @@ async def _run_job(job_id: str) -> None:
                     )
                 elif job.type == "augmentation":
                     _v, yaml_text, log_path, _report = await run_augment_job(
+                        session,
+                        job_id=job_id,
+                        input_version=input_version,
+                        operators=operators_arg,
+                        member_configs=member_configs_arg,
+                        target_members=target_members_arg,
+                        goal=body.goal,
+                        output_dataset_id=body.output_dataset_id,
+                        text_keys=getattr(body, "text_keys", None),
+                    )
+                elif job.type == "trainset":
+                    _v, yaml_text, log_path, _report = await run_trainset_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,

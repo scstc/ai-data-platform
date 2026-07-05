@@ -55,15 +55,16 @@ const OperatorItem: React.FC<{
   );
 };
 
-/** 左栏:检索/场景,点 + 添加算子到流水线。展示全量算子目录,不按业务桶或
+/** 左栏:检索/场景,点 + 添加算子到流水线。默认展示全量算子目录,不按业务桶或
  *  可运行状态过滤(各任务均可自由选用任意算子)。
- *  传 ``bucket``(cleansing/distillation/make/augment)时隐藏自由「场景」下拉
- *  (加工页不传 bucket → 展示全部算子)。 */
+ *  传 ``bucket``(cleansing/distillation/make/augment/trainset)时隐藏自由「场景」下拉;
+ *  ``restrictToBucket`` 为真时进一步只拉该 bucket 的算子(训练集生成:只列生成类算子)。 */
 const OperatorLibrary: React.FC<{
   onAdd: (name: string) => void;
   category?: string;
   bucket?: string;
-}> = ({ onAdd, category, bucket }) => {
+  restrictToBucket?: boolean;
+}> = ({ onAdd, category, bucket, restrictToBucket }) => {
   const [scenarios, setScenarios] = useState<Record<string, number>>({});
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
@@ -80,12 +81,13 @@ const OperatorLibrary: React.FC<{
       category,
       scenario,
       keyword,
+      bucket: restrictToBucket ? bucket : undefined,
       current: 1,
       pageSize: 200,
     })
       .then((r) => setData(r.data))
       .finally(() => setLoading(false));
-  }, [category, scenario, keyword]);
+  }, [category, scenario, keyword, restrictToBucket, bucket]);
 
   const scenarioOptions = useMemo(
     () =>

@@ -310,6 +310,17 @@ export default [
         hideInMenu: true,
       },
       {
+        path: '/governance/trainset',
+        name: 'trainset',
+        component: './trainset',
+      },
+      {
+        path: '/governance/trainset/editor',
+        name: 'trainset-editor',
+        component: './trainset/editor',
+        hideInMenu: true,
+      },
+      {
         path: '/governance/annotation',
         name: 'annotation',
         component: './annotation',

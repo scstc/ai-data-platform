@@ -77,6 +77,8 @@ export default {
   'menu.governance.augment': 'Data Augmentation',
   'menu.governance.augment-jobs': 'Job History',
   'menu.governance.augment-editor': 'New Data Augmentation',
+  'menu.governance.trainset': 'Trainset Generation',
+  'menu.governance.trainset-editor': 'New Trainset Generation',
   'menu.governance.annotation': 'Data Annotation',
   'menu.assessment': 'Data Assessment',
   'menu.assessment.quality': 'Quality Assessment',

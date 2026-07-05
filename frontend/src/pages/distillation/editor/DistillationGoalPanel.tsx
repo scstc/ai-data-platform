@@ -1,33 +1,13 @@
 // 蒸馏目标面板:任务级参数(保留方式 / 排序字段 / 兜底策略),不写到算子链。
-// 选填:输出数据集(默认沿用输入版本所属数据集)。
-import {
-  Form,
-  Input,
-  InputNumber,
-  Radio,
-  Select,
-  Space,
-  Switch,
-  Typography,
-} from 'antd';
+// 产物固定为输入数据集的新版本(不提供输出数据集选择,与生成/增强一致)。
+import { Form, Input, InputNumber, Radio, Switch, Typography } from 'antd';
 
 interface Props {
   value: DataPlatform.DistillationGoal;
   onChange: (v: DataPlatform.DistillationGoal) => void;
-  datasets: DataPlatform.Dataset[];
-  defaultDatasetId?: string;
-  outputDatasetId?: string;
-  onOutputDatasetChange?: (v: string | undefined) => void;
 }
 
-const DistillationGoalPanel: React.FC<Props> = ({
-  value,
-  onChange,
-  datasets,
-  defaultDatasetId,
-  outputDatasetId,
-  onOutputDatasetChange,
-}) => {
+const DistillationGoalPanel: React.FC<Props> = ({ value, onChange }) => {
   const keepMode: 'ratio' | 'num' = value.keepNum != null ? 'num' : 'ratio';
   const setMode = (m: 'ratio' | 'num') => {
     if (m === 'ratio') onChange({ ...value, keepNum: undefined });
@@ -100,17 +80,6 @@ const DistillationGoalPanel: React.FC<Props> = ({
           <Switch
             checked={value.enableDedup ?? true}
             onChange={(c) => onChange({ ...value, enableDedup: c })}
-          />
-        </Form.Item>
-
-        <Form.Item label="输出数据集">
-          <Select
-            allowClear
-            placeholder={defaultDatasetId ? '默认沿用输入数据集' : '请选择'}
-            value={outputDatasetId ?? defaultDatasetId}
-            onChange={(v) => onOutputDatasetChange?.(v)}
-            style={{ width: 200 }}
-            options={datasets.map((d) => ({ label: d.name, value: d.id }))}
           />
         </Form.Item>
       </Form>

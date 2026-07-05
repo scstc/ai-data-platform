@@ -59,6 +59,9 @@ export type LlmScenarioEditorProps<TGoal extends object> = {
   scenario?: 'distillation' | 'synthesis' | 'augmentation';
   /** OperatorLibrary 业务桶(锁定算子库子集);历史命名与 scenario 不一致 */
   bucket: string;
+  /** 为真时算子库只展示该 bucket 的算子(训练集生成:只列生成类算子);
+   *  默认 false 沿用各场景「展示全量算子」的既有行为。 */
+  restrictToBucket?: boolean;
   pageTitle: string;
   submitLabel: string;
   /** 中栏「已选算子」卡片标题,如 "已选蒸馏算子" */
@@ -106,6 +109,7 @@ function LlmScenarioEditor<TGoal extends object>({
   validateSteps,
   llmAlert,
   footerNote,
+  restrictToBucket,
 }: LlmScenarioEditorProps<TGoal>) {
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
@@ -413,7 +417,13 @@ function LlmScenarioEditor<TGoal extends object>({
       >
         <CollapsiblePanes
           leftTitle="算子库"
-          left={<OperatorLibrary onAdd={appendOperator} bucket={bucket} />}
+          left={
+            <OperatorLibrary
+              onAdd={appendOperator}
+              bucket={bucket}
+              restrictToBucket={restrictToBucket}
+            />
+          }
           centerTitle={selectedOperatorsTitle}
           center={
             <PipelineCanvas

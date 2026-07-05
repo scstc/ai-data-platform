@@ -279,12 +279,26 @@ AUGMENT_OPS: frozenset[str] = frozenset(
 )
 
 
+TRAINSET_OPS: frozenset[str] = frozenset(
+    {
+        "generate_qa_from_text_mapper",  # 1→N,无结构文本→QA 对
+        "generate_qa_from_examples_mapper",  # Self-Instruct:从种子示例生成新 QA
+        "pair_preference_mapper",  # 构造 DPO 偏好对
+        "generate_cot_mapper",  # API 型 CoT 推理链生成(平台自定义算子)
+    }
+)
+
+
 def is_make_operator(name: str) -> bool:
     return name in MAKE_OPS
 
 
 def is_augment_operator(name: str) -> bool:
     return name in AUGMENT_OPS
+
+
+def is_trainset_operator(name: str) -> bool:
+    return name in TRAINSET_OPS
 
 
 # 业务桶 → 白名单集合:供算子库按任务类型过滤(清洗/蒸馏/合成/增强各自只展示对应算子)。
@@ -294,6 +308,7 @@ _BUCKET_SETS: dict[str, frozenset[str]] = {
     "distillation": DISTILLATION_OPS,
     "make": MAKE_OPS,
     "augment": AUGMENT_OPS,
+    "trainset": TRAINSET_OPS,
 }
 
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
