@@ -6,12 +6,10 @@ import { history, useLocation } from '@umijs/max';
 import {
   Button,
   Card,
-  Col,
   Form,
   Input,
   Modal,
   message,
-  Row,
   Select,
   Space,
   Tooltip,
@@ -19,6 +17,7 @@ import {
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
+import CollapsiblePanes from '@/pages/processing/editor/CollapsiblePanes';
 import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
 import PipelineCanvas from '@/pages/processing/editor/PipelineCanvas';
 import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
@@ -123,6 +122,9 @@ function LlmScenarioEditor<TGoal extends object>({
   const [activeIdx, setActiveIdx] = useState(0);
   // 画布是否存在游离(未接入主链)算子节点,提交/保存前据此阻断
   const [hasOrphanSteps, setHasOrphanSteps] = useState(false);
+  // 左「算子库」/右「参数」折叠状态
+  const [libCollapsed, setLibCollapsed] = useState(false);
+  const [paramsCollapsed, setParamsCollapsed] = useState(false);
   const [goal, setGoal] = useState<TGoal>(defaultGoal);
   const [outputDatasetId, setOutputDatasetId] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -403,52 +405,39 @@ function LlmScenarioEditor<TGoal extends object>({
         onAppend={appendOperator}
         onReorder={reorder}
       >
-        <Row gutter={16}>
-          <Col span={5}>
-            <Card
-              title="算子库"
-              size="small"
-              styles={{ body: { height: 440, padding: 12 } }}
-            >
-              <OperatorLibrary onAdd={appendOperator} bucket={bucket} />
-            </Card>
-          </Col>
-          <Col span={13}>
-            <Card
-              title={selectedOperatorsTitle}
-              size="small"
-              styles={{ body: { height: 440, padding: 0 } }}
-            >
-              <PipelineCanvas
-                steps={steps}
-                labelOf={labelOf}
-                categoryOf={categoryOf}
-                activeIdx={activeIdx}
-                onSelect={setActiveIdx}
-                onRemove={(i) => {
-                  remove(i);
-                  setActiveIdx(0);
-                }}
-                onOrderChange={onOrderChange}
-                inputLabel={`${selectedDatasetName ?? '数据集'}${selectedVersionLabel ? ` · ${selectedVersionLabel}` : ''}`}
-                outputLabel="新版本"
-              />
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card
-              title="参数"
-              size="small"
-              styles={{ body: { height: 440, overflow: 'auto' } }}
-            >
-              <StepParamsForm
-                op={activeOp}
-                params={activeStep?.params ?? {}}
-                onChange={(p) => updateParams(activeIdx, p)}
-              />
-            </Card>
-          </Col>
-        </Row>
+        <CollapsiblePanes
+          leftTitle="算子库"
+          left={<OperatorLibrary onAdd={appendOperator} bucket={bucket} />}
+          centerTitle={selectedOperatorsTitle}
+          center={
+            <PipelineCanvas
+              steps={steps}
+              labelOf={labelOf}
+              categoryOf={categoryOf}
+              activeIdx={activeIdx}
+              onSelect={setActiveIdx}
+              onRemove={(i) => {
+                remove(i);
+                setActiveIdx(0);
+              }}
+              onOrderChange={onOrderChange}
+              inputLabel={`${selectedDatasetName ?? '数据集'}${selectedVersionLabel ? ` · ${selectedVersionLabel}` : ''}`}
+              outputLabel="新版本"
+            />
+          }
+          rightTitle="参数"
+          right={
+            <StepParamsForm
+              op={activeOp}
+              params={activeStep?.params ?? {}}
+              onChange={(p) => updateParams(activeIdx, p)}
+            />
+          }
+          leftCollapsed={libCollapsed}
+          rightCollapsed={paramsCollapsed}
+          onLeftCollapsedChange={setLibCollapsed}
+          onRightCollapsedChange={setParamsCollapsed}
+        />
       </PipelineDndArea>
 
       <Card size="small" style={{ marginTop: 16 }}>

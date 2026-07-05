@@ -4,13 +4,11 @@ import {
   Badge,
   Button,
   Card,
-  Col,
   Empty,
   Form,
   Input,
   Modal,
   message,
-  Row,
   Select,
   Space,
   Table,
@@ -30,6 +28,7 @@ import {
   previewDatasetVersion,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
+import CollapsiblePanes from './CollapsiblePanes';
 import OperatorLibrary from './OperatorLibrary';
 import PipelineCanvas from './PipelineCanvas';
 import PipelineDndArea from './PipelineDndArea';
@@ -88,6 +87,9 @@ const Editor: React.FC<{
   const [memberHasOrphan, setMemberHasOrphan] = useState<
     Record<string, boolean>
   >({});
+  // 左「算子库」/右「参数」折叠状态:放编辑器顶层,跨成员 Tab 共享
+  const [libCollapsed, setLibCollapsed] = useState(false);
+  const [paramsCollapsed, setParamsCollapsed] = useState(false);
 
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
@@ -447,90 +449,79 @@ const Editor: React.FC<{
                         setMemberOperators(m.tableName, next);
                       }}
                     >
-                      <Row gutter={16}>
-                        <Col span={5}>
-                          <Card
-                            title="算子库"
-                            size="small"
-                            styles={{ body: { height: 440, padding: 12 } }}
-                          >
-                            <OperatorLibrary
-                              onAdd={appendOperator}
-                              bucket={bucket}
-                            />
-                          </Card>
-                        </Col>
-                        <Col span={13}>
-                          <Card
-                            title="算子流水线"
-                            size="small"
-                            styles={{ body: { height: 440, padding: 0 } }}
-                          >
-                            <PipelineCanvas
-                              steps={memberSteps}
-                              labelOf={labelOf}
-                              categoryOf={categoryOf}
-                              activeIdx={idx}
-                              onSelect={(i) =>
-                                setMemberActiveIdx((prev) => ({
-                                  ...prev,
-                                  [m.tableName]: i,
-                                }))
-                              }
-                              onRemove={(i) => {
-                                setMemberOperators(
-                                  m.tableName,
-                                  cfg.operators.filter((_, j) => j !== i),
-                                );
-                                setMemberActiveIdx((prev) => ({
-                                  ...prev,
-                                  [m.tableName]: 0,
-                                }));
-                              }}
-                              onOrderChange={(perm) => {
-                                if (perm.length !== cfg.operators.length) {
-                                  setMemberHasOrphan((prev) => ({
-                                    ...prev,
-                                    [m.tableName]: true,
-                                  }));
-                                  return;
-                                }
+                      <CollapsiblePanes
+                        leftTitle="算子库"
+                        left={
+                          <OperatorLibrary
+                            onAdd={appendOperator}
+                            bucket={bucket}
+                          />
+                        }
+                        centerTitle="算子流水线"
+                        center={
+                          <PipelineCanvas
+                            steps={memberSteps}
+                            labelOf={labelOf}
+                            categoryOf={categoryOf}
+                            activeIdx={idx}
+                            onSelect={(i) =>
+                              setMemberActiveIdx((prev) => ({
+                                ...prev,
+                                [m.tableName]: i,
+                              }))
+                            }
+                            onRemove={(i) => {
+                              setMemberOperators(
+                                m.tableName,
+                                cfg.operators.filter((_, j) => j !== i),
+                              );
+                              setMemberActiveIdx((prev) => ({
+                                ...prev,
+                                [m.tableName]: 0,
+                              }));
+                            }}
+                            onOrderChange={(perm) => {
+                              if (perm.length !== cfg.operators.length) {
                                 setMemberHasOrphan((prev) => ({
                                   ...prev,
-                                  [m.tableName]: false,
+                                  [m.tableName]: true,
                                 }));
-                                if (perm.every((v, i) => v === i)) return;
-                                setMemberOperators(
-                                  m.tableName,
-                                  perm.map((i) => cfg.operators[i]),
-                                );
-                              }}
-                              inputLabel={`${selectedVersionLabel ?? '版本'} · ${m.tableName}`}
-                              outputLabel="新版本"
-                            />
-                          </Card>
-                        </Col>
-                        <Col span={6}>
-                          <Card
-                            title="参数"
-                            size="small"
-                            styles={{ body: { height: 440, overflow: 'auto' } }}
-                          >
-                            <StepParamsForm
-                              op={activeOpOfMember}
-                              params={activeStepOfMember?.params ?? {}}
-                              onChange={(p) =>
-                                setMemberOperators(
-                                  m.tableName,
-                                  cfg.operators.map((op, i) =>
-                                    i === idx ? { ...op, params: p } : op,
-                                  ),
-                                )
+                                return;
                               }
-                            />
-                          </Card>
-                        </Col>
-                      </Row>
+                              setMemberHasOrphan((prev) => ({
+                                ...prev,
+                                [m.tableName]: false,
+                              }));
+                              if (perm.every((v, i) => v === i)) return;
+                              setMemberOperators(
+                                m.tableName,
+                                perm.map((i) => cfg.operators[i]),
+                              );
+                            }}
+                            inputLabel={`${selectedVersionLabel ?? '版本'} · ${m.tableName}`}
+                            outputLabel="新版本"
+                          />
+                        }
+                        rightTitle="参数"
+                        right={
+                          <StepParamsForm
+                            op={activeOpOfMember}
+                            params={activeStepOfMember?.params ?? {}}
+                            onChange={(p) =>
+                              setMemberOperators(
+                                m.tableName,
+                                cfg.operators.map((op, i) =>
+                                  i === idx ? { ...op, params: p } : op,
+                                ),
+                              )
+                            }
+                          />
+                        }
+                        leftCollapsed={libCollapsed}
+                        rightCollapsed={paramsCollapsed}
+                        onLeftCollapsedChange={setLibCollapsed}
+                        onRightCollapsedChange={setParamsCollapsed}
+                      />
                     </PipelineDndArea>
 
                     <Card title="YAML 预览" size="small">
