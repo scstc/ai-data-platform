@@ -2,8 +2,8 @@
 
 走真实审核引擎(useLlm=false → 规则 + 内置词表 + PII,避免依赖外部 LLM):
 - POST /content-safety/jobs 建 review job,同步跑完 → success。
-- 报告有命中(flaggedRows/byCategory/bySource),产出打标版本(origin=review,
-  每行带 safety 字段)。
+- 报告有命中(flaggedRows/byCategory/bySource),命中行删除产出净化版本
+  (origin=review;被删行另写 removed 存档,净化版仅保留干净行)。
 - GET report / findings(分页 + 过滤),GET jobs type=review 列表。
 - 版本不存在 → 404。
 
@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+from app.services import job_runner
 
 DATASET_ID = "dset-cs1"
 VERSION_ID = "dsv-cs1"
@@ -119,18 +120,18 @@ async def test_review_job_full_flow(
     assert body["success"] is True
     data = body["data"]
     assert data["type"] == "review"
-    assert data["state"] == "success"
     job_id = data["id"]
-    # 打标版本作为产物挂在 output 上
-    assert data["output"] is not None
-    tagged_version_id = data["output"]["versionId"]
-    assert data["input"]["versionId"] == VERSION_ID
 
-    # 报告:命中行数与各维度计数
+    # 审核异步执行(spawn 后立即返回 pending):等后台任务落终态再断言产物
+    await job_runner.drain()
+
+    # 报告:状态终态 + 产物版本 + 命中行数与各维度计数
     resp = await client.get(f"/api/v1/content-safety/jobs/{job_id}/report")
     assert resp.status_code == 200
     report = resp.json()["data"]
-    assert report["taggedVersionId"] == tagged_version_id
+    assert report["state"] == "success", report.get("error")
+    tagged_version_id = report["taggedVersionId"]
+    assert tagged_version_id is not None
     rr = report["reviewReport"]
     assert rr["totalRows"] == 4
     assert rr["scannedRows"] == 4
@@ -141,6 +142,10 @@ async def test_review_job_full_flow(
     assert rr["bySource"].get("flagged_words") == 1
     assert rr["bySource"].get("pii") == 1
     assert rr["bySource"].get("keyword") == 1
+    # 命中处置固定为删除:3 命中行删除,另写 removed 存档
+    assert rr["action"] == "delete"
+    assert rr["deletedRows"] == 3
+    assert rr["removedArchives"]  # 非空
 
     # findings 分页:全部命中按 row_index 升序
     resp = await client.get(
@@ -163,27 +168,38 @@ async def test_review_job_full_flow(
     assert fbody["data"][0]["category"] == "pii"
     assert fbody["data"][0]["detail"] == "phone"
 
-    # 打标版本落库且 origin=review;每行带 safety 字段
+    # 净化版本落库且 origin=review;命中行已删除,仅保留干净行
     async with session_factory() as session:
         v = await session.get(DatasetVersion, tagged_version_id)
         assert v is not None
         assert v.origin == "review"
         assert v.produced_by_job_id == job_id
         assert v.version_no == 2
-        # 自动安全判据:3 处命中 + 全量扫描 → failed(auto)
-        assert v.scan_verdict == "failed"
+        # 全量扫描 + 命中已剔净 → 产出净化版自动判 passed(可发布)
+        assert v.scan_verdict == "passed"
         assert v.verdict_source == "auto"
         assert v.publish_status == "draft"
-        tagged_lines = [
+        kept_lines = [
             json.loads(ln)
             for ln in Path(v.storage_uri).read_text(encoding="utf-8").splitlines()
             if ln.strip()
         ]
-    assert len(tagged_lines) == 4
-    assert all("safety" in r for r in tagged_lines)
-    assert tagged_lines[0]["safety"]["flagged"] is True
-    assert "gambling" in tagged_lines[0]["safety"]["categories"]
-    assert tagged_lines[2]["safety"]["flagged"] is False
+        # 被审版本自身回写 failed(3 命中,供发布门直接拦截)
+        src = await session.get(DatasetVersion, VERSION_ID)
+        assert src.scan_verdict == "failed"
+    # 净化版仅剩 1 条干净行(其余 3 条命中被删),仍带 safety 字段
+    assert len(kept_lines) == 1
+    assert all("safety" in r for r in kept_lines)
+    assert kept_lines[0]["safety"]["flagged"] is False
+    # 被删行存档:3 条,均为命中行
+    removed_path = Path(v.storage_uri).with_name("data.removed.jsonl")
+    removed_lines = [
+        json.loads(ln)
+        for ln in removed_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len(removed_lines) == 3
+    assert all(r["safety"]["flagged"] is True for r in removed_lines)
 
     # type=review 列表
     resp = await client.get("/api/v1/content-safety/jobs")
@@ -220,6 +236,7 @@ async def test_review_job_sample_limit(
     )
     assert resp.status_code == 200, resp.text
     job_id = resp.json()["data"]["id"]
+    await job_runner.drain()
 
     resp = await client.get(f"/api/v1/content-safety/jobs/{job_id}/report")
     rr = resp.json()["data"]["reviewReport"]
@@ -245,7 +262,13 @@ async def test_review_verdict_passed_on_clean_full_scan(
         },
     )
     assert resp.status_code == 200, resp.text
-    tagged_id = resp.json()["data"]["output"]["versionId"]
+    job_id = resp.json()["data"]["id"]
+    await job_runner.drain()
+    report = (
+        await client.get(f"/api/v1/content-safety/jobs/{job_id}/report")
+    ).json()["data"]
+    assert report["state"] == "success", report.get("error")
+    tagged_id = report["taggedVersionId"]
     async with session_factory() as session:
         v = await session.get(DatasetVersion, tagged_id)
         assert v.scan_verdict == "passed"
@@ -268,7 +291,13 @@ async def test_review_verdict_unscanned_on_clean_partial_scan(
         },
     )
     assert resp.status_code == 200, resp.text
-    tagged_id = resp.json()["data"]["output"]["versionId"]
+    job_id = resp.json()["data"]["id"]
+    await job_runner.drain()
+    report = (
+        await client.get(f"/api/v1/content-safety/jobs/{job_id}/report")
+    ).json()["data"]
+    assert report["state"] == "success", report.get("error")
+    tagged_id = report["taggedVersionId"]
     async with session_factory() as session:
         v = await session.get(DatasetVersion, tagged_id)
         # 部分扫描即便零命中也不能 certify 整版安全

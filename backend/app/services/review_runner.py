@@ -6,13 +6,11 @@ run_review:按版本形态分两路——
   jsonl 落 MinIO,safety 为嵌套结构不写 parquet)→ 聚合报告(byTable)。
 - 旧单文件版本:保持原逻辑(materialized_version + 本地 data.jsonl)。
 
-处置方式 config.action:
-- tag(默认):每行加 safety 字段产出打标版本。
-- delete:命中行不写入产出(净化版),按 sampleLimit 扫描(与 tag 一致);超出
-  样本上限的未扫行原样结转进净化版(scanned=false),此时产出版本 verdict 为
-  unscanned 而非 passed。被删行(含 safety)写 <table>.removed.jsonl 存档,位置记入
-  report.removedArchives——连同 review_findings 逐条命中与审计中间件的 POST
-  留痕,构成删除的完整可追溯记录。
+命中处置固定为删除:命中行不写入产出(净化版),按 sampleLimit 扫描;超出样本上限
+的未扫行原样结转进净化版(scanned=false),此时产出版本 verdict 为 unscanned 而非
+passed。被删行(含 safety)写 <table>.removed.jsonl 存档,位置记入
+report.removedArchives——连同 review_findings 逐条命中与审计中间件的 POST 留痕,
+构成删除的完整可追溯记录。
 
 异常 → ReviewError(上层置 job failed)。并发信号量由 job_runner 统一持有。
 
@@ -83,12 +81,10 @@ def _is_flagged(row: dict[str, Any]) -> bool:
     return bool(isinstance(safety, dict) and safety.get("flagged"))
 
 
-def _split_action(
-    tagged_rows: list[dict[str, Any]], action: str
+def _split_flagged(
+    tagged_rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """按处置方式切分产出:tag → 全保留;delete → (净化行, 被删行)。"""
-    if action != "delete":
-        return tagged_rows, []
+    """切分产出为 (净化行, 被删行):命中行进 removed,其余进净化版。"""
     kept = [r for r in tagged_rows if not _is_flagged(r)]
     removed = [r for r in tagged_rows if _is_flagged(r)]
     return kept, removed
@@ -130,16 +126,14 @@ def _verdicts(
     flagged_rows: int,
     sample_applied: bool,
     audited_all: bool,
-    action: str,
 ) -> tuple[str, str]:
     """(被审版本 verdict, 产出版本 verdict)。
 
     被审版本口径三态(#4 发布门,见 docs/plan/11):
       有命中 → failed;零命中但只扫了样本/只审了部分成员 → unscanned;
       零命中且全量全成员 → passed。"passed" 必须意味着"整版都扫过且干净"。
-    产出版本:tag 模式内容与被审一致 → 同 verdict;delete 模式已剔除全部命中,
-    产出无命中——但仅当全量全成员扫过才敢判 passed,否则(未扫行原样留在净化版)
-    仍是 unscanned。
+    产出版本(净化版)已剔除全部命中,产出无命中——但仅当全量全成员扫过才敢判
+    passed,否则(未扫行原样留在净化版)仍是 unscanned。
     """
     if flagged_rows > 0:
         input_verdict = "failed"
@@ -147,12 +141,7 @@ def _verdicts(
         input_verdict = "unscanned"
     else:
         input_verdict = "passed"
-    if action == "delete":
-        output_verdict = (
-            "passed" if not sample_applied and audited_all else "unscanned"
-        )
-    else:
-        output_verdict = input_verdict
+    output_verdict = "passed" if not sample_applied and audited_all else "unscanned"
     return input_verdict, output_verdict
 
 
@@ -186,7 +175,6 @@ async def run_review(
             session, job=job, version=version, config=config
         )
 
-    action = str(config.get("action") or "tag")
     if target_members:
         members_to_process = [m for m in members if m.table_name in target_members]
         if not members_to_process:
@@ -237,7 +225,7 @@ async def run_review(
             table_name=member.table_name,
         )
 
-        kept, removed = _split_action(tagged_rows, action)
+        kept, removed = _split_flagged(tagged_rows)
         # safety 为嵌套结构,产出统一 jsonl(parquet 成员在此转为 jsonl)
         data_bytes = _jsonl_bytes(kept)
         storage_uri = await upload_jsonl_member(
@@ -282,8 +270,8 @@ async def run_review(
         "bySeverity": by_severity,
         "bySource": by_source,
         "byTable": by_table,
-        "action": action,
-        "deletedRows": deleted_rows if action == "delete" else None,
+        "action": "delete",
+        "deletedRows": deleted_rows,
         "removedArchives": removed_archives,
         "warnings": warnings,
     }
@@ -292,14 +280,9 @@ async def run_review(
         flagged_rows=flagged_rows,
         sample_applied=sample_applied,
         audited_all=audited_all,
-        action=action,
     )
 
-    note_action = (
-        f"内容审核净化(删除 {deleted_rows} 行,来自 v{version.version_no})"
-        if action == "delete"
-        else f"内容审核打标(来自 v{version.version_no})"
-    )
+    note_action = f"内容审核净化(删除 {deleted_rows} 行,来自 v{version.version_no})"
     # 未被审的成员原样结转,产出版本保持输入版本的完整成员集
     new_members_data += carry_over_members(
         members, {m.table_name for m in members_to_process}
@@ -351,11 +334,10 @@ async def _run_review_legacy(
 ) -> DatasetVersion:
     """旧单文件版本路径:materialized_version + 本地 data.jsonl 产出(原逻辑)。
 
-    同样支持 action=tag|delete;delete 的被删行存档写产出目录 data.removed.jsonl。
+    命中行删除:被删行存档写产出目录 data.removed.jsonl。
     """
-    action = str(config.get("action") or "tag")
     # 经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
-    # 打标产出仍写受管存储(origin=review),源不动;血缘指向 hosted 被审版本。
+    # 净化产出仍写受管存储(origin=review),源不动;血缘指向 hosted 被审版本。
     async with materialized_version(version, session) as src_path:
         if not src_path.exists():
             raise ReviewError(f"被审版本数据文件不存在:{version.storage_uri}")
@@ -369,7 +351,7 @@ async def _run_review_legacy(
         session, findings, job_id=job.id, version_id=version.id, table_name=None
     )
 
-    kept, removed = _split_action(tagged_rows, action)
+    kept, removed = _split_flagged(tagged_rows)
 
     dataset_id = version.dataset_id
     new_vno = await _next_version_no(session, dataset_id)
@@ -387,8 +369,8 @@ async def _run_review_legacy(
     report = {
         **report,
         "byTable": {},
-        "action": action,
-        "deletedRows": len(removed) if action == "delete" else None,
+        "action": "delete",
+        "deletedRows": len(removed),
         "removedArchives": removed_archives,
     }
 
@@ -396,15 +378,10 @@ async def _run_review_legacy(
         flagged_rows=report["flaggedRows"],
         sample_applied=report["sampleLimitApplied"],
         audited_all=True,
-        action=action,
     )
 
-    note_action = (
-        f"内容审核净化(删除 {len(removed)} 行,来自 v{version.version_no})"
-        if action == "delete"
-        else f"内容审核打标(来自 v{version.version_no})"
-    )
-    tagged_version = DatasetVersion(
+    note_action = f"内容审核净化(删除 {len(removed)} 行,来自 v{version.version_no})"
+    out_version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
         version_no=new_vno,
@@ -418,7 +395,7 @@ async def _run_review_legacy(
         scan_verdict=output_verdict,
         verdict_source="auto",
     )
-    session.add(tagged_version)
+    session.add(out_version)
     # 回写被审版本的 scan_verdict:使被审版本本身也持有扫描结论,
     # 从而让用户可直接对它执行 publish(发布门校验 scan_verdict==passed)。
     version.scan_verdict = input_verdict
@@ -428,5 +405,5 @@ async def _run_review_legacy(
     job.review_report = report
 
     await session.commit()
-    await session.refresh(tagged_version)
-    return tagged_version
+    await session.refresh(out_version)
+    return out_version

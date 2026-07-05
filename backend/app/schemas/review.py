@@ -36,8 +36,8 @@ class ReviewJobConfig(CamelModel):
 
     categories 仅作 UI 侧选择透传(本期内置词表/LLM 覆盖全部类别,不据此裁剪);
     检测手段由 useLlm / usePii / useFlaggedWords 开关控制。
-    action:命中行的处置方式——tag 打标(默认,产出带 safety 字段的打标版本);
-    delete 删除(产出净化版本,命中行写 removed 存档,强制全量扫描)。
+    命中处置固定为删除:产出净化版本,命中行不写入并另写 removed 存档;按
+    sampleLimit 扫描,超出样本上限的未扫行原样结转进净化版。
     ruleWords / ruleRegex:规则库条目,建任务时按 ruleIds 解析冻结于此
     (重跑/继续复用冻结值,不受规则库后续增删影响)。
     """
@@ -47,7 +47,6 @@ class ReviewJobConfig(CamelModel):
     custom_regex: list[CustomRegexSpec] = []
     rule_words: list[RuleWordSpec] = []
     rule_regex: list[RuleRegexSpec] = []
-    action: Literal["tag", "delete"] = "tag"
     use_llm: bool = False
     use_pii: bool = True
     use_flagged_words: bool = True

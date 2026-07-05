@@ -3,9 +3,9 @@
 不依赖 DB / 网络。覆盖:
 - 规则库条目(ruleWords/ruleRegex)按各自 category/severity 命中,与临时自定义并存。
 - rules_to_config:review_rules 行 → config 片段转换(word/regex/未知 kind)。
-- _split_action:tag 全保留;delete 切分净化行/被删行,行数守恒。
-- delete 按 sampleLimit 扫描:只删已扫命中,未扫行原样结转进净化版。
-- _verdicts:被审/产出版本 verdict 三态口径(含部分成员、delete 净化语义)。
+- _split_flagged:切分净化行/被删行,行数守恒。
+- 按 sampleLimit 扫描:只删已扫命中,未扫行原样结转进净化版。
+- _verdicts:被审/产出版本 verdict 三态口径(含部分成员、净化语义)。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services.review import rules_to_config, scan_version
-from app.services.review_runner import _split_action, _verdicts
+from app.services.review_runner import _split_flagged, _verdicts
 
 
 def _run(rows: list[dict[str, Any]], config: dict[str, Any]):
@@ -116,16 +116,10 @@ def _tagged(flagged: bool) -> dict[str, Any]:
     return {"text": "x", "safety": {"flagged": flagged, "scanned": True}}
 
 
-def test_split_action_tag_keeps_all() -> None:
-    rows = [_tagged(True), _tagged(False)]
-    kept, removed = _split_action(rows, "tag")
-    assert kept == rows and removed == []
-
-
-def test_split_action_delete_conserves_rows() -> None:
-    """delete:净化行 + 被删行 = 原行数;flagged 全进 removed。"""
+def test_split_flagged_conserves_rows() -> None:
+    """净化行 + 被删行 = 原行数;flagged 全进 removed。"""
     rows = [_tagged(True), _tagged(False), _tagged(True), _tagged(False)]
-    kept, removed = _split_action(rows, "delete")
+    kept, removed = _split_flagged(rows)
     assert len(kept) + len(removed) == len(rows)
     assert all(not r["safety"]["flagged"] for r in kept)
     assert all(r["safety"]["flagged"] for r in removed)
@@ -133,46 +127,38 @@ def test_split_action_delete_conserves_rows() -> None:
 
 def test_verdicts_matrix() -> None:
     """被审/产出 verdict 口径:命中→failed;采样或部分成员→unscanned;
-    delete 已剔命中→仅全量全成员才 passed,采样/部分成员→unscanned。"""
-    # 有命中,tag:双方 failed
+    净化已剔命中→仅全量全成员才 passed,采样/部分成员→unscanned。"""
+    # 有命中,全量全成员:被审 failed,产出净化后 passed
     assert _verdicts(
-        flagged_rows=1, sample_applied=False, audited_all=True, action="tag"
-    ) == ("failed", "failed")
-    # 有命中,delete 全量全成员:被审 failed,产出净化后 passed
-    assert _verdicts(
-        flagged_rows=1, sample_applied=False, audited_all=True, action="delete"
+        flagged_rows=1, sample_applied=False, audited_all=True
     ) == ("failed", "passed")
-    # delete 但只扫了样本:产出仍 unscanned(未扫行原样留在净化版)
+    # 有命中但只扫了样本:产出仍 unscanned(未扫行原样留在净化版)
     assert _verdicts(
-        flagged_rows=1, sample_applied=True, audited_all=True, action="delete"
+        flagged_rows=1, sample_applied=True, audited_all=True
     ) == ("failed", "unscanned")
-    # delete 但只审了部分成员:产出 unscanned
+    # 只审了部分成员:产出 unscanned
     assert _verdicts(
-        flagged_rows=0, sample_applied=False, audited_all=False, action="delete"
+        flagged_rows=0, sample_applied=False, audited_all=False
     ) == ("unscanned", "unscanned")
     # 零命中但采样:unscanned(不能据样本 certify 整版)
     assert _verdicts(
-        flagged_rows=0, sample_applied=True, audited_all=True, action="tag"
-    ) == ("unscanned", "unscanned")
-    # 零命中但只审了部分成员:unscanned
-    assert _verdicts(
-        flagged_rows=0, sample_applied=False, audited_all=False, action="tag"
+        flagged_rows=0, sample_applied=True, audited_all=True
     ) == ("unscanned", "unscanned")
     # 零命中且全量全成员:passed
     assert _verdicts(
-        flagged_rows=0, sample_applied=False, audited_all=True, action="tag"
+        flagged_rows=0, sample_applied=False, audited_all=True
     ) == ("passed", "passed")
 
 
 def test_scan_delete_flow_honors_sample_limit() -> None:
-    """delete 按 sampleLimit 扫描:只扫前 N 行,只删已扫命中,未扫行原样留净化版。"""
+    """按 sampleLimit 扫描:只扫前 N 行,只删已扫命中,未扫行原样留净化版。"""
     rows = [{"text": "赌博网站"}, {"text": "正常内容"}, {"text": "赌博推广"}]
     findings, tagged, report = _run(
         rows, {"useFlaggedWords": True, "sampleLimit": 1}
     )
     assert report["sampleLimitApplied"] is True  # 只扫 1/3
     assert report["flaggedRows"] == 1
-    kept, removed = _split_action(tagged, "delete")
+    kept, removed = _split_flagged(tagged)
     assert len(removed) == 1  # 仅已扫命中(row0)
     assert len(kept) == 2  # 未扫的 row1/row2 原样结转
     assert {f["rowIndex"] for f in findings} == {0}
