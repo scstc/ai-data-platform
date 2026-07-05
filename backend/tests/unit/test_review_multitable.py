@@ -4,7 +4,7 @@
 - 规则库条目(ruleWords/ruleRegex)按各自 category/severity 命中,与临时自定义并存。
 - rules_to_config:review_rules 行 → config 片段转换(word/regex/未知 kind)。
 - _split_action:tag 全保留;delete 切分净化行/被删行,行数守恒。
-- _member_scan_config:delete 强制全量(sampleLimit=行数),tag 原样。
+- delete 按 sampleLimit 扫描:只删已扫命中,未扫行原样结转进净化版。
 - _verdicts:被审/产出版本 verdict 三态口径(含部分成员、delete 净化语义)。
 """
 
@@ -15,11 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services.review import rules_to_config, scan_version
-from app.services.review_runner import (
-    _member_scan_config,
-    _split_action,
-    _verdicts,
-)
+from app.services.review_runner import _split_action, _verdicts
 
 
 def _run(rows: list[dict[str, Any]], config: dict[str, Any]):
@@ -113,7 +109,7 @@ def test_rules_to_config_split_word_regex_skip_unknown() -> None:
     ]
 
 
-# ---- 删除模式切分 / 强制全量 / verdict ----
+# ---- 删除模式切分 / 按样本量扫描 / verdict ----
 
 
 def _tagged(flagged: bool) -> dict[str, Any]:
@@ -135,28 +131,25 @@ def test_split_action_delete_conserves_rows() -> None:
     assert all(r["safety"]["flagged"] for r in removed)
 
 
-def test_member_scan_config_delete_forces_full_scan() -> None:
-    """delete 强制全量:sampleLimit 提到行数,snake_case 残留键清除;tag 原样。"""
-    cfg = {"sampleLimit": 5, "sample_limit": 5, "useLlm": False}
-    forced = _member_scan_config(cfg, "delete", 100)
-    assert forced["sampleLimit"] == 100
-    assert "sample_limit" not in forced
-    # 原 config 不被就地修改
-    assert cfg["sampleLimit"] == 5
-    assert _member_scan_config(cfg, "tag", 100) is cfg
-
-
 def test_verdicts_matrix() -> None:
     """被审/产出 verdict 口径:命中→failed;采样或部分成员→unscanned;
-    delete 产出恒 passed(净化版只含审过且干净的行)。"""
+    delete 已剔命中→仅全量全成员才 passed,采样/部分成员→unscanned。"""
     # 有命中,tag:双方 failed
     assert _verdicts(
         flagged_rows=1, sample_applied=False, audited_all=True, action="tag"
     ) == ("failed", "failed")
-    # 有命中,delete:被审 failed,产出净化后 passed
+    # 有命中,delete 全量全成员:被审 failed,产出净化后 passed
     assert _verdicts(
         flagged_rows=1, sample_applied=False, audited_all=True, action="delete"
     ) == ("failed", "passed")
+    # delete 但只扫了样本:产出仍 unscanned(未扫行原样留在净化版)
+    assert _verdicts(
+        flagged_rows=1, sample_applied=True, audited_all=True, action="delete"
+    ) == ("failed", "unscanned")
+    # delete 但只审了部分成员:产出 unscanned
+    assert _verdicts(
+        flagged_rows=0, sample_applied=False, audited_all=False, action="delete"
+    ) == ("unscanned", "unscanned")
     # 零命中但采样:unscanned(不能据样本 certify 整版)
     assert _verdicts(
         flagged_rows=0, sample_applied=True, audited_all=True, action="tag"
@@ -171,15 +164,15 @@ def test_verdicts_matrix() -> None:
     ) == ("passed", "passed")
 
 
-def test_scan_delete_flow_end_to_end_pure() -> None:
-    """组合:强制全量扫描 + 切分 → 被删行恰为命中行,净化行零命中。"""
+def test_scan_delete_flow_honors_sample_limit() -> None:
+    """delete 按 sampleLimit 扫描:只扫前 N 行,只删已扫命中,未扫行原样留净化版。"""
     rows = [{"text": "赌博网站"}, {"text": "正常内容"}, {"text": "赌博推广"}]
     findings, tagged, report = _run(
-        rows,
-        _member_scan_config({"useFlaggedWords": True, "sampleLimit": 1}, "delete", 3),
+        rows, {"useFlaggedWords": True, "sampleLimit": 1}
     )
-    assert report["sampleLimitApplied"] is False  # 全量
+    assert report["sampleLimitApplied"] is True  # 只扫 1/3
+    assert report["flaggedRows"] == 1
     kept, removed = _split_action(tagged, "delete")
-    assert len(removed) == report["flaggedRows"] == 2
-    assert len(kept) == 1
-    assert {f["rowIndex"] for f in findings} == {0, 2}
+    assert len(removed) == 1  # 仅已扫命中(row0)
+    assert len(kept) == 2  # 未扫的 row1/row2 原样结转
+    assert {f["rowIndex"] for f in findings} == {0}

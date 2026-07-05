@@ -8,8 +8,9 @@ run_review:按版本形态分两路——
 
 处置方式 config.action:
 - tag(默认):每行加 safety 字段产出打标版本。
-- delete:命中行不写入产出(净化版),强制全量扫描(忽略 sampleLimit,否则未扫
-  行会混进"净化版");被删行(含 safety)写 <table>.removed.jsonl 存档,位置记入
+- delete:命中行不写入产出(净化版),按 sampleLimit 扫描(与 tag 一致);超出
+  样本上限的未扫行原样结转进净化版(scanned=false),此时产出版本 verdict 为
+  unscanned 而非 passed。被删行(含 safety)写 <table>.removed.jsonl 存档,位置记入
   report.removedArchives——连同 review_findings 逐条命中与审计中间件的 POST
   留痕,构成删除的完整可追溯记录。
 
@@ -93,18 +94,6 @@ def _split_action(
     return kept, removed
 
 
-def _member_scan_config(
-    config: dict[str, Any], action: str, total_rows: int
-) -> dict[str, Any]:
-    """成员扫描配置:delete 模式强制全量(sampleLimit=行数),tag 模式原样。"""
-    if action != "delete":
-        return config
-    forced = dict(config)
-    forced["sampleLimit"] = max(total_rows, 1)
-    forced.pop("sample_limit", None)
-    return forced
-
-
 def _add_findings(
     session: AsyncSession,
     findings: list[dict[str, Any]],
@@ -148,8 +137,9 @@ def _verdicts(
     被审版本口径三态(#4 发布门,见 docs/plan/11):
       有命中 → failed;零命中但只扫了样本/只审了部分成员 → unscanned;
       零命中且全量全成员 → passed。"passed" 必须意味着"整版都扫过且干净"。
-    产出版本:tag 模式内容与被审一致 → 同 verdict;delete 模式产出只含
-    审过且干净的行(强制全量扫描) → passed。
+    产出版本:tag 模式内容与被审一致 → 同 verdict;delete 模式已剔除全部命中,
+    产出无命中——但仅当全量全成员扫过才敢判 passed,否则(未扫行原样留在净化版)
+    仍是 unscanned。
     """
     if flagged_rows > 0:
         input_verdict = "failed"
@@ -157,7 +147,12 @@ def _verdicts(
         input_verdict = "unscanned"
     else:
         input_verdict = "passed"
-    output_verdict = "passed" if action == "delete" else input_verdict
+    if action == "delete":
+        output_verdict = (
+            "passed" if not sample_applied and audited_all else "unscanned"
+        )
+    else:
+        output_verdict = input_verdict
     return input_verdict, output_verdict
 
 
@@ -231,7 +226,7 @@ async def run_review(
 
         findings, tagged_rows, report = await scan_version(
             rows,
-            _member_scan_config(config, action, len(rows)),
+            config,
             provider=provider,
         )
         _add_findings(
@@ -368,7 +363,7 @@ async def _run_review_legacy(
     provider = get_ai_provider(settings)
 
     findings, tagged_rows, report = await scan_version(
-        rows, _member_scan_config(config, action, len(rows)), provider=provider
+        rows, config, provider=provider
     )
     _add_findings(
         session, findings, job_id=job.id, version_id=version.id, table_name=None

@@ -1,6 +1,6 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { history, useLocation } from '@umijs/max';
+import { useLocation } from '@umijs/max';
 import {
   Alert,
   Button,
@@ -24,7 +24,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DatasetFilter } from '@/components';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
@@ -41,8 +41,13 @@ import {
   updateReviewRule,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+import { suggestTaskName } from '@/utils/taskName';
 
 const { Text, Title, Paragraph } = Typography;
+
+// 「全部」扫描:传一个远超任何数据集行数的上限,后端 min(total, limit)=total 即全量
+// (与 delete 模式强制 sampleLimit=行数 的全量口径一致)
+const SCAN_ALL_LIMIT = 1_000_000_000;
 
 const STATE_META: Record<
   DataPlatform.Job['state'],
@@ -393,6 +398,7 @@ const ContentSafety: React.FC = () => {
 
   // —— 配置区 state ——
   const [name, setName] = useState('');
+  const [nameDirty, setNameDirty] = useState(false); // 用户改过则不再自动覆盖
   const [datasetId, setDatasetId] = useState<string>();
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
@@ -412,10 +418,12 @@ const ContentSafety: React.FC = () => {
   const [customRegex, setCustomRegex] = useState<
     DataPlatform.ReviewCustomRegex[]
   >([]);
-  const [sampleLimit, setSampleLimit] = useState<number>(500);
   const [submitting, setSubmitting] = useState(false);
-  // 处置方式:tag 打标(产出带 safety 字段版本) / delete 删除(产出净化版+存档)
-  const [action, setAction] = useState<DataPlatform.ReviewAction>('tag');
+  const [sampleLimit, setSampleLimit] = useState<number>(500);
+  // 「全部」:不限样本量,扫描全部行(送大上限 SCAN_ALL_LIMIT)
+  const [scanAll, setScanAll] = useState(false);
+  // 处置方式固定为 delete:命中行直接删除,产出净化版 + 被删行存档
+  const action: DataPlatform.ReviewAction = 'delete';
   // 多表版本:参与审核的成员表(默认全选)
   const [targetMembers, setTargetMembers] = useState<string[]>([]);
   // 规则库:启用中的条目 + 本次任务勾选(默认全选启用项)
@@ -445,6 +453,16 @@ const ContentSafety: React.FC = () => {
   const memberNames = (
     versions.find((v) => v.id === versionId)?.tables ?? []
   ).map((t) => t.tableName);
+
+  // 自动任务名:数据集变化时重算,用户手动改过(nameDirty)则不再覆盖(同 processing/quality 编辑器)
+  const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
+  const suggestedName = useMemo(
+    () => suggestTaskName(selectedDatasetName, '内容审核'),
+    [selectedDatasetName],
+  );
+  useEffect(() => {
+    if (!nameDirty) setName(suggestedName);
+  }, [suggestedName, nameDirty]);
 
   // —— 报告区 state ——
   const [activeJob, setActiveJob] = useState<DataPlatform.Job>();
@@ -532,7 +550,7 @@ const ContentSafety: React.FC = () => {
           useLlm,
           usePii,
           useFlaggedWords,
-          sampleLimit,
+          sampleLimit: scanAll ? SCAN_ALL_LIMIT : sampleLimit,
         },
         // 全选(或无成员)不传 → 后端审全部;部分勾选才圈范围
         targetMembers:
@@ -583,18 +601,6 @@ const ContentSafety: React.FC = () => {
       message.warning(
         '请至少启用一种检测手段(LLM/内置词表/PII)或填写自定义敏感词/正则/勾选规则库',
       );
-      return;
-    }
-    if (action === 'delete') {
-      Modal.confirm({
-        title: '确认以「删除」方式处置命中行？',
-        content:
-          '将产出剔除全部命中行的净化版本(强制全量扫描,忽略样本上限);被删行会完整' +
-          '存档(<表名>.removed.jsonl)并逐条记录在命中明细中,原版本不受影响。',
-        okText: '确认删除处置',
-        okButtonProps: { danger: true },
-        onOk: () => doSubmit(customWords, cleanedRegex),
-      });
       return;
     }
     doSubmit(customWords, cleanedRegex);
@@ -663,7 +669,7 @@ const ContentSafety: React.FC = () => {
       dataIndex: 'input',
       render: (_, r) =>
         r.input
-          ? `${r.input.datasetName}（${r.input.datasetId} ${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
+          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
           : '-',
     },
     {
@@ -697,10 +703,13 @@ const ContentSafety: React.FC = () => {
       <Card title="新建内容审核" size="small" style={{ marginBottom: 16 }}>
         <Space style={{ marginBottom: 16 }} wrap>
           <Input
-            placeholder="任务名(可选)"
+            placeholder="任务名(自动生成,可编辑)"
             style={{ width: 220 }}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              setNameDirty(true);
+            }}
           />
           <Select
             placeholder="选择数据集"
@@ -786,9 +795,7 @@ const ContentSafety: React.FC = () => {
             </Title>
             <Radio.Group
               value={action}
-              onChange={(e) => setAction(e.target.value)}
               options={[
-                { label: '打标(保留原行,附加 safety 字段)', value: 'tag' },
                 { label: '删除(产出净化版,被删行存档留痕)', value: 'delete' },
               ]}
             />
@@ -802,12 +809,18 @@ const ContentSafety: React.FC = () => {
                 style={{ width: 160 }}
                 value={sampleLimit}
                 onChange={(v) => setSampleLimit(v ?? 500)}
-                disabled={action === 'delete'}
+                disabled={scanAll}
               />
+              <Checkbox
+                checked={scanAll}
+                onChange={(e) => setScanAll(e.target.checked)}
+              >
+                全部
+              </Checkbox>
               <Text type="secondary">
-                {action === 'delete'
-                  ? '删除处置强制全量扫描,样本上限不生效'
-                  : '超过则只扫前 N 行,报告会显式标注'}
+                {scanAll
+                  ? '扫描全部行'
+                  : '只扫前 N 行,未扫行原样保留(不删除),报告会显式标注'}
               </Text>
             </Space>
           </Col>
@@ -1052,23 +1065,6 @@ const ContentSafety: React.FC = () => {
                     </Text>
                   </Paragraph>
                 )}
-
-              {report?.taggedVersionId && (
-                <Paragraph>
-                  <Text strong>
-                    {body.action === 'delete' ? '净化版本:' : '打标版本:'}
-                  </Text>{' '}
-                  <Text code>{report.taggedVersionId}</Text>{' '}
-                  <a
-                    onClick={(e) => {
-                      e.preventDefault();
-                      history.push('/datasets/list');
-                    }}
-                  >
-                    {body.action === 'delete' ? '查看净化版本' : '查看打标版本'}
-                  </a>
-                </Paragraph>
-              )}
 
               <Divider style={{ margin: '8px 0 16px' }} />
               <Title level={5}>命中明细</Title>
