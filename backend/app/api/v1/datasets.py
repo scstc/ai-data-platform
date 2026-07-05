@@ -1147,16 +1147,31 @@ async def delete_version_members(
     size_freed = 0
     for key in keys:
         if row := key_to_row.get(key):
-            # 结构化成员:删对象 + DB 行
-            bucket, obj_key = ("", key)
-            try:
-                bucket, obj_key = parse_s3_uri(row.storage_uri)
-            except Exception:
-                pass
-            try:
-                await remove_object(cfg, bucket or settings.storage_minio_upload_bucket, obj_key)
-            except ExternalStoreError:
-                pass
+            # 结构化成员:删 DB 行;对象仅在无共享引用时才删——零拷贝结转
+            # (engine.carry_over_members)会让后续版本的成员行引用同一
+            # storage_uri,此时只删行保对象,否则下游版本成员指向空对象。
+            shared = await session.scalar(
+                select(func.count())
+                .select_from(DatasetVersionTable)
+                .where(
+                    DatasetVersionTable.storage_uri == row.storage_uri,
+                    DatasetVersionTable.id != row.id,
+                )
+            )
+            if not shared:
+                bucket, obj_key = ("", key)
+                try:
+                    bucket, obj_key = parse_s3_uri(row.storage_uri)
+                except Exception:
+                    pass
+                try:
+                    await remove_object(
+                        cfg,
+                        bucket or settings.storage_minio_upload_bucket,
+                        obj_key,
+                    )
+                except ExternalStoreError:
+                    pass
             size_freed += row.size or 0
             await session.delete(row)
             deleted += 1
@@ -1831,7 +1846,7 @@ async def _has_hosted_version(session: AsyncSession, dataset_id: str) -> bool:
 
 
 async def _purge_dataset(session: AsyncSession, dataset_id: str) -> bool:
-    """暂存删除一个数据集(版本 + 血缘边 + 元数据),不 commit;返回是否命中。
+    """暂存删除一个数据集(版本 + 表成员 + 血缘边 + 元数据),不 commit;返回是否命中。
 
     注意:本函数只删平台记录,**绝不调用任何 S3 删除**(部署红线,#18)。
     含 hosted 版本时由调用方先行拦截(delete/batch-delete 返回 403),unhost 才允许。
@@ -1849,6 +1864,11 @@ async def _purge_dataset(session: AsyncSession, dataset_id: str) -> bool:
     if version_ids:
         await session.execute(
             delete(JobInput).where(JobInput.dataset_version_id.in_(version_ids))
+        )
+        await session.execute(
+            delete(DatasetVersionTable).where(
+                DatasetVersionTable.dataset_version_id.in_(version_ids)
+            )
         )
     await session.execute(
         delete(DatasetVersion).where(DatasetVersion.dataset_id == dataset_id)
@@ -2934,7 +2954,11 @@ async def delete_dataset_version(
     session: SessionDep,
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
-    """删除数据集版本(仅允许删除 draft 状态版本)。"""
+    """删除数据集版本(仅允许删除 draft 状态版本)。
+
+    同事务级联删表成员行与血缘边,避免孤儿记录;只删平台记录不删对象
+    (成员对象可能被后续版本零拷贝结转共享,见 engine.carry_over_members)。
+    """
     version = await session.get(DatasetVersion, version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="Version not found")
@@ -2943,6 +2967,14 @@ async def delete_dataset_version(
             status_code=400,
             content={"success": False, "message": "只能删除草稿(draft)状态的版本"},
         )
+    await session.execute(
+        delete(DatasetVersionTable).where(
+            DatasetVersionTable.dataset_version_id == version_id
+        )
+    )
+    await session.execute(
+        delete(JobInput).where(JobInput.dataset_version_id == version_id)
+    )
     await session.delete(version)
     await session.commit()
     return JSONResponse(content={"success": True})

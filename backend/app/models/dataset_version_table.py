@@ -29,6 +29,8 @@ class DatasetVersionTable(Base):
         Index("ix_dvt_version", "dataset_version_id"),
         # 反向血缘:按湖快照查它被抽到了哪些数据集成员
         Index("ix_dvt_source_snapshot", "source_snapshot_id"),
+        # 共享引用计数:删成员前查同 storage_uri 是否被其他版本结转引用
+        Index("ix_dvt_storage_uri", "storage_uri"),
     )
 
     # 主键形如 "dvt-" + 6 位 hex
