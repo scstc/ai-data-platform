@@ -79,6 +79,11 @@ type PreviewState = {
 
 const FilesPage: React.FC = () => {
   const access = useAccess();
+  const canUpload = access.hasPerm('ingest:file:upload');
+  const canAddFolder = access.hasPerm('ingest:file:add');
+  const canDownload = access.hasPerm('ingest:file:download');
+  const canImport = access.hasPerm('ingest:file:import');
+  const canRemove = access.hasPerm('ingest:file:remove');
   const actionRef = useRef<ActionType | null>(null);
   const [messageApi, contextHolder] = message.useMessage();
   const [buckets, setBuckets] = useState<string[]>([]);
@@ -354,7 +359,7 @@ const FilesPage: React.FC = () => {
               <a key="enter" onClick={() => goPrefix(`${prefix}${row.name}/`)}>
                 进入
               </a>,
-              access.canAdmin ? (
+              canRemove ? (
                 <Popconfirm
                   key="del-folder"
                   title="确认删除该文件夹？"
@@ -370,13 +375,15 @@ const FilesPage: React.FC = () => {
               ) : null,
             ]
           : [
-              <a key="download" onClick={() => handleDownload(row.entry.key)}>
-                下载
-              </a>,
+              canDownload ? (
+                <a key="download" onClick={() => handleDownload(row.entry.key)}>
+                  下载
+                </a>
+              ) : null,
               <a key="preview" onClick={() => handlePreview(row.entry)}>
                 预览
               </a>,
-              access.canAdmin ? (
+              canImport ? (
                 <Popconfirm
                   key="host"
                   title="接入为数据集？"
@@ -387,7 +394,7 @@ const FilesPage: React.FC = () => {
                   <a>接入数据集</a>
                 </Popconfirm>
               ) : null,
-              access.canAdmin ? (
+              canRemove ? (
                 <Popconfirm
                   key="delete"
                   title="确认删除该文件？"
@@ -462,7 +469,7 @@ const FilesPage: React.FC = () => {
           });
         }}
         toolBarRender={() => [
-          <Access key="upload" accessible={!!access.canAdmin}>
+          <Access key="upload" accessible={canUpload}>
             <Space>
               <Upload
                 showUploadList={false}
@@ -487,7 +494,7 @@ const FilesPage: React.FC = () => {
               )}
             </Space>
           </Access>,
-          <Access key="new-folder" accessible={!!access.canAdmin}>
+          <Access key="new-folder" accessible={canAddFolder}>
             <Button
               icon={<FolderAddOutlined />}
               disabled={!bucket}

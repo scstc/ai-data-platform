@@ -8,7 +8,13 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useLocation, useParams, useSearchParams } from '@umijs/max';
+import {
+  history,
+  useAccess,
+  useLocation,
+  useParams,
+  useSearchParams,
+} from '@umijs/max';
 import {
   Alert,
   Badge,
@@ -304,6 +310,11 @@ const BrowserPanel: FC<{
 /** 数据源配置页:左侧凭证表单 + 测试连接,右侧浏览面板(两栏布局)。
  *  新建走 query 模板(dbKind/provider);编辑走路由 state 传入的整条记录,回填后 PUT 更新。 */
 const DataSourceConfigPage: FC = () => {
+  const access = useAccess();
+  const canAdd = access.hasPerm('ingest:datasource:add');
+  const canEdit = access.hasPerm('ingest:datasource:edit');
+  const canTest = access.hasPerm('ingest:datasource:test');
+  const canRotate = access.hasPerm('ingest:datasource:rotate');
   const params = useParams();
   const [search] = useSearchParams();
   const location = useLocation();
@@ -537,15 +548,17 @@ const DataSourceConfigPage: FC = () => {
         >
           取消
         </Button>,
-        <Button
-          key="save"
-          type="primary"
-          icon={<SaveOutlined />}
-          loading={saving}
-          onClick={handleSave}
-        >
-          {isEdit ? '保存修改' : '保存连接'}
-        </Button>,
+        (isEdit ? canEdit : canAdd) && (
+          <Button
+            key="save"
+            type="primary"
+            icon={<SaveOutlined />}
+            loading={saving}
+            onClick={handleSave}
+          >
+            {isEdit ? '保存修改' : '保存连接'}
+          </Button>
+        ),
       ]}
     >
       <div
@@ -724,14 +737,16 @@ const DataSourceConfigPage: FC = () => {
                     >
                       {pushUrl}
                     </Text>
-                    <Button
-                      size="small"
-                      loading={rotating}
-                      danger
-                      onClick={handleRotateToken}
-                    >
-                      轮换 Token
-                    </Button>
+                    {canRotate && (
+                      <Button
+                        size="small"
+                        loading={rotating}
+                        danger
+                        onClick={handleRotateToken}
+                      >
+                        轮换 Token
+                      </Button>
+                    )}
                     <Paragraph type="secondary" style={{ margin: 0 }}>
                       外部系统向推送地址 POST 数据(JSON 数组或
                       jsonl)即可接入。Token 即鉴权凭证,泄露后点「轮换
@@ -825,9 +840,11 @@ const DataSourceConfigPage: FC = () => {
                         : '未连接'
                     }
                   />
-                  <Button loading={testing} onClick={handleTest}>
-                    测试连接
-                  </Button>
+                  {canTest && (
+                    <Button loading={testing} onClick={handleTest}>
+                      测试连接
+                    </Button>
+                  )}
                 </div>
                 {testResult && !testResult.success && (
                   <Alert

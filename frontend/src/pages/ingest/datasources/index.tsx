@@ -20,6 +20,10 @@ import { DB_KIND_LABEL, STATUS_META, TYPE_META } from './components/constants';
 
 const DataSourcesPage: FC = () => {
   const access = useAccess();
+  const canAdd = access.hasPerm('ingest:datasource:add');
+  const canEdit = access.hasPerm('ingest:datasource:edit');
+  const canRemove = access.hasPerm('ingest:datasource:remove');
+  const canRecheck = access.hasPerm('ingest:datasource:recheck');
   const actionRef = useRef<ActionType | null>(null);
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [categoryTreeData, setCategoryTreeData] = useState<CategoryTreeNode[]>(
@@ -146,51 +150,55 @@ const DataSourcesPage: FC = () => {
       title: '操作',
       valueType: 'option',
       width: 200,
-      // 重新检测/编辑/删除仅 admin 可见(后端 require_admin 双层防护);非 admin 此列为空。
-      render: (_, record) =>
-        access.canAdmin
-          ? [
-              // api 推送无在线探测语义,不显示「重新检测」
-              record.type !== 'api' ? (
-                <a
-                  key="recheck"
-                  style={
-                    recheckingId === record.id
-                      ? { pointerEvents: 'none', color: '#aaa' }
-                      : undefined
-                  }
-                  onClick={() => handleRecheck(record.id)}
-                >
-                  {recheckingId === record.id ? '检测中…' : '重新检测'}
-                </a>
-              ) : null,
-              <a
-                key="edit"
-                onClick={() => {
-                  openEdit(record);
-                }}
-              >
-                编辑
-              </a>,
-              <Popconfirm
-                key="delete"
-                title="确认删除该数据源？"
-                okText="删除"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-                onConfirm={() => handleDelete(record.id)}
-              >
-                <a style={{ color: '#ff4d4f' }}>删除</a>
-              </Popconfirm>,
-            ]
-          : [<span key="readonly">-</span>],
+      // 重新检测/编辑/删除按各自权限点分别门控;均无权限时此列为空。
+      render: (_, record) => {
+        const actions = [
+          // api 推送无在线探测语义,不显示「重新检测」
+          record.type !== 'api' && canRecheck ? (
+            <a
+              key="recheck"
+              style={
+                recheckingId === record.id
+                  ? { pointerEvents: 'none', color: '#aaa' }
+                  : undefined
+              }
+              onClick={() => handleRecheck(record.id)}
+            >
+              {recheckingId === record.id ? '检测中…' : '重新检测'}
+            </a>
+          ) : null,
+          canEdit ? (
+            <a
+              key="edit"
+              onClick={() => {
+                openEdit(record);
+              }}
+            >
+              编辑
+            </a>
+          ) : null,
+          canRemove ? (
+            <Popconfirm
+              key="delete"
+              title="确认删除该数据源？"
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(record.id)}
+            >
+              <a style={{ color: '#ff4d4f' }}>删除</a>
+            </Popconfirm>
+          ) : null,
+        ].filter(Boolean);
+        return actions.length ? actions : [<span key="readonly">-</span>];
+      },
     },
   ];
 
   return (
     <PageContainer>
-      {/* 接入方式选择直接放列表上方(原 /new 落地页内容);新建为 admin 操作,非 admin 不展示 */}
-      <Access accessible={!!access.canAdmin}>
+      {/* 接入方式选择直接放列表上方(原 /new 落地页内容);无新增权限不展示 */}
+      <Access accessible={canAdd}>
         <div style={{ marginBottom: 24 }}>
           <AccessMethodPicker />
         </div>

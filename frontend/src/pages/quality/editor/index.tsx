@@ -1,5 +1,5 @@
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useLocation } from '@umijs/max';
+import { history, useAccess, useLocation } from '@umijs/max';
 import {
   Badge,
   Button,
@@ -40,6 +40,8 @@ type MemberConfig = {
 /** 质量评估编辑器:成员级 Tab 配置(对齐清洗页 processing/editor),
  *  每个数据集版本成员(表/文件)独立选择 filter 类算子。 */
 const QualityEditor: React.FC = () => {
+  const access = useAccess();
+  const canAdd = access.hasPerm('assessment:quality:add');
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
   const [datasetId, setDatasetId] = useState<string>();
@@ -205,16 +207,20 @@ const QualityEditor: React.FC = () => {
   return (
     <PageContainer
       header={{ title: '新建质量评估' }}
-      extra={[
-        <Button
-          key="submit"
-          type="primary"
-          loading={submitting}
-          onClick={onSubmit}
-        >
-          创建评估
-        </Button>,
-      ]}
+      extra={
+        canAdd
+          ? [
+              <Button
+                key="submit"
+                type="primary"
+                loading={submitting}
+                onClick={onSubmit}
+              >
+                创建评估
+              </Button>,
+            ]
+          : []
+      }
     >
       <Space style={{ marginBottom: 16 }} wrap>
         <Input

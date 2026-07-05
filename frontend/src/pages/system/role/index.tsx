@@ -11,7 +11,7 @@ import {
   ProTable,
 } from '@ant-design/pro-components';
 import { useAccess } from '@umijs/max';
-import { Button, Card, Drawer, message, Popconfirm, Tag, Tree } from 'antd';
+import { Button, Card, Drawer, message, Popconfirm, Tag } from 'antd';
 import dayjs from 'dayjs';
 import { type FC, useRef, useState } from 'react';
 import {
@@ -22,6 +22,7 @@ import {
   listRoles,
   updateRole,
 } from '@/services/system';
+import MenuPermMatrix from './components/MenuPermMatrix';
 
 const pickErrMsg = (err: unknown, fallback: string): string => {
   const e = err as { response?: { data?: { message?: string } } };
@@ -35,14 +36,6 @@ const DATA_SCOPES = [
   { label: '自定义部门', value: 'custom' },
   { label: '仅本人', value: 'self' },
 ];
-
-/** 菜单树 → antd Tree treeData(仅展示 M/C,叶子含 F 按钮以做按钮级勾选)。 */
-const toMenuTreeData = (nodes: System.Menu[]): any[] =>
-  nodes.map((n) => ({
-    key: n.id,
-    title: `${n.name}${n.perms ? ` (${n.perms})` : ''}`,
-    children: n.children?.length ? toMenuTreeData(n.children) : undefined,
-  }));
 
 /** 角色:CRUD + 菜单授权(勾选菜单/按钮)。授权 = system:role:edit。 */
 const RolePage: FC = () => {
@@ -307,19 +300,17 @@ const RolePage: FC = () => {
         title={`分配菜单:${authTarget?.name ?? ''}`}
         open={!!authTarget}
         onClose={() => setAuthTarget(null)}
-        width={480}
+        width="80%"
         extra={
           <Button type="primary" loading={authLoading} onClick={submitAuth}>
             保存
           </Button>
         }
       >
-        <Tree
-          checkable
-          defaultExpandAll
-          treeData={toMenuTreeData(menuTree)}
-          checkedKeys={checkedKeys}
-          onCheck={(keys) => setCheckedKeys((keys as string[]) ?? [])}
+        <MenuPermMatrix
+          menus={menuTree}
+          value={checkedKeys}
+          onChange={setCheckedKeys}
         />
       </Drawer>
     </PageContainer>

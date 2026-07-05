@@ -9,7 +9,7 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useAccess } from '@umijs/max';
 import {
   Alert,
   Button,
@@ -332,9 +332,11 @@ const FilterTab: React.FC<{
   input: DataPlatform.IngestOutput;
   qualityOps: DataPlatform.Operator[];
   opMap: Record<string, DataPlatform.Operator>;
+  /** 是否有权限提交低质过滤(assessment:quality:filter) */
+  canFilter: boolean;
   /** 成功后父组件回调：刷新任务列表 + 跳转到产出版本所在数据集 */
   onSuccess: (output: DataPlatform.IngestOutput) => void;
-}> = ({ job, input, qualityOps, opMap, onSuccess }) => {
+}> = ({ job, input, qualityOps, opMap, canFilter, onSuccess }) => {
   // running=true 时禁止重复提交，并展示轮询进度 Alert
   const [running, setRunning] = useState(false);
   const [statusText, setStatusText] = useState('');
@@ -418,11 +420,15 @@ const FilterTab: React.FC<{
         operators: string[];
         params?: Record<string, Record<string, unknown>>;
       }>
-        submitter={{
-          searchConfig: { submitText: '删除低质数据（产出新版本）' },
-          resetButtonProps: { style: { display: 'none' } },
-          submitButtonProps: { loading: running, disabled: running },
-        }}
+        submitter={
+          canFilter
+            ? {
+                searchConfig: { submitText: '删除低质数据（产出新版本）' },
+                resetButtonProps: { style: { display: 'none' } },
+                submitButtonProps: { loading: running, disabled: running },
+              }
+            : false
+        }
         onFinish={async (values) => {
           const operators = (values.operators ?? []).map((name) => ({
             name,
@@ -555,6 +561,11 @@ const useQualityMember = (versionId: string | undefined) => {
 };
 
 const Quality: React.FC = () => {
+  const access = useAccess();
+  const canAdd = access.hasPerm('assessment:quality:add');
+  const canRemove = access.hasPerm('assessment:quality:remove');
+  const canBatchRemove = access.hasPerm('assessment:quality:batch-remove');
+  const canFilter = access.hasPerm('assessment:quality:filter');
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
@@ -672,7 +683,7 @@ const Quality: React.FC = () => {
       width: 80,
       render: (_, r) =>
         // 运行中的任务后端拒绝删除(需先停止);其余状态给删除入口
-        r.state === 'running'
+        r.state === 'running' || !canRemove
           ? []
           : [
               <Popconfirm
@@ -701,18 +712,20 @@ const Quality: React.FC = () => {
           onChange: (_keys, rows) =>
             setSelectedRows(rows as DataPlatform.Job[]),
         }}
-        tableAlertOptionRender={() => (
-          <Popconfirm
-            title={`确认删除选中的 ${selectedRows.length} 个任务？`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={handleBatchDelete}
-          >
-            <Button type="link" danger>
-              批量删除
-            </Button>
-          </Popconfirm>
-        )}
+        tableAlertOptionRender={() =>
+          canBatchRemove ? (
+            <Popconfirm
+              title={`确认删除选中的 ${selectedRows.length} 个任务？`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleBatchDelete}
+            >
+              <Button type="link" danger>
+                批量删除
+              </Button>
+            </Popconfirm>
+          ) : null
+        }
         request={async (params) => {
           const res = await listJobs({
             current: params.current,
@@ -722,15 +735,19 @@ const Quality: React.FC = () => {
           return { data: res.data, total: res.total, success: res.success };
         }}
         columns={columns}
-        toolBarRender={() => [
-          <Button
-            key="create"
-            type="primary"
-            onClick={() => history.push('/assessment/quality/editor')}
-          >
-            新建质量评估
-          </Button>,
-        ]}
+        toolBarRender={() =>
+          canAdd
+            ? [
+                <Button
+                  key="create"
+                  type="primary"
+                  onClick={() => history.push('/assessment/quality/editor')}
+                >
+                  新建质量评估
+                </Button>,
+              ]
+            : []
+        }
       />
 
       <Drawer
@@ -830,6 +847,7 @@ const Quality: React.FC = () => {
                           input={currentJob.input}
                           qualityOps={qualityOps}
                           opMap={opMap}
+                          canFilter={canFilter}
                           onSuccess={handleFilterSuccess}
                         />
                       ),

@@ -29,10 +29,14 @@ const pickErrMsg = (err: unknown, fallback: string): string => {
 };
 
 /** 标签管理:全局标签池 CRUD + 批量删 + 合并(扁平,仅挂数据集)。
- *  列表所有登录用户可见;写操作仅 admin(canAdmin)。颜色按 name 哈希(utils/tags)。 */
+ *  列表所有登录用户可见;写操作按 perm 门控(dataset:tag:*)。颜色按 name 哈希(utils/tags)。 */
 const TagsPage: FC = () => {
   const access = useAccess();
-  const canAdmin = !!access.canAdmin;
+  const canAdd = access.hasPerm('dataset:tag:add');
+  const canEdit = access.hasPerm('dataset:tag:edit');
+  const canRemove = access.hasPerm('dataset:tag:remove');
+  const canBatchRemove = access.hasPerm('dataset:tag:batch-remove');
+  const canMerge = access.hasPerm('dataset:tag:merge');
   const actionRef = useRef<ActionType | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -63,54 +67,61 @@ const TagsPage: FC = () => {
       title: '操作',
       valueType: 'option',
       width: 160,
-      render: (_text, record) =>
-        canAdmin
-          ? [
-              <ModalForm<DataPlatform.TagUpdate>
-                key="rename"
-                title="重命名标签"
-                trigger={<a>重命名</a>}
-                width={380}
-                modalProps={{ destroyOnHidden: true }}
-                initialValues={{ name: record.name }}
-                onFinish={async (values) => {
-                  try {
-                    await updateTag(record.id, { name: values.name });
-                    message.success('已保存');
-                    reload();
-                    return true;
-                  } catch (err) {
-                    message.error(pickErrMsg(err, '保存失败，请重试'));
-                    return false;
-                  }
-                }}
-              >
-                <ProFormText
-                  name="name"
-                  label="名称"
-                  rules={[{ required: true, message: '请输入名称' }]}
-                />
-              </ModalForm>,
-              <Popconfirm
-                key="delete"
-                title={`确认删除「${record.name}」?(被数据集引用时将拒绝删除)`}
-                okText="删除"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-                onConfirm={async () => {
-                  try {
-                    await deleteTag(record.id);
-                    message.success('已删除');
-                    reload();
-                  } catch (err) {
-                    message.error(pickErrMsg(err, '删除失败，请重试'));
-                  }
-                }}
-              >
-                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-              </Popconfirm>,
-            ]
-          : [<span key="readonly">-</span>],
+      render: (_text, record) => {
+        const actions: ReactNode[] = [];
+        if (canEdit) {
+          actions.push(
+            <ModalForm<DataPlatform.TagUpdate>
+              key="rename"
+              title="重命名标签"
+              trigger={<a>重命名</a>}
+              width={380}
+              modalProps={{ destroyOnHidden: true }}
+              initialValues={{ name: record.name }}
+              onFinish={async (values) => {
+                try {
+                  await updateTag(record.id, { name: values.name });
+                  message.success('已保存');
+                  reload();
+                  return true;
+                } catch (err) {
+                  message.error(pickErrMsg(err, '保存失败，请重试'));
+                  return false;
+                }
+              }}
+            >
+              <ProFormText
+                name="name"
+                label="名称"
+                rules={[{ required: true, message: '请输入名称' }]}
+              />
+            </ModalForm>,
+          );
+        }
+        if (canRemove) {
+          actions.push(
+            <Popconfirm
+              key="delete"
+              title={`确认删除「${record.name}」?(被数据集引用时将拒绝删除)`}
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={async () => {
+                try {
+                  await deleteTag(record.id);
+                  message.success('已删除');
+                  reload();
+                } catch (err) {
+                  message.error(pickErrMsg(err, '删除失败，请重试'));
+                }
+              }}
+            >
+              <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+            </Popconfirm>,
+          );
+        }
+        return actions.length > 0 ? actions : [<span key="readonly">-</span>];
+      },
     },
   ];
 
@@ -133,7 +144,7 @@ const TagsPage: FC = () => {
           options={{ reload: true, density: false, setting: false }}
           pagination={false}
           rowSelection={
-            canAdmin
+            canBatchRemove
               ? {
                   selectedRowKeys: selected,
                   onChange: (keys) => setSelected(keys as string[]),
@@ -142,8 +153,7 @@ const TagsPage: FC = () => {
           }
           toolBarRender={() => {
             const btns: ReactNode[] = [];
-            if (!canAdmin) return btns;
-            if (selected.length > 0) {
+            if (canBatchRemove && selected.length > 0) {
               btns.push(
                 <Popconfirm
                   key="batch"
@@ -166,20 +176,24 @@ const TagsPage: FC = () => {
                 </Popconfirm>,
               );
             }
-            btns.push(
-              <Button
-                key="create"
-                type="primary"
-                onClick={() => setCreateOpen(true)}
-              >
-                新建标签
-              </Button>,
-            );
-            btns.push(
-              <Button key="merge" onClick={() => setMergeOpen(true)}>
-                合并标签
-              </Button>,
-            );
+            if (canAdd) {
+              btns.push(
+                <Button
+                  key="create"
+                  type="primary"
+                  onClick={() => setCreateOpen(true)}
+                >
+                  新建标签
+                </Button>,
+              );
+            }
+            if (canMerge) {
+              btns.push(
+                <Button key="merge" onClick={() => setMergeOpen(true)}>
+                  合并标签
+                </Button>,
+              );
+            }
             return btns;
           }}
           request={async () => {

@@ -10,6 +10,7 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components';
+import { useAccess } from '@umijs/max';
 import {
   Col,
   Descriptions,
@@ -48,6 +49,10 @@ const fmtSize = (n?: number) => {
 };
 
 const DatasetsPresets: React.FC = () => {
+  const access = useAccess();
+  const canDownload = access.hasPerm('dataset:preset:download');
+  const canExport = access.hasPerm('dataset:preset:export');
+  const canEdit = access.hasPerm('dataset:preset:edit');
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
   const [activeVersionId, setActiveVersionId] = useState<string>();
@@ -276,27 +281,31 @@ const DatasetsPresets: React.FC = () => {
                             </Typography.Text>
                           )}
                           <Space size={12} style={{ marginTop: 2 }}>
-                            <a
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                window.open(
-                                  `/api/v1/dataset-versions/${v.id}/download`,
-                                  '_blank',
-                                );
-                              }}
-                              style={{ fontSize: 12 }}
-                            >
-                              下载
-                            </a>
-                            <a
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setExportVersion(v);
-                              }}
-                              style={{ fontSize: 12 }}
-                            >
-                              导出到 S3
-                            </a>
+                            {canDownload && (
+                              <a
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  window.open(
+                                    `/api/v1/dataset-versions/${v.id}/download`,
+                                    '_blank',
+                                  );
+                                }}
+                                style={{ fontSize: 12 }}
+                              >
+                                下载
+                              </a>
+                            )}
+                            {canExport && (
+                              <a
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExportVersion(v);
+                                }}
+                                style={{ fontSize: 12 }}
+                              >
+                                导出到 S3
+                              </a>
+                            )}
                           </Space>
                         </Flex>
                       </List.Item>
@@ -317,14 +326,16 @@ const DatasetsPresets: React.FC = () => {
                       <Typography.Title level={5} style={{ margin: 0 }}>
                         {activeVer.versionLabel ?? `v${activeVer.versionNo}`}
                       </Typography.Title>
-                      <a
-                        onClick={() => {
-                          setEditingVersion(activeVer);
-                          setEditVersionOpen(true);
-                        }}
-                      >
-                        编辑
-                      </a>
+                      {canEdit && (
+                        <a
+                          onClick={() => {
+                            setEditingVersion(activeVer);
+                            setEditVersionOpen(true);
+                          }}
+                        >
+                          编辑
+                        </a>
+                      )}
                     </Flex>
                     <Descriptions
                       size="small"

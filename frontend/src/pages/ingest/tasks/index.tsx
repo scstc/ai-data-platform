@@ -187,6 +187,11 @@ const pruneEmptyQualityPolicy = <
 
 const IngestTasksPage: React.FC = () => {
   const access = useAccess();
+  const canAdd = access.hasPerm('ingest:task:add');
+  const canEdit = access.hasPerm('ingest:task:edit');
+  const canRun = access.hasPerm('ingest:task:run');
+  const canStop = access.hasPerm('ingest:task:stop');
+  const canRemove = access.hasPerm('ingest:task:remove');
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentRow, setCurrentRow] = useState<DataPlatform.IngestTask>();
@@ -615,31 +620,37 @@ const IngestTasksPage: React.FC = () => {
         <a key="detail" onClick={() => openDetail(record.id)}>
           详情
         </a>,
-        <a key="edit" onClick={() => setEditRow(record)}>
-          编辑
-        </a>,
-        record.status === 'running' ? (
-          <Popconfirm
-            key="stop"
-            title="确认停止该任务？"
-            onConfirm={() => handleStop(record.id)}
-          >
-            <a>停止</a>
-          </Popconfirm>
-        ) : (
-          <a key="rerun" onClick={() => handleRerun(record.id)}>
-            运行
+        canEdit && (
+          <a key="edit" onClick={() => setEditRow(record)}>
+            编辑
           </a>
         ),
-        <Popconfirm
-          key="delete"
-          title="确认删除该任务？"
-          okText="删除"
-          okButtonProps={{ danger: true }}
-          onConfirm={() => handleDelete(record.id)}
-        >
-          <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-        </Popconfirm>,
+        record.status === 'running'
+          ? canStop && (
+              <Popconfirm
+                key="stop"
+                title="确认停止该任务？"
+                onConfirm={() => handleStop(record.id)}
+              >
+                <a>停止</a>
+              </Popconfirm>
+            )
+          : canRun && (
+              <a key="rerun" onClick={() => handleRerun(record.id)}>
+                运行
+              </a>
+            ),
+        canRemove && (
+          <Popconfirm
+            key="delete"
+            title="确认删除该任务？"
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(record.id)}
+          >
+            <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+          </Popconfirm>
+        ),
       ],
     },
   ];
@@ -697,16 +708,18 @@ const IngestTasksPage: React.FC = () => {
           <Access key="category" accessible={!!access.canAdmin}>
             <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
           </Access>,
-          <Button
-            key="create"
-            type="primary"
-            onClick={() => {
-              setWizardCtx({});
-              setCreateOpen(true);
-            }}
-          >
-            新建任务
-          </Button>,
+          canAdd && (
+            <Button
+              key="create"
+              type="primary"
+              onClick={() => {
+                setWizardCtx({});
+                setCreateOpen(true);
+              }}
+            >
+              新建任务
+            </Button>
+          ),
         ]}
       />
 
@@ -1215,7 +1228,7 @@ const IngestTasksPage: React.FC = () => {
                     render: (_, r) =>
                       // 失败 run（含质量门阻断）给重试入口，复用列表「运行」的 rerunIngestTask；
                       // 成功 run 不重试（避免无意中重复落地新版本）。
-                      r.status === 'failed' && currentRow ? (
+                      r.status === 'failed' && currentRow && canRun ? (
                         <Popconfirm
                           title="重试该任务？"
                           onConfirm={() => handleRerun(currentRow.id)}

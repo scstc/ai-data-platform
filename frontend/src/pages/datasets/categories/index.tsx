@@ -9,6 +9,9 @@ import { buildBreadcrumb } from '@/utils/breadcrumb';
  *  快捷入口复用同一 CategoryPanel(抽屉形态)。 */
 const CategoriesPage: React.FC = () => {
   const access = useAccess();
+  const canAdd = access.hasPerm('dataset:category:add');
+  const canEdit = access.hasPerm('dataset:category:edit');
+  const canRemove = access.hasPerm('dataset:category:remove');
   return (
     <PageContainer
       breadcrumb={buildBreadcrumb([
@@ -19,7 +22,11 @@ const CategoriesPage: React.FC = () => {
       content="维护用于组织数据集 / 采集任务的分类词表(新增 / 编辑 / 删除仅管理员)。"
     >
       <Card>
-        <CategoryPanel canAdmin={!!access.canAdmin} />
+        <CategoryPanel
+          canAdd={canAdd}
+          canEdit={canEdit}
+          canRemove={canRemove}
+        />
       </Card>
     </PageContainer>
   );

@@ -3,7 +3,7 @@ import {
   DownloadOutlined,
   InboxOutlined,
 } from '@ant-design/icons';
-import { history } from '@umijs/max';
+import { history, useAccess } from '@umijs/max';
 import type { UploadFile, UploadProps } from 'antd';
 import {
   Button,
@@ -127,6 +127,8 @@ const ScenarioImportCard: React.FC<Props> = ({
   semanticType,
   onFilesChange,
 }) => {
+  const access = useAccess();
+  const canUpload = access.hasPerm('ingest:upload:upload');
   const cfg = CONFIG[semanticType];
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [lakeId, setLakeId] = useState<string>();
@@ -321,17 +323,19 @@ const ScenarioImportCard: React.FC<Props> = ({
           200MB;归档到数据湖后可到数据湖详情页抽取生成数据集。
         </p>
       </Dragger>
-      <Button
-        type="primary"
-        icon={<CloudUploadOutlined />}
-        style={{ marginTop: 16 }}
-        loading={submitting}
-        disabled={fileList.length === 0 || !lakeId}
-        onClick={onSubmit}
-        data-testid={`scenario-import-submit-${semanticType}`}
-      >
-        上传并归档到数据湖（{fileList.length}）
-      </Button>
+      {canUpload && (
+        <Button
+          type="primary"
+          icon={<CloudUploadOutlined />}
+          style={{ marginTop: 16 }}
+          loading={submitting}
+          disabled={fileList.length === 0 || !lakeId}
+          onClick={onSubmit}
+          data-testid={`scenario-import-submit-${semanticType}`}
+        >
+          上传并归档到数据湖（{fileList.length}）
+        </Button>
+      )}
     </Card>
   );
 };

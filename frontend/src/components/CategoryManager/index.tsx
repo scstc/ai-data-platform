@@ -18,8 +18,14 @@ import {
 import { toCategoryTreeData } from '@/utils/categoryTree';
 
 interface CategoryPanelProps {
-  /** 当前用户是否为管理员：决定新增/编辑/删除是否可用 */
+  /** 当前用户是否为管理员：决定新增/编辑/删除是否可用（未单独传 canAdd/canEdit/canRemove 时的兜底） */
   canAdmin?: boolean;
+  /** 是否可新增分类；未传时回退到 canAdmin */
+  canAdd?: boolean;
+  /** 是否可编辑分类；未传时回退到 canAdmin */
+  canEdit?: boolean;
+  /** 是否可删除分类；未传时回退到 canAdmin */
+  canRemove?: boolean;
   /** 分类发生增/改/删后回调（供宿主页刷新分类筛选选项与列表） */
   onChanged?: () => void;
 }
@@ -41,6 +47,9 @@ const pickErrMsg = (err: unknown, fallback: string): string => {
  */
 export const CategoryPanel: FC<CategoryPanelProps> = ({
   canAdmin,
+  canAdd = canAdmin,
+  canEdit = canAdmin,
+  canRemove = canAdmin,
   onChanged,
 }) => {
   const actionRef = useRef<ActionType | null>(null);
@@ -99,25 +108,29 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
       title: '操作',
       valueType: 'option',
       width: 130,
-      // 新增/编辑/删除仅 admin（后端 require_admin 双层防护）；非 admin 此列为空
-      render: (_, record) =>
-        canAdmin
-          ? [
-              <a key="edit" onClick={() => openEdit(record)}>
-                编辑
-              </a>,
-              <Popconfirm
-                key="delete"
-                title="确认删除该分类？"
-                okText="删除"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-                onConfirm={() => handleDelete(record)}
-              >
-                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-              </Popconfirm>,
-            ]
-          : [<span key="readonly">-</span>],
+      // 编辑/删除按各自权限位控制（后端 require_admin 双层防护）；均无权限时此列为空
+      render: (_, record) => {
+        const actions = [
+          canEdit && (
+            <a key="edit" onClick={() => openEdit(record)}>
+              编辑
+            </a>
+          ),
+          canRemove && (
+            <Popconfirm
+              key="delete"
+              title="确认删除该分类？"
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(record)}
+            >
+              <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+            </Popconfirm>
+          ),
+        ].filter(Boolean);
+        return actions.length ? actions : [<span key="readonly">-</span>];
+      },
     },
   ];
 
@@ -134,7 +147,7 @@ export const CategoryPanel: FC<CategoryPanelProps> = ({
         pagination={false}
         childrenColumnName="children"
         toolBarRender={() =>
-          canAdmin
+          canAdd
             ? [
                 <Button key="create" type="primary" onClick={openCreate}>
                   新增分类

@@ -35,7 +35,9 @@ const pickErrMsg = (err: unknown, fallback: string): string => {
  */
 const DataLakesPage: FC = () => {
   const access = useAccess();
-  const canAdmin = !!access.canAdmin;
+  const canAdd = access.hasPerm('datalake:add');
+  const canRemove = access.hasPerm('datalake:remove');
+  const canBatchRemove = access.hasPerm('datalake:batch-remove');
   const actionRef = useRef<ActionType | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedRows, setSelectedRows] = useState<DataPlatform.DataLake[]>([]);
@@ -98,7 +100,7 @@ const DataLakesPage: FC = () => {
         >
           详情
         </a>,
-        canAdmin ? (
+        canRemove ? (
           <Popconfirm
             key="delete"
             title="删除数据湖?"
@@ -129,7 +131,7 @@ const DataLakesPage: FC = () => {
         headerTitle="数据湖列表"
         search={{ labelWidth: 90 }}
         rowSelection={
-          canAdmin
+          canBatchRemove
             ? {
                 selectedRowKeys,
                 onChange: (_keys, rows) =>
@@ -138,7 +140,7 @@ const DataLakesPage: FC = () => {
             : undefined
         }
         tableAlertOptionRender={() => (
-          <Access accessible={canAdmin}>
+          <Access accessible={canBatchRemove}>
             <Popconfirm
               title={`确认删除选中的 ${selectedRowKeys.length} 个数据湖?`}
               description="仅删元数据,快照物理文件保留。不可恢复。"
@@ -166,7 +168,7 @@ const DataLakesPage: FC = () => {
           };
         }}
         toolBarRender={() =>
-          canAdmin
+          canAdd
             ? [
                 <Button
                   key="new"

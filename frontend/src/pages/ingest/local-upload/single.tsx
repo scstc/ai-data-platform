@@ -12,7 +12,7 @@ import {
   VideoCameraOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useAccess } from '@umijs/max';
 import type { UploadFile, UploadProps } from 'antd';
 import {
   Button,
@@ -25,10 +25,7 @@ import {
   Upload,
 } from 'antd';
 import { type ReactNode, useCallback, useState } from 'react';
-import {
-  listDataLakes,
-  localUploadToLake,
-} from '@/services/data-platform';
+import { listDataLakes, localUploadToLake } from '@/services/data-platform';
 import { buildBreadcrumb } from '@/utils/breadcrumb';
 
 const { Text } = Typography;
@@ -243,6 +240,8 @@ const getExt = (filename: string): string => {
 /** 单一数据接入:一批文件 → 数据湖归档(结构化解析 parquet、媒体原格式),
  *  后续到数据湖详情页勾快照抽取生成数据集。 */
 const SingleUploadPage: React.FC = () => {
+  const access = useAccess();
+  const canUpload = access.hasPerm('ingest:upload:upload');
   const [lakeId, setLakeId] = useState<string>();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -426,14 +425,16 @@ const SingleUploadPage: React.FC = () => {
               单文件最大 200MB。
             </p>
           </Dragger>
-          <Button
-            type="primary"
-            onClick={onSubmit}
-            loading={submitting}
-            disabled={fileList.length === 0}
-          >
-            上传并归档到数据湖({fileList.length})
-          </Button>
+          {canUpload && (
+            <Button
+              type="primary"
+              onClick={onSubmit}
+              loading={submitting}
+              disabled={fileList.length === 0}
+            >
+              上传并归档到数据湖({fileList.length})
+            </Button>
+          )}
         </Space>
       </Card>
     </PageContainer>

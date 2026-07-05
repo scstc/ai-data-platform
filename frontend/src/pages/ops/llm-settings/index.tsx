@@ -6,6 +6,7 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components';
+import { useAccess } from '@umijs/max';
 import {
   Alert,
   AutoComplete,
@@ -450,6 +451,13 @@ const LlmSettings: React.FC = () => {
     | DataPlatform.LlmProvider['provider']
     | undefined;
   const actionRef = useRef(null);
+  const access = useAccess();
+  const canAdd = access.hasPerm('ops:llm:add');
+  const canEdit = access.hasPerm('ops:llm:edit');
+  const canRemove = access.hasPerm('ops:llm:remove');
+  const canTest = access.hasPerm('ops:llm:test');
+  const canActivate = access.hasPerm('ops:llm:activate');
+  const canManageModel = access.hasPerm('ops:llm:manage-model');
 
   const loadProviders = useCallback(async () => {
     setListLoading(true);
@@ -655,39 +663,49 @@ const LlmSettings: React.FC = () => {
       width: 360,
       render: (_, r) => (
         <Space size="small">
-          <Button
-            type="link"
-            size="small"
-            loading={testingId === r.id}
-            onClick={() => handleTest(r.id)}
-          >
-            测试
-          </Button>
-          <Button type="link" size="small" onClick={() => openManage(r)}>
-            管理模型
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            disabled={r.isActive}
-            loading={activatingId === r.id}
-            onClick={() => handleActivate(r.id)}
-          >
-            激活
-          </Button>
-          <Button type="link" size="small" onClick={() => openEdit(r)}>
-            编辑
-          </Button>
-          <Popconfirm
-            title="确定删除该供应商配置？"
-            onConfirm={() => handleDelete(r.id)}
-            okText="删除"
-            cancelText="取消"
-          >
-            <Button type="link" size="small" danger>
-              删除
+          {canTest && (
+            <Button
+              type="link"
+              size="small"
+              loading={testingId === r.id}
+              onClick={() => handleTest(r.id)}
+            >
+              测试
             </Button>
-          </Popconfirm>
+          )}
+          {canManageModel && (
+            <Button type="link" size="small" onClick={() => openManage(r)}>
+              管理模型
+            </Button>
+          )}
+          {canActivate && (
+            <Button
+              type="link"
+              size="small"
+              disabled={r.isActive}
+              loading={activatingId === r.id}
+              onClick={() => handleActivate(r.id)}
+            >
+              激活
+            </Button>
+          )}
+          {canEdit && (
+            <Button type="link" size="small" onClick={() => openEdit(r)}>
+              编辑
+            </Button>
+          )}
+          {canRemove && (
+            <Popconfirm
+              title="确定删除该供应商配置？"
+              onConfirm={() => handleDelete(r.id)}
+              okText="删除"
+              cancelText="取消"
+            >
+              <Button type="link" size="small" danger>
+                删除
+              </Button>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -711,11 +729,15 @@ const LlmSettings: React.FC = () => {
         dataSource={providers}
         columns={columns}
         options={{ reload: () => loadProviders() }}
-        toolBarRender={() => [
-          <Button key="create" type="primary" onClick={openCreate}>
-            新建供应商
-          </Button>,
-        ]}
+        toolBarRender={() =>
+          canAdd
+            ? [
+                <Button key="create" type="primary" onClick={openCreate}>
+                  新建供应商
+                </Button>,
+              ]
+            : []
+        }
       />
 
       <div style={{ marginTop: 24 }}>

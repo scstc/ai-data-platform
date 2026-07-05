@@ -3,7 +3,7 @@
 // 列表走 /api/v1/data-tasks;暂停/继续/停止走通用 /api/v1/jobs/{id}/pause|resume|stop。
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { history, useSearchParams } from '@umijs/max';
+import { history, useAccess, useSearchParams } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Progress, Tag } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { JobDetail } from '@/components';
@@ -100,6 +100,13 @@ async function rerunByType(type: string, id: string) {
 const ERR = 'var(--ant-color-error, #ff4d4f)';
 
 const DataTasks: React.FC = () => {
+  const access = useAccess();
+  const canPause = access.hasPerm('ops:datatask:pause');
+  const canResume = access.hasPerm('ops:datatask:resume');
+  const canStop = access.hasPerm('ops:datatask:stop');
+  const canRerun = access.hasPerm('ops:datatask:rerun');
+  const canRemove = access.hasPerm('ops:datatask:remove');
+  const canBatchRemove = access.hasPerm('ops:datatask:batch-remove');
   const actionRef = useRef<ActionType | null>(null);
   const [searchParams] = useSearchParams();
   const [detailOpen, setDetailOpen] = useState(false);
@@ -374,7 +381,7 @@ const DataTasks: React.FC = () => {
       search: false,
       render: (_, r) => {
         const actions: React.ReactNode[] = [];
-        if (r.canPause) {
+        if (r.canPause && canPause) {
           actions.push(
             <Popconfirm
               key="pause"
@@ -387,7 +394,7 @@ const DataTasks: React.FC = () => {
             </Popconfirm>,
           );
         }
-        if (r.canResume) {
+        if (r.canResume && canResume) {
           actions.push(
             <Popconfirm
               key="resume"
@@ -400,7 +407,7 @@ const DataTasks: React.FC = () => {
             </Popconfirm>,
           );
         }
-        if (r.canStop) {
+        if (r.canStop && canStop) {
           actions.push(
             <Popconfirm
               key="stop"
@@ -422,7 +429,12 @@ const DataTasks: React.FC = () => {
             </a>,
           );
         }
-        if (r.canRerun && RERUN_SUPPORTED.has(r.type) && !r.canStop) {
+        if (
+          r.canRerun &&
+          RERUN_SUPPORTED.has(r.type) &&
+          !r.canStop &&
+          canRerun
+        ) {
           actions.push(
             <Popconfirm
               key="rerun"
@@ -433,7 +445,7 @@ const DataTasks: React.FC = () => {
             </Popconfirm>,
           );
         }
-        if (r.state !== 'running') {
+        if (r.state !== 'running' && canRemove) {
           actions.push(
             <Popconfirm
               key="delete"
@@ -474,19 +486,21 @@ const DataTasks: React.FC = () => {
           onChange: (_keys, rows) =>
             setSelectedRows(rows as DataPlatform.Job[]),
         }}
-        tableAlertOptionRender={() => (
-          <Popconfirm
-            title={`确认删除选中的 ${selectedRows.length} 个任务？`}
-            description="只删任务记录，产出的数据集版本会保留。"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={handleBatchDelete}
-          >
-            <Button type="link" danger>
-              批量删除
-            </Button>
-          </Popconfirm>
-        )}
+        tableAlertOptionRender={() =>
+          canBatchRemove && (
+            <Popconfirm
+              title={`确认删除选中的 ${selectedRows.length} 个任务？`}
+              description="只删任务记录，产出的数据集版本会保留。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleBatchDelete}
+            >
+              <Button type="link" danger>
+                批量删除
+              </Button>
+            </Popconfirm>
+          )
+        }
         polling={polling}
         request={async (params) => {
           const current = params.current ?? 1;

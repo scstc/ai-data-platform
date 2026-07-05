@@ -1,6 +1,6 @@
 import { UploadOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useAccess } from '@umijs/max';
 import {
   Alert,
   Button,
@@ -69,15 +69,19 @@ function runnableTag(op: DataPlatform.CatalogOperator): {
   return RUNNABLE_TAG[op.runnable];
 }
 
-const MODALITY_CHIPS = (['text', 'image', 'audio', 'video', 'multimodal'] as const)
-  .map((v) => ({ value: v, label: MODALITY_LABEL[v] ?? v }));
-const RESOURCE_CHIPS = (['cpu', 'api_llm', 'hf_model', 'gpu', 'vllm'] as const).map(
-  (v) => ({ value: v, label: RESOURCE_LABEL[v] }),
-);
+const MODALITY_CHIPS = (
+  ['text', 'image', 'audio', 'video', 'multimodal'] as const
+).map((v) => ({ value: v, label: MODALITY_LABEL[v] ?? v }));
+const RESOURCE_CHIPS = (
+  ['cpu', 'api_llm', 'hf_model', 'gpu', 'vllm'] as const
+).map((v) => ({ value: v, label: RESOURCE_LABEL[v] }));
 const ALL_KEY = '__all__';
 const PAGE_SIZE = 24;
 
 const Market: React.FC = () => {
+  const access = useAccess();
+  const canUploadOperator = access.hasPerm('operator:upload');
+
   // 全量算子(一次性拉取)
   const [allOps, setAllOps] = useState<DataPlatform.CatalogOperator[]>([]);
   const [loading, setLoading] = useState(false);
@@ -154,14 +158,7 @@ const Market: React.FC = () => {
       }
       return true;
     });
-  }, [
-    allOps,
-    modalities,
-    resources,
-    runnableFilter,
-    onlyRecommended,
-    keyword,
-  ]);
+  }, [allOps, modalities, resources, runnableFilter, onlyRecommended, keyword]);
 
   /** 列表展示(在公共过滤之上再叠 category)。 */
   const filtered = useMemo(() => {
@@ -270,11 +267,7 @@ const Market: React.FC = () => {
         {/* 右:多维 chips + 卡片栅格 */}
         <Col xs={24} md={18} lg={19} xl={20}>
           <Card>
-            <Space
-              direction="vertical"
-              size={12}
-              style={{ width: '100%' }}
-            >
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
               {/* 搜索 + runnable + 推荐 + 上传 */}
               <Space
                 wrap
@@ -308,12 +301,14 @@ const Market: React.FC = () => {
                   >
                     只看推荐
                   </Checkbox>
-                  <Button
-                    icon={<UploadOutlined />}
-                    onClick={() => history.push('/operators/upload')}
-                  >
-                    上传自定义算子
-                  </Button>
+                  {canUploadOperator && (
+                    <Button
+                      icon={<UploadOutlined />}
+                      onClick={() => history.push('/operators/upload')}
+                    >
+                      上传自定义算子
+                    </Button>
+                  )}
                 </Space>
               </Space>
 
@@ -430,7 +425,8 @@ const Market: React.FC = () => {
                         </Paragraph>
                         <Text type="secondary" style={{ fontSize: 12 }}>
                           {[
-                            RESOURCE_LABEL[op.resourceClass] ?? op.resourceClass,
+                            RESOURCE_LABEL[op.resourceClass] ??
+                              op.resourceClass,
                             ...(op.modality ?? []).map(
                               (m) => MODALITY_LABEL[m] ?? m,
                             ),
@@ -441,10 +437,7 @@ const Market: React.FC = () => {
                         <Divider
                           style={{ marginBlock: 12, marginTop: 'auto' }}
                         />
-                        <Tag
-                          color={tag.color}
-                          style={{ marginInlineEnd: 0 }}
-                        >
+                        <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
                           {tag.label}
                         </Tag>
                       </Card>

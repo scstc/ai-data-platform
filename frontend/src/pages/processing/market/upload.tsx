@@ -5,7 +5,7 @@ import {
   PlusOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useAccess } from '@umijs/max';
 import type { UploadFile } from 'antd';
 import {
   Alert,
@@ -39,6 +39,8 @@ const PARAM_TYPE_OPTIONS = [
  *  用法示例等属性——这些字段驱动算子市场详情页展示 + 加工任务编排页的动态表单
  *  (见 backend operator_catalog._ui_params)。 */
 const UploadCustomOperatorPage: React.FC = () => {
+  const access = useAccess();
+  const canUploadOperator = access.hasPerm('operator:upload');
   const [form] = Form.useForm();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [scenarioOptions, setScenarioOptions] = useState<{ value: string }[]>(
@@ -237,9 +239,11 @@ const UploadCustomOperatorPage: React.FC = () => {
           </Form.Item>
 
           <Space>
-            <Button type="primary" loading={submitting} onClick={onSubmit}>
-              上传
-            </Button>
+            {canUploadOperator && (
+              <Button type="primary" loading={submitting} onClick={onSubmit}>
+                上传
+              </Button>
+            )}
             <Button onClick={() => history.push('/operators')}>取消</Button>
           </Space>
         </Form>

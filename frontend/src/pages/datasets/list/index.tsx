@@ -121,6 +121,12 @@ const QuickTagEditor: React.FC<{
 
 const DatasetsList: React.FC = () => {
   const access = useAccess();
+  const canAdd = access.hasPerm('dataset:add');
+  const canHost = access.hasPerm('dataset:host');
+  const canEdit = access.hasPerm('dataset:edit');
+  const canUnhost = access.hasPerm('dataset:unhost');
+  const canRemove = access.hasPerm('dataset:remove');
+  const canBatchRemove = access.hasPerm('dataset:batch-remove');
   const actionRef = useRef<ActionType | null>(null);
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Dataset[]>([]);
   const [hostOpen, setHostOpen] = useState(false);
@@ -315,7 +321,7 @@ const DatasetsList: React.FC = () => {
             )}
           </>
         );
-        if (!access.canAdmin) return inner;
+        if (!canEdit) return inner;
         // 多模态展开为子类型子菜单(图片/视频/音频/跨模态);其余语义类型为平铺项。
         const items: MenuProps['items'] = Object.entries(
           SEMANTIC_TYPE_META,
@@ -393,7 +399,7 @@ const DatasetsList: React.FC = () => {
       },
       render: (_, r) => {
         const inner = r.categoryName || <Tag bordered={false}>未设置</Tag>;
-        if (!access.canAdmin) return inner;
+        if (!canEdit) return inner;
         return (
           <Popover
             open={quickCatId === r.id}
@@ -435,7 +441,7 @@ const DatasetsList: React.FC = () => {
         ) : (
           <Tag bordered={false}>未设置</Tag>
         );
-        if (!access.canAdmin) return inner;
+        if (!canEdit) return inner;
         return (
           <Popover
             open={quickTagId === r.id}
@@ -498,7 +504,7 @@ const DatasetsList: React.FC = () => {
         // 外部托管数据集禁止删除(#18)——隐藏「删除」，改显 admin「取消托管」;
         // 受管数据集照旧显示「删除」(仅 admin，后端 require_admin 双层防护)
         record.hosted
-          ? access.canAdmin && (
+          ? canUnhost && (
               <Popconfirm
                 key="unhost"
                 title="确认取消托管该数据集？"
@@ -509,7 +515,7 @@ const DatasetsList: React.FC = () => {
                 <a>取消托管</a>
               </Popconfirm>
             )
-          : access.canAdmin && (
+          : canRemove && (
               <Popconfirm
                 key="delete"
                 title="确认删除该数据集？"
@@ -539,7 +545,7 @@ const DatasetsList: React.FC = () => {
             setSelectedRows(rows as DataPlatform.Dataset[]),
         }}
         tableAlertOptionRender={() => (
-          <Access accessible={!!access.canAdmin}>
+          <Access accessible={canBatchRemove}>
             {hasHostedSelected ? (
               <Button
                 type="link"
@@ -571,16 +577,20 @@ const DatasetsList: React.FC = () => {
           <Access key="category" accessible={!!access.canAdmin}>
             <Button onClick={() => setCategoryOpen(true)}>分类管理</Button>
           </Access>,
-          <Button
-            key="create"
-            type="primary"
-            onClick={() => setCreateOpen(true)}
-          >
-            新建数据集
-          </Button>,
-          <Button key="host-s3" onClick={() => setHostOpen(true)}>
-            托管 S3 数据
-          </Button>,
+          canAdd && (
+            <Button
+              key="create"
+              type="primary"
+              onClick={() => setCreateOpen(true)}
+            >
+              新建数据集
+            </Button>
+          ),
+          canHost && (
+            <Button key="host-s3" onClick={() => setHostOpen(true)}>
+              托管 S3 数据
+            </Button>
+          ),
         ]}
         request={async (params) => {
           const range = params.createdAt as [string, string] | undefined;

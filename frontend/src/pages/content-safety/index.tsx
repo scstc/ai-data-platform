@@ -1,6 +1,6 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { useLocation } from '@umijs/max';
+import { useAccess, useLocation } from '@umijs/max';
 import {
   Alert,
   Button,
@@ -133,6 +133,10 @@ const RulesManager: React.FC<{
   onClose: () => void;
   onChanged: () => void;
 }> = ({ open, onClose, onChanged }) => {
+  const access = useAccess();
+  const canAdd = access.hasPerm('governance:contentsafety:add');
+  const canEdit = access.hasPerm('governance:contentsafety:edit');
+  const canRemove = access.hasPerm('governance:contentsafety:remove');
   const [rules, setRules] = useState<DataPlatform.ReviewRule[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState<DataPlatform.ReviewRuleCreate>({
@@ -242,9 +246,11 @@ const RulesManager: React.FC<{
             Object.keys(SEVERITY_META) as DataPlatform.ReviewSeverity[]
           ).map((s) => ({ label: SEVERITY_META[s].text, value: s }))}
         />
-        <Button type="primary" onClick={onAdd}>
-          添加
-        </Button>
+        {canAdd && (
+          <Button type="primary" onClick={onAdd}>
+            添加
+          </Button>
+        )}
       </Space>
       <Table<DataPlatform.ReviewRule>
         rowKey="id"
@@ -277,26 +283,30 @@ const RulesManager: React.FC<{
             title: '启用',
             dataIndex: 'enabled',
             width: 80,
-            render: (_, r) => (
-              <Switch
-                size="small"
-                checked={r.enabled}
-                onChange={(v) => onToggle(r, v)}
-              />
-            ),
+            render: (_, r) =>
+              canEdit && (
+                <Switch
+                  size="small"
+                  checked={r.enabled}
+                  onChange={(v) => onToggle(r, v)}
+                />
+              ),
           },
           {
             title: '操作',
             key: 'op',
             width: 80,
-            render: (_, r) => (
-              <Popconfirm
-                title="删除该规则？已建任务不受影响。"
-                onConfirm={() => onDelete(r)}
-              >
-                <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-              </Popconfirm>
-            ),
+            render: (_, r) =>
+              canRemove && (
+                <Popconfirm
+                  title="删除该规则？已建任务不受影响。"
+                  onConfirm={() => onDelete(r)}
+                >
+                  <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>
+                    删除
+                  </a>
+                </Popconfirm>
+              ),
           },
         ]}
       />
@@ -394,6 +404,8 @@ const FindingsTable: React.FC<{ jobId: string; tables?: string[] }> = ({
 };
 
 const ContentSafety: React.FC = () => {
+  const access = useAccess();
+  const canRun = access.hasPerm('governance:contentsafety:run');
   const actionRef = useRef<ActionType | null>(null);
 
   // —— 配置区 state ——
@@ -900,9 +912,11 @@ const ContentSafety: React.FC = () => {
         </Row>
 
         <Divider style={{ margin: '16px 0' }} />
-        <Button type="primary" loading={submitting} onClick={onSubmit}>
-          开始审核
-        </Button>
+        {canRun && (
+          <Button type="primary" loading={submitting} onClick={onSubmit}>
+            开始审核
+          </Button>
+        )}
       </Card>
 
       {/* 任务列表 */}

@@ -1,6 +1,6 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useAccess } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Tag } from 'antd';
 import { useRef, useState } from 'react';
 import { DatasetFilter, JobDetail } from '@/components';
@@ -14,6 +14,8 @@ import {
 import { formatDateTime } from '@/utils/format';
 import { jobVersionColumns, renderState } from '@/utils/jobState';
 
+const PERM_BASE: Record<string, string> = { clean: 'governance:cleaning' };
+
 /** 清洗任务列表(可按 jobType 过滤)。数据清洗=clean。
  *  作为通用列表组件保留,cleaning/index.tsx 传 jobType="clean" 复用。 */
 const Processing: React.FC<{
@@ -25,6 +27,13 @@ const Processing: React.FC<{
   title = '数据清洗任务',
   createHref = '/governance/cleaning/editor',
 }) => {
+  const access = useAccess();
+  const base = PERM_BASE[jobType];
+  const canAdd = !base || access.hasPerm(`${base}:add`);
+  const canRemove = !base || access.hasPerm(`${base}:remove`);
+  const canBatchRemove = !base || access.hasPerm(`${base}:batch-remove`);
+  const canRerunPerm = !base || access.hasPerm(`${base}:rerun`);
+  const canStop = !base || access.hasPerm(`${base}:stop`);
   const actionRef = useRef<ActionType | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
@@ -133,21 +142,25 @@ const Processing: React.FC<{
       render: (_, r) => {
         // 运行中/排队中:只给「停止」(删除会被后端 409,重跑无意义)
         if (r.state === 'running' || r.state === 'pending') {
-          return [
-            <Popconfirm
-              key="stop"
-              title="停止该任务？已产出的内容不受影响。"
-              okText="停止"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => handleStop(r.id)}
-            >
-              <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>停止</a>
-            </Popconfirm>,
-          ];
+          return canStop
+            ? [
+                <Popconfirm
+                  key="stop"
+                  title="停止该任务？已产出的内容不受影响。"
+                  okText="停止"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => handleStop(r.id)}
+                >
+                  <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>
+                    停止
+                  </a>
+                </Popconfirm>,
+              ]
+            : [];
         }
         // 终态:可重跑 + 可删除
         const actions = [];
-        if (r.canRerun) {
+        if (r.canRerun && canRerunPerm) {
           actions.push(
             <Popconfirm
               key="rerun"
@@ -158,17 +171,19 @@ const Processing: React.FC<{
             </Popconfirm>,
           );
         }
-        actions.push(
-          <Popconfirm
-            key="delete"
-            title="删除该任务记录？产出的数据集版本会保留。"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => handleDelete(r.id)}
-          >
-            <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
-          </Popconfirm>,
-        );
+        if (canRemove) {
+          actions.push(
+            <Popconfirm
+              key="delete"
+              title="删除该任务记录？产出的数据集版本会保留。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(r.id)}
+            >
+              <a style={{ color: 'var(--ant-color-error, #ff4d4f)' }}>删除</a>
+            </Popconfirm>,
+          );
+        }
         return actions;
       },
     },
@@ -187,19 +202,23 @@ const Processing: React.FC<{
           onChange: (_keys, rows) =>
             setSelectedRows(rows as DataPlatform.Job[]),
         }}
-        tableAlertOptionRender={() => (
-          <Popconfirm
-            title={`确认删除选中的 ${selectedRows.length} 个任务？`}
-            description="只删任务记录，产出的数据集版本会保留。"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={handleBatchDelete}
-          >
-            <Button type="link" danger>
-              批量删除
-            </Button>
-          </Popconfirm>
-        )}
+        tableAlertOptionRender={
+          canBatchRemove
+            ? () => (
+                <Popconfirm
+                  title={`确认删除选中的 ${selectedRows.length} 个任务？`}
+                  description="只删任务记录，产出的数据集版本会保留。"
+                  okText="删除"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={handleBatchDelete}
+                >
+                  <Button type="link" danger>
+                    批量删除
+                  </Button>
+                </Popconfirm>
+              )
+            : undefined
+        }
         polling={polling}
         params={{ datasetId }}
         request={async (params) => {
@@ -223,13 +242,15 @@ const Processing: React.FC<{
             value={datasetId}
             onChange={setDatasetId}
           />,
-          <Button
-            type="primary"
-            key="new"
-            onClick={() => history.push(createHref)}
-          >
-            新建任务
-          </Button>,
+          canAdd && (
+            <Button
+              type="primary"
+              key="new"
+              onClick={() => history.push(createHref)}
+            >
+              新建任务
+            </Button>
+          ),
         ]}
       />
 

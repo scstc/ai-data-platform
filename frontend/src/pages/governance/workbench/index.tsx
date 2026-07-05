@@ -4,7 +4,7 @@
 // query ?scenario= 读取初始场景(未带参数则展示"全部")。
 import { PlusOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
-import { history, useSearchParams } from '@umijs/max';
+import { history, useAccess, useSearchParams } from '@umijs/max';
 import {
   Card,
   Col,
@@ -71,8 +71,16 @@ const SCENARIO_MAP: Record<string, ScenarioMeta> = Object.fromEntries(
 
 const ERR = 'var(--ant-color-error, #ff4d4f)';
 
+/** 场景 → RBAC perm 前缀,门控按当前场景动态取。 */
+const PERM_BASE: Record<ScenarioKey, string> = {
+  clean: 'governance:cleaning',
+  distillation: 'governance:distillation',
+  augmentation: 'governance:augment',
+};
+
 /** 命名导出:供场景菜单薄入口以固定 scenario 挂载。 */
 export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
+  const access = useAccess();
   const [activeKey, setActiveKey] = useState<string>(scenario ?? 'all');
   const [pipelines, setPipelines] = useState<DataPlatform.Pipeline[]>([]);
   const [loading, setLoading] = useState(false);
@@ -136,7 +144,7 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
       </div>
 
       <Row gutter={[16, 16]}>
-        {activeMeta && (
+        {activeMeta && access.hasPerm(`${PERM_BASE[activeMeta.key]}:add`) && (
           <Col span={6}>
             <Card
               hoverable
@@ -168,37 +176,42 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
                   ) : undefined
                 }
                 actions={[
-                  <a key="run" onClick={() => setExecTarget(p)}>
-                    一键执行
-                  </a>,
-                  <a
-                    key="edit"
-                    onClick={() =>
-                      meta &&
-                      history.push(`${meta.editorPath}?pipelineId=${p.id}`)
-                    }
-                  >
-                    编辑编排
-                  </a>,
-                  p.isPreset ? (
-                    <span
-                      key="delete"
-                      style={{ color: 'var(--ant-color-text-disabled)' }}
-                    >
-                      删除
-                    </span>
-                  ) : (
-                    <Popconfirm
-                      key="delete"
-                      title="删除该流水线模板？"
-                      okText="删除"
-                      okButtonProps={{ danger: true }}
-                      onConfirm={() => handleDelete(p.id)}
-                    >
-                      <a style={{ color: ERR }}>删除</a>
-                    </Popconfirm>
+                  meta && access.hasPerm(`${PERM_BASE[meta.key]}:run`) && (
+                    <a key="run" onClick={() => setExecTarget(p)}>
+                      一键执行
+                    </a>
                   ),
-                ]}
+                  meta && access.hasPerm(`${PERM_BASE[meta.key]}:edit`) && (
+                    <a
+                      key="edit"
+                      onClick={() =>
+                        history.push(`${meta.editorPath}?pipelineId=${p.id}`)
+                      }
+                    >
+                      编辑编排
+                    </a>
+                  ),
+                  meta &&
+                    access.hasPerm(`${PERM_BASE[meta.key]}:remove`) &&
+                    (p.isPreset ? (
+                      <span
+                        key="delete"
+                        style={{ color: 'var(--ant-color-text-disabled)' }}
+                      >
+                        删除
+                      </span>
+                    ) : (
+                      <Popconfirm
+                        key="delete"
+                        title="删除该流水线模板？"
+                        okText="删除"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={() => handleDelete(p.id)}
+                      >
+                        <a style={{ color: ERR }}>删除</a>
+                      </Popconfirm>
+                    )),
+                ].filter(Boolean)}
               >
                 {p.description && (
                   <Paragraph
