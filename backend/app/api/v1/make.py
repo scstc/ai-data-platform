@@ -67,25 +67,48 @@ async def _start_make(
     session: AsyncSession, body: MakeJobCreate
 ) -> JSONResponse:
     """合成版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。"""
-    if not body.operators:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "请至少选择一个算子"},
-        )
-    unknown = [o.name for o in body.operators if oc.get_operator(o.name) is None]
-    if unknown:
-        return JSONResponse(
-            status_code=400, content={"success": False, "message": f"未知算子:{', '.join(unknown)}"}
-        )
-    if (block_msg := _make_operator_block(body.operators)) is not None:
-        return JSONResponse(
-            status_code=400, content={"success": False, "message": block_msg}
-        )
-    if body.goal.mode not in ("synthesize", "make"):
+    if body.goal.mode not in ("synthesize", "make", "merge"):
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": f"goal.mode 非法:{body.goal.mode}"},
         )
+    if body.goal.mode == "merge":
+        # 合并模式:纯 Python 按行拼接,不走 DJ/LLM,只校验合并配置。
+        # 字段是否真为共同字段在执行时逐文件复核(services/make.merge 报错到任务)。
+        names = body.goal.merge_members or []
+        if len(names) < 2:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "合并模式至少选择 2 个成员文件"},
+            )
+        if len(set(names)) != len(names):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "合并成员文件名重复"},
+            )
+        if not (body.goal.merge_field or "").strip():
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "请指定合并字段"},
+            )
+    else:
+        if not body.operators:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "请至少选择一个算子"},
+            )
+        unknown = [
+            o.name for o in body.operators if oc.get_operator(o.name) is None
+        ]
+        if unknown:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
+            )
+        if (block_msg := _make_operator_block(body.operators)) is not None:
+            return JSONResponse(
+                status_code=400, content={"success": False, "message": block_msg}
+            )
 
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:

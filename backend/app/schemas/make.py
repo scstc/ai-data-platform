@@ -17,7 +17,8 @@ from app.schemas.job import MemberOperatorConfig, OperatorSpec
 class MakeGoal(CamelModel):
     """数据合成目标(任务级参数)。"""
 
-    # 合成模式:固定为 synthesize(后续可能扩展回 augment 之类的,先固定)
+    # 合成模式:merge(多 jsonl 成员按行拼接,纯 Python 不走 DJ/LLM,当前主路径)
+    # | synthesize(LLM 造新数据,保留给存量任务重跑/流水线)
     mode: str = "synthesize"
     # 每个输入样本生成的目标条数(1→N 的 N;QA 类算子可 >1)
     target_per_sample: int = 1
@@ -25,6 +26,15 @@ class MakeGoal(CamelModel):
     target_total: int | None = None
     # 备注(落到 DatasetVersion.note)
     note: str | None = None
+
+    # --- merge 模式专用 ---
+    # 参与合并的成员文件名(≥2,有序):第一个为主文件,产物沿用其
+    # 文件名与其余字段,后续文件仅贡献合并字段的拼接片段
+    merge_members: list[str] | None = None
+    # 拼接字段,必须是所有参与文件的共同字段(如 text)
+    merge_field: str | None = None
+    # 片段分隔符;句末标点(。.!?！？;；)会同时补到整段结尾
+    merge_separator: str = "。"
 
 
 class MakeJobCreate(CamelModel):

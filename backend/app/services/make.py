@@ -1,8 +1,9 @@
-"""数据合成(make)执行引擎:走 data-juicer LLM Mapper 链,产物落新版本。
+"""数据合成(make)执行引擎。
 
-增强(augment)走 ``services/augment.py``,本模块专管 LLM 造新数据。
+主路径 mode='merge':多个 jsonl 成员按行号对齐,拼接共同字段(如 text)成新行,
+纯 Python 执行,不进 data-juicer 子进程、不依赖 LLM。
+mode='synthesize' 保留:走 data-juicer LLM Mapper 链(存量任务重跑/流水线)。
 产物 ``DatasetVersion.origin='synthetic'``(与 augment 共享约定)。
-所有算子需 LLM;OPENAI_API_KEY 未配 → needs_api 拦截。
 """
 
 from __future__ import annotations
@@ -33,6 +34,216 @@ from app.services.engine import (
 )
 
 
+# 视为句末标点的分隔符:片段先去尾重复,再在整段结尾补一个,
+# 使产物形如「片段A。片段B。」(见需求示例);空格/换行等分隔符不补尾。
+_TERMINAL_SEPARATORS = ("。", ".", "!", "?", "！", "？", ";", "；")
+
+
+def merge_records(
+    named_rows: list[tuple[str, list[dict[str, Any]]]],
+    field: str,
+    separator: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """多文件记录按行号对齐,拼接 ``field`` 字段;纯函数,便于单测。
+
+    产物行数 = 主文件(第一个)行数,其余字段沿用主文件对应行;
+    扩展文件比主文件短则缺失行少拼一段,长则多余行丢弃,均记 warning。
+    """
+    warnings: list[str] = []
+    primary_name, primary = named_rows[0]
+    terminal = separator if separator in _TERMINAL_SEPARATORS else ""
+    merged: list[dict[str, Any]] = []
+    for i, base in enumerate(primary):
+        parts: list[str] = []
+        for _name, rows in named_rows:
+            if i >= len(rows) or rows[i].get(field) is None:
+                continue
+            frag = str(rows[i][field]).strip()
+            if terminal:
+                frag = frag.rstrip(terminal)
+            if frag:
+                parts.append(frag)
+        rec = dict(base)
+        rec[field] = separator.join(parts) + (terminal if parts else "")
+        merged.append(rec)
+    for name, rows in named_rows[1:]:
+        if len(rows) > len(primary):
+            warnings.append(
+                f"{name} 比主文件 {primary_name} 多 "
+                f"{len(rows) - len(primary)} 行,多余行已丢弃"
+            )
+        elif len(rows) < len(primary):
+            warnings.append(
+                f"{name} 比主文件 {primary_name} 少 "
+                f"{len(primary) - len(rows)} 行,缺失行未拼接该片段"
+            )
+    return merged, warnings
+
+
+async def _run_merge_job(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    input_version: DatasetVersion,
+    goal: MakeGoal,
+    output_dataset_id: str | None = None,
+) -> tuple[DatasetVersion, str, str, MakeReport]:
+    """merge 模式:多 jsonl 成员按行拼接 → 新版本(纯 Python,不走 DJ)。
+
+    产物成员沿用主文件名(主文件的演进),被合并的扩展文件不结转,
+    未参与的其他成员原样结转。失败抛 EngineError(落任务错误,fail loud)。
+    """
+    names = goal.merge_members or []
+    field = (goal.merge_field or "").strip()
+    separator = goal.merge_separator or "。"
+    if len(names) < 2 or not field:
+        raise EngineError("合并模式需要至少 2 个成员文件和合并字段")
+
+    dataset_id = output_dataset_id or input_version.dataset_id
+    target_ds = await session.get(Dataset, dataset_id)
+    if target_ds is None:
+        raise EngineError(f"输出数据集不存在:{dataset_id}")
+
+    from app.services.engine import (
+        _get_member_output_path,
+        _get_version_members,
+        _materialize_member,
+        _new_member_id,
+    )
+    from app.services.external_store import upload_jsonl_member
+
+    members = await _get_version_members(session, input_version.id)
+    by_name = {m.table_name: m for m in members}
+    if missing := [n for n in names if n not in by_name]:
+        raise EngineError(f"版本中不存在成员:{', '.join(missing)}")
+    if non_jsonl := [n for n in names if by_name[n].format != "jsonl"]:
+        raise EngineError(f"仅支持 jsonl 成员合并:{', '.join(non_jsonl)}")
+
+    started = time.time()
+
+    # 读入各成员并校验合并字段确为共同字段(抽样前 50 行)
+    named_rows: list[tuple[str, list[dict[str, Any]]]] = []
+    for n in names:
+        path = await _materialize_member(session, by_name[n])
+        rows = [
+            json.loads(line)
+            for line in path.open(encoding="utf-8")
+            if line.strip()
+        ]
+        sampled_fields = sorted({k for r in rows[:50] for k in r})
+        if field not in sampled_fields:
+            raise EngineError(
+                f"成员 {n} 缺少合并字段「{field}」,"
+                f"可用字段:{', '.join(sampled_fields) or '(空文件)'}"
+            )
+        named_rows.append((n, rows))
+
+    merged, warnings = merge_records(named_rows, field, separator)
+
+    # 落盘 + 上传:产物成员沿用主文件名
+    max_vno = await session.scalar(
+        select(func.max(DatasetVersion.version_no)).where(
+            DatasetVersion.dataset_id == dataset_id
+        )
+    )
+    new_vno = (max_vno or 0) + 1
+    primary_name = names[0]
+    out_path = _get_member_output_path(dataset_id, new_vno, primary_name, "jsonl")
+    data_bytes = "".join(
+        json.dumps(r, ensure_ascii=False) + "\n" for r in merged
+    ).encode("utf-8")
+    out_path.write_bytes(data_bytes)
+    storage_uri = await upload_jsonl_member(
+        dataset_id, new_vno, primary_name, data_bytes
+    )
+
+    new_members_data: list[dict[str, Any]] = [
+        {
+            "table_name": primary_name,
+            "storage_uri": storage_uri,
+            "format": "jsonl",
+            "rows": len(merged),
+            "size": len(data_bytes),
+            "schema_variant": by_name[primary_name].schema_variant,
+        }
+    ]
+    # 写回输入同数据集时,未参与合并的成员原样结转(被合并的扩展文件已并入主文件)
+    from app.models.dataset_version_table import DatasetVersionTable
+    from app.services.engine import carry_over_members
+
+    if dataset_id == input_version.dataset_id:
+        new_members_data += carry_over_members(members, set(names))
+
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset_id,
+        version_no=new_vno,
+        storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
+        format="multi" if len(new_members_data) > 1 else "jsonl",
+        rows=sum(m["rows"] or 0 for m in new_members_data),
+        size=sum(m["size"] or 0 for m in new_members_data),
+        origin="synthetic",
+        produced_by_job_id=job_id,
+        note=goal.note
+        or f"合并产出({' + '.join(names)},来自 v{input_version.version_no})",
+    )
+    session.add(version)
+    await session.flush()
+    for m_data in new_members_data:
+        session.add(
+            DatasetVersionTable(
+                id=_new_member_id(), dataset_version_id=version.id, **m_data
+            )
+        )
+    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+    await session.commit()
+    await session.refresh(version)
+
+    # 配置回显(job.config_yaml)与日志/报告
+    yaml_text = yaml.safe_dump(
+        {
+            "mode": "merge",
+            "members": names,
+            "field": field,
+            "separator": separator,
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    out_dir = out_path.parent
+    log_lines = [
+        f"merge 模式:{' + '.join(names)},字段={field},分隔符={separator!r}",
+        *(f"输入 {n}: {len(rows)} 行" for n, rows in named_rows),
+        f"输出 {primary_name}: {len(merged)} 行",
+        *warnings,
+    ]
+    log_path = out_dir / "run.log"
+    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+
+    total_input = sum(len(rows) for _n, rows in named_rows)
+    report = MakeReport(
+        job_id=job_id,
+        input_version_id=input_version.id,
+        output_version_id=version.id,
+        mode="merge",
+        input_count=total_input,
+        output_count=len(merged),
+        expansion_ratio=(len(merged) / total_input) if total_input else None,
+        elapsed_seconds=round(time.time() - started, 2),
+        operator_chain=[],
+        warnings=warnings,
+        raw={
+            "goal": goal.model_dump(mode="json"),
+            "input_rows": {n: len(rows) for n, rows in named_rows},
+        },
+    )
+    (out_dir / "report.json").write_text(
+        json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return version, yaml_text, str(log_path), report
+
+
 async def run_make_job(
     session: AsyncSession,
     *,
@@ -53,6 +264,16 @@ async def run_make_job(
     goal: 全局合成目标参数（不按成员区分）
     产物 origin='synthetic',返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
     """
+    # merge 模式:纯 Python 按行拼接,不走下方 DJ 算子链
+    if goal.mode == "merge":
+        return await _run_merge_job(
+            session,
+            job_id=job_id,
+            input_version=input_version,
+            goal=goal,
+            output_dataset_id=output_dataset_id,
+        )
+
     dataset_id = output_dataset_id or input_version.dataset_id
     target_ds = await session.get(Dataset, dataset_id)
     if target_ds is None:

@@ -658,16 +658,24 @@ declare namespace DataPlatform {
 
   /** 数据合成(make)目标(任务级参数) */
   type MakeGoal = {
-    mode?: 'synthesize' | 'make';
+    /** merge=多 jsonl 按行拼接(纯 Python,当前主路径);synthesize=LLM 造新数据(存量) */
+    mode?: 'synthesize' | 'make' | 'merge';
     targetPerSample?: number;
     targetTotal?: number;
     note?: string;
+    /** merge 模式:参与合并的成员文件名(≥2,有序,第一个为主文件) */
+    mergeMembers?: string[];
+    /** merge 模式:拼接字段,须为所有参与文件的共同字段 */
+    mergeField?: string;
+    /** merge 模式:片段分隔符,句末标点会同时补到结尾;默认「。」 */
+    mergeSeparator?: string;
   };
   /** 新建合成任务入参 */
   type MakeJobCreate = {
     name: string;
     datasetVersionId: string;
-    operators: { name: string; params?: Record<string, any> }[];
+    /** merge 模式不需要算子 */
+    operators?: { name: string; params?: Record<string, any> }[];
     goal: MakeGoal;
     outputDatasetId?: string;
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
