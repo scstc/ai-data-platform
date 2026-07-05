@@ -146,8 +146,9 @@ const QualityEditor: React.FC = () => {
       (op) => ({ name: op.name, params: op.params ?? {} }),
     );
     return stepsToYaml(normalizedSteps, {
-      datasetName: memberName,
+      datasetName: selectedDatasetName,
       versionLabel: selectedVersionLabel,
+      fileName: memberName,
       textKeys: cfg.textKeys,
     });
   };

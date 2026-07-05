@@ -16,4 +16,14 @@ describe('stepsToYaml', () => {
   it('空流水线给出占位 process: []', () => {
     expect(stepsToYaml([])).toContain('process: []');
   });
+
+  it('编排粒度=文件:dataset 渲染数据集本名,file 单独一行,避免语义混淆', () => {
+    const y = stepsToYaml([{ name: 'clean_html_mapper', params: {} }], {
+      datasetName: '测试6666',
+      versionLabel: 'v2026.7.2 (#1)',
+      fileName: '安全审核_银行业务QA_2500条',
+    });
+    expect(y).toContain('dataset: 测试6666 / v2026.7.2 (#1)');
+    expect(y).toContain('file: 安全审核_银行业务QA_2500条');
+  });
 });

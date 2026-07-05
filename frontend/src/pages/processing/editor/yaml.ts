@@ -1,9 +1,11 @@
 import yaml from 'js-yaml';
 
-/** YAML 预览上下文:用户已选的数据集/版本/清洗字段,随选择即时反映到预览。 */
+/** YAML 预览上下文:用户已选的数据集/版本/文件/清洗字段,随选择即时反映到预览。 */
 export interface YamlPreviewContext {
   datasetName?: string;
   versionLabel?: string;
+  /** 编排的文件(版本成员);编排粒度=文件,与 dataset 分开渲染避免混淆 */
+  fileName?: string;
   /** 清洗字段(对应 DJ 配置项 text_keys);留空=后端自动探测,不渲染 */
   textKeys?: string[];
 }
@@ -23,6 +25,7 @@ export function stepsToYaml(
       ? `${ctx.datasetName} / ${ctx.versionLabel}`
       : ctx.datasetName;
   }
+  if (ctx?.fileName) doc.file = ctx.fileName;
   if (ctx?.textKeys?.length) doc.text_keys = ctx.textKeys;
   doc.process = process;
   return yaml.dump(doc, { noRefs: true, sortKeys: false });

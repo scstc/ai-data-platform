@@ -1,8 +1,11 @@
+import { CopyOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useLocation } from '@umijs/max';
 import {
+  Badge,
   Button,
   Card,
+  Checkbox,
   Empty,
   Form,
   Input,
@@ -10,8 +13,8 @@ import {
   message,
   Select,
   Space,
-  Table,
   Typography,
+  theme,
 } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
@@ -37,11 +40,23 @@ type MemberConfig = {
   operators: DataPlatform.OperatorSpec[];
 };
 
+/** 字节数人类可读,与 data-lakes/detail.tsx 的 formatSize 保持一致 */
+const formatSize = (bytes?: number | null): string => {
+  if (bytes === null || bytes === undefined) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
+
 /** 清洗任务编辑器(按 jobType 建任务)。数据清洗=clean。
  *  作为通用编辑器组件保留,cleaning/editor 渲染 <Editor jobType="clean" ... /> 复用。
- *  编排粒度=文件:顶部「数据集→版本→文件」三级选择,画布一次编排一个文件;
- *  各文件配置按文件名缓存,切文件不丢,提交时每个已配置文件独立生成 YAML 分别
- *  执行,产物与未配置文件(原样结转)合并为同一个新版本。 */
+ *  编排粒度=文件,master-detail:左侧常驻文件清单(每个文件显示格式/大小/
+ *  配置状态,点行切换),右侧画布编排当前文件,所有文件状态一屏可见;
+ *  各文件配置按文件名缓存,切文件不丢,行内「复制」可批量套用同一条流水线;
+ *  提交时每个已配置文件独立生成 YAML 分别执行,产物与未配置文件(原样结转)
+ *  合并为同一个新版本。 */
 const Editor: React.FC<{
   jobType?: string;
   title?: string;
@@ -90,6 +105,7 @@ const Editor: React.FC<{
     Record<string, DataPlatform.CatalogOperator>
   >({});
   const [submitting, setSubmitting] = useState(false);
+  const { token } = theme.useToken();
 
   // 算子元信息(供 label/params 渲染):一次取全量(212 ≤ 后端 pageSize 上限 500)
   useEffect(() => {
@@ -202,8 +218,9 @@ const Editor: React.FC<{
       (op) => ({ name: op.name, params: op.params ?? {} }),
     );
     return stepsToYaml(normalizedSteps, {
-      datasetName: memberName,
+      datasetName: selectedDatasetName,
       versionLabel: selectedVersionLabel,
+      fileName: memberName,
     });
   };
 
@@ -216,6 +233,40 @@ const Editor: React.FC<{
       [memberName]: { operators: next },
     }));
 
+  // 复制配置:把 copySource 文件的算子链整体覆盖到勾选的目标文件
+  const [copySource, setCopySource] = useState<string>();
+  const [copyTargets, setCopyTargets] = useState<string[]>([]);
+
+  const applyCopy = () => {
+    if (!copySource) return;
+    const src = memberConfigs[copySource]?.operators ?? [];
+    setMemberConfigs((prev) => {
+      const next = { ...prev };
+      for (const t of copyTargets) {
+        next[t] = {
+          operators: src.map((op) => ({
+            name: op.name,
+            params: { ...(op.params ?? {}) },
+          })),
+        };
+      }
+      return next;
+    });
+    // 覆盖后目标文件是一条干净的线性链,重置游离标记与选中步骤
+    setMemberHasOrphan((prev) => {
+      const next = { ...prev };
+      for (const t of copyTargets) next[t] = false;
+      return next;
+    });
+    setMemberActiveIdx((prev) => {
+      const next = { ...prev };
+      for (const t of copyTargets) next[t] = 0;
+      return next;
+    });
+    message.success(`已复制到 ${copyTargets.length} 个文件`);
+    setCopySource(undefined);
+  };
+
   // 保存为流水线:取当前激活成员的 {operators} 作为 spec,与 scenario 绑定
   const [pipelineModalOpen, setPipelineModalOpen] = useState(false);
   const [pipelineForm] = Form.useForm<{ name: string; description?: string }>();
@@ -224,7 +275,7 @@ const Editor: React.FC<{
   const openSavePipeline = () => {
     const cfg = activeMember ? memberConfigs[activeMember] : undefined;
     if (!cfg?.operators.length) {
-      message.warning('请先为当前成员配置算子');
+      message.warning('请先进入某个文件的编排并配置算子');
       return;
     }
     if (activeMember && memberHasOrphan[activeMember]) {
@@ -282,20 +333,29 @@ const Editor: React.FC<{
       return;
     }
 
-    setSubmitting(true);
-    try {
-      await createJob({
-        name,
-        type: jobType,
-        datasetVersionId: versionId,
-        memberConfigs: configs,
-        outputMode: 'version',
-      });
-      message.success(`${noun}任务已创建，正在后台运行`);
-      history.push(redirectHref);
-    } finally {
-      setSubmitting(false);
-    }
+    const carryCount = versionMembers.length - configs.length;
+    Modal.confirm({
+      title: '确认创建任务',
+      content: `将对 ${configs.length} 个文件执行${noun}${
+        carryCount > 0 ? `,其余 ${carryCount} 个未配置文件原样结转` : ''
+      },产物合并为新版本。`,
+      onOk: async () => {
+        setSubmitting(true);
+        try {
+          await createJob({
+            name,
+            type: jobType,
+            datasetVersionId: versionId,
+            memberConfigs: configs,
+            outputMode: 'version',
+          });
+          message.success(`${noun}任务已创建，正在后台运行`);
+          history.push(redirectHref);
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
   };
 
   return (
@@ -350,20 +410,6 @@ const Editor: React.FC<{
             };
           })}
         />
-        <Select
-          placeholder="选择文件"
-          style={{ width: 240 }}
-          value={activeMember}
-          onChange={setActiveMember}
-          disabled={versionMembers.length === 0}
-          options={versionMembers.map((m) => {
-            const count = memberConfigs[m.tableName]?.operators.length || 0;
-            return {
-              label: count ? `${m.tableName}（${count} 算子）` : m.tableName,
-              value: m.tableName,
-            };
-          })}
-        />
       </Space>
 
       {versionMembers.length === 0 || !activeMember ? (
@@ -371,123 +417,214 @@ const Editor: React.FC<{
           <Empty description="请先选择数据集和版本" />
         </Card>
       ) : (
-        <Card title={`算子编排 · ${activeMember}`} size="small">
-          {(() => {
-            const memberName = activeMember;
-            const cfg = memberConfigs[memberName] ?? { operators: [] };
-            const memberSteps: DataPlatform.PipelineStep[] = cfg.operators.map(
-              (op) => ({
-                name: op.name,
-                params: op.params ?? {},
-              }),
-            );
-            const idx = memberActiveIdx[memberName] ?? 0;
-            const activeStepOfMember = memberSteps[idx];
-            const activeOpOfMember = activeStepOfMember
-              ? opMap[activeStepOfMember.name]
-              : undefined;
-            const appendOperator = (name: string) =>
-              setMemberOperators(memberName, [
-                ...cfg.operators,
-                { name, params: {} },
-              ]);
-
-            return (
-              <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                <PipelineDndArea
-                  steps={memberSteps}
-                  labelOf={labelOf}
-                  onAppend={appendOperator}
-                  onReorder={(from, to) => {
-                    const next = [...cfg.operators];
-                    const [moved] = next.splice(from, 1);
-                    next.splice(to, 0, moved);
-                    setMemberOperators(memberName, next);
+        <div style={{ display: 'flex', gap: 12, alignItems: 'stretch' }}>
+          <Card
+            size="small"
+            style={{ width: 240, flexShrink: 0 }}
+            styles={{ body: { padding: 8 } }}
+            title={
+              <Space>
+                <span>文件</span>
+                <Text
+                  type="secondary"
+                  style={{ fontWeight: 'normal', fontSize: 12 }}
+                >
+                  已配置{' '}
+                  {
+                    versionMembers.filter(
+                      (m) => memberConfigs[m.tableName]?.operators.length,
+                    ).length
+                  }
+                  /{versionMembers.length}
+                </Text>
+              </Space>
+            }
+          >
+            {versionMembers.map((m) => {
+              const count = memberConfigs[m.tableName]?.operators.length || 0;
+              const active = m.tableName === activeMember;
+              return (
+                <div
+                  key={m.tableName}
+                  onClick={() => setActiveMember(m.tableName)}
+                  style={{
+                    padding: '6px 8px',
+                    borderRadius: token.borderRadius,
+                    cursor: 'pointer',
+                    background: active ? token.colorPrimaryBg : undefined,
                   }}
                 >
-                  <CollapsiblePanes
-                    leftTitle="算子库"
-                    left={
-                      <OperatorLibrary onAdd={appendOperator} bucket={bucket} />
-                    }
-                    centerTitle="算子流水线"
-                    center={
-                      <PipelineCanvas
-                        steps={memberSteps}
-                        labelOf={labelOf}
-                        categoryOf={categoryOf}
-                        activeIdx={idx}
-                        onSelect={(i) =>
-                          setMemberActiveIdx((prev) => ({
-                            ...prev,
-                            [memberName]: i,
-                          }))
-                        }
-                        onRemove={(i) => {
-                          setMemberOperators(
-                            memberName,
-                            cfg.operators.filter((_, j) => j !== i),
-                          );
-                          setMemberActiveIdx((prev) => ({
-                            ...prev,
-                            [memberName]: 0,
-                          }));
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 4,
+                    }}
+                  >
+                    <Space size={6} style={{ minWidth: 0 }}>
+                      <Badge status={count ? 'processing' : 'default'} />
+                      <Text
+                        strong={active}
+                        ellipsis={{ tooltip: m.tableName }}
+                        style={{ maxWidth: 140 }}
+                      >
+                        {m.tableName}
+                      </Text>
+                    </Space>
+                    {count > 0 && versionMembers.length > 1 && (
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        title="复制此配置到其他文件"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCopySource(m.tableName);
+                          setCopyTargets([]);
                         }}
-                        onOrderChange={(perm) => {
-                          if (perm.length !== cfg.operators.length) {
+                      />
+                    )}
+                  </div>
+                  <Text
+                    type="secondary"
+                    style={{ fontSize: 12, paddingLeft: 14 }}
+                  >
+                    {m.format} · {formatSize(m.size)} ·{' '}
+                    {count ? `${count} 算子` : '原样结转'}
+                  </Text>
+                </div>
+              );
+            })}
+          </Card>
+          <Card
+            title={`算子编排 · ${activeMember}`}
+            size="small"
+            style={{ flex: 1, minWidth: 0 }}
+          >
+            {(() => {
+              const memberName = activeMember;
+              const cfg = memberConfigs[memberName] ?? { operators: [] };
+              const memberSteps: DataPlatform.PipelineStep[] =
+                cfg.operators.map((op) => ({
+                  name: op.name,
+                  params: op.params ?? {},
+                }));
+              const idx = memberActiveIdx[memberName] ?? 0;
+              const activeStepOfMember = memberSteps[idx];
+              const activeOpOfMember = activeStepOfMember
+                ? opMap[activeStepOfMember.name]
+                : undefined;
+              const appendOperator = (name: string) =>
+                setMemberOperators(memberName, [
+                  ...cfg.operators,
+                  { name, params: {} },
+                ]);
+
+              return (
+                <Space
+                  orientation="vertical"
+                  style={{ width: '100%' }}
+                  size={16}
+                >
+                  <PipelineDndArea
+                    steps={memberSteps}
+                    labelOf={labelOf}
+                    onAppend={appendOperator}
+                    onReorder={(from, to) => {
+                      const next = [...cfg.operators];
+                      const [moved] = next.splice(from, 1);
+                      next.splice(to, 0, moved);
+                      setMemberOperators(memberName, next);
+                    }}
+                  >
+                    <CollapsiblePanes
+                      leftTitle="算子库"
+                      left={
+                        <OperatorLibrary
+                          onAdd={appendOperator}
+                          bucket={bucket}
+                        />
+                      }
+                      centerTitle="算子流水线"
+                      center={
+                        <PipelineCanvas
+                          steps={memberSteps}
+                          labelOf={labelOf}
+                          categoryOf={categoryOf}
+                          activeIdx={idx}
+                          onSelect={(i) =>
+                            setMemberActiveIdx((prev) => ({
+                              ...prev,
+                              [memberName]: i,
+                            }))
+                          }
+                          onRemove={(i) => {
+                            setMemberOperators(
+                              memberName,
+                              cfg.operators.filter((_, j) => j !== i),
+                            );
+                            setMemberActiveIdx((prev) => ({
+                              ...prev,
+                              [memberName]: 0,
+                            }));
+                          }}
+                          onOrderChange={(perm) => {
+                            if (perm.length !== cfg.operators.length) {
+                              setMemberHasOrphan((prev) => ({
+                                ...prev,
+                                [memberName]: true,
+                              }));
+                              return;
+                            }
                             setMemberHasOrphan((prev) => ({
                               ...prev,
-                              [memberName]: true,
+                              [memberName]: false,
                             }));
-                            return;
+                            if (perm.every((v, i) => v === i)) return;
+                            setMemberOperators(
+                              memberName,
+                              perm.map((i) => cfg.operators[i]),
+                            );
+                          }}
+                          inputLabel={`${selectedVersionLabel ?? '版本'} · ${memberName}`}
+                          outputLabel="新版本"
+                        />
+                      }
+                      rightTitle="参数"
+                      right={
+                        <StepParamsForm
+                          op={activeOpOfMember}
+                          params={activeStepOfMember?.params ?? {}}
+                          onChange={(p) =>
+                            setMemberOperators(
+                              memberName,
+                              cfg.operators.map((op, i) =>
+                                i === idx ? { ...op, params: p } : op,
+                              ),
+                            )
                           }
-                          setMemberHasOrphan((prev) => ({
-                            ...prev,
-                            [memberName]: false,
-                          }));
-                          if (perm.every((v, i) => v === i)) return;
-                          setMemberOperators(
-                            memberName,
-                            perm.map((i) => cfg.operators[i]),
-                          );
-                        }}
-                        inputLabel={`${selectedVersionLabel ?? '版本'} · ${memberName}`}
-                        outputLabel="新版本"
-                      />
-                    }
-                    rightTitle="参数"
-                    right={
-                      <StepParamsForm
-                        op={activeOpOfMember}
-                        params={activeStepOfMember?.params ?? {}}
-                        onChange={(p) =>
-                          setMemberOperators(
-                            memberName,
-                            cfg.operators.map((op, i) =>
-                              i === idx ? { ...op, params: p } : op,
-                            ),
-                          )
-                        }
-                      />
-                    }
-                    leftCollapsed={libCollapsed}
-                    rightCollapsed={paramsCollapsed}
-                    onLeftCollapsedChange={setLibCollapsed}
-                    onRightCollapsedChange={setParamsCollapsed}
-                  />
-                </PipelineDndArea>
+                        />
+                      }
+                      leftCollapsed={libCollapsed}
+                      rightCollapsed={paramsCollapsed}
+                      onLeftCollapsedChange={setLibCollapsed}
+                      onRightCollapsedChange={setParamsCollapsed}
+                    />
+                  </PipelineDndArea>
 
-                <Card title="YAML 预览" size="small">
-                  <Paragraph>
-                    <pre style={{ margin: 0, fontSize: 12 }}>
-                      {memberYamlOf(memberName)}
-                    </pre>
-                  </Paragraph>
-                </Card>
-              </Space>
-            );
-          })()}
-        </Card>
+                  <Card title="YAML 预览" size="small">
+                    <Paragraph>
+                      <pre style={{ margin: 0, fontSize: 12 }}>
+                        {memberYamlOf(memberName)}
+                      </pre>
+                    </Paragraph>
+                  </Card>
+                </Space>
+              );
+            })()}
+          </Card>
+        </div>
       )}
 
       <Card size="small" style={{ marginTop: 16 }}>
@@ -495,9 +632,36 @@ const Editor: React.FC<{
           每个文件独立生成
           YAML、独立执行；已配置文件的产物与未配置文件（原样保留）
           合并为所选数据集的新版本，可通过历史版本对比追溯加工效果。
-          切换顶部「选择文件」可为其他文件编排，配置不会丢失。
+          左侧文件列表可随时切换编排对象（配置不会丢失）；行内复制按钮
+          可把当前文件的流水线批量套用到其他文件。
         </Text>
       </Card>
+
+      <Modal
+        title={`复制「${copySource ?? ''}」的配置到…`}
+        open={!!copySource}
+        onCancel={() => setCopySource(undefined)}
+        onOk={applyCopy}
+        okButtonProps={{ disabled: copyTargets.length === 0 }}
+        okText="复制"
+      >
+        <Checkbox.Group
+          value={copyTargets}
+          onChange={(v) => setCopyTargets(v as string[])}
+          style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+          options={versionMembers
+            .filter((m) => m.tableName !== copySource)
+            .map((m) => {
+              const count = memberConfigs[m.tableName]?.operators.length || 0;
+              return {
+                label: count
+                  ? `${m.tableName}（已有 ${count} 算子，将被覆盖）`
+                  : m.tableName,
+                value: m.tableName,
+              };
+            })}
+        />
+      </Modal>
 
       <Modal
         title="保存为流水线"
