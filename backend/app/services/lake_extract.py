@@ -275,10 +275,13 @@ def _inject_lineage_fields(
 ) -> list[dict[str, Any]]:
     """向记录中注入嵌套 "meta" 元数据（DJ 标准格式）。
 
-    meta 只含三元组（对齐 data-juicer 样例数据集的 {"src", "date", "version"}）：
+    meta 含 DJ 标准三元组（对齐 data-juicer 样例数据集的 {"src", "date", "version"}）
+    加一个精确血缘键：
     - src: 数据来源（原文件名/源表名，见 _lake_file_name）
     - date: 入湖日期（快照 created_at，YYYY-MM-DD）
-    - version: 源头快照版本号（source_version，可反查快照追溯全量血缘）
+    - version: 源头快照版本号（source_version，仅湖内唯一，兼容展示）
+    - snapshot_id: 快照主键（全局唯一，消除 source_version 跨湖歧义；
+      经 snapshot.object_id/version_no 可定位"哪个湖文件的哪一版"）
     """
     meta: dict[str, Any] = {
         "src": _lake_file_name(snapshot),
@@ -286,6 +289,7 @@ def _inject_lineage_fields(
             snapshot.created_at.strftime("%Y-%m-%d") if snapshot.created_at else None
         ),
         "version": snapshot.source_version,
+        "snapshot_id": snapshot.id,
     }
 
     # 每条记录持有独立的 meta 副本，避免共享引用被下游误改
@@ -347,6 +351,7 @@ async def extract_and_land_from_lake(
         note=note,
         produced_by_job_id=produced_by_job_id,
         storage_format="jsonl",
+        source_snapshot_id=snapshot.id,
     )
 
     return version, member
@@ -499,6 +504,7 @@ async def extract_to_new_dataset(
             source_format=snapshot.storage_format,
             note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",
             storage_format="jsonl",
+            source_snapshot_id=snapshot.id,
         )
 
     return dataset

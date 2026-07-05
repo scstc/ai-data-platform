@@ -27,6 +27,8 @@ class DatasetVersionTable(Base):
             "dataset_version_id", "table_name", name="uq_dvt_version_table"
         ),
         Index("ix_dvt_version", "dataset_version_id"),
+        # 反向血缘:按湖快照查它被抽到了哪些数据集成员
+        Index("ix_dvt_source_snapshot", "source_snapshot_id"),
     )
 
     # 主键形如 "dvt-" + 6 位 hex
@@ -48,6 +50,10 @@ class DatasetVersionTable(Base):
     # 质量评估:该成员逐条 stats 文件路径(dj-analyze 产出,如 <table>_stats.jsonl);
     # 未跑过质量评估的成员为空。
     stats_uri: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 湖→仓血缘:该成员抽取自哪个湖快照(data_lake_snapshots.id,无 FK 弱引用);
+    # 经 snapshot.object_id/version_no 可定位"哪个湖文件的哪一版"。
+    # 非湖抽取来源(采集/上传/加工产出)为空。
+    source_snapshot_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

@@ -668,6 +668,8 @@ async def _target_draft_version(
                     size=pm.size,
                     schema_snapshot=pm.schema_snapshot,
                     schema_variant=pm.schema_variant,
+                    # 克隆成员指向同一旧文件,内容未变,湖血缘随行
+                    source_snapshot_id=pm.source_snapshot_id,
                 )
             )
     await session.commit()
@@ -721,6 +723,7 @@ async def add_table_member(
     train_type: str | None = None,
     schema_variant: str | None = None,
     note: str | None = None,
+    source_snapshot_id: str | None = None,
 ) -> tuple[DatasetVersion, DatasetVersionTable]:
     """把一张表的记录落成当前 draft 版本的一个成员(同名覆盖)。
 
@@ -814,6 +817,8 @@ async def add_table_member(
         existing.size = size
         existing.schema_snapshot = snap
         existing.schema_variant = eff_variant
+        # 同名覆盖即内容替换,血缘跟随新内容(非湖来源覆盖时置空,不残留旧血缘)
+        existing.source_snapshot_id = source_snapshot_id
         member = existing
     else:
         member = DatasetVersionTable(
@@ -826,6 +831,7 @@ async def add_table_member(
             size=size,
             schema_snapshot=snap,
             schema_variant=eff_variant,
+            source_snapshot_id=source_snapshot_id,
         )
         session.add(member)
 

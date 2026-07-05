@@ -361,6 +361,7 @@ class S3Connector:
                     src_config=config,
                     src_bucket=bucket,
                     key=key,
+                    job_id=job_id,
                 )
                 task.logs = [
                     *task.logs,
@@ -403,6 +404,7 @@ class S3Connector:
         src_config: dict[str, Any],
         src_bucket: str,
         key: str,
+        job_id: str,
     ):
         """对象原样入湖:下载源对象 → ingest_to_lake_raw(湖桶 source_v 快照)。
 
@@ -444,6 +446,7 @@ class S3Connector:
             datasource_id=datasource.id,
             source_metadata={"bucket_name": src_bucket, "obj_key": key},
             ingest_task_id=task.id,
+            job_id=job_id,
         )
 
     async def _ingest_raw_file(

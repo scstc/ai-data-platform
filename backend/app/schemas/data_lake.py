@@ -43,7 +43,60 @@ class DataLakeSnapshotRead(CamelModel):
     rows: int | None = None
     size: int | None = None
     ingest_task_id: str | None = None
+    # 所属文件与该文件下的第几版(存量快照未回填时为空)
+    object_id: str | None = None
+    version_no: int | None = None
+    job_id: str | None = None
+    merge_inputs: list[dict[str, Any]] | None = None
     created_at: UtcDateTime
+
+
+class DataLakeObjectRead(CamelModel):
+    """数据湖文件读模型(一张表/一个文件的稳定身份 + 版本聚合统计)。"""
+
+    id: str
+    lake_id: str
+    identity_key: str
+    display_name: str
+    origin: str  # ingested | merged
+    data_category: str
+    storage_format: str | None = None
+    latest_version_no: int
+    latest_snapshot_id: str | None = None
+    version_count: int
+    total_size: int | None = None
+    latest_rows: int | None = None
+    merge_config: dict[str, Any] | None = None
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
+
+
+class LakeMergeInput(CamelModel):
+    """湖内合并单个输入项:文件 + 可选指定版本(缺省取最新版本)。"""
+
+    object_id: str
+    snapshot_id: str | None = None
+
+
+class LakeMergeRequest(CamelModel):
+    """湖内合并入参:union(纵向拼接) | join(按键关联)。
+
+    产出目标二选一(model_validator 拒绝混合或全空):
+    - 新建:``name`` 填,``target_object_id`` 空 → 建新合并文件
+    - 追加:``target_object_id`` 填,``name`` 空 → 追加到已有合并文件新版本
+    """
+
+    mode: Literal["union", "join"]
+    inputs: list[LakeMergeInput]
+    join_keys: list[str] | None = None
+    name: str | None = None
+    target_object_id: str | None = None
+
+    @model_validator(mode="after")
+    def _check_target_one_of(self) -> LakeMergeRequest:
+        if bool(self.name) == bool(self.target_object_id):
+            raise ValueError("name 与 target_object_id 必须二选一")
+        return self
 
 
 class DataLakeCreate(CamelModel):

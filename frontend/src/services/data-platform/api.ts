@@ -2239,6 +2239,57 @@ export async function listLakeSnapshots(
   });
 }
 
+/** 文件列表(数据湖内,聚合各文件最新版本 + 版本数/大小)GET /api/v1/data-lakes/:lakeId/objects */
+export async function listLakeObjects(
+  lakeId: string,
+  params: { page?: number; pageSize?: number; name?: string } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.DataLakeObject[];
+    total: number;
+    success: boolean;
+  }>(`/api/v1/data-lakes/${lakeId}/objects`, {
+    method: 'GET',
+    params,
+    ...(options || {}),
+  });
+}
+
+/** 文件的版本历史(按 versionNo 倒序)GET /api/v1/data-lake-objects/:objectId/versions */
+export async function listObjectVersions(
+  objectId: string,
+  params: { page?: number; pageSize?: number } = {},
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: DataPlatform.DataLakeSnapshot[];
+    total: number;
+    success: boolean;
+  }>(`/api/v1/data-lake-objects/${objectId}/versions`, {
+    method: 'GET',
+    params,
+    ...(options || {}),
+  });
+}
+
+/** 湖内合并结构化文件(admin),union 纵向拼接 / join 按键关联 POST /api/v1/data-lakes/:lakeId/merge */
+export async function mergeLakeObjects(
+  lakeId: string,
+  body: DataPlatform.LakeMergeRequest,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { objectId: string; snapshotId: string; versionNo: number };
+    success: boolean;
+  }>(`/api/v1/data-lakes/${lakeId}/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    ...(options || {}),
+  });
+}
+
 /** 快照详情 GET /api/v1/data-lake-snapshots/:snapshotId */
 export async function getLakeSnapshot(
   snapshotId: string,

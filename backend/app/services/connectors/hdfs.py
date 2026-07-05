@@ -358,6 +358,7 @@ class HdfsConnector:
                     datasource_id=datasource.id,
                     source_metadata={"hdfs_path": hdfs_path},
                     ingest_task_id=task.id,
+                    job_id=job_id,
                 )
                 task.logs = [
                     *task.logs,

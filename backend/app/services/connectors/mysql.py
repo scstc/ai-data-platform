@@ -235,6 +235,7 @@ class MysqlConnector:
                             },
                             datasource_id=datasource.id,
                             ingest_task_id=task.id,
+                            job_id=job_id,
                         )
                         task.logs = [
                             *task.logs,

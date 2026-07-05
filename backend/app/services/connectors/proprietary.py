@@ -65,6 +65,7 @@ async def _land_rows(
             source_metadata={"db_table": table_name, "db_engine": engine},
             datasource_id=datasource.id,
             ingest_task_id=task.id,
+            job_id=job_id,
         )
         task.logs = [
             *task.logs,

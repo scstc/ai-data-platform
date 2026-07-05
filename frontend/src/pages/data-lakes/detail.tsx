@@ -1,4 +1,5 @@
 import {
+  type ActionType,
   ModalForm,
   PageContainer,
   ProCard,
@@ -12,27 +13,19 @@ import {
   ProTable,
 } from '@ant-design/pro-components';
 import { history, useParams } from '@umijs/max';
-import {
-  Button,
-  Empty,
-  message,
-  Space,
-  Spin,
-  Tag,
-  Tooltip,
-  Typography,
-} from 'antd';
+import { Button, Empty, message, Space, Spin, Tag, Typography } from 'antd';
 import dayjs from 'dayjs';
-import { type FC, useEffect, useState } from 'react';
+import { type FC, useEffect, useRef, useState } from 'react';
 import {
   extractLakeToDataset,
   getDataLakeDetail,
-  getSnapshotPresignedUrl,
   listDatasets,
-  renameLakeSnapshot,
+  listLakeObjects,
 } from '@/services/data-platform';
-import { UploadChannelTag } from '@/utils/uploadChannel';
+import type { ExtractItem } from './components/extractItem';
 import LakeSnapshotPreview from './components/LakeSnapshotPreview';
+import MergeObjectsModal from './components/MergeObjectsModal';
+import VersionHistoryDrawer from './components/VersionHistoryDrawer';
 
 const { Text } = Typography;
 
@@ -46,17 +39,6 @@ const DATA_CATEGORY_LABEL: Record<DataPlatform.DataLakeDataCategory, string> = {
   text: '文本',
 };
 
-/**
- * 快照展示文件名。与后端 lake_extract 取名优先级一致:
- * original_filename(上传原文件名/用户改名)> db_table(DB 采集来源表名)。
- */
-const snapshotFilename = (
-  r: DataPlatform.DataLakeSnapshot,
-): string | undefined =>
-  (r.sourceMetadata?.original_filename ?? r.sourceMetadata?.db_table) as
-    | string
-    | undefined;
-
 /** 字节数人类可读 */
 const formatSize = (bytes: number | null): string => {
   if (bytes === null || bytes === undefined) return '-';
@@ -68,70 +50,55 @@ const formatSize = (bytes: number | null): string => {
 };
 
 /**
- * 数据湖详情页 —— 元信息 + 快照列表。
+ * 数据湖详情页 —— 元信息 + 文件列表(三层模型:湖 → 文件 → 版本)。
  *
- * 快照 = 不可变的 source_v 版本归档,一次接入产生一个快照。
- * 血缘链路:数据集 → snapshot.sourceVersion → 数据湖 → 数据源。
+ * 文件 DataLakeObject = 一张表 / 一个对象的稳定身份,按 identity_key 判重;
+ * 同一文件多次采集追加新版本,而非各自散落的快照。血缘链路:
+ * 数据集 → 版本快照 → 文件 → 数据湖 → 数据源。见 docs/数据湖文件版本模型整改.md。
  */
 const DataLakeDetailPage: FC = () => {
   const { id } = useParams<{ id: string }>();
-  const [detail, setDetail] = useState<DataPlatform.DataLakeDetail | null>(
-    null,
-  );
+  const [meta, setMeta] = useState<DataPlatform.DataLake | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedSnapshots, setSelectedSnapshots] = useState<
-    DataPlatform.DataLakeSnapshot[]
+  const actionRef = useRef<ActionType | null>(null);
+
+  const [selectedObjects, setSelectedObjects] = useState<
+    DataPlatform.DataLakeObject[]
   >([]);
-  const [extractOpen, setExtractOpen] = useState(false);
+  const [extractItems, setExtractItems] = useState<ExtractItem[] | null>(null);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [historyObject, setHistoryObject] =
+    useState<DataPlatform.DataLakeObject | null>(null);
   const [previewSnapshot, setPreviewSnapshot] =
     useState<DataPlatform.DataLakeSnapshot | null>(null);
-  const [renameTarget, setRenameTarget] =
-    useState<DataPlatform.DataLakeSnapshot | null>(null);
 
-  const reload = () => {
+  useEffect(() => {
     if (!id) return;
     setLoading(true);
     getDataLakeDetail(id)
-      .then(setDetail)
-      .catch(() => setDetail(null))
+      .then(setMeta)
+      .catch(() => setMeta(null))
       .finally(() => setLoading(false));
-  };
-
-  const handleDownload = async (snapshot: DataPlatform.DataLakeSnapshot) => {
-    try {
-      const res = await getSnapshotPresignedUrl(snapshot.id);
-      const { url } = res;
-
-      // 直接打开 presigned URL(浏览器会根据文件类型自动下载)
-      window.open(url, '_blank');
-    } catch (e: any) {
-      message.error(
-        e?.info?.errorMessage || e?.response?.data?.message || '下载失败',
-      );
-    }
-  };
-
-  useEffect(() => {
-    reload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const snapshotColumns: ProColumns<DataPlatform.DataLakeSnapshot>[] = [
+  const reloadObjects = () => actionRef.current?.reload();
+
+  const mergeableSelected =
+    selectedObjects.length >= 2 &&
+    selectedObjects.every((o) => o.storageFormat === 'parquet');
+
+  const objectColumns: ProColumns<DataPlatform.DataLakeObject>[] = [
     {
       title: '文件名',
-      dataIndex: 'sourceMetadata',
-      width: 200,
+      dataIndex: 'displayName',
+      width: 220,
       ellipsis: true,
-      render: (_, r) => {
-        const filename = snapshotFilename(r);
-        return filename ? (
-          <Tooltip title={filename}>
-            <Text>{filename}</Text>
-          </Tooltip>
-        ) : (
-          '-'
-        );
-      },
+      render: (_, r) => (
+        <Space size={4}>
+          <Text>{r.displayName}</Text>
+          {r.origin === 'merged' && <Tag color="purple">合并</Tag>}
+        </Space>
+      ),
     },
     {
       title: '数据类型',
@@ -145,62 +112,54 @@ const DataLakeDetailPage: FC = () => {
       title: '存储格式',
       dataIndex: 'storageFormat',
       width: 100,
-      render: (_, r) => <Tag color="default">{r.storageFormat}</Tag>,
+      render: (_, r) =>
+        r.storageFormat ? <Tag color="default">{r.storageFormat}</Tag> : '-',
     },
     {
-      title: '来源',
-      dataIndex: 'uploadChannel',
-      width: 100,
-      render: (_, r) => <UploadChannelTag channel={r.uploadChannel} />,
+      title: '最新版本',
+      dataIndex: 'latestVersionNo',
+      width: 90,
+      render: (_, r) => <Tag color="blue">v{r.latestVersionNo}</Tag>,
+    },
+    {
+      title: '版本数',
+      dataIndex: 'versionCount',
+      width: 90,
+      align: 'right' as const,
     },
     {
       title: '行数',
-      dataIndex: 'rows',
+      dataIndex: 'latestRows',
       width: 90,
       align: 'right' as const,
-      render: (_, r) => (r.rows != null ? r.rows.toLocaleString() : '-'),
+      render: (_, r) =>
+        r.latestRows != null ? r.latestRows.toLocaleString() : '-',
     },
     {
       title: '大小',
-      dataIndex: 'size',
+      dataIndex: 'totalSize',
       width: 100,
       align: 'right' as const,
-      render: (_, r) => formatSize(r.size),
+      render: (_, r) => formatSize(r.totalSize),
     },
     {
-      title: '归档时间',
-      dataIndex: 'createdAt',
+      title: '最近归档时间',
+      dataIndex: 'updatedAt',
       width: 168,
-      render: (_, r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+      render: (_, r) => dayjs(r.updatedAt).format('YYYY-MM-DD HH:mm:ss'),
     },
     {
       title: '操作',
-      width: 200,
+      width: 120,
       fixed: 'right' as const,
       render: (_, record) => (
-        <Space size="small">
-          <Button
-            type="link"
-            size="small"
-            onClick={() => setPreviewSnapshot(record)}
-          >
-            预览
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            onClick={() => handleDownload(record)}
-          >
-            下载
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            onClick={() => setRenameTarget(record)}
-          >
-            改名
-          </Button>
-        </Space>
+        <Button
+          type="link"
+          size="small"
+          onClick={() => setHistoryObject(record)}
+        >
+          版本历史
+        </Button>
       ),
     },
   ];
@@ -215,7 +174,7 @@ const DataLakeDetailPage: FC = () => {
     );
   }
 
-  if (!detail) {
+  if (!meta) {
     return (
       <PageContainer>
         <Empty description="数据湖不存在或已删除" />
@@ -226,7 +185,7 @@ const DataLakeDetailPage: FC = () => {
   return (
     <PageContainer
       header={{
-        title: detail.name,
+        title: meta.name,
         subTitle: <Tag color="blue">多源汇聚</Tag>,
       }}
     >
@@ -235,60 +194,86 @@ const DataLakeDetailPage: FC = () => {
           <ProDescriptions column={2}>
             <ProDescriptions.Item label="数据湖 ID">
               <Text code copyable>
-                {detail.id}
+                {meta.id}
               </Text>
             </ProDescriptions.Item>
             <ProDescriptions.Item label="所有者">
-              {detail.owner}
+              {meta.owner}
             </ProDescriptions.Item>
             <ProDescriptions.Item label="创建人">
-              {detail.creator}
+              {meta.creator}
             </ProDescriptions.Item>
             <ProDescriptions.Item label="创建时间">
-              {dayjs(detail.createdAt).format('YYYY-MM-DD HH:mm:ss')}
+              {dayjs(meta.createdAt).format('YYYY-MM-DD HH:mm:ss')}
             </ProDescriptions.Item>
             <ProDescriptions.Item label="更新时间">
-              {dayjs(detail.updatedAt).format('YYYY-MM-DD HH:mm:ss')}
+              {dayjs(meta.updatedAt).format('YYYY-MM-DD HH:mm:ss')}
             </ProDescriptions.Item>
             <ProDescriptions.Item label="描述" span={2}>
-              {detail.description ?? '-'}
+              {meta.description ?? '-'}
             </ProDescriptions.Item>
           </ProDescriptions>
         </ProCard>
 
         <ProCard
-          title={
+          title="文件列表"
+          tooltip="文件 = 一张表/一个对象的稳定身份,按身份键判重;同一文件多次采集追加新版本"
+          extra={
             <Space>
-              <span>文件列表</span>
-              <Tag>{detail.snapshots.length} 个</Tag>
+              <Button
+                disabled={!mergeableSelected}
+                onClick={() => setMergeOpen(true)}
+              >
+                数据合并({selectedObjects.length})
+              </Button>
+              <Button
+                type="primary"
+                disabled={selectedObjects.length === 0}
+                onClick={() =>
+                  setExtractItems(
+                    selectedObjects
+                      .filter((o) => !!o.latestSnapshotId)
+                      .map((o) => ({
+                        snapshotId: o.latestSnapshotId as string,
+                        displayName: o.displayName,
+                        dataCategory: o.dataCategory,
+                        storageFormat: o.storageFormat,
+                      })),
+                  )
+                }
+              >
+                抽取生成数据集({selectedObjects.length})
+              </Button>
             </Space>
           }
-          tooltip="快照 = 一次数据接入的不可变版本归档,永久固化、可追溯"
-          extra={
-            <Button
-              type="primary"
-              disabled={selectedSnapshots.length === 0}
-              onClick={() => setExtractOpen(true)}
-            >
-              抽取生成数据集({selectedSnapshots.length})
-            </Button>
-          }
         >
-          <ProTable<DataPlatform.DataLakeSnapshot>
-            columns={snapshotColumns}
-            dataSource={detail.snapshots}
+          <ProTable<DataPlatform.DataLakeObject>
+            actionRef={actionRef}
+            columns={objectColumns}
             rowKey="id"
             search={false}
             pagination={{ pageSize: 20 }}
             options={false}
             rowSelection={{
-              selectedRowKeys: selectedSnapshots.map((s) => s.id),
+              selectedRowKeys: selectedObjects.map((o) => o.id),
               onChange: (_keys, rows) =>
-                setSelectedSnapshots(rows as DataPlatform.DataLakeSnapshot[]),
+                setSelectedObjects(rows as DataPlatform.DataLakeObject[]),
+            }}
+            request={async (params) => {
+              if (!id) return { data: [], total: 0, success: true };
+              const res = await listLakeObjects(id, {
+                page: params.current,
+                pageSize: params.pageSize,
+              });
+              return {
+                data: res.data ?? [],
+                total: res.total ?? 0,
+                success: res.success ?? true,
+              };
             }}
             locale={{
               emptyText: (
-                <Empty description="该数据湖暂无快照,等待接入任务写入" />
+                <Empty description="该数据湖暂无文件,等待接入任务写入" />
               ),
             }}
           />
@@ -302,27 +287,28 @@ const DataLakeDetailPage: FC = () => {
         description?: string;
         fieldMappings?: Record<string, string>;
       }>
-        title="从湖快照抽取生成数据集"
-        open={extractOpen}
-        onOpenChange={setExtractOpen}
+        title="从湖文件抽取生成数据集"
+        open={!!extractItems}
+        onOpenChange={(open) => {
+          if (!open) setExtractItems(null);
+        }}
         width={720}
         modalProps={{ destroyOnHidden: true }}
         initialValues={{ targetMode: 'new' }}
         onFinish={async (values) => {
-          if (!id) return false;
+          if (!id || !extractItems) return false;
           const hide = message.loading('正在抽取...', 0);
           try {
-            // 过滤掉空模板
             const fieldMapping = values.fieldMappings
               ? Object.fromEntries(
-                  Object.entries(values.fieldMappings).filter(
-                    ([, template]) => template && template.trim(),
+                  Object.entries(values.fieldMappings).filter(([, template]) =>
+                    template?.trim(),
                   ),
                 )
               : undefined;
 
             const res = await extractLakeToDataset(id, {
-              snapshotIds: selectedSnapshots.map((s) => s.id),
+              snapshotIds: extractItems.map((s) => s.snapshotId),
               datasetId:
                 values.targetMode === 'existing' ? values.datasetId : undefined,
               datasetName:
@@ -337,7 +323,8 @@ const DataLakeDetailPage: FC = () => {
             message.success(
               `已生成数据集: ${res?.data?.datasetName ?? values.datasetName}`,
             );
-            setSelectedSnapshots([]);
+            setExtractItems(null);
+            setSelectedObjects([]);
             if (res?.data?.datasetId) {
               history.push(`/datasets/${res.data.datasetId}`);
             }
@@ -357,8 +344,8 @@ const DataLakeDetailPage: FC = () => {
         }}
       >
         <div style={{ marginBottom: 16, color: '#666' }}>
-          将从 <b>{selectedSnapshots.length}</b> 个快照抽取数据,
-          每个快照作为一个表成员落进目标数据集(表名 = source_version)。
+          将从 <b>{extractItems?.length ?? 0}</b> 个版本抽取数据,
+          每个版本作为一个表成员落进目标数据集(表名 = source_version)。
           血缘字段自动透传。
         </div>
         <ProFormRadio.Group
@@ -414,7 +401,7 @@ const DataLakeDetailPage: FC = () => {
         </ProFormDependency>
 
         {/* 逐文件配置字段映射 */}
-        {selectedSnapshots.filter(
+        {(extractItems ?? []).filter(
           (s) => s.dataCategory === 'database' || s.dataCategory === 'tabular',
         ).length > 0 && (
           <>
@@ -422,19 +409,19 @@ const DataLakeDetailPage: FC = () => {
               字段映射配置（可选）
             </Typography.Title>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              为表格类快照配置字段映射模板，使用 {'{字段名}'} 占位符拼接多字段为
+              为表格类版本配置字段映射模板，使用 {'{字段名}'} 占位符拼接多字段为
               text
             </Typography.Text>
             <div style={{ marginTop: 12 }}>
-              {selectedSnapshots
+              {(extractItems ?? [])
                 .filter(
                   (s) =>
                     s.dataCategory === 'database' ||
                     s.dataCategory === 'tabular',
                 )
-                .map((snapshot) => (
+                .map((item) => (
                   <div
-                    key={snapshot.id}
+                    key={item.snapshotId}
                     style={{
                       marginBottom: 12,
                       padding: 12,
@@ -444,15 +431,15 @@ const DataLakeDetailPage: FC = () => {
                   >
                     <div style={{ marginBottom: 8 }}>
                       <Space>
-                        <Text strong>
-                          {snapshotFilename(snapshot) || snapshot.id}
-                        </Text>
-                        <Tag>{DATA_CATEGORY_LABEL[snapshot.dataCategory]}</Tag>
-                        <Tag color="default">{snapshot.storageFormat}</Tag>
+                        <Text strong>{item.displayName}</Text>
+                        <Tag>{DATA_CATEGORY_LABEL[item.dataCategory]}</Tag>
+                        {item.storageFormat && (
+                          <Tag color="default">{item.storageFormat}</Tag>
+                        )}
                       </Space>
                     </div>
                     <ProFormTextArea
-                      name={['fieldMappings', snapshot.id]}
+                      name={['fieldMappings', item.snapshotId]}
                       placeholder="用户提问：{question}，客服回答：{answer}"
                       fieldProps={{ rows: 2, maxLength: 500 }}
                     />
@@ -463,60 +450,33 @@ const DataLakeDetailPage: FC = () => {
         )}
       </ModalForm>
 
-      <ModalForm<{ filename: string }>
-        title="修改文件名"
-        open={!!renameTarget}
-        onOpenChange={(open) => {
-          if (!open) setRenameTarget(null);
-        }}
-        width={420}
-        modalProps={{ destroyOnHidden: true }}
-        initialValues={{
-          filename: renameTarget ? snapshotFilename(renameTarget) : undefined,
-        }}
-        onFinish={async (values) => {
-          if (!renameTarget) return false;
-          try {
-            await renameLakeSnapshot(renameTarget.id, {
-              filename: values.filename.trim(),
-            });
-            message.success('改名成功');
-            reload();
-            return true;
-          } catch (err) {
-            const e = err as {
-              response?: { data?: { detail?: string; message?: string } };
-            };
-            message.error(
-              e?.response?.data?.detail ??
-                e?.response?.data?.message ??
-                '改名失败',
-            );
-            return false;
-          }
-        }}
-      >
-        <div style={{ marginBottom: 16, color: '#666' }}>
-          仅修改展示文件名,不影响已归档的物理文件与血缘字段。
-        </div>
-        <ProFormText
-          name="filename"
-          label="文件名"
-          rules={[
-            { required: true, whitespace: true, message: '请填写文件名' },
-            {
-              pattern: /^[^/\\]+$/,
-              message: '文件名不能包含路径分隔符',
-            },
-          ]}
+      {id && (
+        <MergeObjectsModal
+          lakeId={id}
+          open={mergeOpen}
+          onOpenChange={setMergeOpen}
+          selected={selectedObjects}
+          onSuccess={() => {
+            setMergeOpen(false);
+            setSelectedObjects([]);
+            reloadObjects();
+          }}
         />
-      </ModalForm>
+      )}
+
+      <VersionHistoryDrawer
+        object={historyObject}
+        onClose={() => setHistoryObject(null)}
+        onPreview={(snapshot) => setPreviewSnapshot(snapshot)}
+        onExtract={(items) => {
+          setHistoryObject(null);
+          setExtractItems(items);
+        }}
+      />
 
       <LakeSnapshotPreview
         snapshotId={previewSnapshot?.id ?? ''}
-        filename={
-          previewSnapshot ? snapshotFilename(previewSnapshot) : undefined
-        }
+        filename={historyObject?.displayName}
         storageFormat={previewSnapshot?.storageFormat}
         open={!!previewSnapshot}
         onClose={() => setPreviewSnapshot(null)}

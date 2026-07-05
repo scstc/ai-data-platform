@@ -1474,11 +1474,62 @@ declare namespace DataPlatform {
     size: number | null;
     ingestTaskId: string | null;
     createdAt: string;
+    /** 所属文件(DataLakeObject.id)。存量数据回填前可能为空 */
+    objectId?: string | null;
+    /** 该文件下的第几版,与 objectId 联合唯一 */
+    versionNo?: number | null;
+    /** 产出该版本的采集任务 id(手动上传/合并可能为空) */
+    jobId?: string | null;
+    /** 仅合并版本:血缘,记录参与合并的各文件版本 */
+    mergeInputs?:
+      | { objectId: string; snapshotId: string; versionNo: number }[]
+      | null;
   }
 
   /** 数据湖详情(元信息 + 快照列表) */
   interface DataLakeDetail extends DataLake {
     snapshots: DataLakeSnapshot[];
+  }
+
+  /** 数据湖内的文件(一张表 / 一个对象的稳定身份,聚合多个版本快照) */
+  interface DataLakeObject {
+    id: string;
+    lakeId: string;
+    /** 身份键,同湖内唯一,如 `ds-xxx:public.orders` / `local:report.pdf` */
+    identityKey: string;
+    /** 展示文件名 */
+    displayName: string;
+    /** ingested=外部采集/上传;merged=湖内合并生成 */
+    origin: 'ingested' | 'merged';
+    dataCategory: DataLakeDataCategory;
+    storageFormat: string | null;
+    latestVersionNo: number;
+    latestSnapshotId: string | null;
+    /** 该文件累计版本数 */
+    versionCount: number;
+    /** 该文件所有版本累计大小(字节) */
+    totalSize: number | null;
+    /** 最新版本行数 */
+    latestRows: number | null;
+    /** 仅 merged:合并配置,重新合并时回显 */
+    mergeConfig:
+      | {
+          mode: 'union' | 'join';
+          joinKeys?: string[] | null;
+          inputs: { objectId: string }[];
+        }
+      | null;
+    createdAt: string;
+    updatedAt: string;
+  }
+
+  /** 湖内合并请求:union(纵向拼接)/ join(按键关联),目标新建或追加到已有合并文件 */
+  interface LakeMergeRequest {
+    mode: 'union' | 'join';
+    inputs: { objectId: string; snapshotId?: string }[];
+    joinKeys?: string[] | null;
+    name?: string | null;
+    targetObjectId?: string | null;
   }
 
   /** 创建数据湖入参(湖=纯容器) */

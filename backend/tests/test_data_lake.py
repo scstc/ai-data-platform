@@ -164,7 +164,7 @@ async def test_extract_to_existing_dataset_appends_without_recomputing_semantic(
     await db_session.commit()
 
     created_calls: list[dict] = []
-    captured: list[tuple[str, str | None]] = []
+    captured: list[tuple[str, str | None, str | None]] = []
 
     async def fake_create_dataset(session, **kwargs):
         created_calls.append(kwargs)
@@ -176,7 +176,7 @@ async def test_extract_to_existing_dataset_appends_without_recomputing_semantic(
     async def fake_add_table_member(
         session, dataset_id, records, *, table_name, semantic_type=None, **kw
     ):
-        captured.append((dataset_id, semantic_type))
+        captured.append((dataset_id, semantic_type, kw.get("source_snapshot_id")))
         return (None, None)
 
     monkeypatch.setattr(landing, "create_dataset", fake_create_dataset)
@@ -192,7 +192,8 @@ async def test_extract_to_existing_dataset_appends_without_recomputing_semantic(
 
     assert dataset.id == existing.id
     assert created_calls == []  # 未新建数据集
-    assert captured == [(existing.id, "multimodal")]  # 复用既有 semantic_type
+    # 复用既有 semantic_type;成员行透传湖快照 id(湖→仓结构化血缘)
+    assert captured == [(existing.id, "multimodal", snap.id)]
 
 
 @pytest.mark.asyncio
@@ -258,11 +259,12 @@ async def test_extract_from_lake_snapshot_accepts_doc_formats(db_session, monkey
     )
     assert len(records) == 1
     assert records[0]["text"] == "解析出的段落"
-    # meta 仅含 DJ 三元组;created_at 由 DB server_default 生成,按快照值验证
+    # meta 含 DJ 三元组 + snapshot_id;created_at 由 DB server_default 生成
     assert records[0]["meta"] == {
         "src": "1.pdf",
         "date": snap.created_at.strftime("%Y-%m-%d"),
         "version": "source_v20260701_01_pdf",
+        "snapshot_id": "snap-pdf001",
     }
 
 
@@ -629,12 +631,13 @@ def test_inject_lineage_database_fields():
 
     assert len(enriched) == 2
     for record in enriched:
-        # meta 仅含三元组:src 取源表名(DB 类无 original_filename);
-        # date 为 None(内存构造未落库,created_at 为空)
+        # meta 含 DJ 三元组 + snapshot_id(全局唯一血缘键):src 取源表名
+        # (DB 类无 original_filename);date 为 None(内存构造未落库)
         assert record["meta"] == {
             "src": "transactions",
             "date": None,
             "version": "source_v20260701_01_mysql",
+            "snapshot_id": "snap-lineage1",
         }
     # 原字段保留在顶层
     assert enriched[0]["id"] == 1
@@ -663,11 +666,12 @@ def test_inject_lineage_object_store_fields():
     enriched = _inject_lineage_fields(records, snapshot)
 
     # 无 original_filename/db_table 时 src 回退到 storage_uri 末段;
-    # bucket_name/obj_key 等血缘信息由 version 反查快照获取,不冗余进记录
+    # bucket_name/obj_key 等血缘信息由 snapshot_id 反查快照获取,不冗余进记录
     assert enriched[0]["meta"] == {
         "src": "data.parquet",
         "date": None,
         "version": "source_v20260701_01_s3",
+        "snapshot_id": "snap-obj-01",
     }
 
 
@@ -690,6 +694,7 @@ def test_inject_lineage_no_source_metadata():
         "src": "data.parquet",
         "date": None,
         "version": "source_v20260701_01_test",
+        "snapshot_id": "snap-nometa",
     }
     assert enriched[0]["col"] == "value"
 

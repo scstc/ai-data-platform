@@ -18,15 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.db import get_session
-from app.models.data_lake import DataLake, DataLakeSnapshot
+from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
 from app.schemas.common import CamelModel, PageResponse
 from app.schemas.data_lake import (
     DataLakeCreate,
     DataLakeDetailRead,
+    DataLakeObjectRead,
     DataLakeRead,
     DataLakeSnapshotRead,
     DataLakeUpdate,
     ExtractToDatasetRequest,
+    LakeMergeRequest,
     SnapshotRenameRequest,
 )
 from app.services import data_lake as data_lake_service
@@ -270,6 +272,154 @@ async def list_snapshots(
         total=total,
         success=True,
     )
+
+
+@router.get(
+    "/data-lakes/{lake_id}/objects", response_model=PageResponse[DataLakeObjectRead]
+)
+async def list_objects(
+    lake_id: str,
+    db: SessionDep,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    name: str | None = Query(None, description="展示名模糊查询"),
+) -> PageResponse[DataLakeObjectRead]:
+    """分页列出数据湖的文件(★新增三层模型:文件聚合其多个版本快照)。
+
+    version_count/total_size/latest_rows 用一条按 object_id 分组的聚合子查询
+    算出,避免列表页逐个文件再查一次快照。
+    """
+    lake = await data_lake_service.get_lake_by_id(db, lake_id)
+    if not lake:
+        raise HTTPException(status_code=404, detail="数据湖不存在")
+
+    query = select(DataLakeObject).where(DataLakeObject.lake_id == lake_id)
+    if name:
+        query = query.where(DataLakeObject.display_name.ilike(f"%{name}%"))
+
+    total_query = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(total_query)).scalar_one()
+
+    query = query.order_by(DataLakeObject.updated_at.desc())
+    query = query.limit(page_size).offset((page - 1) * page_size)
+    result = await db.execute(query)
+    objects = list(result.scalars().all())
+
+    agg_query = (
+        select(
+            DataLakeSnapshot.object_id,
+            func.count().label("version_count"),
+            func.sum(DataLakeSnapshot.size).label("total_size"),
+        )
+        .where(DataLakeSnapshot.object_id.in_([o.id for o in objects]))
+        .group_by(DataLakeSnapshot.object_id)
+    )
+    agg_rows = (await db.execute(agg_query)).all() if objects else []
+    agg_by_object = {row.object_id: row for row in agg_rows}
+
+    # latest_rows 单独一条查询按 id 批量取(不能并进上面的分组聚合:那条按
+    # object_id 分组统计的是全部版本,这里只要最新版本一行的 rows)
+    latest_snapshot_ids = [
+        o.latest_snapshot_id for o in objects if o.latest_snapshot_id
+    ]
+    rows_by_snapshot: dict[str, int | None] = {}
+    if latest_snapshot_ids:
+        latest_query = select(DataLakeSnapshot.id, DataLakeSnapshot.rows).where(
+            DataLakeSnapshot.id.in_(latest_snapshot_ids)
+        )
+        rows_by_snapshot = {
+            row.id: row.rows for row in (await db.execute(latest_query)).all()
+        }
+
+    data: list[DataLakeObjectRead] = []
+    for obj in objects:
+        agg = agg_by_object.get(obj.id)
+        data.append(
+            DataLakeObjectRead(
+                id=obj.id,
+                lake_id=obj.lake_id,
+                identity_key=obj.identity_key,
+                display_name=obj.display_name,
+                origin=obj.origin,
+                data_category=obj.data_category,
+                storage_format=obj.storage_format,
+                latest_version_no=obj.latest_version_no,
+                latest_snapshot_id=obj.latest_snapshot_id,
+                merge_config=obj.merge_config,
+                created_at=obj.created_at,
+                updated_at=obj.updated_at,
+                version_count=agg.version_count if agg else 0,
+                total_size=int(agg.total_size) if agg and agg.total_size else None,
+                latest_rows=rows_by_snapshot.get(obj.latest_snapshot_id),
+            )
+        )
+
+    return PageResponse(data=data, total=total, success=True)
+
+
+@router.get(
+    "/data-lake-objects/{object_id}/versions",
+    response_model=PageResponse[DataLakeSnapshotRead],
+)
+async def list_object_versions(
+    object_id: str,
+    db: SessionDep,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> PageResponse[DataLakeSnapshotRead]:
+    """分页列出某文件的所有版本(按 version_no 倒序,最新版本在前)。"""
+    total_query = (
+        select(func.count())
+        .select_from(DataLakeSnapshot)
+        .where(DataLakeSnapshot.object_id == object_id)
+    )
+    total = (await db.execute(total_query)).scalar_one()
+
+    query = (
+        select(DataLakeSnapshot)
+        .where(DataLakeSnapshot.object_id == object_id)
+        .order_by(DataLakeSnapshot.version_no.desc())
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    )
+    result = await db.execute(query)
+    snapshots = list(result.scalars().all())
+
+    return PageResponse(
+        data=[DataLakeSnapshotRead.model_validate(s) for s in snapshots],
+        total=total,
+        success=True,
+    )
+
+
+@router.post("/data-lakes/{lake_id}/merge", dependencies=[Depends(require_admin)])
+async def merge_lake_objects(
+    lake_id: str,
+    body: LakeMergeRequest,
+    db: SessionDep,
+) -> dict[str, Any]:
+    """湖内合并:多个结构化文件的某个版本 union/join 成一个宽表文件的新版本。"""
+    try:
+        snapshot = await data_lake_service.merge_lake_objects(
+            db,
+            lake_id=lake_id,
+            mode=body.mode,
+            inputs=[item.model_dump() for item in body.inputs],
+            join_keys=body.join_keys,
+            name=body.name,
+            target_object_id=body.target_object_id,
+        )
+    except ExternalStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "data": {
+            "objectId": snapshot.object_id,
+            "snapshotId": snapshot.id,
+            "versionNo": snapshot.version_no,
+        },
+        "success": True,
+    }
 
 
 @router.get("/data-lake-snapshots/{snapshot_id}", response_model=DataLakeSnapshotRead)
