@@ -516,6 +516,31 @@ async def _materialize_member(
         return Path(uri)
 
 
+def carry_over_members(
+    members: list[DatasetVersionTable], processed_names: set[str]
+) -> list[dict[str, Any]]:
+    """未跑算子的成员原样带入新版本(零拷贝:新成员记录引用原对象的 storage_uri)。
+
+    新版本 = 输入版本的完整演进:只处理部分成员时,其余成员不丢,直接结转。
+    版本目前只增不删,跨版本共享对象是安全的;若将来支持删除版本需改为复制对象。
+    """
+    return [
+        {
+            "table_name": m.table_name,
+            "storage_uri": m.storage_uri,
+            "format": m.format,
+            "rows": m.rows,
+            "size": m.size,
+            "schema_snapshot": m.schema_snapshot,
+            "schema_variant": m.schema_variant,
+            "stats_uri": m.stats_uri,
+            "source_snapshot_id": m.source_snapshot_id,
+        }
+        for m in members
+        if m.table_name not in processed_names
+    ]
+
+
 def _get_member_output_path(
     dataset_id: str, version_no: int, table_name: str, format: str
 ) -> Path:
@@ -718,15 +743,18 @@ async def run_process_job(
             }
         )
 
-    # 5. 创建新版本和成员记录
+    # 5. 未配置算子的成员原样结转,再创建新版本和成员记录
+    new_members_data += carry_over_members(
+        members, {m.table_name for m in members_to_process}
+    )
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
         version_no=new_vno,
         storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
         format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
-        rows=sum(m["rows"] for m in new_members_data),
-        size=sum(m["size"] for m in new_members_data),
+        rows=sum(m["rows"] or 0 for m in new_members_data),
+        size=sum(m["size"] or 0 for m in new_members_data),
         origin="managed",
         produced_by_job_id=job_id,
         note=f"加工产出(来自 v{input_version.version_no})",

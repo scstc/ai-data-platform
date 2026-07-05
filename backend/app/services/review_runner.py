@@ -40,6 +40,7 @@ from app.services.engine import (
     _get_version_members,
     _materialize_member,
     _new_member_id,
+    carry_over_members,
 )
 from app.services.external_store import materialized_version, upload_jsonl_member
 from app.services.landing import parquet_bytes_to_records
@@ -179,8 +180,9 @@ async def run_review(
 ) -> DatasetVersion:
     """对被审版本跑内容审核 → 写命中 + 产出打标/净化版本 + 回写报告。
 
-    多表版本逐成员审核(target_members 圈定范围,缺省全部;产出版本仅含被审
-    成员,与 quality/engine 的多成员语义一致);无成员的旧版本走单文件路径。
+    多表版本逐成员审核(target_members 圈定范围,缺省全部;未被审成员原样
+    结转,产出版本保持完整成员集,与 quality/engine 的多成员语义一致);
+    无成员的旧版本走单文件路径。
     成功返回产出版本;数据文件缺失/成员不存在抛 ReviewError(上层置 job failed)。
     """
     members = await _get_version_members(session, version.id)
@@ -303,6 +305,10 @@ async def run_review(
         if action == "delete"
         else f"内容审核打标(来自 v{version.version_no})"
     )
+    # 未被审的成员原样结转,产出版本保持输入版本的完整成员集
+    new_members_data += carry_over_members(
+        members, {m.table_name for m in members_to_process}
+    )
     out_version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
@@ -311,8 +317,8 @@ async def run_review(
             f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/"
         ),
         format="multi" if len(new_members_data) > 1 else "jsonl",
-        rows=sum(m["rows"] for m in new_members_data),
-        size=sum(m["size"] for m in new_members_data),
+        rows=sum(m["rows"] or 0 for m in new_members_data),
+        size=sum(m["size"] or 0 for m in new_members_data),
         origin="review",
         produced_by_job_id=job.id,
         note=note_action,

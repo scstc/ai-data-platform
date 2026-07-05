@@ -205,17 +205,23 @@ async def run_make_job(
             }
         )
 
-    # 5. 创建新版本和成员记录
+    # 5. 创建新版本和成员记录;写回输入同数据集时,未处理成员原样结转
+    #    (跨数据集输出时不结转:输出集的版本只承载合成产物)
     from app.models.dataset_version_table import DatasetVersionTable
+    from app.services.engine import carry_over_members
 
+    if dataset_id == input_version.dataset_id:
+        new_members_data += carry_over_members(
+            members, {m.table_name for m in members_to_process}
+        )
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
         version_no=new_vno,
         storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
         format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
-        rows=sum(m["rows"] for m in new_members_data),
-        size=sum(m["size"] for m in new_members_data),
+        rows=sum(m["rows"] or 0 for m in new_members_data),
+        size=sum(m["size"] or 0 for m in new_members_data),
         origin="synthetic",
         produced_by_job_id=job_id,
         note=f"合成产出(来自 v{input_version.version_no})",

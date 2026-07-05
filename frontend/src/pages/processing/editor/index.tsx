@@ -1,7 +1,6 @@
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useLocation } from '@umijs/max';
 import {
-  Badge,
   Button,
   Card,
   Empty,
@@ -12,8 +11,6 @@ import {
   Select,
   Space,
   Table,
-  Tabs,
-  Tooltip,
   Typography,
 } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -25,7 +22,6 @@ import {
   getPipeline,
   listDatasets,
   listOperatorCatalog,
-  previewDatasetVersion,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 import CollapsiblePanes from './CollapsiblePanes';
@@ -39,12 +35,13 @@ const { Text, Paragraph } = Typography;
 
 type MemberConfig = {
   operators: DataPlatform.OperatorSpec[];
-  textKeys: string[];
 };
 
 /** 清洗任务编辑器(按 jobType 建任务)。数据清洗=clean。
  *  作为通用编辑器组件保留,cleaning/editor 渲染 <Editor jobType="clean" ... /> 复用。
- *  统一走成员级配置(dataset-first 架构下单表也是"1 个成员"),不再区分单表/多表两套 UI。 */
+ *  编排粒度=文件:顶部「数据集→版本→文件」三级选择,画布一次编排一个文件;
+ *  各文件配置按文件名缓存,切文件不丢,提交时每个已配置文件独立生成 YAML 分别
+ *  执行,产物与未配置文件(原样结转)合并为同一个新版本。 */
 const Editor: React.FC<{
   jobType?: string;
   title?: string;
@@ -68,8 +65,6 @@ const Editor: React.FC<{
   const [versionId, setVersionId] = useState<string>();
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
   const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  // 选中版本的列名(供各成员「清洗字段」多选);清洗字段留空=后端自动探测主文本字段
-  const [columns, setColumns] = useState<string[]>([]);
   const [versionMembers, setVersionMembers] = useState<
     DataPlatform.DatasetTable[]
   >([]);
@@ -118,17 +113,14 @@ const Editor: React.FC<{
     getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
   }, [datasetId]);
 
-  // 版本变化:拉一条预览取列名,供「清洗字段」多选;并按版本的表成员初始化各自配置
+  // 版本变化:按版本的表成员初始化各自配置
   useEffect(() => {
     setVersionMembers([]);
     setMemberConfigs({});
     setActiveMember(undefined);
     setMemberActiveIdx({});
     setMemberHasOrphan({});
-    if (!versionId || !datasetId) {
-      setColumns([]);
-      return;
-    }
+    if (!versionId || !datasetId) return;
 
     // 获取版本详情（包含成员列表）
     getDataset(datasetId).then((r) => {
@@ -138,15 +130,10 @@ const Editor: React.FC<{
 
       const configs: Record<string, MemberConfig> = {};
       for (const m of members) {
-        configs[m.tableName] = { operators: [], textKeys: [] };
+        configs[m.tableName] = { operators: [] };
       }
       setMemberConfigs(configs);
       setActiveMember(members[0]?.tableName);
-
-      // 预览第一个成员获取列名
-      previewDatasetVersion(versionId, { limit: 1 })
-        .then((r) => setColumns(r.columns ?? []))
-        .catch(() => setColumns([]));
     });
   }, [versionId, datasetId]);
 
@@ -161,7 +148,7 @@ const Editor: React.FC<{
     if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
   }, [versions]);
 
-  // 流水线预载:URL 带 pipelineId 时,版本成员就绪后把 spec.operators/textKeys
+  // 流水线预载:URL 带 pipelineId 时,版本成员就绪后把 spec.operators
   // 套用到每个成员(仅套用一次;加载失败不阻塞正常编辑)
   const pipelineAppliedRef = useRef(false);
   useEffect(() => {
@@ -180,11 +167,10 @@ const Editor: React.FC<{
         const operators: DataPlatform.OperatorSpec[] = (
           spec.operators ?? []
         ).map((o) => ({ name: o.name, params: o.params ?? {} }));
-        const textKeys = spec.textKeys ?? [];
         setMemberConfigs((prev) => {
           const next = { ...prev };
           for (const m of versionMembers) {
-            next[m.tableName] = { operators, textKeys };
+            next[m.tableName] = { operators };
           }
           return next;
         });
@@ -218,7 +204,6 @@ const Editor: React.FC<{
     return stepsToYaml(normalizedSteps, {
       datasetName: memberName,
       versionLabel: selectedVersionLabel,
-      textKeys: cfg.textKeys,
     });
   };
 
@@ -228,13 +213,10 @@ const Editor: React.FC<{
   ) =>
     setMemberConfigs((prev) => ({
       ...prev,
-      [memberName]: {
-        ...(prev[memberName] ?? { textKeys: [] }),
-        operators: next,
-      },
+      [memberName]: { operators: next },
     }));
 
-  // 保存为流水线:取当前激活成员的 {operators, textKeys} 作为 spec,与 scenario 绑定
+  // 保存为流水线:取当前激活成员的 {operators} 作为 spec,与 scenario 绑定
   const [pipelineModalOpen, setPipelineModalOpen] = useState(false);
   const [pipelineForm] = Form.useForm<{ name: string; description?: string }>();
   const [savingPipeline, setSavingPipeline] = useState(false);
@@ -264,7 +246,7 @@ const Editor: React.FC<{
         name: values.name,
         description: values.description,
         scenario,
-        spec: { operators: cfg.operators, textKeys: cfg.textKeys },
+        spec: { operators: cfg.operators },
       });
       message.success('已保存为流水线');
       setPipelineModalOpen(false);
@@ -289,7 +271,6 @@ const Editor: React.FC<{
       .map(([memberName, cfg]) => ({
         memberName,
         operators: cfg.operators,
-        textKeys: cfg.textKeys.length > 0 ? cfg.textKeys : undefined,
       }));
 
     if (configs.length === 0) {
@@ -369,180 +350,152 @@ const Editor: React.FC<{
             };
           })}
         />
+        <Select
+          placeholder="选择文件"
+          style={{ width: 240 }}
+          value={activeMember}
+          onChange={setActiveMember}
+          disabled={versionMembers.length === 0}
+          options={versionMembers.map((m) => {
+            const count = memberConfigs[m.tableName]?.operators.length || 0;
+            return {
+              label: count ? `${m.tableName}（${count} 算子）` : m.tableName,
+              value: m.tableName,
+            };
+          })}
+        />
       </Space>
 
-      {versionMembers.length === 0 ? (
+      {versionMembers.length === 0 || !activeMember ? (
         <Card size="small">
           <Empty description="请先选择数据集和版本" />
         </Card>
       ) : (
-        <Card title="成员级算子配置" size="small">
-          <Tabs
-            activeKey={activeMember}
-            onChange={setActiveMember}
-            items={versionMembers.map((m) => ({
-              key: m.tableName,
-              label: (
-                <Space size="small">
-                  <Text>{m.tableName}</Text>
-                  <Badge
-                    count={memberConfigs[m.tableName]?.operators.length || 0}
-                    style={{ backgroundColor: '#52c41a' }}
-                  />
-                </Space>
-              ),
-              children: (() => {
-                const cfg = memberConfigs[m.tableName] ?? {
-                  operators: [],
-                  textKeys: [],
-                };
-                const memberSteps: DataPlatform.PipelineStep[] =
-                  cfg.operators.map((op) => ({
-                    name: op.name,
-                    params: op.params ?? {},
-                  }));
-                const idx = memberActiveIdx[m.tableName] ?? 0;
-                const activeStepOfMember = memberSteps[idx];
-                const activeOpOfMember = activeStepOfMember
-                  ? opMap[activeStepOfMember.name]
-                  : undefined;
-                const appendOperator = (name: string) =>
-                  setMemberOperators(m.tableName, [
-                    ...cfg.operators,
-                    { name, params: {} },
-                  ]);
+        <Card title={`算子编排 · ${activeMember}`} size="small">
+          {(() => {
+            const memberName = activeMember;
+            const cfg = memberConfigs[memberName] ?? { operators: [] };
+            const memberSteps: DataPlatform.PipelineStep[] = cfg.operators.map(
+              (op) => ({
+                name: op.name,
+                params: op.params ?? {},
+              }),
+            );
+            const idx = memberActiveIdx[memberName] ?? 0;
+            const activeStepOfMember = memberSteps[idx];
+            const activeOpOfMember = activeStepOfMember
+              ? opMap[activeStepOfMember.name]
+              : undefined;
+            const appendOperator = (name: string) =>
+              setMemberOperators(memberName, [
+                ...cfg.operators,
+                { name, params: {} },
+              ]);
 
-                return (
-                  <Space
-                    direction="vertical"
-                    style={{ width: '100%' }}
-                    size={16}
-                  >
-                    {/* 该成员的清洗字段选择 */}
-                    <Card title="清洗字段（可选）" size="small">
-                      <Tooltip title="算子作用的字段;留空则自动探测主文本字段。脏字符不在标准字段(如 task)时在此显式指定。">
-                        <Select
-                          mode="multiple"
-                          allowClear
-                          placeholder="选择清洗字段（留空=自动探测）"
-                          style={{ width: '100%' }}
-                          value={cfg.textKeys}
-                          onChange={(vals) => {
-                            setMemberConfigs((prev) => ({
+            return (
+              <Space direction="vertical" style={{ width: '100%' }} size={16}>
+                <PipelineDndArea
+                  steps={memberSteps}
+                  labelOf={labelOf}
+                  onAppend={appendOperator}
+                  onReorder={(from, to) => {
+                    const next = [...cfg.operators];
+                    const [moved] = next.splice(from, 1);
+                    next.splice(to, 0, moved);
+                    setMemberOperators(memberName, next);
+                  }}
+                >
+                  <CollapsiblePanes
+                    leftTitle="算子库"
+                    left={
+                      <OperatorLibrary onAdd={appendOperator} bucket={bucket} />
+                    }
+                    centerTitle="算子流水线"
+                    center={
+                      <PipelineCanvas
+                        steps={memberSteps}
+                        labelOf={labelOf}
+                        categoryOf={categoryOf}
+                        activeIdx={idx}
+                        onSelect={(i) =>
+                          setMemberActiveIdx((prev) => ({
+                            ...prev,
+                            [memberName]: i,
+                          }))
+                        }
+                        onRemove={(i) => {
+                          setMemberOperators(
+                            memberName,
+                            cfg.operators.filter((_, j) => j !== i),
+                          );
+                          setMemberActiveIdx((prev) => ({
+                            ...prev,
+                            [memberName]: 0,
+                          }));
+                        }}
+                        onOrderChange={(perm) => {
+                          if (perm.length !== cfg.operators.length) {
+                            setMemberHasOrphan((prev) => ({
                               ...prev,
-                              [m.tableName]: { ...cfg, textKeys: vals },
+                              [memberName]: true,
                             }));
-                          }}
-                          options={columns.map((c) => ({ label: c, value: c }))}
-                        />
-                      </Tooltip>
-                    </Card>
-
-                    <PipelineDndArea
-                      steps={memberSteps}
-                      labelOf={labelOf}
-                      onAppend={appendOperator}
-                      onReorder={(from, to) => {
-                        const next = [...cfg.operators];
-                        const [moved] = next.splice(from, 1);
-                        next.splice(to, 0, moved);
-                        setMemberOperators(m.tableName, next);
-                      }}
-                    >
-                      <CollapsiblePanes
-                        leftTitle="算子库"
-                        left={
-                          <OperatorLibrary
-                            onAdd={appendOperator}
-                            bucket={bucket}
-                          />
-                        }
-                        centerTitle="算子流水线"
-                        center={
-                          <PipelineCanvas
-                            steps={memberSteps}
-                            labelOf={labelOf}
-                            categoryOf={categoryOf}
-                            activeIdx={idx}
-                            onSelect={(i) =>
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [m.tableName]: i,
-                              }))
-                            }
-                            onRemove={(i) => {
-                              setMemberOperators(
-                                m.tableName,
-                                cfg.operators.filter((_, j) => j !== i),
-                              );
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [m.tableName]: 0,
-                              }));
-                            }}
-                            onOrderChange={(perm) => {
-                              if (perm.length !== cfg.operators.length) {
-                                setMemberHasOrphan((prev) => ({
-                                  ...prev,
-                                  [m.tableName]: true,
-                                }));
-                                return;
-                              }
-                              setMemberHasOrphan((prev) => ({
-                                ...prev,
-                                [m.tableName]: false,
-                              }));
-                              if (perm.every((v, i) => v === i)) return;
-                              setMemberOperators(
-                                m.tableName,
-                                perm.map((i) => cfg.operators[i]),
-                              );
-                            }}
-                            inputLabel={`${selectedVersionLabel ?? '版本'} · ${m.tableName}`}
-                            outputLabel="新版本"
-                          />
-                        }
-                        rightTitle="参数"
-                        right={
-                          <StepParamsForm
-                            op={activeOpOfMember}
-                            params={activeStepOfMember?.params ?? {}}
-                            onChange={(p) =>
-                              setMemberOperators(
-                                m.tableName,
-                                cfg.operators.map((op, i) =>
-                                  i === idx ? { ...op, params: p } : op,
-                                ),
-                              )
-                            }
-                          />
-                        }
-                        leftCollapsed={libCollapsed}
-                        rightCollapsed={paramsCollapsed}
-                        onLeftCollapsedChange={setLibCollapsed}
-                        onRightCollapsedChange={setParamsCollapsed}
+                            return;
+                          }
+                          setMemberHasOrphan((prev) => ({
+                            ...prev,
+                            [memberName]: false,
+                          }));
+                          if (perm.every((v, i) => v === i)) return;
+                          setMemberOperators(
+                            memberName,
+                            perm.map((i) => cfg.operators[i]),
+                          );
+                        }}
+                        inputLabel={`${selectedVersionLabel ?? '版本'} · ${memberName}`}
+                        outputLabel="新版本"
                       />
-                    </PipelineDndArea>
+                    }
+                    rightTitle="参数"
+                    right={
+                      <StepParamsForm
+                        op={activeOpOfMember}
+                        params={activeStepOfMember?.params ?? {}}
+                        onChange={(p) =>
+                          setMemberOperators(
+                            memberName,
+                            cfg.operators.map((op, i) =>
+                              i === idx ? { ...op, params: p } : op,
+                            ),
+                          )
+                        }
+                      />
+                    }
+                    leftCollapsed={libCollapsed}
+                    rightCollapsed={paramsCollapsed}
+                    onLeftCollapsedChange={setLibCollapsed}
+                    onRightCollapsedChange={setParamsCollapsed}
+                  />
+                </PipelineDndArea>
 
-                    <Card title="YAML 预览" size="small">
-                      <Paragraph>
-                        <pre style={{ margin: 0, fontSize: 12 }}>
-                          {memberYamlOf(m.tableName)}
-                        </pre>
-                      </Paragraph>
-                    </Card>
-                  </Space>
-                );
-              })(),
-            }))}
-          />
+                <Card title="YAML 预览" size="small">
+                  <Paragraph>
+                    <pre style={{ margin: 0, fontSize: 12 }}>
+                      {memberYamlOf(memberName)}
+                    </pre>
+                  </Paragraph>
+                </Card>
+              </Space>
+            );
+          })()}
         </Card>
       )}
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          加工产物将作为所选数据集的新版本，可通过历史版本对比追溯加工效果。
-          各成员的 YAML 预览见对应 Tab 内；真实配置在创建时由后端生成。
+          每个文件独立生成
+          YAML、独立执行；已配置文件的产物与未配置文件（原样保留）
+          合并为所选数据集的新版本，可通过历史版本对比追溯加工效果。
+          切换顶部「选择文件」可为其他文件编排，配置不会丢失。
         </Text>
       </Card>
 

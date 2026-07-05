@@ -21,7 +21,7 @@ async def test_get_version_members(db_session):
 
 @pytest.mark.asyncio
 async def test_process_selected_members(db_session):
-    """测试只处理选定成员"""
+    """测试只处理选定成员:新版本 = 输入版本的完整演进,未选成员原样结转不丢失"""
     # 1. 创建多成员数据集
     ds = await create_dataset(db_session, name="多表集")
     v1, _ = await add_table_member(db_session, ds.id, [{"text": "hello world"}], table_name="users")
@@ -39,12 +39,17 @@ async def test_process_selected_members(db_session):
         target_members=["users", "orders"],
     )
 
-    # 3. 验证产出版本只有 2 个成员
+    # 3. 验证产出版本保留全部 3 个成员:users/orders 被处理,logs 结转
     members = await _get_version_members(db_session, v2.id)
-    assert len(members) == 2
-    assert {m.table_name for m in members} == {"users", "orders"}
+    assert len(members) == 3
+    assert {m.table_name for m in members} == {"users", "orders", "logs"}
 
-    # 4. 验证版本汇总统计
+    # 4. 结转成员零拷贝:logs 直接引用输入版本的原对象
+    v1_members = {m.table_name: m for m in await _get_version_members(db_session, v1.id)}
+    v2_logs = next(m for m in members if m.table_name == "logs")
+    assert v2_logs.storage_uri == v1_members["logs"].storage_uri
+
+    # 5. 验证版本汇总统计
     assert v2.rows == sum(m.rows or 0 for m in members)
     assert v2.format == "multi"
 

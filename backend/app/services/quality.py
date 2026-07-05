@@ -31,6 +31,7 @@ from app.services.engine import (
     _running_procs,
     _semaphore,
     build_config,
+    carry_over_members,
     detect_text_key,
 )
 from app.services.external_store import materialized_version
@@ -268,15 +269,18 @@ async def run_quality_job(
             }
         )
 
-    # 5. 创建新版本和成员记录
+    # 5. 未评估的成员原样结转,再创建新版本和成员记录
+    new_members_data += carry_over_members(
+        members, {m.table_name for m in members_to_process}
+    )
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,
         version_no=new_vno,
         storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
         format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
-        rows=sum(m["rows"] for m in new_members_data),
-        size=sum(m["size"] for m in new_members_data),
+        rows=sum(m["rows"] or 0 for m in new_members_data),
+        size=sum(m["size"] or 0 for m in new_members_data),
         origin="managed",
         produced_by_job_id=job_id,
         note=f"质量评估产出(来自 v{input_version.version_no})",
