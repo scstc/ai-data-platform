@@ -1,10 +1,4 @@
-// 数据清洗任务列表(clean 类型)——与数据加工同构,复用 Processing 按 jobType 过滤。
-import Processing from '@/pages/processing';
+// 数据清洗菜单薄入口:渲染治理工场并预设场景为 clean;原任务列表迁至 jobs.tsx。
+import { Workbench } from '@/pages/governance/workbench';
 
-export default () => (
-  <Processing
-    jobType="clean"
-    title="数据清洗任务"
-    createHref="/governance/cleaning/editor"
-  />
-);
+export default () => <Workbench scenario="clean" />;

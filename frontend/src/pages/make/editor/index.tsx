@@ -1,299 +1,35 @@
-// 数据合成新建页:LLM 造新数据(Self-Instruct / QA 生成 / few-shot prompt)
-// 复用 distillation 的三件套 + LLM 顶部提示;算子在 MAKE_OPS 白名单(3 个)
-import { PageContainer } from '@ant-design/pro-components';
-import { history, useLocation } from '@umijs/max';
-import {
-  Button,
-  Card,
-  Col,
-  Input,
-  message,
-  Row,
-  Select,
-  Space,
-  Tooltip,
-  Typography,
-} from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+// 数据合成新建页:薄壳,把差异点传给共用的 LlmScenarioEditor(蒸馏/合成/增强共用)。
 import LlmRequiredAlert from '@/components/LlmRequiredAlert';
-import { isBinaryFormat } from '@/pages/ingest/access/constants';
-import {
-  createMakeJob,
-  getDataset,
-  listDatasets,
-  listOperatorCatalog,
-  previewDatasetVersion,
-} from '@/services/data-platform';
-import { suggestTaskName } from '@/utils/taskName';
-import OperatorLibrary from '../../processing/editor/OperatorLibrary';
-import PipelineSteps from '../../processing/editor/PipelineSteps';
-import StepParamsForm from '../../processing/editor/StepParamsForm';
+import LlmScenarioEditor from '@/pages/governance/shared/LlmScenarioEditor';
+import { createMakeJob } from '@/services/data-platform';
 import MakeGoalPanel from './MakeGoalPanel';
-
-const { Text } = Typography;
 
 const DEFAULT_GOAL: DataPlatform.MakeGoal = {
   mode: 'synthesize',
   targetPerSample: 1,
 };
 
-const MakeEditor: React.FC = () => {
-  const [name, setName] = useState('');
-  const [nameDirty, setNameDirty] = useState(false);
-  const [datasetId, setDatasetId] = useState<string>();
-  const [versionId, setVersionId] = useState<string>();
-  const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
-  const [versions, setVersions] = useState<DataPlatform.DatasetVersion[]>([]);
-  // 选中版本的列名(供「文本字段」多选);留空=后端自动探测主文本字段
-  const [columns, setColumns] = useState<string[]>([]);
-  const [textKeys, setTextKeys] = useState<string[]>([]);
-  const [opMap, setOpMap] = useState<
-    Record<string, DataPlatform.CatalogOperator>
-  >({});
-  const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
-  const [activeIdx, setActiveIdx] = useState(0);
-  const [goal, setGoal] = useState<DataPlatform.MakeGoal>(DEFAULT_GOAL);
-  const [outputDatasetId, setOutputDatasetId] = useState<string>();
-  const [submitting, setSubmitting] = useState(false);
-
-  const add = useCallback(
-    (op: string) => setSteps((prev) => [...prev, { name: op, params: {} }]),
-    [],
-  );
-  const remove = useCallback(
-    (idx: number) => setSteps((prev) => prev.filter((_, i) => i !== idx)),
-    [],
-  );
-  const updateParams = useCallback(
-    (idx: number, params: Record<string, unknown>) =>
-      setSteps((prev) =>
-        prev.map((s, i) => (i === idx ? { ...s, params } : s)),
-      ),
-    [],
-  );
-  const reorder = useCallback(
-    (from: number, to: number) =>
-      setSteps((prev) => {
-        const next = [...prev];
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        return next;
-      }),
-    [],
-  );
-
-  useEffect(() => {
-    listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
-      setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
-    });
-  }, []);
-
-  useEffect(() => {
-    listDatasets({ current: 1, pageSize: 500 }).then((r) =>
-      setDatasets(r.data),
-    );
-  }, []);
-
-  useEffect(() => {
-    if (!datasetId) {
-      setVersions([]);
-      setVersionId(undefined);
-      return;
-    }
-    getDataset(datasetId).then((r) => setVersions(r.data.versions ?? []));
-  }, [datasetId]);
-
-  // 版本变化:拉一条预览取列名,供「文本字段」多选;切版本时清空已选(列可能不同)
-  useEffect(() => {
-    setTextKeys([]);
-    if (!versionId) {
-      setColumns([]);
-      return;
-    }
-    previewDatasetVersion(versionId, { limit: 1 })
-      .then((r) => setColumns(r.columns ?? []))
-      .catch(() => setColumns([]));
-  }, [versionId]);
-
-  const location = useLocation();
-  useEffect(() => {
-    const dsId = new URLSearchParams(location.search).get('datasetId');
-    if (dsId) setDatasetId(dsId);
-  }, []);
-  useEffect(() => {
-    const vId = new URLSearchParams(location.search).get('versionId');
-    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
-  }, [versions]);
-
-  const activeStep = steps[activeIdx];
-  // 自动任务名:数据集/算子变化时重算,用户改过(nameDirty)则不再覆盖
-  const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
-  const suggestedName = suggestTaskName(selectedDatasetName, '数据合成');
-  useEffect(() => {
-    if (!nameDirty) setName(suggestedName);
-  }, [suggestedName, nameDirty]);
-
-  const activeOp = activeStep ? opMap[activeStep.name] : undefined;
-
-  const onSubmit = async () => {
-    if (!name.trim()) {
-      message.warning('请填写任务名');
-      return;
-    }
-    if (!versionId) {
-      message.warning('请选择数据集版本');
-      return;
-    }
-    if (!steps.length) {
-      message.warning('至少添加一个算子');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await createMakeJob({
-        name,
-        datasetVersionId: versionId,
-        operators: steps,
-        goal: { ...goal, mode: 'synthesize' },
-        outputDatasetId,
-        textKeys: textKeys.length ? textKeys : undefined,
-      });
-      message.success('合成任务已创建，正在后台运行');
-      history.push('/governance/make');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <PageContainer
-      header={{ title: '新建数据合成' }}
-      extra={[
-        <Button
-          key="submit"
-          type="primary"
-          loading={submitting}
-          onClick={onSubmit}
-        >
-          创建任务
-        </Button>,
-      ]}
-    >
+const MakeEditor: React.FC = () => (
+  <LlmScenarioEditor<DataPlatform.MakeGoal>
+    scenario="synthesis"
+    bucket="make"
+    pageTitle="新建数据合成"
+    submitLabel="创建任务"
+    selectedOperatorsTitle="已选合成算子"
+    successMessage="合成任务已创建，正在后台运行"
+    jobsHref="/governance/make/jobs"
+    taskNameNoun="数据合成"
+    textKeyTooltip="算子作用的字段;留空则自动探测主文本字段。数据无 text 字段(如 GIS address)时在此显式指定。"
+    binaryDisabledSuffix="二进制不支持"
+    defaultGoal={DEFAULT_GOAL}
+    GoalPanel={MakeGoalPanel}
+    createJob={createMakeJob}
+    normalizeGoal={(goal) => ({ ...goal, mode: 'synthesize' })}
+    llmAlert={
       <LlmRequiredAlert description="数据合成(LLM 造新数据)需 LLM 支持。请先在运维监控 → LLM 配置页设置 OPENAI_API_KEY 并激活。" />
-
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Input
-          placeholder="任务名(自动生成,可编辑)"
-          style={{ width: 280 }}
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value);
-            setNameDirty(true);
-          }}
-        />
-        <Select
-          placeholder="选择数据集"
-          style={{ width: 220 }}
-          value={datasetId}
-          onChange={(v) => setDatasetId(v)}
-          options={datasets.map((d) => ({ label: d.name, value: d.id }))}
-        />
-        <Select
-          placeholder="选择版本"
-          style={{ width: 240 }}
-          value={versionId}
-          onChange={setVersionId}
-          options={versions.map((v) => {
-            const isBinary = isBinaryFormat(v.format);
-            return {
-              label: isBinary
-                ? `${v.versionLabel}（${v.format}·二进制不支持）`
-                : `${v.versionLabel}（${v.format}）`,
-              value: v.id,
-              disabled: isBinary,
-            };
-          })}
-        />
-        <Tooltip title="算子作用的字段;留空则自动探测主文本字段。数据无 text 字段(如 GIS address)时在此显式指定。">
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder="文本字段(留空=自动)"
-            style={{ minWidth: 220, maxWidth: 360 }}
-            value={textKeys}
-            onChange={setTextKeys}
-            disabled={!versionId || columns.length === 0}
-            options={columns.map((c) => ({ label: c, value: c }))}
-            maxTagCount="responsive"
-          />
-        </Tooltip>
-      </Space>
-
-      <Card size="small" style={{ marginBottom: 16 }}>
-        <MakeGoalPanel
-          value={goal}
-          onChange={setGoal}
-          datasets={datasets}
-          defaultDatasetId={datasetId}
-          outputDatasetId={outputDatasetId}
-          onOutputDatasetChange={setOutputDatasetId}
-        />
-      </Card>
-
-      <Row gutter={16}>
-        <Col span={7}>
-          <Card
-            title="算子库"
-            size="small"
-            styles={{ body: { height: 460, padding: 12 } }}
-          >
-            <OperatorLibrary onAdd={add} bucket="make" />
-          </Card>
-        </Col>
-        <Col span={10}>
-          <Card
-            title="已选合成算子"
-            size="small"
-            styles={{ body: { height: 460, overflow: 'auto' } }}
-          >
-            <PipelineSteps
-              steps={steps}
-              labelOf={(n) => opMap[n]?.zhLabel || n}
-              activeIdx={activeIdx}
-              onSelect={setActiveIdx}
-              onRemove={(i) => {
-                remove(i);
-                setActiveIdx(0);
-              }}
-              onReorder={reorder}
-            />
-          </Card>
-        </Col>
-        <Col span={7}>
-          <Card
-            title="参数"
-            size="small"
-            styles={{ body: { height: 460, overflow: 'auto' } }}
-          >
-            <StepParamsForm
-              op={activeOp}
-              params={activeStep?.params ?? {}}
-              onChange={(p) => updateParams(activeIdx, p)}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      <Card size="small" style={{ marginTop: 16 }}>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          数据合成走 LLM 造新数据类算子(generate_qa_from_* 抽取 QA
-          对、optimize_prompt 上下文扩展等);产物 version 标记
-          origin=synthetic,可被前端按 origin 区分「原始数据 vs 合成数据」。需
-          LLM Key(见顶部提示)。
-        </Text>
-      </Card>
-    </PageContainer>
-  );
-};
+    }
+    footerNote="数据合成走 LLM 造新数据类算子(generate_qa_from_* 抽取 QA 对、optimize_prompt 上下文扩展等);产物 version 标记 origin=synthetic,可被前端按 origin 区分「原始数据 vs 合成数据」。需 LLM Key(见顶部提示)。"
+  />
+);
 
 export default MakeEditor;

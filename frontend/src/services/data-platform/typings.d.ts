@@ -342,6 +342,51 @@ declare namespace DataPlatform {
     textKeys?: string[];
   };
 
+  /** 治理工场:流水线编排规格(算子链 + 可选目标说明/清洗字段) */
+  type PipelineSpec = {
+    operators: OperatorSpec[];
+    goal?: Record<string, any>;
+    textKeys?: string[];
+  };
+
+  /** 治理工场:命名流水线(与 Job.type 对齐的场景枚举,可保存复用) */
+  type Pipeline = {
+    id: string;
+    name: string;
+    description?: string;
+    scenario: 'clean' | 'distillation' | 'synthesis' | 'augmentation';
+    spec: PipelineSpec;
+    /** 预置模板:不可改名/编辑/删除(后端 400) */
+    isPreset: boolean;
+    createdBy: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+
+  /** 流水线列表查询参数 */
+  type PipelineListParams = {
+    scenario?: Pipeline['scenario'];
+    current?: number;
+    pageSize?: number;
+  };
+
+  /** 新建流水线入参 */
+  type PipelineCreate = {
+    name: string;
+    description?: string;
+    scenario: Pipeline['scenario'];
+    spec: PipelineSpec;
+  };
+
+  /** 更新流水线入参(预置模板调用返回 400) */
+  type PipelineUpdate = Partial<PipelineCreate>;
+
+  /** 执行流水线入参:落地为对应场景的一条 Job */
+  type PipelineExecuteParams = {
+    name?: string;
+    datasetVersionId: string;
+  };
+
   /** AI 生成流水线入参 */
   type GeneratePipelineParams = {
     goal: string;
@@ -431,6 +476,8 @@ declare namespace DataPlatform {
     canResume?: boolean;
     /** 可停止(pending/running/paused)——由后端 JobRead.can_stop 派生 */
     canStop?: boolean;
+    /** 来源流水线 id(治理工场执行产生的任务才有;手工编辑器新建任务为空) */
+    pipelineId?: string | null;
   };
 
   /** 新建加工任务入参 */

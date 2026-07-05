@@ -17,6 +17,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
+import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
 import PipelineSteps from '@/pages/processing/editor/PipelineSteps';
 import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
 import { stepsToYaml } from '@/pages/processing/editor/yaml';
@@ -285,6 +286,11 @@ const QualityEditor: React.FC = () => {
                 const activeOpOfMember = activeStepOfMember
                   ? opMap[activeStepOfMember.name]
                   : undefined;
+                const appendOperator = (name: string) =>
+                  setMemberOperators(m.tableName, [
+                    ...cfg.operators,
+                    { name, params: {} },
+                  ]);
 
                 return (
                   <Space
@@ -309,80 +315,81 @@ const QualityEditor: React.FC = () => {
                       />
                     </Card>
 
-                    <Row gutter={16}>
-                      <Col span={7}>
-                        <Card
-                          title="质量算子库"
-                          size="small"
-                          styles={{ body: { height: 360, padding: 12 } }}
-                        >
-                          <OperatorLibrary
-                            category="filter"
-                            onAdd={(name) =>
-                              setMemberOperators(m.tableName, [
-                                ...cfg.operators,
-                                { name, params: {} },
-                              ])
-                            }
-                          />
-                        </Card>
-                      </Col>
-                      <Col span={10}>
-                        <Card
-                          title="已选质量算子"
-                          size="small"
-                          styles={{ body: { height: 360, overflow: 'auto' } }}
-                        >
-                          <PipelineSteps
-                            steps={memberSteps}
-                            labelOf={labelOf}
-                            activeIdx={idx}
-                            onSelect={(i) =>
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [m.tableName]: i,
-                              }))
-                            }
-                            onRemove={(i) => {
-                              setMemberOperators(
-                                m.tableName,
-                                cfg.operators.filter((_, j) => j !== i),
-                              );
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [m.tableName]: 0,
-                              }));
-                            }}
-                            onReorder={(from, to) => {
-                              const next = [...cfg.operators];
-                              const [moved] = next.splice(from, 1);
-                              next.splice(to, 0, moved);
-                              setMemberOperators(m.tableName, next);
-                            }}
-                          />
-                        </Card>
-                      </Col>
-                      <Col span={7}>
-                        <Card
-                          title="参数"
-                          size="small"
-                          styles={{ body: { height: 360, overflow: 'auto' } }}
-                        >
-                          <StepParamsForm
-                            op={activeOpOfMember}
-                            params={activeStepOfMember?.params ?? {}}
-                            onChange={(p) =>
-                              setMemberOperators(
-                                m.tableName,
-                                cfg.operators.map((op, i) =>
-                                  i === idx ? { ...op, params: p } : op,
-                                ),
-                              )
-                            }
-                          />
-                        </Card>
-                      </Col>
-                    </Row>
+                    <PipelineDndArea
+                      steps={memberSteps}
+                      labelOf={labelOf}
+                      onAppend={appendOperator}
+                      onReorder={(from, to) => {
+                        const next = [...cfg.operators];
+                        const [moved] = next.splice(from, 1);
+                        next.splice(to, 0, moved);
+                        setMemberOperators(m.tableName, next);
+                      }}
+                    >
+                      <Row gutter={16}>
+                        <Col span={7}>
+                          <Card
+                            title="质量算子库"
+                            size="small"
+                            styles={{ body: { height: 360, padding: 12 } }}
+                          >
+                            <OperatorLibrary
+                              category="filter"
+                              onAdd={appendOperator}
+                            />
+                          </Card>
+                        </Col>
+                        <Col span={10}>
+                          <Card
+                            title="已选质量算子"
+                            size="small"
+                            styles={{ body: { height: 360, overflow: 'auto' } }}
+                          >
+                            <PipelineSteps
+                              steps={memberSteps}
+                              labelOf={labelOf}
+                              activeIdx={idx}
+                              onSelect={(i) =>
+                                setMemberActiveIdx((prev) => ({
+                                  ...prev,
+                                  [m.tableName]: i,
+                                }))
+                              }
+                              onRemove={(i) => {
+                                setMemberOperators(
+                                  m.tableName,
+                                  cfg.operators.filter((_, j) => j !== i),
+                                );
+                                setMemberActiveIdx((prev) => ({
+                                  ...prev,
+                                  [m.tableName]: 0,
+                                }));
+                              }}
+                            />
+                          </Card>
+                        </Col>
+                        <Col span={7}>
+                          <Card
+                            title="参数"
+                            size="small"
+                            styles={{ body: { height: 360, overflow: 'auto' } }}
+                          >
+                            <StepParamsForm
+                              op={activeOpOfMember}
+                              params={activeStepOfMember?.params ?? {}}
+                              onChange={(p) =>
+                                setMemberOperators(
+                                  m.tableName,
+                                  cfg.operators.map((op, i) =>
+                                    i === idx ? { ...op, params: p } : op,
+                                  ),
+                                )
+                              }
+                            />
+                          </Card>
+                        </Col>
+                      </Row>
+                    </PipelineDndArea>
 
                     <Card title="YAML 预览" size="small">
                       <Paragraph>

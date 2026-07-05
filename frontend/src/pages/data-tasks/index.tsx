@@ -14,6 +14,7 @@ import {
   getJob,
   listDatasets,
   listDataTasks,
+  listPipelines,
   pauseJob,
   rerunAugmentJob,
   rerunDistillationJob,
@@ -75,6 +76,14 @@ const RERUN_SUPPORTED = new Set([
   'augmentation',
 ]);
 
+/** 「来源流水线」列点击跳转——回各场景编辑器并带上 pipelineId(quality/review 无编辑器,不在此列)。 */
+const PIPELINE_EDITOR_PAGE: Record<string, string> = {
+  clean: '/governance/cleaning/editor',
+  distillation: '/governance/distillation/editor',
+  synthesis: '/governance/make/editor',
+  augmentation: '/governance/augment/editor',
+};
+
 async function rerunByType(type: string, id: string) {
   switch (type) {
     case 'distillation':
@@ -101,11 +110,24 @@ const DataTasks: React.FC = () => {
   const [stats, setStats] = useState<DataTaskStatsData>();
   // 数据集列表:供「数据集」搜索项下拉选项
   const [datasets, setDatasets] = useState<DataPlatform.Dataset[]>([]);
+  // 流水线 id → {name, scenario} 映射:供「来源流水线」列展示名称与拼编辑器跳转链接
+  const [pipelineMap, setPipelineMap] = useState<
+    Record<string, { name: string; scenario: string }>
+  >({});
 
   useEffect(() => {
     listDatasets({ current: 1, pageSize: 1000 })
       .then((r) => setDatasets(r.data ?? []))
       .catch(() => setDatasets([]));
+    listPipelines({ pageSize: 100 })
+      .then((r) => {
+        const map: Record<string, { name: string; scenario: string }> = {};
+        (r.data ?? []).forEach((p) => {
+          map[p.id] = { name: p.name, scenario: p.scenario };
+        });
+        setPipelineMap(map);
+      })
+      .catch(() => setPipelineMap({}));
   }, []);
 
   const refreshStats = () => {
@@ -275,6 +297,29 @@ const DataTasks: React.FC = () => {
           {TYPE_LABEL[r.type] ?? r.type}
         </Tag>
       ),
+    },
+    {
+      title: '来源流水线',
+      dataIndex: 'pipelineId',
+      width: 160,
+      ellipsis: true,
+      search: false,
+      render: (_, r) => {
+        const pipeline = r.pipelineId ? pipelineMap[r.pipelineId] : undefined;
+        if (!pipeline) return '-';
+        const editorPath = PIPELINE_EDITOR_PAGE[r.type];
+        if (!editorPath) return pipeline.name;
+        return (
+          <a
+            title={pipeline.name}
+            onClick={() =>
+              history.push(`${editorPath}?pipelineId=${r.pipelineId}`)
+            }
+          >
+            {pipeline.name}
+          </a>
+        );
+      },
     },
     {
       // 仅作搜索项(数据集筛选);列表展示由 jobVersionColumns 的「数据集」列负责

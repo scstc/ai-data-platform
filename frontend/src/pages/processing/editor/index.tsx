@@ -6,7 +6,9 @@ import {
   Card,
   Col,
   Empty,
+  Form,
   Input,
+  Modal,
   message,
   Row,
   Select,
@@ -16,17 +18,20 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import {
   createJob,
+  createPipeline,
   getDataset,
+  getPipeline,
   listDatasets,
   listOperatorCatalog,
   previewDatasetVersion,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from './OperatorLibrary';
+import PipelineDndArea from './PipelineDndArea';
 import PipelineSteps from './PipelineSteps';
 import StepParamsForm from './StepParamsForm';
 import { stepsToYaml } from './yaml';
@@ -48,12 +53,15 @@ const Editor: React.FC<{
   redirectHref?: string;
   /** 业务桶:清洗页传 "cleansing" 锁定算子库;不传 → 展示全部算子 */
   bucket?: string;
+  /** 流水线场景:传入时展示「保存为流水线」;不传(如通用加工页)则不展示 */
+  scenario?: DataPlatform.Pipeline['scenario'];
 }> = ({
   jobType = 'clean',
   title = '新建清洗任务',
   noun = '清洗',
   redirectHref = '/governance/cleaning',
   bucket,
+  scenario,
 }) => {
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false); // 用户改过则不再自动覆盖
@@ -146,6 +154,37 @@ const Editor: React.FC<{
     if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
   }, [versions]);
 
+  // 流水线预载:URL 带 pipelineId 时,版本成员就绪后把 spec.operators/textKeys
+  // 套用到每个成员(仅套用一次;加载失败不阻塞正常编辑)
+  const pipelineAppliedRef = useRef(false);
+  useEffect(() => {
+    const pipelineId = new URLSearchParams(location.search).get('pipelineId');
+    if (
+      !pipelineId ||
+      pipelineAppliedRef.current ||
+      versionMembers.length === 0
+    ) {
+      return;
+    }
+    pipelineAppliedRef.current = true;
+    getPipeline(pipelineId)
+      .then((r) => {
+        const spec = r.data.spec;
+        const operators: DataPlatform.OperatorSpec[] = (
+          spec.operators ?? []
+        ).map((o) => ({ name: o.name, params: o.params ?? {} }));
+        const textKeys = spec.textKeys ?? [];
+        setMemberConfigs((prev) => {
+          const next = { ...prev };
+          for (const m of versionMembers) {
+            next[m.tableName] = { operators, textKeys };
+          }
+          return next;
+        });
+      })
+      .catch(() => message.error('加载流水线失败'));
+  }, [versionMembers]);
+
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
 
   // 自动任务名:数据集变化时重算,用户手动改过(nameDirty)则不再覆盖
@@ -186,6 +225,42 @@ const Editor: React.FC<{
         operators: next,
       },
     }));
+
+  // 保存为流水线:取当前激活成员的 {operators, textKeys} 作为 spec,与 scenario 绑定
+  const [pipelineModalOpen, setPipelineModalOpen] = useState(false);
+  const [pipelineForm] = Form.useForm<{ name: string; description?: string }>();
+  const [savingPipeline, setSavingPipeline] = useState(false);
+
+  const openSavePipeline = () => {
+    const cfg = activeMember ? memberConfigs[activeMember] : undefined;
+    if (!cfg?.operators.length) {
+      message.warning('请先为当前成员配置算子');
+      return;
+    }
+    setPipelineModalOpen(true);
+  };
+
+  const onSavePipeline = async (values: {
+    name: string;
+    description?: string;
+  }) => {
+    if (!activeMember || !scenario) return;
+    const cfg = memberConfigs[activeMember];
+    setSavingPipeline(true);
+    try {
+      await createPipeline({
+        name: values.name,
+        description: values.description,
+        scenario,
+        spec: { operators: cfg.operators, textKeys: cfg.textKeys },
+      });
+      message.success('已保存为流水线');
+      setPipelineModalOpen(false);
+      pipelineForm.resetFields();
+    } finally {
+      setSavingPipeline(false);
+    }
+  };
 
   const onSubmit = async () => {
     if (!name.trim()) {
@@ -230,6 +305,11 @@ const Editor: React.FC<{
     <PageContainer
       header={{ title }}
       extra={[
+        scenario && (
+          <Button key="save-pipeline" onClick={openSavePipeline}>
+            保存为流水线
+          </Button>
+        ),
         <Button
           key="submit"
           type="primary"
@@ -310,6 +390,11 @@ const Editor: React.FC<{
                 const activeOpOfMember = activeStepOfMember
                   ? opMap[activeStepOfMember.name]
                   : undefined;
+                const appendOperator = (name: string) =>
+                  setMemberOperators(m.tableName, [
+                    ...cfg.operators,
+                    { name, params: {} },
+                  ]);
 
                 return (
                   <Space
@@ -337,80 +422,81 @@ const Editor: React.FC<{
                       </Tooltip>
                     </Card>
 
-                    <Row gutter={16}>
-                      <Col span={7}>
-                        <Card
-                          title="算子库"
-                          size="small"
-                          styles={{ body: { height: 360, padding: 12 } }}
-                        >
-                          <OperatorLibrary
-                            onAdd={(name) =>
-                              setMemberOperators(m.tableName, [
-                                ...cfg.operators,
-                                { name, params: {} },
-                              ])
-                            }
-                            bucket={bucket}
-                          />
-                        </Card>
-                      </Col>
-                      <Col span={10}>
-                        <Card
-                          title="算子流水线"
-                          size="small"
-                          styles={{ body: { height: 360, overflow: 'auto' } }}
-                        >
-                          <PipelineSteps
-                            steps={memberSteps}
-                            labelOf={labelOf}
-                            activeIdx={idx}
-                            onSelect={(i) =>
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [m.tableName]: i,
-                              }))
-                            }
-                            onRemove={(i) => {
-                              setMemberOperators(
-                                m.tableName,
-                                cfg.operators.filter((_, j) => j !== i),
-                              );
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [m.tableName]: 0,
-                              }));
-                            }}
-                            onReorder={(from, to) => {
-                              const next = [...cfg.operators];
-                              const [moved] = next.splice(from, 1);
-                              next.splice(to, 0, moved);
-                              setMemberOperators(m.tableName, next);
-                            }}
-                          />
-                        </Card>
-                      </Col>
-                      <Col span={7}>
-                        <Card
-                          title="参数"
-                          size="small"
-                          styles={{ body: { height: 360, overflow: 'auto' } }}
-                        >
-                          <StepParamsForm
-                            op={activeOpOfMember}
-                            params={activeStepOfMember?.params ?? {}}
-                            onChange={(p) =>
-                              setMemberOperators(
-                                m.tableName,
-                                cfg.operators.map((op, i) =>
-                                  i === idx ? { ...op, params: p } : op,
-                                ),
-                              )
-                            }
-                          />
-                        </Card>
-                      </Col>
-                    </Row>
+                    <PipelineDndArea
+                      steps={memberSteps}
+                      labelOf={labelOf}
+                      onAppend={appendOperator}
+                      onReorder={(from, to) => {
+                        const next = [...cfg.operators];
+                        const [moved] = next.splice(from, 1);
+                        next.splice(to, 0, moved);
+                        setMemberOperators(m.tableName, next);
+                      }}
+                    >
+                      <Row gutter={16}>
+                        <Col span={7}>
+                          <Card
+                            title="算子库"
+                            size="small"
+                            styles={{ body: { height: 360, padding: 12 } }}
+                          >
+                            <OperatorLibrary
+                              onAdd={appendOperator}
+                              bucket={bucket}
+                            />
+                          </Card>
+                        </Col>
+                        <Col span={10}>
+                          <Card
+                            title="算子流水线"
+                            size="small"
+                            styles={{ body: { height: 360, overflow: 'auto' } }}
+                          >
+                            <PipelineSteps
+                              steps={memberSteps}
+                              labelOf={labelOf}
+                              activeIdx={idx}
+                              onSelect={(i) =>
+                                setMemberActiveIdx((prev) => ({
+                                  ...prev,
+                                  [m.tableName]: i,
+                                }))
+                              }
+                              onRemove={(i) => {
+                                setMemberOperators(
+                                  m.tableName,
+                                  cfg.operators.filter((_, j) => j !== i),
+                                );
+                                setMemberActiveIdx((prev) => ({
+                                  ...prev,
+                                  [m.tableName]: 0,
+                                }));
+                              }}
+                            />
+                          </Card>
+                        </Col>
+                        <Col span={7}>
+                          <Card
+                            title="参数"
+                            size="small"
+                            styles={{ body: { height: 360, overflow: 'auto' } }}
+                          >
+                            <StepParamsForm
+                              op={activeOpOfMember}
+                              params={activeStepOfMember?.params ?? {}}
+                              onChange={(p) =>
+                                setMemberOperators(
+                                  m.tableName,
+                                  cfg.operators.map((op, i) =>
+                                    i === idx ? { ...op, params: p } : op,
+                                  ),
+                                )
+                              }
+                            />
+                          </Card>
+                        </Col>
+                      </Row>
+                    </PipelineDndArea>
 
                     <Card title="YAML 预览" size="small">
                       <Paragraph>
@@ -433,6 +519,28 @@ const Editor: React.FC<{
           各成员的 YAML 预览见对应 Tab 内；真实配置在创建时由后端生成。
         </Text>
       </Card>
+
+      <Modal
+        title="保存为流水线"
+        open={pipelineModalOpen}
+        onCancel={() => setPipelineModalOpen(false)}
+        onOk={() => pipelineForm.submit()}
+        confirmLoading={savingPipeline}
+        destroyOnHidden
+      >
+        <Form form={pipelineForm} layout="vertical" onFinish={onSavePipeline}>
+          <Form.Item
+            name="name"
+            label="流水线名称"
+            rules={[{ required: true, message: '请输入名称' }]}
+          >
+            <Input placeholder="如：通用清洗流水线" />
+          </Form.Item>
+          <Form.Item name="description" label="描述（可选）">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </PageContainer>
   );
 };

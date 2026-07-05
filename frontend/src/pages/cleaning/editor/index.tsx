@@ -6,7 +6,8 @@ export default () => (
     jobType="clean"
     title="新建清洗任务"
     noun="清洗"
-    redirectHref="/governance/cleaning"
+    redirectHref="/governance/cleaning/jobs"
     bucket="cleansing"
+    scenario="clean"
   />
 );

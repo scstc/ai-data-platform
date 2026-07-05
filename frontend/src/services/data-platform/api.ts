@@ -1109,6 +1109,95 @@ export async function createQualityJob(
 }
 
 // ---------------------------------------------------------------------------
+// 治理工场:流水线(命名的算子编排,可保存复用;执行落地为对应场景的 Job)
+// ---------------------------------------------------------------------------
+/** 分页列出流水线(预置模板排在最前)GET /api/v1/pipelines */
+export async function listPipelines(
+  params?: DataPlatform.PipelineListParams,
+  options?: { [key: string]: any },
+) {
+  return request<DataPlatform.PageResult<DataPlatform.Pipeline>>(
+    '/api/v1/pipelines',
+    {
+      method: 'GET',
+      params: { ...params },
+      ...(options || {}),
+    },
+  );
+}
+
+/** 流水线详情 GET /api/v1/pipelines/{id} */
+export async function getPipeline(id: string, options?: { [key: string]: any }) {
+  return request<{ data: DataPlatform.Pipeline; success: boolean }>(
+    `/api/v1/pipelines/${id}`,
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 新建流水线 POST /api/v1/pipelines */
+export async function createPipeline(
+  body: DataPlatform.PipelineCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Pipeline; success: boolean }>(
+    '/api/v1/pipelines',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 更新流水线(预置模板返回 400)PUT /api/v1/pipelines/{id} */
+export async function updatePipeline(
+  id: string,
+  body: DataPlatform.PipelineUpdate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Pipeline; success: boolean }>(
+    `/api/v1/pipelines/${id}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      // skipErrorHandler:交由调用方 catch 展示后端「预置模板不可编辑」message
+      skipErrorHandler: true,
+      ...(options || {}),
+    },
+  );
+}
+
+/** 删除流水线(预置模板返回 400)DELETE /api/v1/pipelines/{id} */
+export async function deletePipeline(id: string, options?: { [key: string]: any }) {
+  return request<{ success: boolean }>(`/api/v1/pipelines/${id}`, {
+    method: 'DELETE',
+    // skipErrorHandler:交由调用方 catch 展示后端「预置模板不可删除」message
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
+/** 执行流水线:对指定数据集版本按 spec 跑一遍算子链,产出对应场景的任务
+ *  POST /api/v1/pipelines/{id}/execute */
+export async function executePipeline(
+  id: string,
+  body: DataPlatform.PipelineExecuteParams,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/pipelines/${id}/execute`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 数据蒸馏
 // ---------------------------------------------------------------------------
 /** 新建并执行蒸馏任务 POST /api/v1/distillation/jobs */

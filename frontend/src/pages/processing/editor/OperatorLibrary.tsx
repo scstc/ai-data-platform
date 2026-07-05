@@ -1,4 +1,5 @@
 import { PlusOutlined } from '@ant-design/icons';
+import { useDraggable } from '@dnd-kit/core';
 import { Button, Input, List, Select, Space, Tag, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -7,6 +8,52 @@ import {
 } from '@/services/data-platform';
 
 const { Text } = Typography;
+
+/** 拖拽 id 前缀,供外层 PipelineDndArea 区分「来自算子库」与「流水线内部排序」。 */
+const DRAG_ID_PREFIX = 'op:';
+
+/** 单条算子:内容区可拖拽(拖入右侧流水线区即 append),「+」按钮保留点击加入。 */
+const OperatorItem: React.FC<{
+  op: DataPlatform.CatalogOperator;
+  onAdd: (name: string) => void;
+}> = ({ op, onAdd }) => {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `${DRAG_ID_PREFIX}${op.name}`,
+  });
+  return (
+    <List.Item
+      actions={[
+        <Button
+          key="add"
+          type="text"
+          size="small"
+          icon={<PlusOutlined />}
+          onClick={() => onAdd(op.name)}
+        />,
+      ]}
+    >
+      <div
+        ref={setNodeRef}
+        {...attributes}
+        {...listeners}
+        style={{ flex: 1, cursor: 'grab', opacity: isDragging ? 0.4 : 1 }}
+      >
+        <List.Item.Meta
+          title={<Text style={{ fontSize: 13 }}>{op.zhLabel}</Text>}
+          description={
+            <Text
+              type="secondary"
+              style={{ fontSize: 11, fontFamily: 'monospace' }}
+            >
+              {op.name}
+            </Text>
+          }
+        />
+      </div>
+      {op.runnable !== 'ready' && <Tag>{op.runnable}</Tag>}
+    </List.Item>
+  );
+};
 
 /** 左栏:检索/场景,点 + 添加算子到流水线。展示全量算子目录,不按业务桶或
  *  可运行状态过滤(各任务均可自由选用任意算子)。
@@ -73,30 +120,7 @@ const OperatorLibrary: React.FC<{
           size="small"
           dataSource={data}
           renderItem={(op) => (
-            <List.Item
-              actions={[
-                <Button
-                  key="add"
-                  type="text"
-                  size="small"
-                  icon={<PlusOutlined />}
-                  onClick={() => onAdd(op.name)}
-                />,
-              ]}
-            >
-              <List.Item.Meta
-                title={<Text style={{ fontSize: 13 }}>{op.zhLabel}</Text>}
-                description={
-                  <Text
-                    type="secondary"
-                    style={{ fontSize: 11, fontFamily: 'monospace' }}
-                  >
-                    {op.name}
-                  </Text>
-                }
-              />
-              {op.runnable !== 'ready' && <Tag>{op.runnable}</Tag>}
-            </List.Item>
+            <OperatorItem key={op.name} op={op} onAdd={onAdd} />
           )}
         />
       </div>

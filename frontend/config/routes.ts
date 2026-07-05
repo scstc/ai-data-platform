@@ -222,13 +222,20 @@ export default [
       },
     ],
   },
-  // ④ 数据治理(动数据侧:内容安全 / 加工 / 蒸馏 / 合成 / 增强 / 标注)
+  // ④ 数据治理(动数据侧:治理工场 / 内容安全 / 清洗 / 蒸馏 / 合成 / 增强 / 标注)
+  // 治理工场(workbench)收口清洗/蒸馏/合成/增强四场景为统一入口(场景 Tab + 流水线模板);
+  // 原四个菜单项评标期保留为薄入口(渲染 Workbench 并预设 scenario),编辑器/任务列表路径不变。
   {
     path: '/governance',
     name: 'governance',
     icon: 'safety',
     routes: [
-      { path: '/governance', redirect: '/governance/content-safety' },
+      { path: '/governance', redirect: '/governance/workbench' },
+      {
+        path: '/governance/workbench',
+        name: 'workbench',
+        component: './governance/workbench',
+      },
       {
         path: '/governance/content-safety',
         name: 'contentSafety',
@@ -238,6 +245,12 @@ export default [
         path: '/governance/cleaning',
         name: 'cleaning',
         component: './cleaning',
+      },
+      {
+        path: '/governance/cleaning/jobs',
+        name: 'cleaning-jobs',
+        component: './cleaning/jobs',
+        hideInMenu: true,
       },
       {
         path: '/governance/cleaning/editor',
@@ -251,6 +264,12 @@ export default [
         component: './distillation',
       },
       {
+        path: '/governance/distillation/jobs',
+        name: 'distillation-jobs',
+        component: './distillation/jobs',
+        hideInMenu: true,
+      },
+      {
         path: '/governance/distillation/editor',
         name: 'distillation-editor',
         component: './distillation/editor',
@@ -262,6 +281,12 @@ export default [
         component: './make',
       },
       {
+        path: '/governance/make/jobs',
+        name: 'make-jobs',
+        component: './make/jobs',
+        hideInMenu: true,
+      },
+      {
         path: '/governance/make/editor',
         name: 'make-editor',
         component: './make/editor',
@@ -271,6 +296,12 @@ export default [
         path: '/governance/augment',
         name: 'augment',
         component: './augment',
+      },
+      {
+        path: '/governance/augment/jobs',
+        name: 'augment-jobs',
+        component: './augment/jobs',
+        hideInMenu: true,
       },
       {
         path: '/governance/augment/editor',
