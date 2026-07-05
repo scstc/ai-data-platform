@@ -25,3 +25,4 @@ deploy/.env.gov
 # scripts 跑出的临时 JSON(由 parse_op_docs / render_op_demos 生成)
 /backend/scripts/_op_demos.json
 /backend/scripts/_media_demos.json
+deploy/.env.local

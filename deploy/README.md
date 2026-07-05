@@ -106,3 +106,58 @@ aws --endpoint-url http://10.60.1.60:9000 s3 ls
 ```
 
 平台对接:在「数据源管理」新建 s3 数据源,endpoint `http://10.60.1.60:9000`、accessKey `adpadmin`、secretKey `adpMinio#2026`、bucket `datasets`。
+
+## 纯本地栈(deploy/docker-compose.local.yml)
+
+与上面的生产编排(依赖 10.60.1.60 的 PG/MinIO)相互独立:**PostgreSQL + MinIO + 后端 + 前端 + kkFileView 全部本地新建容器**,不连远程,数据库为全新空库(只跑 `alembic upgrade head` 建表,不迁移生产数据)。
+
+```bash
+# 仓库根目录(需已 /adp-init 拉好 data-juicer/)
+cp deploy/.env.local.example deploy/.env.local   # 按需改端口/密码
+bash deploy/deploy.local.sh
+```
+
+默认端口(避开本机 `/adp-start` 常用的 8001/18003):
+
+| 服务 | 地址 |
+|---|---|
+| Web UI | http://localhost:8090(admin/ant.design) |
+| 后端 Swagger | http://localhost:18004/docs(nginx 只反代 /api/,docs 需直连后端端口) |
+| PostgreSQL | localhost:55433(`adp` 库,新建) |
+| MinIO S3 API | http://localhost:9000 |
+| MinIO 控制台 | http://localhost:9001(adpadmin / 见 `.env.local`) |
+| kkFileView 预览 | http://localhost:8012 |
+
+项目名 `adp-local`,卷 `adp_local_pg_data` / `adp_local_minio_data` / `adp_local_data`,与生产栈(`adp` / `adp_pg_data` 等)完全隔离,可与本机 `/adp-start` 的裸进程后端(:18003)同时存在。
+
+```bash
+C="docker compose -f deploy/docker-compose.local.yml --env-file deploy/.env.local"
+$C ps / logs -f backend / down / down -v   # 同生产栈用法
+```
+
+### GPU 算子(本地 NVIDIA 显卡)
+
+`deploy/backend.Dockerfile` 默认不装 torch 等 ML 依赖(生产机多为 CPU-only,装 DJ 的
+`generic` extra 会让镜像 +几 GB、构建变慢)。本地栈通过 `deploy/.env.local` 的
+`DJ_EXTRAS=[generic]` + `GPU_COUNT=all` 按需开启:
+
+- `DJ_EXTRAS` 作为构建参数传给 `uv pip install "/opt/dj${DJ_EXTRAS}"`,装 CUDA 版 torch/transformers/vllm/cudf 等
+- `docker-compose.local.yml` 的 backend 服务声明了 `deploy.resources.reservations.devices`(nvidia GPU 直通),依赖 Docker Desktop 已注册的 `nvidia` runtime(`docker info` 能看到)
+
+本机没有 NVIDIA 显卡:把 `.env.local` 的 `DJ_EXTRAS` 留空、`GPU_COUNT=0`,并删掉
+`docker-compose.local.yml` 里 backend 的 `deploy.resources.reservations.devices` 整段——
+否则 `up` 会因找不到 GPU 设备直接报错拒绝启动。
+
+验证 GPU 是否被容器实际探测到:
+
+```bash
+docker exec adp-local-backend /opt/dj/.venv/bin/python -c \
+  "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+**装了 CUDA 版 torch ≠ 算子能跑**:`hf_model`/多模态类算子首次执行时还要从 HuggingFace 拉具体模型权重(pip 只装了运行时库,权重是单独的下载),容器目前没有任何缓存。`HF_HUB_DISABLE_XET=1` 已在 compose 里配好(国内连 hf-xet 传输后端会直接挂死,禁用后退回普通 http 下载,huggingface.co 直连可通);`HF_HOME=/data/hf-cache` 落在持久卷,重建容器不用重下。也可以进容器提前拉一个模型探路:
+
+```bash
+docker exec -e HF_HUB_DISABLE_XET=1 -e HF_HOME=/data/hf-cache adp-local-backend \
+  /opt/dj/.venv/bin/hf download Qwen/Qwen2-VL-2B-Instruct
+```

@@ -1,0 +1,123 @@
+# 纯本地栈:PostgreSQL + MinIO + 后端(含 data-juicer 引擎) + 前端(nginx),全部本地新建容器,
+# 不依赖 10.60.1.60。数据库为全新空库(仅跑 alembic 迁移建表),不迁移生产数据。
+# 启动:docker compose -f deploy/docker-compose.local.yml --env-file deploy/.env.local up -d --build
+name: adp-local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: adp-local-postgres
+    environment:
+      POSTGRES_USER: ${PG_USER:-adp}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-adp_dev_pw}
+      POSTGRES_DB: ${PG_DB:-adp}
+    ports:
+      - "${PG_PORT:-55433}:5432"
+    volumes:
+      - adp_local_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-adp} -d ${PG_DB:-adp}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: adp-local-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-adpadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-adpMinio#2026}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - adp_local_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+      args:
+        # 本地有 GPU:装 DJ 的 generic extra(torch/transformers/vllm/cudf 等 CUDA 版依赖)。
+        # 必须显式写死 [generic],不读 .env:compose 把 ${DJ_EXTRAS:-[generic]} 当字面量拼到 ARG,
+        # 若 .env 没读到,Dockerfile 收到空值,torch 等不会装。
+        DJ_EXTRAS: "[generic]"
+    image: adp-local-backend:latest
+    container_name: adp-local-backend
+    # 直连后端(Swagger /docs 等):nginx 只反代 /api/ 前缀,docs 在前缀外,故额外发布端口方便本地调试
+    ports:
+      - "${BACKEND_PORT:-18004}:18003"
+    # GPU 直通(Docker Desktop WSL2 已注册 nvidia runtime);机器无 GPU 时把 .env.local 的
+    # GPU_COUNT 设为 0 或删掉这段,否则 up 会因找不到 GPU 设备直接报错拒绝启动。
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-all}
+              capabilities: [gpu]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${PG_USER:-adp}:${PG_PASSWORD:-adp_dev_pw}@postgres:5432/${PG_DB:-adp}
+      UPLOAD_DIR: /data/uploads
+      DATASETS_DIR: /data/datasets
+      DJ_PROCESS_BIN: /opt/dj/.venv/bin/dj-process
+      ENGINE_NP: ${ENGINE_NP:-2}
+      ENGINE_CONCURRENCY: ${ENGINE_CONCURRENCY:-3}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:8090"]}
+      AUTH_SECRET: ${AUTH_SECRET:-adp-dev-insecure-secret-change-me}
+      # 平台内置 MinIO(本地新建,同 compose 栈内)
+      STORAGE_MINIO_ENDPOINT: http://minio:9000
+      STORAGE_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-adpadmin}
+      STORAGE_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-adpMinio#2026}
+      # GPU/hf_model 算子首次运行会从 HuggingFace 拉模型权重(pip 装的 transformers 只是能力,
+      # 权重要单独下);hf-xet 传输后端在国内连不上会直接挂死,必须禁掉退回 http 下载。
+      # HF_HOME 落 /data 卷,容器重建/换镜像也不用重下(模型可能几 GB)。
+      HF_HUB_DISABLE_XET: "1"
+      HF_HOME: /data/hf-cache
+      # 视觉/HF 模型算子强制离线走本地缓存:不加时 transformers 加载 tokenizer 会请求
+      # additional_chat_templates(404)未被捕获→逐样本抛错、DJ 默认跳错样本→产物空却仍报 success。
+      # 模型须先下好缓存到 HF_HOME(见 /data/hf-cache/hub);新模型先 hf download 再开算子。
+      HF_HUB_OFFLINE: "1"
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - adp_local_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    image: adp-local-frontend:latest
+    container_name: adp-local-frontend
+    ports:
+      - "${WEB_PORT:-8090}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  kkfileview:
+    image: keking/kkfileview:latest
+    container_name: adp-local-kkfileview
+    ports:
+      - "${KK_PORT:-8012}:8012"
+    restart: unless-stopped
+
+volumes:
+  adp_local_pg_data:
+  adp_local_minio_data:
+  adp_local_data:

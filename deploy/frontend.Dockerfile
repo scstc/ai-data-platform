@@ -6,7 +6,13 @@ ENV HUSKY=0
 # 先装依赖,再拷源码。用 npm install(非 ci):仓库 package-lock 与 package.json
 # 存在漂移(@utoo/pack 等未写回 lock),ci 严格校验会拒装;install 按 package.json 解析。
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm install --no-audit --no-fund --legacy-peer-deps
+# 大依赖树在弱网/代理环境下偶发 ECONNRESET(连接中途被重置,npm 内置重试覆盖不到),外层重试兜底
+RUN npm config set fetch-retries 5 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && ( npm install --no-audit --no-fund --legacy-peer-deps \
+         || (echo "npm install failed, retry 1/2..." && sleep 5 && npm install --no-audit --no-fund --legacy-peer-deps) \
+         || (echo "npm install failed, retry 2/2..." && sleep 5 && npm install --no-audit --no-fund --legacy-peer-deps) )
 COPY frontend/ ./
 RUN npm run build
 
