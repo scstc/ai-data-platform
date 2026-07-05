@@ -31,8 +31,8 @@ import {
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 import OperatorLibrary from './OperatorLibrary';
+import PipelineCanvas from './PipelineCanvas';
 import PipelineDndArea from './PipelineDndArea';
-import PipelineSteps from './PipelineSteps';
 import StepParamsForm from './StepParamsForm';
 import { stepsToYaml } from './yaml';
 
@@ -84,6 +84,10 @@ const Editor: React.FC<{
   const [memberActiveIdx, setMemberActiveIdx] = useState<
     Record<string, number>
   >({});
+  // 每个成员独立维护画布是否存在游离(未接入主链)算子节点,提交/保存前据此阻断
+  const [memberHasOrphan, setMemberHasOrphan] = useState<
+    Record<string, boolean>
+  >({});
 
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
@@ -118,6 +122,7 @@ const Editor: React.FC<{
     setMemberConfigs({});
     setActiveMember(undefined);
     setMemberActiveIdx({});
+    setMemberHasOrphan({});
     if (!versionId || !datasetId) {
       setColumns([]);
       return;
@@ -186,6 +191,7 @@ const Editor: React.FC<{
   }, [versionMembers]);
 
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
+  const categoryOf = (n: string) => opMap[n]?.category || '';
 
   // 自动任务名:数据集变化时重算,用户手动改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
@@ -237,6 +243,10 @@ const Editor: React.FC<{
       message.warning('请先为当前成员配置算子');
       return;
     }
+    if (activeMember && memberHasOrphan[activeMember]) {
+      message.warning('存在未接入流水线的算子');
+      return;
+    }
     setPipelineModalOpen(true);
   };
 
@@ -282,6 +292,10 @@ const Editor: React.FC<{
 
     if (configs.length === 0) {
       message.warning('请至少为一个成员配置算子');
+      return;
+    }
+    if (configs.some((c) => memberHasOrphan[c.memberName])) {
+      message.warning('存在未接入流水线的算子');
       return;
     }
 
@@ -434,11 +448,11 @@ const Editor: React.FC<{
                       }}
                     >
                       <Row gutter={16}>
-                        <Col span={7}>
+                        <Col span={5}>
                           <Card
                             title="算子库"
                             size="small"
-                            styles={{ body: { height: 360, padding: 12 } }}
+                            styles={{ body: { height: 440, padding: 12 } }}
                           >
                             <OperatorLibrary
                               onAdd={appendOperator}
@@ -446,15 +460,16 @@ const Editor: React.FC<{
                             />
                           </Card>
                         </Col>
-                        <Col span={10}>
+                        <Col span={13}>
                           <Card
                             title="算子流水线"
                             size="small"
-                            styles={{ body: { height: 360, overflow: 'auto' } }}
+                            styles={{ body: { height: 440, padding: 0 } }}
                           >
-                            <PipelineSteps
+                            <PipelineCanvas
                               steps={memberSteps}
                               labelOf={labelOf}
+                              categoryOf={categoryOf}
                               activeIdx={idx}
                               onSelect={(i) =>
                                 setMemberActiveIdx((prev) => ({
@@ -472,14 +487,34 @@ const Editor: React.FC<{
                                   [m.tableName]: 0,
                                 }));
                               }}
+                              onOrderChange={(perm) => {
+                                if (perm.length !== cfg.operators.length) {
+                                  setMemberHasOrphan((prev) => ({
+                                    ...prev,
+                                    [m.tableName]: true,
+                                  }));
+                                  return;
+                                }
+                                setMemberHasOrphan((prev) => ({
+                                  ...prev,
+                                  [m.tableName]: false,
+                                }));
+                                if (perm.every((v, i) => v === i)) return;
+                                setMemberOperators(
+                                  m.tableName,
+                                  perm.map((i) => cfg.operators[i]),
+                                );
+                              }}
+                              inputLabel={`${selectedVersionLabel ?? '版本'} · ${m.tableName}`}
+                              outputLabel="新版本"
                             />
                           </Card>
                         </Col>
-                        <Col span={7}>
+                        <Col span={6}>
                           <Card
                             title="参数"
                             size="small"
-                            styles={{ body: { height: 360, overflow: 'auto' } }}
+                            styles={{ body: { height: 440, overflow: 'auto' } }}
                           >
                             <StepParamsForm
                               op={activeOpOfMember}

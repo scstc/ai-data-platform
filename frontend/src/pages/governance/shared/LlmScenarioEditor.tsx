@@ -1,6 +1,6 @@
 // 数据蒸馏 / 数据合成 / 数据增强共用的 LLM 场景编辑器:三者原为独立镜像页面
 // (仅目标面板组件、算子桶、创建接口、文案不同),收敛为一份参数化实现。
-// 布局对齐 quality/editor:扁平 Space 顶部 + Goal 面板 + 7/10/7 三栏。
+// 布局对齐 quality/editor:扁平 Space 顶部 + Goal 面板 + 5/13/6 三栏(中栏为画布式编排)。
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useLocation } from '@umijs/max';
 import {
@@ -20,8 +20,8 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
 import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
+import PipelineCanvas from '@/pages/processing/editor/PipelineCanvas';
 import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
-import PipelineSteps from '@/pages/processing/editor/PipelineSteps';
 import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
 import {
   createPipeline,
@@ -121,6 +121,8 @@ function LlmScenarioEditor<TGoal extends object>({
   >({});
   const [steps, setSteps] = useState<DataPlatform.PipelineStep[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
+  // 画布是否存在游离(未接入主链)算子节点,提交/保存前据此阻断
+  const [hasOrphanSteps, setHasOrphanSteps] = useState(false);
   const [goal, setGoal] = useState<TGoal>(defaultGoal);
   const [outputDatasetId, setOutputDatasetId] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -218,9 +220,24 @@ function LlmScenarioEditor<TGoal extends object>({
 
   const activeStep = steps[activeIdx];
   const activeOp = activeStep ? opMap[activeStep.name] : undefined;
+  const labelOf = (n: string) => opMap[n]?.zhLabel || n;
+  const categoryOf = (n: string) => opMap[n]?.category || '';
+
+  const onOrderChange = (perm: number[]) => {
+    if (perm.length !== steps.length) {
+      setHasOrphanSteps(true);
+      return;
+    }
+    setHasOrphanSteps(false);
+    if (perm.every((v, i) => v === i)) return;
+    setSteps(perm.map((i) => steps[i]));
+  };
 
   // 自动任务名:数据集/算子变化时重算,用户改过(nameDirty)则不再覆盖
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
+  const selectedVersionLabel = versions.find(
+    (v) => v.id === versionId,
+  )?.versionLabel;
   const suggestedName = suggestTaskName(selectedDatasetName, taskNameNoun);
   useEffect(() => {
     if (!nameDirty) setName(suggestedName);
@@ -234,6 +251,10 @@ function LlmScenarioEditor<TGoal extends object>({
   const openSavePipeline = () => {
     if (!steps.length) {
       message.warning('请先添加算子');
+      return;
+    }
+    if (hasOrphanSteps) {
+      message.warning('存在未接入流水线的算子');
       return;
     }
     setPipelineModalOpen(true);
@@ -270,6 +291,10 @@ function LlmScenarioEditor<TGoal extends object>({
     }
     if (!steps.length) {
       message.warning('至少添加一个算子');
+      return;
+    }
+    if (hasOrphanSteps) {
+      message.warning('存在未接入流水线的算子');
       return;
     }
     const validationError = validateSteps?.(steps, opMap);
@@ -374,43 +399,47 @@ function LlmScenarioEditor<TGoal extends object>({
 
       <PipelineDndArea
         steps={steps}
-        labelOf={(n) => opMap[n]?.zhLabel || n}
+        labelOf={labelOf}
         onAppend={appendOperator}
         onReorder={reorder}
       >
         <Row gutter={16}>
-          <Col span={7}>
+          <Col span={5}>
             <Card
               title="算子库"
               size="small"
-              styles={{ body: { height: 460, padding: 12 } }}
+              styles={{ body: { height: 440, padding: 12 } }}
             >
               <OperatorLibrary onAdd={appendOperator} bucket={bucket} />
             </Card>
           </Col>
-          <Col span={10}>
+          <Col span={13}>
             <Card
               title={selectedOperatorsTitle}
               size="small"
-              styles={{ body: { height: 460, overflow: 'auto' } }}
+              styles={{ body: { height: 440, padding: 0 } }}
             >
-              <PipelineSteps
+              <PipelineCanvas
                 steps={steps}
-                labelOf={(n) => opMap[n]?.zhLabel || n}
+                labelOf={labelOf}
+                categoryOf={categoryOf}
                 activeIdx={activeIdx}
                 onSelect={setActiveIdx}
                 onRemove={(i) => {
                   remove(i);
                   setActiveIdx(0);
                 }}
+                onOrderChange={onOrderChange}
+                inputLabel={`${selectedDatasetName ?? '数据集'}${selectedVersionLabel ? ` · ${selectedVersionLabel}` : ''}`}
+                outputLabel="新版本"
               />
             </Card>
           </Col>
-          <Col span={7}>
+          <Col span={6}>
             <Card
               title="参数"
               size="small"
-              styles={{ body: { height: 460, overflow: 'auto' } }}
+              styles={{ body: { height: 440, overflow: 'auto' } }}
             >
               <StepParamsForm
                 op={activeOp}
