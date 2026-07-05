@@ -28,7 +28,7 @@ import ExecuteModal from './ExecuteModal';
 
 const { Paragraph } = Typography;
 
-type ScenarioKey = 'clean' | 'distillation' | 'synthesis' | 'augmentation';
+type ScenarioKey = 'clean' | 'distillation';
 
 type ScenarioMeta = {
   key: ScenarioKey;
@@ -38,7 +38,9 @@ type ScenarioMeta = {
   taskType: TaskType;
 };
 
-/** 场景元信息(与后端 Job.type / Pipeline.scenario 对齐)。 */
+/** 场景元信息(与后端 Job.type / Pipeline.scenario 对齐)。
+ *  数据合成(改为多文件按行拼接,非算子流水线形态)与数据增强已退出工场,
+ *  走侧边栏独立菜单 /governance/make、/governance/augment。 */
 const SCENARIOS: ScenarioMeta[] = [
   {
     key: 'clean',
@@ -53,20 +55,6 @@ const SCENARIOS: ScenarioMeta[] = [
     jobsPath: '/governance/distillation/jobs',
     editorPath: '/governance/distillation/editor',
     taskType: '数据蒸馏',
-  },
-  {
-    key: 'synthesis',
-    label: '数据合成',
-    jobsPath: '/governance/make/jobs',
-    editorPath: '/governance/make/editor',
-    taskType: '数据合成',
-  },
-  {
-    key: 'augmentation',
-    label: '数据增强',
-    jobsPath: '/governance/augment/jobs',
-    editorPath: '/governance/augment/editor',
-    taskType: '数据增强',
   },
 ];
 
@@ -99,7 +87,10 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
       current: 1,
       pageSize: 100,
     })
-      .then((r) => setPipelines(r.data ?? []))
+      // 场景已退出工场的流水线(如存量 synthesis)无 Tab/编辑器可挂,不展示
+      .then((r) =>
+        setPipelines((r.data ?? []).filter((p) => SCENARIO_MAP[p.scenario])),
+      )
       .finally(() => setLoading(false));
   };
 

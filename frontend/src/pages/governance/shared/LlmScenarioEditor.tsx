@@ -54,8 +54,9 @@ type LlmJobBody<TGoal> = {
 };
 
 export type LlmScenarioEditorProps<TGoal extends object> = {
-  /** 流水线场景(对齐 Job.type / pipelines.scenario) */
-  scenario: 'distillation' | 'synthesis' | 'augmentation';
+  /** 流水线场景(对齐 Job.type / pipelines.scenario);
+   *  不传 = 场景已退出治理工场(如增强),不展示「保存为流水线」 */
+  scenario?: 'distillation' | 'synthesis' | 'augmentation';
   /** OperatorLibrary 业务桶(锁定算子库子集);历史命名与 scenario 不一致 */
   bucket: string;
   pageTitle: string;
@@ -266,6 +267,7 @@ function LlmScenarioEditor<TGoal extends object>({
     name: string;
     description?: string;
   }) => {
+    if (!scenario) return;
     setSavingPipeline(true);
     try {
       await createPipeline({
@@ -325,9 +327,13 @@ function LlmScenarioEditor<TGoal extends object>({
     <PageContainer
       header={{ title: pageTitle }}
       extra={[
-        <Button key="save-pipeline" onClick={openSavePipeline}>
-          保存为流水线
-        </Button>,
+        ...(scenario
+          ? [
+              <Button key="save-pipeline" onClick={openSavePipeline}>
+                保存为流水线
+              </Button>,
+            ]
+          : []),
         <Button
           key="submit"
           type="primary"
