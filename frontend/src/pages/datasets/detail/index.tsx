@@ -318,53 +318,6 @@ const DatasetDetail: React.FC = () => {
     }
   };
 
-  const renderLineage = (v: DataPlatform.DatasetVersion) =>
-    v.producedByJobId ? (
-      <a
-        onClick={() =>
-          history.push(`/ops/data-tasks?highlight=${v.producedByJobId}`)
-        }
-      >
-        加工自任务
-      </a>
-    ) : (
-      <Tag>原始接入</Tag>
-    );
-
-  const renderPipelineLinks = (v: DataPlatform.DatasetVersion) => (
-    <Space size="small" wrap>
-      <a
-        onClick={() =>
-          history.push(
-            `/governance/content-safety?datasetId=${v.datasetId}&versionId=${v.id}`,
-          )
-        }
-      >
-        安全扫描
-      </a>
-      <a
-        onClick={() =>
-          history.push(
-            `/assessment/quality/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
-          )
-        }
-      >
-        质量评估
-      </a>
-      {access.canAdmin && (
-        <a
-          onClick={() =>
-            history.push(
-              `/governance/cleaning/editor?datasetId=${v.datasetId}&versionId=${v.id}`,
-            )
-          }
-        >
-          数据清洗
-        </a>
-      )}
-    </Space>
-  );
-
   /** 管理员才有的发布门操作（预览由左侧选中隐式触发，故不再有单独「预览」入口）。 */
   const renderVersionActions = (v: DataPlatform.DatasetVersion) => (
     <Space size="small" wrap>
@@ -508,12 +461,6 @@ const DatasetDetail: React.FC = () => {
           </Descriptions.Item>
           <Descriptions.Item label="发布状态">
             <Tag color={pub.color}>{pub.text}</Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="加工血缘">
-            {renderLineage(v)}
-          </Descriptions.Item>
-          <Descriptions.Item label="流程">
-            {renderPipelineLinks(v)}
           </Descriptions.Item>
         </Descriptions>
         {(v.tables?.length ?? 0) > 1 && (
