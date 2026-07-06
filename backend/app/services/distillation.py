@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from sqlalchemy import func, select
@@ -44,12 +44,11 @@ async def run_distillation_job(
     target_members: list[str] | None = None,
     goal: DistillationGoal,
     output_dataset_id: str | None = None,
-    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
     """对输入版本跑蒸馏算子链 → 写回 dataset(output_dataset_id 或 input 同 dataset)新版本。
 
     operators: 统一应用到所有成员的算子列表（旧版兼容）
-    member_configs: 新版成员独立配置，格式 [{member_name, operators}, ...]
+    member_configs: 新版成员独立配置，格式 [{member_name, operators, text_keys?}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
     goal: 全局蒸馏目标参数（不按成员区分）
     返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
@@ -146,12 +145,26 @@ async def run_distillation_job(
         )
         yaml_path = out_dir / f"{member.table_name}_job.yaml"
 
+        # 探测文本字段：用户显式指定则用 text_keys，否则自动探测
+        raw_text_keys = member_cfg.get("text_keys")
+        member_text_keys: list[str] | None = None
+        if isinstance(raw_text_keys, list) and all(isinstance(x, str) for x in raw_text_keys):
+            member_text_keys = cast(list[str], raw_text_keys)
+
+        detected_key = (
+            None
+            if member_text_keys
+            else detect_text_key(_read_head_records(input_path, 50))  # type: ignore[arg-type]
+        )
+
         # 构建 DJ 配置（蒸馏用 dj-process，不是 dj-analyze）
         cfg = build_config(
             project_name=f"{job_id}-{member.table_name}",
             input_path=str(input_path),
             output_path=str(output_path),
             operators=member_operators,
+            text_key=detected_key,
+            text_keys=member_text_keys,
         )
         yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_content, encoding="utf-8")
@@ -304,6 +317,7 @@ async def _run_distillation_job_legacy(
     operators: list[dict[str, Any]] | None = None,
     goal: DistillationGoal,
     output_dataset_id: str | None = None,
+    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
     """旧版单文件蒸馏逻辑（无成员表的版本）。"""
     if not operators:
