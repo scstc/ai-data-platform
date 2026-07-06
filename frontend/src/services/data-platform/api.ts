@@ -628,6 +628,14 @@ export async function suggestDatasetName(
   }>('/api/v1/ai/suggest-dataset-name', { method: 'POST', data: body });
 }
 
+/** AI:据数据集名称/元数据建议标签 POST /api/v1/ai/suggest-tags */
+export async function suggestTags(body: DataPlatform.SuggestTagsParams) {
+  return request<{
+    data: DataPlatform.SuggestedTags;
+    success: boolean;
+  }>('/api/v1/ai/suggest-tags', { method: 'POST', data: body });
+}
+
 /** 新建空数据集(数据集优先流程):建集后再由上传/采集往里加表成员
  * POST /api/v1/datasets */
 export async function createDataset(

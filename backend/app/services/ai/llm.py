@@ -49,6 +49,12 @@ _SUGGEST_NAME_SYSTEM_PROMPT = (
     "起一个简洁、概括性的中文数据集名称（不超过 20 字，不带文件扩展名、不带引号）。"
     '只输出一个 JSON 对象：{"name":string(中文)}，不要任何额外解释或 markdown 代码块。'
 )
+_SUGGEST_TAGS_SYSTEM_PROMPT = (
+    "你是数据集打标助手。根据数据集名称、描述、分类、数据类型等元数据,"
+    "给出 3~5 个简洁的中文标签(每个不超过 8 字,名词短语,不带 # 与引号)。"
+    "优先复用「已有标签库」中语义匹配的标签,不足再新造;不要输出「已有标签」中已存在的。"
+    '只输出一个 JSON 对象:{"tags":[string]},不要任何额外解释或 markdown 代码块。'
+)
 # 内容安全审核(#4):分批把若干文本分类为 黄/赌/毒/政/恐 或 正常。
 _MODERATE_SYSTEM_PROMPT = (
     "你是内容安全审核助手。给定带编号的若干文本,逐条判断是否含违规内容,"
@@ -246,6 +252,47 @@ class OpenAICompatProvider(AIProvider):
                 filenames, data_type, category
             )
         return {"name": name.strip()}
+
+    async def suggest_tags(
+        self,
+        name: str,
+        description: str | None,
+        category: str | None,
+        data_type: str | None,
+        existing_tags: list[str],
+        known_tags: list[str],
+    ) -> dict[str, Any]:
+        user = (
+            f"名称：{name}\n"
+            f"描述：{description or '(无)'}\n"
+            f"分类：{category or '(无)'}\n"
+            f"数据类型：{data_type or '(无)'}\n"
+            f"已有标签：{', '.join(existing_tags) or '(无)'}\n"
+            f"已有标签库：{', '.join(known_tags[:100]) or '(无)'}"
+        )
+        try:
+            result = await self._chat_json(
+                _SUGGEST_TAGS_SYSTEM_PROMPT, user, feature="suggest_tags"
+            )
+        except Exception as exc:  # noqa: BLE001 — 任何失败都回退，保证可用性
+            logger.warning("LLM suggest_tags 失败，回退启发式：%s", exc)
+            return await self._heuristic.suggest_tags(
+                name, description, category, data_type, existing_tags, known_tags
+            )
+        raw = result.get("tags")
+        if not isinstance(raw, list):
+            logger.warning("LLM suggest_tags 返回缺少 tags 数组，回退启发式")
+            return await self._heuristic.suggest_tags(
+                name, description, category, data_type, existing_tags, known_tags
+            )
+        # 去空/去重/剔除已有标签,防 LLM 越界
+        existing = set(existing_tags)
+        tags: list[str] = []
+        for item in raw:
+            t = str(item).strip().strip("#").strip()
+            if t and t not in existing and t not in tags:
+                tags.append(t)
+        return {"tags": tags[:8]}
 
     async def _moderate_batch(self, batch: list[str]) -> list[dict[str, Any]]:
         """审核一批文本(<=_MODERATE_BATCH 条),返回与 batch 等长、按下标对齐的结果。

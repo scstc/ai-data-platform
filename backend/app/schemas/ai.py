@@ -81,3 +81,21 @@ class SuggestedDatasetName(CamelModel):
     """AI 建议的数据集名（作为 {data, success} 的 data）。"""
 
     name: str
+
+
+# ---- 数据集 AI 打标 ----
+class SuggestTagsRequest(CamelModel):
+    """AI 打标请求：据数据集名称与元数据建议标签。"""
+
+    name: str
+    description: str | None = None
+    category: str | None = None
+    data_type: str | None = None
+    existing_tags: list[str] = []
+    known_tags: list[str] = []
+
+
+class SuggestedTags(CamelModel):
+    """AI 建议的标签列表（作为 {data, success} 的 data）。"""
+
+    tags: list[str]

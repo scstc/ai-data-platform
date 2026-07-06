@@ -411,6 +411,21 @@ declare namespace DataPlatform {
     name: string;
   };
 
+  /** AI 打标入参（据数据集名称与元数据建议标签） */
+  type SuggestTagsParams = {
+    name: string;
+    description?: string;
+    category?: string;
+    dataType?: string;
+    existingTags?: string[];
+    knownTags?: string[];
+  };
+
+  /** AI 打标结果 */
+  type SuggestedTags = {
+    tags: string[];
+  };
+
   /** 样例试跑结果 */
   type PreviewResult = {
     before: Record<string, any>[];

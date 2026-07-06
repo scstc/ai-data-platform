@@ -23,6 +23,8 @@ from app.schemas.ai import (
     QaRequest,
     SuggestDatasetNameRequest,
     SuggestedDatasetName,
+    SuggestedTags,
+    SuggestTagsRequest,
 )
 from app.schemas.common import CamelModel
 from app.services.ai import AIProvider, get_ai_provider
@@ -71,6 +73,13 @@ class SuggestDatasetNameResponse(CamelModel):
     success: bool = True
 
 
+class SuggestTagsResponse(CamelModel):
+    """数据集 AI 打标响应。"""
+
+    data: SuggestedTags
+    success: bool = True
+
+
 @router.post("/infer-schema", response_model=InferSchemaResponse)
 async def infer_schema(
     body: InferSchemaRequest,
@@ -115,3 +124,20 @@ async def suggest_dataset_name(
     return SuggestDatasetNameResponse(
         data=SuggestedDatasetName.model_validate(result)
     )
+
+
+@router.post("/suggest-tags", response_model=SuggestTagsResponse)
+async def suggest_tags(
+    body: SuggestTagsRequest,
+    provider: ProviderDep,
+) -> SuggestTagsResponse:
+    """据数据集名称与元数据用 AI 建议标签（LLM 或启发式兜底）。"""
+    result = await provider.suggest_tags(
+        body.name,
+        body.description,
+        body.category,
+        body.data_type,
+        body.existing_tags,
+        body.known_tags,
+    )
+    return SuggestTagsResponse(data=SuggestedTags.model_validate(result))

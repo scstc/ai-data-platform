@@ -436,6 +436,27 @@ class HeuristicProvider(AIProvider):
     ) -> dict[str, str]:
         return suggest_name_from_files(filenames, data_type, category)
 
+    async def suggest_tags(
+        self,
+        name: str,
+        description: str | None,
+        category: str | None,
+        data_type: str | None,
+        existing_tags: list[str],
+        known_tags: list[str],
+    ) -> dict[str, Any]:
+        """无 LLM 时的兜底打标:已有标签库里出现在名称/描述中的 + 分类/类型。"""
+        text = f"{name} {description or ''}"
+        existing = set(existing_tags)
+        picked: list[str] = []
+        for tag in known_tags:
+            if tag and tag not in existing and tag not in picked and tag in text:
+                picked.append(tag)
+        for extra in (category, data_type):
+            if extra and extra not in existing and extra not in picked:
+                picked.append(extra)
+        return {"tags": picked[:5]}
+
     async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
         """无 LLM 时的保守兜底:全部判为正常。
 

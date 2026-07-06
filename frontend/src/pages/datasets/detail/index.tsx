@@ -46,6 +46,7 @@ import {
   previewDatasetVersion,
   publishVersion,
   setVersionVerdict,
+  suggestTags,
   unpublishVersion,
   updateDataset,
   updateDatasetVersion,
@@ -194,6 +195,10 @@ const DatasetDetail: React.FC = () => {
   const [selectedMembers, setSelectedMembers] = useState<
     Record<string, string[]>
   >({}); // { versionId: [tableName1, tableName2] }
+  // 自动打标:AI 建议标签(undefined=弹框关闭)与勾选态
+  const [autoTagLoading, setAutoTagLoading] = useState(false);
+  const [suggestedTags, setSuggestedTags] = useState<string[]>();
+  const [checkedTags, setCheckedTags] = useState<string[]>([]);
 
   // 切换当前查看的版本;文件清单 + 按文件预览由 VersionFilePreview 按 versionId 自管
   const loadPreview = useCallback((versionId: string) => {
@@ -297,6 +302,54 @@ const DatasetDetail: React.FC = () => {
     } catch (e: any) {
       const body = e?.response?.data ?? e?.data;
       message.error(body?.message ?? e?.message ?? '删除失败，请重试');
+    }
+  };
+
+  /** 自动打标:拉已有标签库 + 数据集名称/元数据交给 LLM,弹框勾选后合并保存。 */
+  const handleAutoTag = async () => {
+    if (!detail) return;
+    setAutoTagLoading(true);
+    try {
+      const known = await listTags()
+        .then((r) => (r.data ?? []).map((t) => t.name))
+        .catch(() => [] as string[]);
+      const res = await suggestTags({
+        name: detail.name,
+        description: detail.description ?? undefined,
+        category: detail.categoryName ?? undefined,
+        dataType: detail.semanticType ?? undefined,
+        existingTags: detail.tags ?? [],
+        knownTags: known,
+      });
+      const tags = res.data?.tags ?? [];
+      if (!tags.length) {
+        message.info('未得到新的标签建议');
+        return;
+      }
+      setSuggestedTags(tags);
+      setCheckedTags(tags);
+    } catch {
+      message.error('自动打标失败，请重试');
+    } finally {
+      setAutoTagLoading(false);
+    }
+  };
+
+  const applyAutoTags = async () => {
+    if (!detail || checkedTags.length === 0) {
+      setSuggestedTags(undefined);
+      return;
+    }
+    try {
+      const merged = Array.from(
+        new Set([...(detail.tags ?? []), ...checkedTags]),
+      );
+      const res = await updateDataset(detail.id, { tags: merged });
+      message.success(`已添加 ${checkedTags.length} 个标签`);
+      setDetail(res.data);
+      setSuggestedTags(undefined);
+    } catch {
+      message.error('保存标签失败，请重试');
     }
   };
 
@@ -680,14 +733,32 @@ const DatasetDetail: React.FC = () => {
                 {
                   title: '标签',
                   dataIndex: 'tags',
-                  render: (_, r) =>
-                    r.tags?.length
-                      ? r.tags.map((t) => (
-                          <Tag key={t} color={tagColor(t)}>
-                            {t}
-                          </Tag>
-                        ))
-                      : '-',
+                  render: (_, r) => (
+                    <Space size={4} wrap>
+                      {r.tags?.length
+                        ? r.tags.map((t) => (
+                            <Tag
+                              key={t}
+                              color={tagColor(t)}
+                              style={{ marginInlineEnd: 0 }}
+                            >
+                              {t}
+                            </Tag>
+                          ))
+                        : '-'}
+                      {access.canAdmin && (
+                        <Button
+                          size="small"
+                          type="link"
+                          style={{ padding: 0, height: 'auto' }}
+                          loading={autoTagLoading}
+                          onClick={handleAutoTag}
+                        >
+                          自动打标
+                        </Button>
+                      )}
+                    </Space>
+                  ),
                 },
                 {
                   title: '描述',
@@ -910,6 +981,29 @@ const DatasetDetail: React.FC = () => {
           placeholder="理由（可选，建议填写以便审计追溯）"
           value={verdictNote}
           onChange={(e) => setVerdictNote(e.target.value)}
+        />
+      </Modal>
+
+      {/* 自动打标:展示 AI 建议标签,勾选确认后合并进数据集标签 */}
+      <Modal
+        title="自动打标 · AI 建议标签"
+        open={!!suggestedTags}
+        onOk={applyAutoTags}
+        onCancel={() => setSuggestedTags(undefined)}
+        okText={`添加（${checkedTags.length}）`}
+        okButtonProps={{ disabled: checkedTags.length === 0 }}
+      >
+        <Typography.Paragraph type="secondary">
+          基于数据集名称与元数据（描述 / 分类 / 数据类型）由 LLM
+          生成，勾选要添加的标签：
+        </Typography.Paragraph>
+        <Tag.CheckableTagGroup
+          multiple
+          options={suggestedTags ?? []}
+          value={checkedTags}
+          onChange={(v) =>
+            setCheckedTags(Array.isArray(v) ? (v as string[]) : [])
+          }
         />
       </Modal>
 

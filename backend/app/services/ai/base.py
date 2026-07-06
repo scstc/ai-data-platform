@@ -43,6 +43,22 @@ class AIProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def suggest_tags(
+        self,
+        name: str,
+        description: str | None,
+        category: str | None,
+        data_type: str | None,
+        existing_tags: list[str],
+        known_tags: list[str],
+    ) -> dict[str, Any]:
+        """据数据集名称与元数据建议若干标签，返回 {"tags": [str]}。
+
+        known_tags 为平台已有标签库（优先复用）；结果不含 existing_tags 中已有的。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def moderate_texts(self, texts: list[str]) -> list[dict[str, Any]]:
         """内容安全审核(#4):对一批文本逐条分类。
 
