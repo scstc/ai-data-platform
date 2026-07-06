@@ -1,8 +1,10 @@
-// 数据血缘:数据集版本管理(左)+ 血缘关系图(右,版本↔任务 DAG)。
+// 数据血缘:数据集版本管理(左)+ 血缘关系图(右,数据源→湖快照→版本↔任务全链路 DAG)。
 // 血缘端点 GET /api/v1/datasets/{id}/lineage 返回 nodes+edges;用 ReactFlow(@xyflow/react)
-// 渲染 + dagre 算上→下树形布局(rankdir=TB),节点复用 antd 版本/任务卡片,自带平移/缩放/自适应。
+// 渲染 + dagre 算上→下树形布局(rankdir=TB),节点复用 antd 卡片,自带平移/缩放/自适应。
+// 节点四层:datasource(数据源)→ lake_snapshot(湖快照)→ version(数据集版本)↔ job(任务);
+// 支持 ?datasetId= 直达(数据集详情/数据湖详情"查看血缘"入口跳转)。
 import { PageContainer } from '@ant-design/pro-components';
-import { history } from '@umijs/max';
+import { history, useSearchParams } from '@umijs/max';
 import {
   Background,
   Controls,
@@ -56,10 +58,29 @@ const STATE_TEXT: Record<string, { t: string; c: string }> = {
   cancelled: { t: '已取消', c: 'warning' },
 };
 
+// 分层配色:节点卡左侧色带 + 图例共用,标识节点属于链路的哪一层。
+const KIND_META: Record<string, { label: string; color: string }> = {
+  datasource: { label: '数据源', color: '#1677ff' },
+  lake_snapshot: { label: '湖快照', color: '#13c2c2' },
+  version: { label: '数据集版本', color: '#52c41a' },
+  job: { label: '加工任务', color: '#fa8c16' },
+};
+
+// 湖/源层边的中文标签(input/output 版本↔任务边保持无标签,与旧版一致)
+const EDGE_LABEL: Record<string, string> = {
+  extract: '抽取',
+  ingest: '采集',
+  merge: '合并',
+  hosted_source: '直连',
+};
+
 // dagre 布局用的节点尺寸。每次须返回**新对象**——dagre layout 会往传入的 label 对象上
 // 写 x/y,若共享单例,同类型节点会共用同一个位置对象 → 全部叠到同一坐标。
-const sizeOf = (n: DataPlatform.LineageNode) =>
-  n.kind === 'job' ? { width: 250, height: 178 } : { width: 250, height: 132 };
+const sizeOf = (n: DataPlatform.LineageNode) => {
+  if (n.kind === 'job') return { width: 250, height: 178 };
+  if (n.kind === 'datasource') return { width: 250, height: 96 };
+  return { width: 250, height: 132 };
+};
 
 const scanTag = (v?: string) =>
   v === 'passed'
@@ -108,6 +129,84 @@ const OperatorChips: React.FC<{
   );
 };
 
+/** 数据源节点卡(链路最上游:外部数据源连接) */
+const DatasourceNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
+  <div
+    style={{
+      height: '100%',
+      padding: 10,
+      borderRadius: 8,
+      background: 'var(--ant-color-bg-container)',
+      border: '1px solid var(--ant-color-border)',
+      borderLeft: `3px solid ${KIND_META.datasource.color}`,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      justifyContent: 'center',
+      overflow: 'hidden',
+    }}
+  >
+    <Tag color="blue" style={{ margin: 0, width: 'fit-content' }}>
+      数据源
+    </Tag>
+    <Tooltip title={n.name}>
+      <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
+        {n.name}
+      </Typography.Text>
+    </Tooltip>
+    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      {n.sourceType ?? '-'}
+      {n.dbKind ? ` · ${n.dbKind}` : ''}
+    </Typography.Text>
+  </div>
+);
+
+/** 湖快照节点卡(湖对象@第 n 版 + 溯源摘要);点击跳数据湖详情 */
+const SnapshotNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
+  <div
+    onClick={() => n.lakeId && history.push(`/data-lakes/${n.lakeId}`)}
+    style={{
+      height: '100%',
+      padding: 10,
+      borderRadius: 8,
+      cursor: n.lakeId ? 'pointer' : 'default',
+      background: 'var(--ant-color-bg-container)',
+      border: '1px solid var(--ant-color-border)',
+      borderLeft: `3px solid ${KIND_META.lake_snapshot.color}`,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      overflow: 'hidden',
+    }}
+  >
+    <Tooltip title={`${n.name ?? ''}(湖 ${n.lakeName ?? n.lakeId ?? '-'})`}>
+      <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
+        {n.name}
+        {n.versionNo != null ? ` @v${n.versionNo}` : ''}
+      </Typography.Text>
+    </Tooltip>
+    <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+      湖 {n.lakeName ?? n.lakeId ?? '-'}
+      {n.rows != null ? ` · ${n.rows} 行` : ''}
+    </Typography.Text>
+    {n.sourceSummary && (
+      <Typography.Text type="secondary" ellipsis style={{ fontSize: 11 }}>
+        {n.sourceSummary}
+      </Typography.Text>
+    )}
+    <Space size={4} wrap>
+      <Tag color="cyan" style={{ margin: 0, fontSize: 11 }}>
+        {n.uploadChannel ?? n.dataCategory ?? '快照'}
+      </Tag>
+      {n.ingestTaskName && (
+        <Tooltip title={`采集任务:${n.ingestTaskName}`}>
+          <Tag style={{ margin: 0, fontSize: 11 }}>{n.ingestTaskName}</Tag>
+        </Tooltip>
+      )}
+    </Space>
+  </div>
+);
+
 /** 任务节点卡(虚线框,与版本卡区分) */
 const JobNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
   const st = STATE_TEXT[n.state ?? ''] ?? { t: n.state ?? '-', c: 'default' };
@@ -119,6 +218,7 @@ const JobNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
         borderRadius: 8,
         background: 'var(--ant-color-fill-quaternary)',
         border: '1px dashed var(--ant-color-border)',
+        borderLeft: `3px solid ${KIND_META.job.color}`,
         display: 'flex',
         flexDirection: 'column',
         gap: 4,
@@ -158,6 +258,9 @@ const VersionNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
         background: 'var(--ant-color-bg-container)',
         border: `1.5px solid ${
           n.isFocus ? 'var(--ant-color-primary)' : 'var(--ant-color-border)'
+        }`,
+        borderLeft: `3px solid ${
+          n.isFocus ? 'var(--ant-color-primary)' : KIND_META.version.color
         }`,
         boxShadow: n.isFocus ? '0 0 0 3px var(--ant-color-primary-bg)' : 'none',
         display: 'flex',
@@ -209,13 +312,32 @@ const RFJobNode = ({ data }: NodeProps) => (
     <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
   </>
 );
+const RFSnapshotNode = ({ data }: NodeProps) => (
+  <>
+    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+    <SnapshotNode n={data as DataPlatform.LineageNode} />
+    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+  </>
+);
+const RFDatasourceNode = ({ data }: NodeProps) => (
+  <>
+    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+    <DatasourceNode n={data as DataPlatform.LineageNode} />
+    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+  </>
+);
 
 /** 血缘图:ReactFlow + dagre(上→下树形布局 rankdir=TB),节点为 antd 卡片,自带平移/缩放/自适应 */
 const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
   graph,
 }) => {
   const nodeTypes = useMemo(
-    () => ({ version: RFVersionNode, job: RFJobNode }),
+    () => ({
+      version: RFVersionNode,
+      job: RFJobNode,
+      lake_snapshot: RFSnapshotNode,
+      datasource: RFDatasourceNode,
+    }),
     [],
   );
   if (!graph || graph.nodes.length === 0) {
@@ -253,6 +375,9 @@ const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
     source: e.from,
     target: e.to,
     type: 'smoothstep',
+    // 湖/源层边带中文标签 + 虚线,与版本↔任务实线边区分
+    label: EDGE_LABEL[e.kind],
+    style: EDGE_LABEL[e.kind] ? { strokeDasharray: '6 3' } : undefined,
     // ReactFlow 边默认无箭头,显式加箭头标记
     markerEnd: { type: MarkerType.ArrowClosed },
   }));
@@ -278,12 +403,17 @@ const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
 };
 
 const Lineage: React.FC = () => {
-  const [datasetId, setDatasetId] = useState<string>();
+  // 支持 ?datasetId= 直达(数据集详情/数据湖详情"查看血缘"入口带参跳转)
+  const [searchParams] = useSearchParams();
+  const [datasetId, setDatasetId] = useState<string | undefined>(
+    () => searchParams.get('datasetId') ?? undefined,
+  );
   const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
   const [graph, setGraph] = useState<DataPlatform.LineageGraph>();
   const [loading, setLoading] = useState(false);
 
-  // 首次进入自动选第一个数据集(轻量拉一页 1 条,避免旧版一次拉 200 条)
+  // 首次进入自动选第一个数据集(轻量拉一页 1 条,避免旧版一次拉 200 条);
+  // URL 已带 datasetId 时 cur 非空,不会被覆盖。
   useEffect(() => {
     listDatasets({ current: 1, pageSize: 1 })
       .then((res) => {
@@ -415,7 +545,27 @@ const Lineage: React.FC = () => {
         <Col xs={24} md={18}>
           <Card
             size="small"
-            title="血缘关系图（上 → 下：上游版本 → 任务 → 产出版本）"
+            title="血缘关系图（上 → 下：数据源 → 湖快照 → 版本 → 任务 → 产出版本）"
+            extra={
+              <Space size={8} wrap>
+                {Object.entries(KIND_META).map(([k, m]) => (
+                  <Space key={k} size={4} align="center">
+                    <span
+                      style={{
+                        display: 'inline-block',
+                        width: 10,
+                        height: 10,
+                        borderRadius: 2,
+                        background: m.color,
+                      }}
+                    />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {m.label}
+                    </Typography.Text>
+                  </Space>
+                ))}
+              </Space>
+            }
             styles={{ body: { maxHeight: '70vh', overflow: 'auto' } }}
           >
             <Spin spinning={loading}>

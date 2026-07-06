@@ -163,6 +163,8 @@ class DatasetMemberRead(CamelModel):
     size: int | None = None
     # 行数:结构化表成员/单文件版本有值;originals 原件与 manifest 媒体对象为 None
     rows: int | None = None
+    # 湖→集血缘:该成员抽取自哪个湖快照(data_lake_snapshots.id);非湖来源为空
+    source_snapshot_id: str | None = None
 
 
 class DatasetDetailRead(DatasetRead):

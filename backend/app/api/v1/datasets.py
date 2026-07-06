@@ -27,11 +27,13 @@ from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.ids import uuid7_hex
+from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
+from app.models.ingest_task import IngestTask
 from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.review_rule import ReviewRule
@@ -817,6 +819,28 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             for o in (spec.get("operators") or [])
             if isinstance(o, dict)
         ]
+        # 成员级任务(member_configs):算子链嵌在各成员配置里,spec.operators 为空
+        # → 聚合各成员 operators(按算子名去重)展示,否则血缘图算子栏恒空。
+        if not ops and isinstance(spec.get("member_configs"), list):
+            seen_op: set[str] = set()
+            for mc in spec["member_configs"]:
+                if not isinstance(mc, dict):
+                    continue
+                for o in mc.get("operators") or []:
+                    if isinstance(o, dict) and o.get("name") not in seen_op:
+                        seen_op.add(o.get("name"))
+                        ops.append(
+                            {"name": o.get("name"), "params": o.get("params") or {}}
+                        )
+        # synthesis merge / construct 等:核心配置在 spec.goal → 伪算子("任务配置")。
+        if not ops and isinstance(spec.get("goal"), dict):
+            parts = {
+                k: v
+                for k, v in spec["goal"].items()
+                if isinstance(v, (str, int, float, bool))
+            }
+            if parts:
+                ops = [{"name": "任务配置", "params": parts}]
         # review 等非算子任务:无 operators 但有 config → 把 config 原语字段作为
         # 伪算子("审核配置")吐出,让版本卡能看到 LLM/PII/抽样等设置。
         # 旧任务(spec 为空,早于 spec 存储特性)仍为空。
@@ -910,6 +934,149 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
                 add_edge(jid2, ov.id, "output")
                 if ov.id not in seen_v:
                     dq.append((ov.id, depth + 1))
+
+    # ---- 湖/源层回溯(治理整改):在版本↔任务图之上补齐上游两层 ----
+    # ① 根版本(produced_by_job_id 为空)经成员 source_snapshot_id 回溯湖快照
+    #    (extract 边);快照再经 merge_inputs(merge 边)与 datasource_id(ingest 边)
+    #    上溯。只对根版本回溯:加工产出版本的成员会结转 source_snapshot_id,
+    #    若也画边则每个下游版本都连快照,失真且成网。
+    # ② 采集任务节点(jobType=ingest)经 ingest_task 回指数据源(ingest 边),
+    #    覆盖绕湖直落的存量采集链路。
+    # ③ 兜底:根版本无湖快照但有 source_datasource_id(hosted/api 推送)→
+    #    数据源直连(hosted_source 边)。
+    MAX_LAKE_DEPTH = 4  # merge 链递归上限(merge_inputs 引用其它快照)
+    # 快照 → 已展开时的最小 ldepth。不能只记"访问过":同一快照被多个根版本经
+    # 不同长度的 merge 链摸到时,首次访问的深度会锁死其上溯预算,后来预算更
+    # 充裕(ldepth 更小)的路径会被去重短路,深链上游节点按遍历顺序非确定性丢失。
+    snap_depth: dict[str, int] = {}
+    lake_cache: dict[str, str] = {}
+    task_cache: dict[str, str | None] = {}
+
+    async def lake_name(lid: str) -> str:
+        if lid not in lake_cache:
+            lake = await session.get(DataLake, lid)
+            lake_cache[lid] = lake.name if lake else lid
+        return lake_cache[lid]
+
+    async def ingest_task_name(tid: str | None) -> str | None:
+        if not tid:
+            return None
+        if tid not in task_cache:
+            t = await session.get(IngestTask, tid)
+            task_cache[tid] = t.name if t else None
+        return task_cache[tid]
+
+    def source_summary(sm: dict | None) -> str | None:
+        """source_metadata 差异化溯源摘要:表名/对象键/HDFS 路径/原始文件名。"""
+        if not isinstance(sm, dict):
+            return None
+        if sm.get("db_table"):
+            return f"表 {sm['db_table']}"
+        if sm.get("obj_key"):
+            return f"对象 {sm['obj_key']}"
+        if sm.get("hdfs_path"):
+            return f"HDFS {sm['hdfs_path']}"
+        if sm.get("original_filename"):
+            return f"文件 {sm['original_filename']}"
+        return None
+
+    async def add_datasource_node(ds_id: str) -> bool:
+        if ds_id in nodes:
+            return True
+        ds = await session.get(DataSource, ds_id)
+        if ds is None:
+            return False
+        nodes[ds_id] = {
+            "id": ds_id,
+            "kind": "datasource",
+            "name": ds.name,
+            "sourceType": ds.type,
+            "dbKind": ds.db_kind,
+        }
+        return True
+
+    async def expand_snapshot(sid: str, ldepth: int) -> bool:
+        """确保湖快照节点入图(含其 merge/数据源上游);返回快照是否存在。
+
+        以更小 ldepth(更充裕预算)重入时重新展开 merge 上游,只补漏不重复
+        (节点/边分别经 nodes 覆盖与 seen_edge 去重);环经 snap_depth 单调
+        递减约束收敛(重入必须 ldepth 严格更小,环上至多重入 MAX_LAKE_DEPTH 次)。
+        """
+        prev = snap_depth.get(sid)
+        if prev is not None and prev <= ldepth:
+            return sid in nodes
+        snap_depth[sid] = ldepth
+        snap = await session.get(DataLakeSnapshot, sid)
+        if snap is None:
+            return False
+        obj = (
+            await session.get(DataLakeObject, snap.object_id)
+            if snap.object_id
+            else None
+        )
+        nodes[sid] = {
+            "id": sid,
+            "kind": "lake_snapshot",
+            "name": obj.display_name if obj else snap.source_version,
+            "lakeId": snap.lake_id,
+            "lakeName": await lake_name(snap.lake_id),
+            "objectId": snap.object_id,
+            "versionNo": snap.version_no,
+            "sourceVersion": snap.source_version,
+            "dataCategory": snap.data_category,
+            "storageFormat": snap.storage_format,
+            "uploadChannel": snap.upload_channel,
+            "rows": snap.rows,
+            "sourceSummary": source_summary(snap.source_metadata),
+            "ingestTaskName": await ingest_task_name(snap.ingest_task_id),
+            "createdAt": snap.created_at.isoformat(),
+        }
+        if ldepth < MAX_LAKE_DEPTH:
+            for mi in snap.merge_inputs or []:
+                msid = mi.get("snapshot_id") if isinstance(mi, dict) else None
+                if msid and await expand_snapshot(msid, ldepth + 1):
+                    add_edge(msid, sid, "merge")
+        if snap.datasource_id and await add_datasource_node(snap.datasource_id):
+            add_edge(snap.datasource_id, sid, "ingest")
+        return True
+
+    root_vids = [
+        n["id"] for n in nodes.values() if n["kind"] == "version" and n["isOriginal"]
+    ]
+    for vid in root_vids:
+        sids = (
+            await session.scalars(
+                select(DatasetVersionTable.source_snapshot_id)
+                .where(
+                    DatasetVersionTable.dataset_version_id == vid,
+                    DatasetVersionTable.source_snapshot_id.is_not(None),
+                )
+                .distinct()
+            )
+        ).all()
+        linked = False
+        for sid in sids:
+            if await expand_snapshot(sid, 0):
+                add_edge(sid, vid, "extract")
+                linked = True
+        if not linked:
+            version = await session.get(DatasetVersion, vid)
+            ds_id = version.source_datasource_id if version else None
+            if ds_id and await add_datasource_node(ds_id):
+                add_edge(ds_id, vid, "hosted_source")
+
+    for jn in [n for n in nodes.values() if n["kind"] == "job"]:
+        if jn.get("jobType") != "ingest":
+            continue
+        job = await session.get(Job, jn["id"])
+        if job is None or not job.ingest_task_id:
+            continue
+        task = await session.get(IngestTask, job.ingest_task_id)
+        if task and task.datasource_id and await add_datasource_node(
+            task.datasource_id
+        ):
+            add_edge(task.datasource_id, jn["id"], "ingest")
+
     return JSONResponse(
         content={"data": {"nodes": list(nodes.values()), "edges": edges}, "success": True}
     )
@@ -947,6 +1114,7 @@ async def _members_of(
                     format=tm.format,
                     size=tm.size,
                     rows=tm.rows,
+                    source_snapshot_id=tm.source_snapshot_id,
                 )
             )
         return out

@@ -956,11 +956,11 @@ declare namespace DataPlatform {
     level: AclLevel;
   };
 
-  /** 血缘图节点:版本 或 任务 */
+  /** 血缘图节点:数据源 / 湖快照 / 版本 / 任务(全链路:源→湖→集→任务) */
   type LineageNode = {
     id: string;
-    kind: 'version' | 'job';
-    createdAt: string;
+    kind: 'version' | 'job' | 'lake_snapshot' | 'datasource';
+    createdAt?: string;
     // version 字段
     datasetId?: string;
     datasetName?: string;
@@ -974,16 +974,36 @@ declare namespace DataPlatform {
     isOriginal?: boolean;
     /** 属于当前选中数据集(前端高亮) */
     isFocus?: boolean;
-    // job 字段
+    // job / datasource / lake_snapshot 共用
     name?: string;
+    // job 字段
     jobType?: string;
     state?: string;
     /** 该任务执行的算子链(name+params,来自 job.spec.operators);review 类无 */
     operators?: { name: string; params: Record<string, any> }[];
+    // lake_snapshot 字段(湖对象某一版快照)
+    lakeId?: string;
+    lakeName?: string;
+    objectId?: string;
+    sourceVersion?: string;
+    dataCategory?: string;
+    storageFormat?: string;
+    uploadChannel?: string;
+    /** 溯源摘要:表 xx / 对象 xx / HDFS xx / 文件 xx */
+    sourceSummary?: string;
+    ingestTaskName?: string;
+    // datasource 字段
+    sourceType?: string;
+    dbKind?: string;
   };
 
-  /** 血缘边:输入版本 --input--> 任务 --output--> 产出版本 */
-  type LineageEdge = { from: string; to: string; kind: 'input' | 'output' };
+  /** 血缘边:input/output=版本↔任务;extract=湖快照→版本;ingest=数据源→快照/采集任务;
+   * merge=湖内合并源→合并快照;hosted_source=数据源→版本(绕湖直连兜底) */
+  type LineageEdge = {
+    from: string;
+    to: string;
+    kind: 'input' | 'output' | 'extract' | 'ingest' | 'merge' | 'hosted_source';
+  };
 
   type LineageGraph = { nodes: LineageNode[]; edges: LineageEdge[] };
 
@@ -1043,6 +1063,8 @@ declare namespace DataPlatform {
     size?: number;
     /** 行数:结构化表成员/单文件版本有值;originals 原件与 manifest 媒体对象为空 */
     rows?: number;
+    /** 湖→集血缘:该成员抽取自哪个湖快照;非湖来源为空 */
+    sourceSnapshotId?: string;
   };
 
   /** 数据集元数据更新入参 */

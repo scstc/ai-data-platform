@@ -215,6 +215,8 @@ async def land_push_records(
         size=out_path.stat().st_size,
         origin="managed",
         semantic_type=effective_semantic,
+        # 血缘:推送版本回指来源 api 数据源(整改前恒为 None,数据集层面来源断链)
+        source_datasource_id=datasource.id,
         produced_by_job_id=None,
         note=f"api 推送 #{version_no}",
     )

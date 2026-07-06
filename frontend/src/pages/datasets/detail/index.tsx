@@ -657,6 +657,14 @@ const DatasetDetail: React.FC = () => {
       extra={
         detail
           ? [
+              <Button
+                key="lineage"
+                onClick={() =>
+                  history.push(`/ops/lineage?datasetId=${detail.id}`)
+                }
+              >
+                查看血缘
+              </Button>,
               detail.myLevel === 'admin' ? (
                 <Button key="acl" onClick={() => setAclOpen(true)}>
                   权限管理
