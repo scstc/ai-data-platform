@@ -52,20 +52,31 @@ _semaphore = asyncio.Semaphore(settings.engine_concurrency)
 _running_procs: dict[str, asyncio.subprocess.Process] = {}
 
 
-def _subprocess_env() -> dict[str, str] | None:
+def _subprocess_env() -> dict[str, str]:
     """dj-process 子进程环境。
 
-    平台配了 LLM 时,把 OPENAI_* 注入子进程环境——needs_api 算子经 DJ 的 openai
-    客户端从环境变量读取凭证(pydantic 只把 .env 读进 settings,不写 os.environ,
-    故不显式注入子进程就拿不到)。未配 LLM 则返回 None,子进程直接继承当前环境。
+    - 平台配了 LLM 时注入 OPENAI_*——needs_api 算子经 DJ 的 openai 客户端从
+      环境变量读取凭证(pydantic 只把 .env 读进 settings,不写 os.environ,
+      故不显式注入子进程就拿不到)。
+    - 自定义算子目录挂进 PYTHONPATH——HF datasets 多进程 map 的 worker 反序列化
+      算子实例时按模块名 re-import;DJ 的 load_custom_operators 只把动态模块注册进
+      主进程 sys.modules,spawn 平台(Windows/macOS)的 worker 找不到模块即猝死
+      (ModuleNotFoundError → "One of the subprocesses has abruptly died")。
+      spawn worker 继承 PYTHONPATH,目录在搜索路径上即可正常 import;
+      Linux fork 继承已加载模块,本就不受影响。
     """
-    cfg = get_active_llm_config()
-    if not cfg.api_key:
-        return None
     env = dict(os.environ)
-    env["OPENAI_API_KEY"] = cfg.api_key
-    if cfg.base_url:
-        env["OPENAI_BASE_URL"] = cfg.base_url
+    custom_dir = Path(settings.upload_dir) / "custom_operators"
+    if custom_dir.is_dir():
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{custom_dir}{os.pathsep}{existing}" if existing else str(custom_dir)
+        )
+    cfg = get_active_llm_config()
+    if cfg.api_key:
+        env["OPENAI_API_KEY"] = cfg.api_key
+        if cfg.base_url:
+            env["OPENAI_BASE_URL"] = cfg.base_url
     return env
 
 
@@ -345,7 +356,8 @@ def detect_text_key(records: list[dict[str, Any]]) -> str | None:
     """从前若干条记录推断主文本字段名,供 build_config 设 text_key。
 
     data-juicer 默认 text_key='text';数据无 text 时(如新闻用 title)必须显式指定,
-    否则 load_dataset 报 'no key [text]'。优先级:已知文本字段名 > 平均值最长的字符串字段。
+    否则 load_dataset 报 'no key [text]'。优先级:已知文本字段名 > 平均最长的
+    字符串字段。
     仅看值为 str 的字段;无字符串字段返回 None(交给 DJ 默认/由其报错)。
     """
     if not records:
@@ -713,7 +725,8 @@ async def run_process_job(
     media_keys(G7):{image_key/audio_key/video_key:字段名},仅 manifest 输入注入。
     target_members:要处理的成员名列表;None=处理所有成员(向后兼容,需配合 operators)。
     member_configs:新版成员独立配置,格式 [{member_name, operators, text_keys?}, ...]。
-                   优先于 operators+target_members 模式;指定时 operators/text_keys 参数被忽略。
+                   优先于 operators+target_members 模式;指定时 operators/
+                   text_keys 参数被忽略。
     无成员表记录的版本(construct/push 等路径产出)合成单一伪成员 'data' 走同一
     流程,产出版本自此拥有真实成员行。
     并发信号量由调用方(job_runner)持有,此处不获取(asyncio.Semaphore 非重入)。
