@@ -220,6 +220,12 @@ export default [
         component: './quality/editor',
         hideInMenu: true,
       },
+      {
+        path: '/assessment/quality/report',
+        name: 'quality-report',
+        component: './quality/report',
+        hideInMenu: true,
+      },
     ],
   },
   // ④ 数据治理(动数据侧:治理工场 / 内容安全 / 清洗 / 蒸馏 / 合成 / 增强 / 标注)
@@ -240,6 +246,12 @@ export default [
         path: '/governance/content-safety',
         name: 'contentSafety',
         component: './content-safety',
+      },
+      {
+        path: '/governance/content-safety/report',
+        name: 'contentSafety-report',
+        component: './content-safety/report',
+        hideInMenu: true,
       },
       {
         path: '/governance/cleaning',

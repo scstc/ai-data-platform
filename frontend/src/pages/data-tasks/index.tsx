@@ -70,14 +70,20 @@ const STATE_VALUE_ENUM: Record<string, { text: string }> = {
   cancelled: { text: '已取消' },
 };
 
-/** 成功任务的「查看报告」跳转——回各类型页(那里有各自的报告/统计视图)。 */
+/** 成功任务的「查看报告」跳转——回各类型页(那里有各自的报告/统计视图)。
+ *  quality/review 有独立报告页,点击处带 ?jobId= 直达该任务报告。
+ *  augmentation 无此入口:/governance/augment 是治理工场薄入口(渲染 Workbench,
+ *  不认 jobId),报告实际在 /governance/augment/jobs 里按行展开,此处不接;
+ *  故不在此表中,「查看报告」按钮相应不出现。 */
 const REPORT_PAGE: Record<string, string> = {
   distillation: '/governance/distillation',
   synthesis: '/governance/make',
-  augmentation: '/governance/augment',
-  quality: '/assessment/quality',
-  review: '/governance/content-safety',
+  quality: '/assessment/quality/report',
+  review: '/governance/content-safety/report',
 };
+
+/** 报告页支持 ?jobId= 定位的任务类型。 */
+const REPORT_WITH_JOB_ID = new Set(['quality', 'review']);
 
 /** 支持重跑的类型(quality/review 无重跑端点,不在此列)。 */
 const RERUN_SUPPORTED = new Set([
@@ -440,10 +446,19 @@ const DataTasks: React.FC = () => {
             </Popconfirm>,
           );
         }
-        // 终态:查看报告(回类型页) / 重新运行 / 删除
+        // 终态:查看报告(quality/review 直达该任务的报告页,其余回类型页) / 重新运行 / 删除
         if (r.state === 'success' && REPORT_PAGE[r.type]) {
           actions.push(
-            <a key="report" onClick={() => history.push(REPORT_PAGE[r.type])}>
+            <a
+              key="report"
+              onClick={() =>
+                history.push(
+                  REPORT_WITH_JOB_ID.has(r.type)
+                    ? `${REPORT_PAGE[r.type]}?jobId=${r.id}`
+                    : REPORT_PAGE[r.type],
+                )
+              }
+            >
               查看报告
             </a>,
           );

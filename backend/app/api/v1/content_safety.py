@@ -119,7 +119,7 @@ async def list_review_jobs(
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出 type=review 任务,按创建时间倒序(带输入版本概要);
+    """分页列出 type=review 任务,按创建时间倒序(带输入/产物版本概要);
     可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
     count_stmt = select(func.count()).select_from(Job).where(Job.type == "review")
     list_stmt = select(Job).where(Job.type == "review")
@@ -138,6 +138,7 @@ async def list_review_jobs(
     for r in rows:
         read = JobRead.model_validate(r)
         read.input = await _build_input(session, r.id)
+        read.output = await _build_output(session, r.id)
         data.append(read)
     return PageResponse[JobRead](data=data, total=total)
 

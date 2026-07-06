@@ -72,7 +72,8 @@ async def create_quality_job(
     """新建质量评估任务并后台异步执行:对版本逐条算 filter stats,不产新版本。
 
     异步(同治理类任务):立即返回 pending,不阻塞请求;进度经轮询 GET 反映,
-    可经 /jobs/{id}/stop|pause|resume 统一管控。stats 跑完回写输入版本/成员 stats_uri。
+    可经 /jobs/{id}/stop|pause|resume 统一管控。stats 跑完回写输入版本/成员
+    stats_uri,报告按输入版本查看。
 
     member_configs(成员级,多文件版本优先)与 operators(旧版统一配置,向后兼容)
     二选一,不可同时指定。
@@ -281,8 +282,9 @@ async def _get_version_with_stats(
 def _analysis_dir(stats_uri: str | None) -> Path | None:
     """从 stats_uri 推导 dj-analyze 产出的 analysis 目录,并校验落在受管数据目录内。
 
-    成员级 stats_uri 形如 <ds>/v<n>/<job_id>-<table>/<table>_stats.jsonl;旧版单文件
-    形如 <ds>/quality/<job_id>/data_stats.jsonl。两者 analysis 均为其同级 analysis/
+    成员级 stats_uri 形如 <ds>/quality/<job_id>/<job_id>-<table>/<table>_stats.jsonl
+    (历史任务曾落 <ds>/v<n>/<job_id>-<table>/ 下,同样兼容);旧版单文件形如
+    <ds>/quality/<job_id>/data_stats.jsonl。各情形 analysis 均为其同级 analysis/
     (dj-analyze 写 overall.csv + PNG 到此,见 services/quality.py 的 work_dir 约定)。
     """
     stats_path = _safe_path(stats_uri)

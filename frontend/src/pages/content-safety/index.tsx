@@ -1,6 +1,6 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
-import { useAccess, useLocation } from '@umijs/max';
+import { history, useAccess, useLocation } from '@umijs/max';
 import {
   Alert,
   Button,
@@ -8,7 +8,6 @@ import {
   Checkbox,
   Col,
   Divider,
-  Empty,
   Input,
   InputNumber,
   Modal,
@@ -18,10 +17,8 @@ import {
   Row,
   Select,
   Space,
-  Statistic,
   Switch,
   Table,
-  Tag,
   Typography,
 } from 'antd';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -32,99 +29,27 @@ import {
   createReviewRule,
   deleteReviewRule,
   getDataset,
-  getJob,
-  getReviewReport,
   listDatasets,
-  listReviewFindings,
   listReviewJobs,
   listReviewRules,
   updateReviewRule,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+import { jobVersionColumns, renderState } from '@/utils/jobState';
 import { suggestTaskName } from '@/utils/taskName';
+import {
+  CATEGORY_META,
+  CATEGORY_OPTIONS,
+  renderCategory,
+  renderSeverity,
+  SEVERITY_META,
+} from './shared';
 
 const { Text, Title, Paragraph } = Typography;
 
 // 「全部」扫描:传一个远超任何数据集行数的上限,后端 min(total, limit)=total 即全量
 // (与 delete 模式强制 sampleLimit=行数 的全量口径一致)
 const SCAN_ALL_LIMIT = 1_000_000_000;
-
-const STATE_META: Record<
-  DataPlatform.Job['state'],
-  { text: string; color: string }
-> = {
-  pending: { text: '待运行', color: 'default' },
-  running: { text: '运行中', color: 'processing' },
-  paused: { text: '已暂停', color: 'gold' },
-  success: { text: '成功', color: 'success' },
-  failed: { text: '失败', color: 'error' },
-  cancelled: { text: '已取消', color: 'warning' },
-};
-
-const CATEGORY_META: Record<
-  DataPlatform.ReviewCategory,
-  { text: string; color: string }
-> = {
-  porn: { text: '色情', color: 'magenta' },
-  gambling: { text: '赌博', color: 'gold' },
-  drugs: { text: '毒品', color: 'volcano' },
-  politics: { text: '涉政', color: 'red' },
-  terrorism: { text: '涉恐', color: 'red' },
-  pii: { text: '隐私', color: 'blue' },
-  other: { text: '其他', color: 'default' },
-};
-
-const SEVERITY_META: Record<
-  DataPlatform.ReviewSeverity,
-  { text: string; color: string }
-> = {
-  high: { text: '高', color: 'error' },
-  medium: { text: '中', color: 'warning' },
-  low: { text: '低', color: 'default' },
-};
-
-const SOURCE_META: Record<DataPlatform.ReviewSource, string> = {
-  keyword: '自定义敏感词',
-  regex: '自定义正则',
-  flagged_words: '内置敏感词',
-  llm: 'LLM 审核',
-  pii: 'PII 识别',
-};
-
-// 类别多选项(黄赌毒政恐 + 隐私/其他)
-const CATEGORY_OPTIONS = (
-  Object.keys(CATEGORY_META) as DataPlatform.ReviewCategory[]
-).map((c) => ({ label: CATEGORY_META[c].text, value: c }));
-
-const renderCategory = (c: DataPlatform.ReviewCategory) => {
-  const m = CATEGORY_META[c] ?? CATEGORY_META.other;
-  return <Tag color={m.color}>{m.text}</Tag>;
-};
-
-const renderSeverity = (s: DataPlatform.ReviewSeverity) => {
-  const m = SEVERITY_META[s] ?? SEVERITY_META.low;
-  return <Tag color={m.color}>{m.text}</Tag>;
-};
-
-const renderSource = (s: DataPlatform.ReviewSource) => SOURCE_META[s] ?? s;
-
-/** 计数 map → Tag 列表(空则占位) */
-const CountTags: React.FC<{
-  counts: Record<string, number>;
-  label: (k: string) => React.ReactNode;
-}> = ({ counts, label }) => {
-  const entries = Object.entries(counts ?? {}).filter(([, v]) => v > 0);
-  if (!entries.length) return <Text type="secondary">无</Text>;
-  return (
-    <Space size={[4, 8]} wrap>
-      {entries.map(([k, v]) => (
-        <Tag key={k}>
-          {label(k)} {v}
-        </Tag>
-      ))}
-    </Space>
-  );
-};
 
 /** 规则库管理弹窗:自定义敏感词/正则的 CRUD + 启用开关。
  * 改动通过 onChanged 通知外层刷新可选规则列表。 */
@@ -314,95 +239,6 @@ const RulesManager: React.FC<{
   );
 };
 
-/** 命中明细表(按表·类别·来源·严重度筛,接 listReviewFindings)。
- * tables 为报告 byTable 的表名列表,多表时开放「所属表」筛选。 */
-const FindingsTable: React.FC<{ jobId: string; tables?: string[] }> = ({
-  jobId,
-  tables,
-}) => {
-  const columns: ProColumns<DataPlatform.ReviewFinding>[] = [
-    {
-      title: '所属表',
-      dataIndex: 'tableName',
-      width: 110,
-      ellipsis: true,
-      valueType: 'select',
-      search: tables && tables.length > 0 ? undefined : false,
-      valueEnum: Object.fromEntries(
-        (tables ?? []).map((t) => [t, { text: t }]),
-      ),
-      render: (_, r) => r.tableName ?? '-',
-    },
-    { title: '行号', dataIndex: 'rowIndex', width: 80, search: false },
-    {
-      title: '类别',
-      dataIndex: 'category',
-      width: 90,
-      valueType: 'select',
-      valueEnum: Object.fromEntries(
-        (Object.keys(CATEGORY_META) as DataPlatform.ReviewCategory[]).map(
-          (c) => [c, { text: CATEGORY_META[c].text }],
-        ),
-      ),
-      render: (_, r) => renderCategory(r.category),
-    },
-    {
-      title: '严重度',
-      dataIndex: 'severity',
-      width: 90,
-      valueType: 'select',
-      valueEnum: Object.fromEntries(
-        (Object.keys(SEVERITY_META) as DataPlatform.ReviewSeverity[]).map(
-          (s) => [s, { text: SEVERITY_META[s].text }],
-        ),
-      ),
-      render: (_, r) => renderSeverity(r.severity),
-    },
-    {
-      title: '来源',
-      dataIndex: 'source',
-      width: 120,
-      valueType: 'select',
-      valueEnum: Object.fromEntries(
-        (Object.keys(SOURCE_META) as DataPlatform.ReviewSource[]).map((s) => [
-          s,
-          { text: SOURCE_META[s] },
-        ]),
-      ),
-      render: (_, r) => renderSource(r.source),
-    },
-    { title: '命中详情', dataIndex: 'detail', width: 160, search: false },
-    {
-      title: '片段',
-      dataIndex: 'snippet',
-      ellipsis: true,
-      search: false,
-    },
-  ];
-
-  return (
-    <ProTable<DataPlatform.ReviewFinding, DataPlatform.ReviewFindingListParams>
-      rowKey={(r) => `${r.rowIndex}-${r.source}-${r.category}-${r.detail}`}
-      size="small"
-      options={false}
-      search={{ labelWidth: 'auto' }}
-      columns={columns}
-      pagination={{ pageSize: 10 }}
-      request={async (params) => {
-        const res = await listReviewFindings(jobId, {
-          current: params.current,
-          pageSize: params.pageSize,
-          category: params.category,
-          source: params.source,
-          severity: params.severity,
-          tableName: params.tableName,
-        });
-        return { data: res.data, total: res.total, success: res.success };
-      }}
-    />
-  );
-};
-
 const ContentSafety: React.FC = () => {
   const access = useAccess();
   const canRun = access.hasPerm('governance:contentsafety:run');
@@ -476,10 +312,8 @@ const ContentSafety: React.FC = () => {
     if (!nameDirty) setName(suggestedName);
   }, [suggestedName, nameDirty]);
 
-  // —— 报告区 state ——
-  const [activeJob, setActiveJob] = useState<DataPlatform.Job>();
+  // —— 任务列表筛选 ——
   const [jobDatasetId, setJobDatasetId] = useState<string>();
-  const [report, setReport] = useState<DataPlatform.ReviewReport>();
 
   // 数据集 → 版本级联(用 listDatasets + getDataset,参照 quality/editor)
   useEffect(() => {
@@ -522,13 +356,6 @@ const ContentSafety: React.FC = () => {
     );
   }, [versionId]);
 
-  // 载入某 job 的报告(被选中时 / 轮询时)
-  const loadReport = useCallback(async (jobId: string) => {
-    const res = await getReviewReport(jobId).catch(() => undefined);
-    if (res?.data) setReport(res.data);
-    return res?.data;
-  }, []);
-
   const addRegex = () =>
     setCustomRegex((prev) => [...prev, { name: '', pattern: '' }]);
   const removeRegex = (idx: number) =>
@@ -542,7 +369,7 @@ const ContentSafety: React.FC = () => {
       prev.map((r, i) => (i === idx ? { ...r, [key]: value } : r)),
     );
 
-  // 开始审核 → createReviewJob → 轮询 getJob 状态 → 完成后载报告
+  // 开始审核 → createReviewJob → 跳独立报告页(那里轮询状态并展示报告)
   const doSubmit = async (
     customWords: string[],
     cleanedRegex: DataPlatform.ReviewCustomRegex[],
@@ -573,11 +400,7 @@ const ContentSafety: React.FC = () => {
       });
       hide();
       message.success('审核任务已创建');
-      actionRef.current?.reload();
-      const job = res.data;
-      setActiveJob(job);
-      setReport(undefined);
-      pollJob(job.id);
+      history.push(`/governance/content-safety/report?jobId=${res.data.id}`);
     } catch {
       hide();
       message.error('创建失败,请重试');
@@ -618,49 +441,6 @@ const ContentSafety: React.FC = () => {
     doSubmit(customWords, cleanedRegex);
   };
 
-  // 轮询单 job 状态(2s),终态停止并载报告;复用 getJob(同 ingest 推进式轮询思路)
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-  const pollJob = useCallback(
-    (jobId: string) => {
-      const tick = async () => {
-        const res = await getJob(jobId).catch(() => undefined);
-        const job = res?.data;
-        if (job) {
-          setActiveJob(job);
-          if (job.state === 'success' || job.state === 'failed') {
-            actionRef.current?.reload();
-            await loadReport(jobId);
-            return;
-          }
-        }
-        pollTimer.current = setTimeout(tick, 2000);
-      };
-      tick();
-    },
-    [loadReport],
-  );
-
-  // 卸载时清理轮询
-  useEffect(
-    () => () => {
-      if (pollTimer.current) clearTimeout(pollTimer.current);
-    },
-    [],
-  );
-
-  // 点选任务列表 → 载入该 job 报告
-  const onSelectJob = async (job: DataPlatform.Job) => {
-    setActiveJob(job);
-    setReport(undefined);
-    if (job.state === 'running' || job.state === 'pending') {
-      pollJob(job.id);
-    } else {
-      await loadReport(job.id);
-    }
-  };
-
   const jobColumns: ProColumns<DataPlatform.Job>[] = [
     {
       title: '任务名',
@@ -669,35 +449,22 @@ const ContentSafety: React.FC = () => {
         <a
           onClick={(e) => {
             e.preventDefault();
-            onSelectJob(record);
+            history.push(
+              `/governance/content-safety/report?jobId=${record.id}`,
+            );
           }}
         >
           {dom}
         </a>
       ),
     },
-    {
-      title: '被审版本',
-      dataIndex: 'input',
-      render: (_, r) =>
-        r.input
-          ? `${r.input.datasetName}（${r.input.versionLabel ?? `v${r.input.versionNo}`}）`
-          : '-',
-    },
+    // 与其他任务列表统一的 数据集/输入版本/产物版本 三列(审核产出净化版)
+    ...jobVersionColumns(),
     {
       title: '状态',
       dataIndex: 'state',
       width: 90,
-      render: (_, r) => {
-        const m = STATE_META[r.state];
-        return <Tag color={m.color}>{m.text}</Tag>;
-      },
-    },
-    {
-      title: '命中行',
-      dataIndex: 'output',
-      width: 90,
-      render: (_, r) => r.output?.rows ?? '-',
+      render: (_, r) => renderState(r.state),
     },
     {
       title: '创建时间',
@@ -705,9 +472,24 @@ const ContentSafety: React.FC = () => {
       width: 170,
       render: (_, r) => formatDateTime(r.createdAt),
     },
+    {
+      title: '操作',
+      valueType: 'option',
+      key: 'option',
+      width: 100,
+      render: (_, r) => [
+        <a
+          key="report"
+          onClick={(e) => {
+            e.preventDefault();
+            history.push(`/governance/content-safety/report?jobId=${r.id}`);
+          }}
+        >
+          查看报告
+        </a>,
+      ],
+    },
   ];
-
-  const body = report?.reviewReport;
 
   return (
     <PageContainer>
@@ -946,154 +728,6 @@ const ContentSafety: React.FC = () => {
           ]}
         />
       </Card>
-
-      {/* 报告区 */}
-      {activeJob ? (
-        <Card
-          size="small"
-          title={
-            <Space>
-              <span>审核报告 · {activeJob.name}</span>
-              <Tag color={STATE_META[activeJob.state].color}>
-                {STATE_META[activeJob.state].text}
-              </Tag>
-            </Space>
-          }
-        >
-          {activeJob.state === 'failed' && (
-            <Alert
-              type="error"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message="审核任务失败"
-              description={activeJob.error || '未知错误'}
-            />
-          )}
-          {(activeJob.state === 'pending' || activeJob.state === 'running') && (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-              message="审核进行中,报告将在完成后展示…"
-            />
-          )}
-
-          {body && (
-            <>
-              {body.sampleLimitApplied && (
-                <Alert
-                  type="warning"
-                  showIcon
-                  style={{ marginBottom: 16 }}
-                  message="已应用样本上限"
-                  description={`总行数 ${body.totalRows},仅扫描前 ${body.scannedRows} 行,其余行未审核。`}
-                />
-              )}
-
-              {body.warnings && body.warnings.length > 0 && (
-                <Alert
-                  type="warning"
-                  showIcon
-                  style={{ marginBottom: 16 }}
-                  message="部分检测已降级"
-                  description={body.warnings.join(';')}
-                />
-              )}
-
-              <Row gutter={32} style={{ marginBottom: 16 }}>
-                <Col>
-                  <Statistic title="总行数" value={body.totalRows} />
-                </Col>
-                <Col>
-                  <Statistic title="已扫描" value={body.scannedRows} />
-                </Col>
-                <Col>
-                  <Statistic
-                    title="命中行"
-                    value={body.flaggedRows}
-                    valueStyle={{
-                      color: body.flaggedRows > 0 ? '#cf1322' : undefined,
-                    }}
-                  />
-                </Col>
-                {body.action === 'delete' && (
-                  <Col>
-                    <Statistic
-                      title="已删除行"
-                      value={body.deletedRows ?? 0}
-                      valueStyle={{
-                        color:
-                          (body.deletedRows ?? 0) > 0 ? '#cf1322' : undefined,
-                      }}
-                    />
-                  </Col>
-                )}
-              </Row>
-
-              <Paragraph>
-                <Text strong>按类别:</Text>{' '}
-                <CountTags
-                  counts={body.byCategory}
-                  label={(k) =>
-                    CATEGORY_META[k as DataPlatform.ReviewCategory]?.text ?? k
-                  }
-                />
-              </Paragraph>
-              <Paragraph>
-                <Text strong>按严重度:</Text>{' '}
-                <CountTags
-                  counts={body.bySeverity}
-                  label={(k) =>
-                    SEVERITY_META[k as DataPlatform.ReviewSeverity]?.text ?? k
-                  }
-                />
-              </Paragraph>
-              <Paragraph>
-                <Text strong>按来源:</Text>{' '}
-                <CountTags
-                  counts={body.bySource}
-                  label={(k) =>
-                    SOURCE_META[k as DataPlatform.ReviewSource] ?? k
-                  }
-                />
-              </Paragraph>
-              {body.byTable && Object.keys(body.byTable).length > 0 && (
-                <Paragraph>
-                  <Text strong>按成员表(命中行):</Text>{' '}
-                  <CountTags counts={body.byTable} label={(k) => k} />
-                </Paragraph>
-              )}
-              {body.removedArchives &&
-                Object.keys(body.removedArchives).length > 0 && (
-                  <Paragraph>
-                    <Text strong>被删行存档:</Text>{' '}
-                    <Space size={[4, 8]} wrap>
-                      {Object.entries(body.removedArchives).map(([t, uri]) => (
-                        <Tag key={t} title={uri}>
-                          {t}.removed.jsonl
-                        </Tag>
-                      ))}
-                    </Space>
-                    <Text type="secondary">
-                      (存于产出版本目录,连同命中明细构成删除留痕)
-                    </Text>
-                  </Paragraph>
-                )}
-
-              <Divider style={{ margin: '8px 0 16px' }} />
-              <Title level={5}>命中明细</Title>
-              <FindingsTable
-                jobId={activeJob.id}
-                tables={Object.keys(body.byTable ?? {})}
-              />
-            </>
-          )}
-        </Card>
-      ) : (
-        <Card size="small">
-          <Empty description="新建审核任务,或从上方任务列表点选以查看报告" />
-        </Card>
-      )}
 
       <RulesManager
         open={rulesOpen}

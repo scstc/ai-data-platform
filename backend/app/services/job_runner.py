@@ -18,6 +18,7 @@ quality/review),入参 body 一律从 ``job.spec`` 重建,故 spawn 只需 job_i
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -44,6 +45,8 @@ from app.services.make import run_make_job
 from app.services.quality import QualityError, run_quality_job
 from app.services.review_runner import ReviewError, run_review
 from app.services.trainset import run_trainset_job
+
+logger = logging.getLogger(__name__)
 
 # 后台任务引用(防被 GC 回收)
 _tasks: set[asyncio.Task] = set()
@@ -409,6 +412,11 @@ async def _run_job(job_id: str) -> None:
             else:
                 job.state = "failed"
                 job.error = str(exc)
+        except Exception as exc:
+            # 兜底:未预期异常若不落终态,协程死亡后任务将永远停在 running
+            logger.exception("job %s 未预期异常", job_id)
+            job.state = "failed"
+            job.error = f"{type(exc).__name__}: {exc}"
         finally:
             _cancelled.discard(job_id)
             _paused.discard(job_id)

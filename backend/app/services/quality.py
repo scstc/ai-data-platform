@@ -1,42 +1,38 @@
-"""质量评估引擎:filter 算子编排 → 子进程跑 dj-analyze → 回写版本 stats_uri。
+"""质量评估引擎:filter 算子编排 → 子进程跑 dj-analyze → stats_uri 回写输入版本。
 
 镜像 engine.run_process_job 的子进程模式。DJ Analyzer 对 Filter 算子只
 compute_stats 不删行(export_original_dataset 默认 False,只导出 stats);
 stats 文件名遵循 Exporter 约定:export_path 为 data.jsonl 时落
 data_stats.jsonl;固定 work_dir + job_id 后分析图表落 work_dir/analysis/。
+
+质量评估**不产新版本**:数据不被修改,产物只有 stats + analysis 图表,
+落 datasets/<ds>/quality/<job_id>/ 下,stats_uri 直接回写输入版本/成员
+(重复评估同一版本时后评覆盖前评)。报告按输入版本查看。
 """
 
 from __future__ import annotations
 
 import asyncio
-import secrets
 from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
-from app.models.dataset_version_table import DatasetVersionTable
 from app.models.job_input import JobInput
 from app.services.engine import (
     _get_version_members,
     _kill_proc_tree,
     _materialize_member,
-    _new_member_id,
-    _new_version_id,
     _read_head_records,
     _running_procs,
     _semaphore,
     build_config,
-    carry_over_members,
     detect_text_key,
 )
 from app.services.external_store import materialized_version
-from app.services.landing import parquet_bytes_to_records
-
 
 # 质量评估专用:质量评估不会跑 wordcloud 的失败模式与小样本/长文本列组合有关
 # (dj-analyze 的 wordcloud 在整段重复 + 频次全 1 时报 ValueError 退出)。
@@ -120,12 +116,13 @@ async def run_quality_job(
     target_members: list[str] | None = None,
     text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
-    """质量评估任务：对输入版本的指定成员运行质量评估算子，产出新版本。
+    """质量评估任务:对输入版本的指定成员运行质量评估算子,不产新版本,
+    stats_uri 回写输入版本对应成员。
 
     operators: 统一应用到所有成员的算子列表（旧版兼容）
     member_configs: 新版成员独立配置，格式 [{member_name, operators, text_keys?}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
-    返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 QualityError。
+    返回 (输入版本, 生成的 yaml 文本, 运行日志路径)。失败抛 QualityError。
     """
     # 1. 查询版本成员
     members = await _get_version_members(session, input_version.id)
@@ -159,21 +156,14 @@ async def run_quality_job(
             for m in members_to_process
         }
 
-    # 3. 创建新版本目录
+    # 3. 评估工作目录(不产新版本,产物不落版本目录)
     dataset_id = input_version.dataset_id
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
-    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
+    out_dir = Path(settings.datasets_dir) / dataset_id / "quality" / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. 对每个成员独立处理
     all_logs: list[str] = []
     all_yamls: list[str] = []
-    new_members_data: list[dict[str, Any]] = []
 
     for member in members_to_process:
         member_cfg = config_map[member.table_name]
@@ -191,17 +181,19 @@ async def run_quality_job(
         member_work_dir = out_dir / member_job_id
         member_work_dir.mkdir(parents=True, exist_ok=True)
 
-        # 输出路径（质量评估产出 stats + 原始数据）
+        # export_path 仅作 stats 文件命名锚点:dj-analyze 默认
+        # export_original_dataset=False,不导出数据本身,只落
+        # <table>_stats.jsonl + analysis/ 图表
         out_format = member.format if member.format in ("parquet", "jsonl") else "jsonl"
         output_path = member_work_dir / f"{member.table_name}.{out_format}"
         stats_path = output_path.parent / f"{member.table_name}_stats.jsonl"
         yaml_path = member_work_dir / f"{member.table_name}_job.yaml"
 
-        # 构建 DJ Analyzer 配置
+        # 构建 DJ Analyzer 配置(text_key 走质量评估专用探测,避开 wordcloud 崩溃)
         detected_key = (
             None
             if member_text_keys
-            else detect_text_key(_read_head_records(input_path, 50))
+            else detect_quality_text_key(_read_head_records(input_path, 50))
         )
         cfg = build_config(
             project_name=member_job_id,
@@ -236,71 +228,13 @@ async def run_quality_job(
                 f"(dj-analyze 退出码 {code})\n{tail}"
             )
 
-        # 上传产出文件（原始数据 + stats）
-        from app.services.external_store import (
-            upload_jsonl_member,
-            upload_parquet_member,
-        )
+        # 评估不改数据、不产新版本:stats_uri 直接回写输入成员
+        # (重复评估同一成员时后评覆盖前评)
+        member.stats_uri = str(stats_path)
 
-        if out_format == "parquet":
-            data_bytes = output_path.read_bytes()
-            storage_uri = await upload_parquet_member(
-                dataset_id, new_vno, member.table_name, data_bytes
-            )
-            rows = len(parquet_bytes_to_records(data_bytes))
-        else:
-            data_bytes = output_path.read_bytes()
-            storage_uri = await upload_jsonl_member(
-                dataset_id, new_vno, member.table_name, data_bytes
-            )
-            rows = sum(
-                1 for line in output_path.open(encoding="utf-8") if line.strip()
-            )
-
-        new_members_data.append(
-            {
-                "table_name": member.table_name,
-                "storage_uri": storage_uri,
-                "format": out_format,
-                "rows": rows,
-                "size": len(data_bytes),
-                "schema_variant": member.schema_variant,
-                "stats_uri": str(stats_path),  # 质量评估特有
-            }
-        )
-
-    # 5. 未评估的成员原样结转,再创建新版本和成员记录
-    new_members_data += carry_over_members(
-        members, {m.table_name for m in members_to_process}
-    )
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
-        format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
-        rows=sum(m["rows"] or 0 for m in new_members_data),
-        size=sum(m["size"] or 0 for m in new_members_data),
-        origin="managed",
-        produced_by_job_id=job_id,
-        note=f"质量评估产出(来自 v{input_version.version_no})",
-    )
-    session.add(version)
-    await session.flush()
-
-    for m_data in new_members_data:
-        stats_uri = m_data.pop("stats_uri")
-        member_rec = DatasetVersionTable(
-            id=_new_member_id(),
-            dataset_version_id=version.id,
-            stats_uri=stats_uri,
-            **m_data,
-        )
-        session.add(member_rec)
-
+    # 5. 落血缘边并提交成员 stats_uri 回写
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
     await session.commit()
-    await session.refresh(version)
 
     # 6. 汇总日志和YAML
     combined_log = "\n\n".join(all_logs)
@@ -309,7 +243,7 @@ async def run_quality_job(
 
     combined_yaml = "\n\n---\n\n".join(all_yamls)
 
-    return version, combined_yaml, str(log_path)
+    return input_version, combined_yaml, str(log_path)
 
 
 async def _run_quality_job_legacy(
@@ -360,31 +294,9 @@ async def _run_quality_job_legacy(
         tail = "\n".join(log.strip().splitlines()[-8:])
         raise QualityError(f"dj-analyze 退出码 {code}\n{tail}")
 
-    # 创建新版本（质量评估也产出版本，只是内容与输入相同但带 stats）
-    dataset_id = input_version.dataset_id
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
-
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=input_version.storage_uri,  # 复用输入的存储
-        format=input_version.format,
-        rows=input_version.rows,
-        size=input_version.size,
-        origin="managed",
-        produced_by_job_id=job_id,
-        stats_uri=str(stats_path),
-        note=f"质量评估产出(来自 v{input_version.version_no})",
-    )
-    session.add(version)
+    # 评估不产新版本:stats_uri 直接回写输入版本(后评覆盖前评)
+    input_version.stats_uri = str(stats_path)
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
     await session.commit()
-    await session.refresh(version)
 
-    return version, yaml_text, str(log_path)
+    return input_version, yaml_text, str(log_path)

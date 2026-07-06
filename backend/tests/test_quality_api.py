@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import json
-import secrets
 from pathlib import Path
 
 import pytest
@@ -271,31 +270,16 @@ async def test_create_quality_job_success_and_type_filter(
     )
 
     async def fake_run_quality_job(session, *, job_id, input_version, operators, member_configs=None, target_members=None, text_keys=None, **kwargs):
-        # 镜像真实实现的副作用:创建新版本 + 记血缘边
+        # 镜像真实实现的副作用:stats_uri 回写输入版本 + 记血缘边(不产新版本)
         assert operators == [
             {"name": "text_length_filter", "params": {"min_len": 5}}
         ]
-        # 创建新版本（简化版，实际实现会复制输入版本）
-        from app.models.dataset_version import DatasetVersion
-        new_version = DatasetVersion(
-            id=f"dsv-{secrets.token_hex(3)}",
-            dataset_id=input_version.dataset_id,
-            version_no=(input_version.version_no or 0) + 1,
-            storage_uri=input_version.storage_uri,
-            format=input_version.format,
-            rows=input_version.rows,
-            size=input_version.size,
-            origin="managed",
-            produced_by_job_id=job_id,
-            stats_uri=stats_uri,
-            note="质量评估产出",
-        )
-        session.add(new_version)
+        input_version.stats_uri = stats_uri
         session.add(
             JobInput(job_id=job_id, dataset_version_id=input_version.id)
         )
         await session.commit()
-        return new_version, "process: []", str(tmp_path / "run.log")
+        return input_version, "process: []", str(tmp_path / "run.log")
 
     # 质量任务后台异步执行(job_runner.spawn),被打桩的是 job_runner 里
     # 引用的 run_quality_job(非 api.v1.quality 模块——那里已不再 import 它)。
@@ -329,8 +313,8 @@ async def test_create_quality_job_success_and_type_filter(
     assert data["type"] == "quality"
     assert data["state"] == "success"
     assert data["progress"] == 100
-    # 质量评估产出带 stats 的新版本(非 None),经 produced_by_job_id 反查
-    assert data["output"]["datasetId"] == DATASET_ID
+    # 不产新版本:output 为 null,stats_uri 回写在输入版本上
+    assert data["output"] is None
     assert {
         "datasetId": data["input"]["datasetId"],
         "datasetName": data["input"]["datasetName"],
@@ -346,10 +330,8 @@ async def test_create_quality_job_success_and_type_filter(
     assert data["input"]["versionLabel"].startswith("v")
     assert data["input"]["versionLabel"].endswith("(#1)")
 
-    # 产出版本(非输入版本)带 stats_uri → stats 端点可用
-    resp = await client.get(
-        f"/api/v1/dataset-versions/{data['output']['versionId']}/stats"
-    )
+    # 输入版本被回写 stats_uri → stats 端点可用
+    resp = await client.get(f"/api/v1/dataset-versions/{VERSION_ID}/stats")
     assert resp.status_code == 200
     assert resp.json()["total"] == 1
 
