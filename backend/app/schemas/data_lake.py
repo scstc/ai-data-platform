@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from app.schemas.common import CamelModel, UtcDateTime
 
@@ -147,6 +147,28 @@ class DataLakeDetailRead(DataLakeRead):
     snapshots: list[DataLakeSnapshotRead] = []
 
 
+class DocSegmentConfig(CamelModel):
+    """文档类快照(word/pdf 等)抽取分段与文本预处理配置。
+
+    - separator/max_length/overlap 仅对 pdf/doc/docx/html 生效;
+      ppt/pptx 固定"一页一条 text",但预处理规则仍生效
+    - separator 支持字面量 \\n / \\t 转义(前端输入框原样传,后端解码)
+    - 扫描型 PDF 先走 OCR(G10,Unlimited-OCR service),识别文本回到同一分段链路
+    """
+
+    separator: str = "\n\n"
+    max_length: int | None = Field(default=None, ge=1, le=100_000)
+    overlap: int = Field(default=0, ge=0)
+    clean_whitespace: bool = False  # 替换连续的空格、换行符和制表符
+    remove_urls_emails: bool = False  # 删除所有 URL 和电子邮件地址
+
+    @model_validator(mode="after")
+    def _check_overlap_lt_max(self) -> DocSegmentConfig:
+        if self.max_length is not None and self.overlap >= self.max_length:
+            raise ValueError("分段重叠长度必须小于分段最大长度")
+        return self
+
+
 class ExtractToDatasetRequest(CamelModel):
     """从湖抽取生成数据集入参(治理改造契约地基)。
 
@@ -163,6 +185,8 @@ class ExtractToDatasetRequest(CamelModel):
     # 如 {"snap-123": "用户提问：{question}，客服回答：{answer}"}
     # 适用于表格类快照(database/tabular:数据库表、CSV、Excel等)。
     field_mapping: dict[str, str] | None = None
+    # 文档分段/预处理配置(可选):对本次抽取的所有文档类快照生效
+    doc_segment: DocSegmentConfig | None = None
 
     @model_validator(mode="after")
     def _check_target_one_of(self) -> ExtractToDatasetRequest:

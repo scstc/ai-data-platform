@@ -26,6 +26,7 @@ from app.services.external_store import ExternalStoreError, client_for, parse_s3
 from app.services.landing import (
     BINARY_FORMATS,
     LANDABLE_FORMATS,
+    DocSegmentOptions,
     LandingError,
     land_media_manifest,
     media_kind,
@@ -101,6 +102,7 @@ async def extract_from_lake_snapshot(
     source_version: str,
     *,
     inject_lineage: bool = True,
+    doc_options: DocSegmentOptions | None = None,
 ) -> list[dict[str, Any]]:
     """从数据湖快照中抽取数据并注入血缘字段。
 
@@ -109,6 +111,7 @@ async def extract_from_lake_snapshot(
         lake_id: 数据湖 ID
         source_version: 源头快照版本号（如 source_v20260701_01_mysql）
         inject_lineage: 是否注入血缘追踪字段
+        doc_options: 文档类快照的分段/清洗配置(仅 word/pdf 等文档格式生效)
 
     Returns:
         记录列表（已注入血缘字段）
@@ -127,7 +130,7 @@ async def extract_from_lake_snapshot(
     elif snapshot.storage_format in LANDABLE_FORMATS:
         # 原格式文件(含 pdf/doc/docx/ppt/pptx/html):从 MinIO 读原始字节
         # → normalize_to_records 解析(文档类内部走 markitdown/OCR)
-        records = await _read_raw_from_snapshot(snapshot)
+        records = await _read_raw_from_snapshot(snapshot, doc_options=doc_options)
     else:
         raise ExternalStoreError(
             f"不支持的存储格式: {snapshot.storage_format}"
@@ -184,6 +187,8 @@ async def _read_parquet_from_snapshot(
 
 async def _read_raw_from_snapshot(
     snapshot: DataLakeSnapshot,
+    *,
+    doc_options: DocSegmentOptions | None = None,
 ) -> list[dict[str, Any]]:
     """从快照的原格式文件(csv/xlsx/jsonl 等)中读取并解析为记录。
 
@@ -191,6 +196,7 @@ async def _read_raw_from_snapshot(
 
     Args:
         snapshot: 数据湖快照
+        doc_options: 文档类格式的分段/清洗配置(透传 normalize_to_records)
 
     Returns:
         记录列表
@@ -219,7 +225,7 @@ async def _read_raw_from_snapshot(
     # 4. 根据扩展名解析(调用 landing.normalize_to_records)
     ext = snapshot.storage_format
     try:
-        return normalize_to_records(raw_bytes, ext)
+        return normalize_to_records(raw_bytes, ext, doc_options=doc_options)
     except Exception as exc:  # noqa: BLE001 解析失败统一上报
         raise ExternalStoreError(
             f"解析 {ext} 文件失败: {exc}(快照 {snapshot.id})"
@@ -367,6 +373,7 @@ async def extract_to_new_dataset(
     description: str | None = None,
     creator: str = "admin",
     field_mapping: dict[str, str] | None = None,
+    doc_segment: DocSegmentOptions | None = None,
 ) -> Any:
     """从若干湖快照抽取生成数据集,目标数据集**新建或追加到已有**(治理改造契约地基)。
 
@@ -388,6 +395,8 @@ async def extract_to_new_dataset(
         description: 数据集描述(仅新建时生效)
         creator: 创建人
         field_mapping: 字段映射模板字典(key=快照ID, value=模板字符串)
+        doc_segment: 文档类快照(word/pdf 等)的分段/清洗配置,本次抽取内
+            所有文档快照共用;ppt/pptx 固定一页一条 text,不受分段参数影响
 
     Returns:
         目标 Dataset 对象(新建或已有)
@@ -472,7 +481,11 @@ async def extract_to_new_dataset(
     used_names: set[str] = set()
     for snapshot in other_snapshots:
         records = await extract_from_lake_snapshot(
-            db, lake_id, snapshot.source_version, inject_lineage=True
+            db,
+            lake_id,
+            snapshot.source_version,
+            inject_lineage=True,
+            doc_options=doc_segment,
         )
 
         # 应用字段映射(表格类快照:database/tabular + 该快照配置了模板时执行)

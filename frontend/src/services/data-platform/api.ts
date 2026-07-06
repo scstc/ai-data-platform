@@ -2556,6 +2556,14 @@ export async function extractLakeToDataset(
     datasetName?: string | null;
     description?: string | null;
     fieldMapping?: Record<string, string> | null;
+    /** 文档类快照(word/pdf 等)分段与预处理配置;ppt/pptx 固定一页一条 text */
+    docSegment?: {
+      separator?: string;
+      maxLength?: number | null;
+      overlap?: number;
+      cleanWhitespace?: boolean;
+      removeUrlsEmails?: boolean;
+    } | null;
   },
   options?: { [key: string]: any },
 ) {

@@ -11,7 +11,9 @@ import csv
 import hashlib
 import io
 import json
+import re
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -375,23 +377,149 @@ def _convert_legacy_doc_to_text(content: bytes) -> str:
     raise ParseError("无法解析 .doc:请安装 antiword 或 libreoffice-core")
 
 
-def _doc_to_records(content: bytes, ext: str) -> list[dict]:
-    """文档(pdf/doc/docx/ppt/pptx/html)→ markitdown 提取 → 去格式 → 按段落每段一条。
+@dataclass(frozen=True)
+class DocSegmentOptions:
+    """文档类(pdf/doc/docx/html)抽取分段与文本预处理配置。
 
-    .doc 走双桥(antiword → soffice→mammoth);其他用 markitdown。
+    默认值等价于历史行为(按空行段落切分,不清洗,不限长)。ppt/pptx 固定
+    "一页一条 text",不受 separator/max_length/overlap 影响,但清洗规则仍生效。
+    """
 
-    pdf 扫描型识别(G10):提取空或字符密度过低 → 疑似扫描件,OCR 启用则调 OCR,
+    separator: str = "\n\n"  # 分段标识符(支持字面量 \n / \t 转义)
+    max_length: int | None = None  # 分段最大长度(字符);None → 不限
+    overlap: int = 0  # 分段重叠长度(仅超长段落二次切分时生效)
+    clean_whitespace: bool = False  # 替换连续的空格/换行符/制表符为单个空格
+    remove_urls_emails: bool = False  # 删除所有 URL 和电子邮件地址
+
+
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# markitdown 的 pptx 输出在每页前插 <!-- Slide number: N --> 注释,按此拆页
+_SLIDE_MARK_RE = re.compile(r"<!--\s*Slide number:\s*\d+\s*-->", re.IGNORECASE)
+
+
+def _clean_doc_text(text: str, options: DocSegmentOptions) -> str:
+    """对单段文本应用预处理规则(按 options 勾选项),返回 strip 后结果。"""
+    if options.remove_urls_emails:
+        text = _EMAIL_RE.sub("", text)
+        text = _URL_RE.sub("", text)
+    if options.clean_whitespace:
+        text = re.sub(r"[ \t\r\n]{2,}", " ", text)
+    return text.strip()
+
+
+def _segment_doc_text(text: str, options: DocSegmentOptions) -> list[str]:
+    """纯文本 → 分段列表:按分段标识符切分 → 逐段清洗 → 超长段按最大长度+重叠二次切分。
+
+    切分先于清洗:clean_whitespace 会把连续换行收敛成空格,若先清洗会破坏
+    "\\n\\n" 这类分段标识符。默认 options 下结果与历史段落切分完全一致。
+    """
+    # 前端输入框里用户敲的是字面量 \n / \t,此处解码为真实控制字符
+    sep = (options.separator or "\n\n").replace("\\n", "\n").replace("\\t", "\t")
+    segments: list[str] = []
+    for part in text.split(sep):
+        cleaned = _clean_doc_text(part, options)
+        if not cleaned:
+            continue
+        if options.max_length and len(cleaned) > options.max_length:
+            step = max(options.max_length - max(options.overlap, 0), 1)
+            i = 0
+            while i < len(cleaned):
+                chunk = cleaned[i : i + options.max_length].strip()
+                if chunk:
+                    segments.append(chunk)
+                if i + options.max_length >= len(cleaned):
+                    break
+                i += step
+        else:
+            segments.append(cleaned)
+    return segments
+
+
+def _strip_html_tags(html: str) -> str:
+    """剔除全部 HTML 标签 → 纯文本(html 快照抽取用,不经 markitdown)。
+
+    - script/style/head 整块删除(标签内是代码/样式,不是正文)
+    - <br> 与块级闭合标签(p/div/li/h1-h6 等)转换行,保住段落边界供
+      "\\n\\n" 分段标识符切段;其余标签一律剔除
+    - HTML 实体(&amp; &nbsp; 等)解码;3+ 连续空行收敛为空行
+    纯函数(标准库 re + html),可单测。
+    """
+    from html import unescape
+
+    text = re.sub(r"(?is)<(script|style|head)\b.*?</\1\s*>", "", html)
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(
+        r"(?i)</(p|div|section|article|li|ul|ol|tr|table|h[1-6]|blockquote|pre)>",
+        "\n\n",
+        text,
+    )
+    text = re.sub(r"(?s)<[^>]+>", "", text)
+    text = unescape(text)
+    # 每行去尾部空白后收敛连续空行,避免"标签间缩进"制造伪段落
+    text = "\n".join(ln.rstrip() for ln in text.splitlines())
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _decode_html_bytes(content: bytes) -> str:
+    """html 字节 → 字符串:utf-8(含 BOM)优先,退 gb18030(中文站点),再退强解。"""
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return content.decode("gb18030")
+        except UnicodeDecodeError:
+            return content.decode("utf-8", errors="replace")
+
+
+def _split_ppt_slides(markdown: str, options: DocSegmentOptions) -> list[str]:
+    """markitdown 的 ppt/pptx markdown → 每页一段纯文本(空页跳过)。
+
+    按 <!-- Slide number: N --> 注释拆页;页内去 markdown 格式后整页合一条,
+    不做 separator/max_length 分段(需求:ppt 一页一个 text),清洗规则照常。
+    """
+    slides: list[str] = []
+    for chunk in _SLIDE_MARK_RE.split(markdown):
+        plain = _markdown_to_plain_text(chunk)
+        cleaned = _clean_doc_text(plain, options)
+        if cleaned:
+            slides.append(cleaned)
+    return slides
+
+
+def _doc_to_records(
+    content: bytes, ext: str, options: DocSegmentOptions | None = None
+) -> list[dict]:
+    """文档(pdf/doc/docx/ppt/pptx/html)→ 提取纯文本 → 分段每段一条。
+
+    .doc 走双桥(antiword → soffice→mammoth);html 剔除全部标签后直接走
+    分段逻辑(不经 markitdown);其他用 markitdown。
+
+    pdf 扫描型识别(G10):提取空或字符密度过低 → 疑似扫描件,OCR 启用则调
+    Unlimited-OCR service,识别文本回到与 word 相同的分段/清洗链路,
     否则 Fail-loud 抛错(不静默落 0 行,守 D2 红线)。
     markdown 去格式(G12):markitdown 输出含 #/**/[]() 等标记,去格式为纯文本,
     避免干扰 data-juicer 算子统计。
+    分段(options):分段标识符 + 最大长度 + 重叠长度 + 预处理规则;缺省行为
+    与历史一致(按空行切段)。ppt/pptx 固定一页一条 text。
     """
+    opts = options or DocSegmentOptions()
     if ext == "doc":
         # .doc 双桥产出已是纯文本,不经 markitdown / 去格式
         text = _convert_legacy_doc_to_text(content).strip()
         if not text:
             raise ParseError(".doc 提取为空(可能是空文档或转换失败)")
-        paras = [p.strip() for p in text.split("\n\n") if p.strip()]
-        return [{"text": p} for p in paras] if paras else [{"text": text}]
+        segs = _segment_doc_text(text, opts)
+        return [{"text": s} for s in segs] if segs else [{"text": text}]
+    if ext == "html":
+        # html 不经 markitdown:剔除全部标签 → 纯文本 → 走 doc 同款分段逻辑
+        text = _strip_html_tags(_decode_html_bytes(content))
+        if not text:
+            raise ParseError("html 提取为空(剔除标签后无正文)")
+        segs = _segment_doc_text(text, opts)
+        return [{"text": s} for s in segs] if segs else [{"text": text}]
     try:
         result = _get_markitdown().convert_stream(
             io.BytesIO(content), file_extension=f".{ext}"
@@ -399,6 +527,15 @@ def _doc_to_records(content: bytes, ext: str) -> list[dict]:
     except Exception as exc:  # noqa: BLE001 解析失败统一上报
         raise ParseError(f"{ext} 解析失败:{exc}") from exc
     text = (result.text_content or "").strip()
+
+    # ppt/pptx:一页一条 text(按 markitdown 的 slide 注释拆页)
+    if ext in ("ppt", "pptx"):
+        if not text:
+            raise ParseError(f"{ext} 提取为空(文档无可提取文本)")
+        slides = _split_ppt_slides(text, opts)
+        if slides:
+            return [{"text": s} for s in slides]
+        raise ParseError(f"{ext} 去格式后为空")
 
     # PDF 扫描型分流(G10):空 / 字符密度过低 → OCR(启用时)或 Fail-loud
     if ext == "pdf":
@@ -421,8 +558,8 @@ def _doc_to_records(content: bytes, ext: str) -> list[dict]:
     text = _markdown_to_plain_text(text)
     if not text:
         raise ParseError(f"{ext} 去格式后为空")
-    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
-    return [{"text": p} for p in paras] if paras else [{"text": text}]
+    segs = _segment_doc_text(text, opts)
+    return [{"text": s} for s in segs] if segs else [{"text": text}]
 
 
 def _geojson_to_records(content: bytes) -> list[dict]:
@@ -473,7 +610,12 @@ def _geojson_to_records(content: bytes) -> list[dict]:
     return []
 
 
-def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
+def normalize_to_records(
+    content: bytes,
+    fmt: str,
+    *,
+    doc_options: DocSegmentOptions | None = None,
+) -> list[dict]:
     """把源文件字节按格式规范化为记录列表(每条 → jsonl 一行)。
 
     - jsonl:逐行 JSON
@@ -481,6 +623,7 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
     - csv/tsv:表头为字段名,每行一条
     - txt/log/md/markdown:每非空行 → {"text": 行}
     - geojson:FeatureCollection 每 Feature 一行,自动抽取 lon/lat
+    - 文档类(DOC_FORMATS):doc_options 控制分段/清洗,仅此类格式生效
     其余格式抛 UnsupportedFormatError。解析失败抛 ParseError。
     """
     fmt = fmt.lower()
@@ -491,7 +634,7 @@ def normalize_to_records(content: bytes, fmt: str) -> list[dict]:
     if fmt == "xls":
         return _xls_to_records(content)
     if fmt in DOC_FORMATS:
-        return _doc_to_records(content, fmt)
+        return _doc_to_records(content, fmt, doc_options)
     if fmt in GIS_FORMATS:
         return _geojson_to_records(content)
     try:

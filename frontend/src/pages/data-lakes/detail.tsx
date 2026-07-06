@@ -5,7 +5,9 @@ import {
   ProCard,
   type ProColumns,
   ProDescriptions,
+  ProFormCheckbox,
   ProFormDependency,
+  ProFormDigit,
   ProFormRadio,
   ProFormSelect,
   ProFormText,
@@ -187,6 +189,12 @@ const DataLakeDetailPage: FC = () => {
       header={{
         title: meta.name,
         subTitle: <Tag color="blue">多源汇聚</Tag>,
+        // 湖对象可能被抽取到多个数据集,血缘页按数据集视角组织,故不带参跳转
+        extra: [
+          <Button key="lineage" onClick={() => history.push('/ops/lineage')}>
+            查看血缘
+          </Button>,
+        ],
       }}
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -286,6 +294,10 @@ const DataLakeDetailPage: FC = () => {
         datasetName?: string;
         description?: string;
         fieldMappings?: Record<string, string>;
+        docSeparator?: string;
+        docMaxLength?: number;
+        docOverlap?: number;
+        docCleanRules?: string[];
       }>
         title="从湖文件抽取生成数据集"
         open={!!extractItems}
@@ -294,7 +306,11 @@ const DataLakeDetailPage: FC = () => {
         }}
         width={720}
         modalProps={{ destroyOnHidden: true }}
-        initialValues={{ targetMode: 'new' }}
+        initialValues={{
+          targetMode: 'new',
+          docSeparator: '\\n\\n',
+          docOverlap: 0,
+        }}
         onFinish={async (values) => {
           if (!id || !extractItems) return false;
           const hide = message.loading('正在抽取...', 0);
@@ -307,6 +323,10 @@ const DataLakeDetailPage: FC = () => {
                 )
               : undefined;
 
+            const hasDocItems = extractItems.some(
+              (s) => s.dataCategory === 'document',
+            );
+
             const res = await extractLakeToDataset(id, {
               snapshotIds: extractItems.map((s) => s.snapshotId),
               datasetId:
@@ -318,6 +338,17 @@ const DataLakeDetailPage: FC = () => {
                 fieldMapping && Object.keys(fieldMapping).length > 0
                   ? fieldMapping
                   : undefined,
+              docSegment: hasDocItems
+                ? {
+                    separator: values.docSeparator || '\\n\\n',
+                    maxLength: values.docMaxLength ?? null,
+                    overlap: values.docOverlap ?? 0,
+                    cleanWhitespace:
+                      values.docCleanRules?.includes('cleanWhitespace'),
+                    removeUrlsEmails:
+                      values.docCleanRules?.includes('removeUrlsEmails'),
+                  }
+                : undefined,
             });
             hide();
             message.success(
@@ -445,6 +476,72 @@ const DataLakeDetailPage: FC = () => {
                     />
                   </div>
                 ))}
+            </div>
+          </>
+        )}
+
+        {/* 文档分段与预处理(word/pdf 等文档类快照) */}
+        {(extractItems ?? []).some((s) => s.dataCategory === 'document') && (
+          <>
+            <Typography.Title level={5} style={{ marginTop: 16 }}>
+              文档分段与预处理
+            </Typography.Title>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Word/PDF 等文档按分段标识符切段,超长段落按最大长度 +
+              重叠长度二次切分;扫描件 PDF 先经 OCR 识别再进入同样的分段逻辑; PPT
+              固定一页一条 text,不受分段参数影响。
+            </Typography.Text>
+            <div style={{ marginTop: 12 }}>
+              <ProFormText
+                name="docSeparator"
+                label="分段标识符"
+                tooltip="支持 \n(换行)、\t(制表符)转义;默认 \n\n 按空行分段"
+                placeholder="\n\n"
+              />
+              <ProFormDigit
+                name="docMaxLength"
+                label="分段最大长度(字符)"
+                min={1}
+                max={100000}
+                placeholder="不填则不限制,常用 1024"
+              />
+              <ProFormDigit
+                name="docOverlap"
+                label="分段重叠长度(字符)"
+                min={0}
+                dependencies={['docMaxLength']}
+                rules={[
+                  ({
+                    getFieldValue,
+                  }: {
+                    getFieldValue: (name: string) => number | undefined;
+                  }) => ({
+                    validator: (_rule: unknown, value?: number) => {
+                      const max = getFieldValue('docMaxLength');
+                      if (max && value != null && value >= max) {
+                        return Promise.reject(
+                          new Error('重叠长度必须小于分段最大长度'),
+                        );
+                      }
+                      return Promise.resolve();
+                    },
+                  }),
+                ]}
+              />
+              <ProFormCheckbox.Group
+                name="docCleanRules"
+                label="文本预处理规则"
+                options={[
+                  {
+                    label: '替换掉连续的空格、换行符和制表符',
+                    value: 'cleanWhitespace',
+                  },
+                  {
+                    label: '删除所有 URL 和电子邮件地址',
+                    value: 'removeUrlsEmails',
+                  },
+                ]}
+              />
             </div>
           </>
         )}

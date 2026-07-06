@@ -668,7 +668,13 @@ async def extract_to_dataset(
       unstructured);追加到已有数据集时复用其既有 semantic_type
     """
     from app.services.external_store import ExternalStoreError
+    from app.services.landing import DocSegmentOptions
 
+    doc_segment = (
+        DocSegmentOptions(**body.doc_segment.model_dump())
+        if body.doc_segment
+        else None
+    )
     try:
         dataset = await lake_extract.extract_to_new_dataset(
             db,
@@ -678,6 +684,7 @@ async def extract_to_dataset(
             dataset_id=body.dataset_id,
             description=body.description,
             field_mapping=body.field_mapping,
+            doc_segment=doc_segment,
         )
     except ExternalStoreError as exc:
         from fastapi import HTTPException
