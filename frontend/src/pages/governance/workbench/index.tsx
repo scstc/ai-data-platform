@@ -1,4 +1,4 @@
-// 治理工场:清洗/蒸馏/合成/增强四场景统一入口——场景 Tab + 流水线模板卡片 + 一键执行。
+// 治理工场:清洗/蒸馏/合成/增强四场景统一入口——场景 Tab + 流水线模板卡片。
 // 命名导出 Workbench 供各场景菜单薄入口(cleaning/distillation/make/augment 的 index.tsx)
 // 以固定 scenario 挂载;默认导出是路由 ./governance/workbench 本身用的包装,从 URL
 // query ?scenario= 读取初始场景(未带参数则展示"全部")。
@@ -23,8 +23,6 @@ import {
   listOperatorCatalog,
   listPipelines,
 } from '@/services/data-platform';
-import type { TaskType } from '@/utils/taskName';
-import ExecuteModal from './ExecuteModal';
 
 const { Paragraph } = Typography;
 
@@ -35,7 +33,6 @@ type ScenarioMeta = {
   label: string;
   jobsPath: string;
   editorPath: string;
-  taskType: TaskType;
 };
 
 /** 场景元信息(与后端 Job.type / Pipeline.scenario 对齐)。
@@ -47,21 +44,18 @@ const SCENARIOS: ScenarioMeta[] = [
     label: '数据清洗',
     jobsPath: '/governance/cleaning/jobs',
     editorPath: '/governance/cleaning/editor',
-    taskType: '数据清洗',
   },
   {
     key: 'distillation',
     label: '数据蒸馏',
     jobsPath: '/governance/distillation/jobs',
     editorPath: '/governance/distillation/editor',
-    taskType: '数据蒸馏',
   },
   {
     key: 'augmentation',
     label: '数据增强',
     jobsPath: '/governance/augment/jobs',
     editorPath: '/governance/augment/editor',
-    taskType: '数据增强',
   },
 ];
 
@@ -87,8 +81,6 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
   >({});
-  const [execTarget, setExecTarget] = useState<DataPlatform.Pipeline>();
-
   useEffect(() => {
     listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
@@ -164,6 +156,13 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
             <Col span={6} key={p.id}>
               <Card
                 size="small"
+                // 等高卡片:撑满 Col 行高,body 弹性伸展把 actions 钉在底部
+                style={{
+                  height: '100%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                }}
+                styles={{ body: { flex: 1 } }}
                 title={
                   <Space>
                     <span>{p.name}</span>
@@ -176,11 +175,6 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
                   ) : undefined
                 }
                 actions={[
-                  meta && access.hasPerm(`${PERM_BASE[meta.key]}:run`) && (
-                    <a key="run" onClick={() => setExecTarget(p)}>
-                      一键执行
-                    </a>
-                  ),
                   meta && access.hasPerm(`${PERM_BASE[meta.key]}:edit`) && (
                     <a
                       key="edit"
@@ -252,16 +246,6 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
           </Col>
         )}
       </Row>
-
-      <ExecuteModal
-        pipeline={execTarget}
-        taskType={
-          execTarget
-            ? (SCENARIO_MAP[execTarget.scenario]?.taskType ?? '数据清洗')
-            : '数据清洗'
-        }
-        onClose={() => setExecTarget(undefined)}
-      />
     </PageContainer>
   );
 };
