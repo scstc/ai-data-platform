@@ -62,6 +62,9 @@ import { tagColor } from '@/utils/tags';
 import { TRAIN_TYPE_META, TrainTypeTag } from '@/utils/trainType';
 import AclDrawer from './components/AclDrawer';
 
+/** 自动打标匹配为空时的兜底标签(与后端 ai.py _DEFAULT_FALLBACK_TAG 同值) */
+const DEFAULT_FALLBACK_TAG = '通用业务（默认）';
+
 /** 数据类型枚举（编辑表单复用） */
 const DATA_TYPE_ENUM = {
   text: { text: 'text' },
@@ -322,12 +325,10 @@ const DatasetDetail: React.FC = () => {
         knownTags: known,
       });
       const tags = res.data?.tags ?? [];
-      if (!tags.length) {
-        message.info('未得到新的标签建议');
-        return;
-      }
-      setSuggestedTags(tags);
-      setCheckedTags(tags);
+      // 后端已兜底默认标签;此处二次防御,防后端老版本/降级路径返回空
+      const finalTags = tags.length ? tags : [DEFAULT_FALLBACK_TAG];
+      setSuggestedTags(finalTags);
+      setCheckedTags(finalTags);
     } catch {
       message.error('自动打标失败，请重试');
     } finally {
@@ -1002,7 +1003,7 @@ const DatasetDetail: React.FC = () => {
         okButtonProps={{ disabled: checkedTags.length === 0 }}
       >
         <Typography.Paragraph type="secondary">
-          基于数据集名称与元数据（描述 / 分类 / 数据类型）由 LLM
+          基于数据集名称与元数据（描述 / 分类 / 数据类型）由 AI
           生成，勾选要添加的标签：
         </Typography.Paragraph>
         <Tag.CheckableTagGroup

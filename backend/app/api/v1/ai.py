@@ -29,6 +29,9 @@ from app.schemas.ai import (
 from app.schemas.common import CamelModel
 from app.services.ai import AIProvider, get_ai_provider
 
+# 自动打标匹配为空时的兜底标签(需求:描述与标签库无关联 → 设为「通用业务(默认)」)
+_DEFAULT_FALLBACK_TAG = "通用业务（默认）"
+
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 
@@ -140,4 +143,7 @@ async def suggest_tags(
         body.existing_tags,
         body.known_tags,
     )
+    # 匹配为空 → 兜底默认标签(需求:描述与标签库无关联 → 「通用业务(默认)」)
+    if not result.get("tags"):
+        result["tags"] = [_DEFAULT_FALLBACK_TAG]
     return SuggestTagsResponse(data=SuggestedTags.model_validate(result))

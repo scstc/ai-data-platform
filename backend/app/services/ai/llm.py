@@ -51,8 +51,8 @@ _SUGGEST_NAME_SYSTEM_PROMPT = (
 )
 _SUGGEST_TAGS_SYSTEM_PROMPT = (
     "你是数据集打标助手。根据数据集名称、描述、分类、数据类型等元数据,"
-    "给出 3~5 个简洁的中文标签(每个不超过 8 字,名词短语,不带 # 与引号)。"
-    "优先复用「已有标签库」中语义匹配的标签,不足再新造;不要输出「已有标签」中已存在的。"
+    "从「已有标签库」中挑选语义相关的标签(每个不超过 8 字,名词短语,不带 # 与引号)。"
+    "严禁输出「已有标签库」以外的标签;不得新造标签;不要输出「已有标签」中已存在的。"
     '只输出一个 JSON 对象:{"tags":[string]},不要任何额外解释或 markdown 代码块。'
 )
 # 内容安全审核(#4):分批把若干文本分类为 黄/赌/毒/政/恐 或 正常。
@@ -285,12 +285,18 @@ class OpenAICompatProvider(AIProvider):
             return await self._heuristic.suggest_tags(
                 name, description, category, data_type, existing_tags, known_tags
             )
-        # 去空/去重/剔除已有标签,防 LLM 越界
+        # 去空/去重/剔除已有;再硬过滤只保留标签库内,防 LLM 越界新造
         existing = set(existing_tags)
+        known_set = set(known_tags)
         tags: list[str] = []
         for item in raw:
             t = str(item).strip().strip("#").strip()
-            if t and t not in existing and t not in tags:
+            if (
+                t
+                and t not in existing
+                and t not in tags
+                and t in known_set  # 强制只能从标签库选
+            ):
                 tags.append(t)
         return {"tags": tags[:8]}
 
