@@ -81,7 +81,9 @@ class GenerateCotMapper(Mapper):
         )
 
     def build_input(self, sample):
-        question = sample.get(self.query_key, "")
+        # 平台数据集主内容通常在 text_key 而非 query 字段;query 缺失/为空时回退
+        # 主文本,避免向 LLM 发出空【问题】占位符白耗 API 调用
+        question = sample.get(self.query_key) or sample.get(self.text_key, "")
         reference = sample.get(self.response_key, "")
         parts = [f"【问题】\n{question}"]
         if reference:
