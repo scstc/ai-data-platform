@@ -19,7 +19,6 @@ const TrainsetEditor: React.FC = () => (
     successMessage="训练集生成任务已创建，正在后台运行"
     jobsHref="/governance/trainset"
     taskNameNoun="训练集生成"
-    textKeyTooltip="算子作用的字段;留空则自动探测主文本字段。数据无 text 字段时在此显式指定。"
     binaryDisabledSuffix="二进制不支持"
     defaultGoal={DEFAULT_GOAL}
     GoalPanel={TrainsetGoalPanel}

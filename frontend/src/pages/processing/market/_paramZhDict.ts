@@ -65,6 +65,9 @@ export const PARAM_ZH_DESC: Record<string, string> = {
   output_key: '输出字段',
   field_key: '字段名',
   key_field: '字段名',
+  cot_key: '推理链写入字段名',
+  rejected_key: '拒绝回答写入字段名',
+  reason_key: '生成理由写入字段名',
 
   // ===== 输入/输出路径与文件 =====
   input_path: '输入路径',
@@ -100,6 +103,9 @@ export const PARAM_ZH_DESC: Record<string, string> = {
   device: '运行设备',
 
   // ===== LLM prompt/样例 =====
+  seed_file: '种子示例文件路径(chatml 格式)',
+  example_num: '选取示例数量',
+  qa_pair_template: '单条 QA 对格式模板',
   system_prompt: '系统提示词',
   system_prompt_template: '系统提示词模板',
   input_template: '输入模板',
