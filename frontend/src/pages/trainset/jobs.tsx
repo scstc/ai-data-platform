@@ -1,21 +1,19 @@
-// 训练集生成任务列表页(独立侧边栏菜单入口):复用增强的 ProTable + 报告缓存模式
+// 训练集生成任务列表页(独立侧边栏菜单入口):复用增强的 ProTable
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
-import { Button, Drawer, message, Popconfirm, Tag, Typography } from 'antd';
+import { Button, Drawer, message, Popconfirm } from 'antd';
 import { useRef, useState } from 'react';
 import { DatasetFilter, JobDetail } from '@/components';
 import {
   batchDeleteTrainsetJobs,
   deleteTrainsetJob,
-  getTrainsetReport,
   listTrainsetJobs,
   rerunTrainsetJob,
   stopTrainsetJob,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 import { jobVersionColumns, renderState } from '@/utils/jobState';
-import TrainsetReportModal from './TrainsetReportModal';
 
 const Trainset: React.FC = () => {
   const access = useAccess();
@@ -28,34 +26,8 @@ const Trainset: React.FC = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const [currentJob, setCurrentJob] = useState<DataPlatform.Job>();
   const [selectedRows, setSelectedRows] = useState<DataPlatform.Job[]>([]);
-  const [reportJobId, setReportJobId] = useState<string>();
-  const [reportCache, setReportCache] = useState<
-    Record<string, DataPlatform.TrainsetReport>
-  >({});
   const [polling, setPolling] = useState<number | undefined>(undefined);
   const [datasetId, setDatasetId] = useState<string>();
-
-  const openReport = async (jobId: string) => {
-    if (reportCache[jobId]) {
-      setReportJobId(jobId);
-      return;
-    }
-    try {
-      const res = await getTrainsetReport(jobId);
-      if (res.data) {
-        setReportCache((prev) => ({ ...prev, [jobId]: res.data }));
-        setReportJobId(jobId);
-      }
-    } catch (e: any) {
-      const msg = e?.info?.errorMessage || e?.data?.message || '读取报告失败';
-      message.error(msg);
-    }
-  };
-
-  const reloadReport = async (jobId: string) => {
-    const res = await getTrainsetReport(jobId).catch(() => undefined);
-    if (res?.data) setReportCache((prev) => ({ ...prev, [jobId]: res.data }));
-  };
 
   const handleRerun = async (id: string) => {
     const hide = message.loading('正在重新运行…', 0);
@@ -63,11 +35,6 @@ const Trainset: React.FC = () => {
       await rerunTrainsetJob(id);
       hide();
       message.success('已重新运行，产出新版本');
-      setReportCache((prev) => {
-        const n = { ...prev };
-        delete n[id];
-        return n;
-      });
       actionRef.current?.reload();
     } catch {
       hide();
@@ -142,30 +109,6 @@ const Trainset: React.FC = () => {
       render: (_, r) => renderState(r.state),
     },
     {
-      title: '扩增比',
-      dataIndex: 'progress',
-      width: 160,
-      render: (_, r) => {
-        if (r.state === 'success') {
-          const report = reportCache[r.id];
-          if (report?.expansionRatio != null) {
-            const ratio = report.expansionRatio.toFixed(2);
-            return (
-              <span>
-                <Tag color="geekblue">{ratio}x</Tag>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {report.outputCount}/{report.inputCount}
-                </Typography.Text>
-              </span>
-            );
-          }
-          return <a onClick={() => openReport(r.id)}>查看报告</a>;
-        }
-        if (r.state === 'running') return <Tag color="processing">进行中</Tag>;
-        return '-';
-      },
-    },
-    {
       title: '创建时间',
       dataIndex: 'createdAt',
       width: 170,
@@ -193,13 +136,6 @@ const Trainset: React.FC = () => {
           ];
         }
         const actions: React.ReactNode[] = [];
-        if (r.state === 'success') {
-          actions.push(
-            <a key="report" onClick={() => openReport(r.id)}>
-              查看报告
-            </a>,
-          );
-        }
         if (r.canRerun && canRerun) {
           actions.push(
             <Popconfirm
@@ -269,10 +205,6 @@ const Trainset: React.FC = () => {
             (j) => j.state === 'running' || j.state === 'pending',
           );
           setPolling(active ? 3000 : undefined);
-          const successIds = (res.data ?? [])
-            .filter((j) => j.state === 'success')
-            .map((j) => j.id);
-          void Promise.all(successIds.map((id) => reloadReport(id)));
           return { data: res.data, total: res.total, success: res.success };
         }}
         columns={columns}
@@ -305,13 +237,6 @@ const Trainset: React.FC = () => {
       >
         {currentJob && <JobDetail job={currentJob} />}
       </Drawer>
-
-      <TrainsetReportModal
-        open={!!reportJobId}
-        jobId={reportJobId}
-        report={reportJobId ? reportCache[reportJobId] : undefined}
-        onClose={() => setReportJobId(undefined)}
-      />
     </PageContainer>
   );
 };

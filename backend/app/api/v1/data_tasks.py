@@ -5,9 +5,10 @@
 ``/jobs/{id}/*`` 端点(已支持 pending/running/paused/cancelled 全状态)。新建任务
 仍回各类型 editor,本端点不负责创建。
 
-受管类型 = 异步可管控的 7 类:process/clean/distillation/synthesis/augmentation/
-quality/review(ingest/annotate 不入控制台)。列表项复用 jobs._build_input/_build_output
-挂上输入/产出版本概要,供前端在详情抽屉里做多版本按文件预览。
+受管类型 = 异步可管控的 8 类:process/clean/distillation/synthesis/
+augmentation/trainset/quality/review(ingest/annotate 不入控制台)。列表项复用
+jobs._build_input/_build_output 挂上输入/产出版本概要,供前端在详情抽屉里做
+多版本按文件预览。
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ _TASK_TYPES: tuple[str, ...] = (
     "distillation",
     "synthesis",
     "augmentation",
+    "trainset",
     "quality",
     "review",
 )
@@ -77,7 +79,7 @@ class TrendPoint(CamelModel):
 
 
 class DataTaskStats(CamelModel):
-    """数据任务概览统计,驱动页顶 dashboard。范围 = 受管 7 类任务。
+    """数据任务概览统计,驱动页顶 dashboard。范围 = 受管 8 类任务。
 
     - byState:各生命周期阶段计数(含全部 6 阶段,无则 0);成功率由前端从此派生。
     - byTypeState:类型 × 阶段计数(仅非零组合),供堆叠柱状图。
@@ -98,7 +100,7 @@ class DataTaskStats(CamelModel):
 
 
 def _coerce_date(value: object) -> date:
-    """把 DB 返回的日期(asyncpg 通常给 date,亦兼容 datetime / ISO 字符串)规整为 date。"""
+    """把 DB 返回的日期(asyncpg 通常给 date,亦兼容 datetime/ISO 字符串)规整为 date。"""
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -164,7 +166,7 @@ async def _build_trend14d(session: SessionDep, now_utc: datetime) -> list[TrendP
 async def data_tasks_stats(session: SessionDep) -> DataTaskStats:
     """数据任务概览:状态 / 类型分布 + 近 24h 完成 + 平均时长 + 近 14 天趋势。
 
-    范围与列表一致——仅受管的 7 类任务。均为廉价的 GROUP BY 聚合;随列表一同刷新
+    范围与列表一致——仅受管的 8 类任务。均为廉价的 GROUP BY 聚合;随列表一同刷新
     (含运行时 3s 轮询)。若 jobs 表显著增大,建议给 created_at / finished_at 加索引。
     """
     base = Job.type.in_(_TASK_TYPES)

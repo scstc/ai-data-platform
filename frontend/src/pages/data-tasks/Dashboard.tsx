@@ -27,6 +27,7 @@ const TYPE_LABEL: Record<string, string> = {
   distillation: '数据蒸馏',
   synthesis: '数据合成',
   augmentation: '数据增强',
+  trainset: '训练集生成',
   quality: '质量评估',
   review: '内容安全',
 };

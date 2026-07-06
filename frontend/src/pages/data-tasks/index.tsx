@@ -28,6 +28,7 @@ import {
   rerunDistillationJob,
   rerunJob,
   rerunMakeJob,
+  rerunTrainsetJob,
   resumeJob,
   stopJob,
 } from '@/services/data-platform';
@@ -41,6 +42,7 @@ const TYPE_LABEL: Record<string, string> = {
   distillation: '数据蒸馏',
   synthesis: '数据合成',
   augmentation: '数据增强',
+  trainset: '训练集生成',
   quality: '质量评估',
   review: '内容安全',
 };
@@ -54,6 +56,7 @@ const TYPE_TAG_COLOR: Record<string, string> = {
   distillation: 'geekblue',
   synthesis: 'geekblue',
   augmentation: 'geekblue',
+  trainset: 'geekblue',
   quality: 'purple',
   review: 'magenta',
 };
@@ -82,6 +85,7 @@ const RERUN_SUPPORTED = new Set([
   'distillation',
   'synthesis',
   'augmentation',
+  'trainset',
 ]);
 
 /** 「来源流水线」列点击跳转——回各场景编辑器并带上 pipelineId(quality/review 无编辑器,不在此列)。 */
@@ -90,6 +94,7 @@ const PIPELINE_EDITOR_PAGE: Record<string, string> = {
   distillation: '/governance/distillation/editor',
   synthesis: '/governance/make/editor',
   augmentation: '/governance/augment/editor',
+  trainset: '/governance/trainset/editor',
 };
 
 async function rerunByType(type: string, id: string) {
@@ -100,6 +105,8 @@ async function rerunByType(type: string, id: string) {
       return rerunMakeJob(id);
     case 'augmentation':
       return rerunAugmentJob(id);
+    case 'trainset':
+      return rerunTrainsetJob(id);
     default:
       return rerunJob(id); // process / clean
   }
