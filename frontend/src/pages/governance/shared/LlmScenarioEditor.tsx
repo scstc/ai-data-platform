@@ -22,6 +22,7 @@ import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
 import PipelineCanvas from '@/pages/processing/editor/PipelineCanvas';
 import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
 import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
+import { stepsToYaml } from '@/pages/processing/editor/yaml';
 import {
   createPipeline,
   getDataset,
@@ -32,7 +33,7 @@ import {
 } from '@/services/data-platform';
 import { suggestTaskName, type TaskType } from '@/utils/taskName';
 
-const { Text } = Typography;
+const { Paragraph, Text } = Typography;
 
 /** 目标面板组件的统一 props 形状(蒸馏/合成/增强三份 GoalPanel 原地保留,签名对齐)。 */
 type GoalPanelProps<TGoal> = {
@@ -458,6 +459,20 @@ function LlmScenarioEditor<TGoal extends object>({
           onRightCollapsedChange={setParamsCollapsed}
         />
       </PipelineDndArea>
+
+      <Card title="YAML 预览" size="small" style={{ marginTop: 16 }}>
+        <Paragraph>
+          <pre style={{ margin: 0, fontSize: 12 }}>
+            {steps.length
+              ? stepsToYaml(steps, {
+                  datasetName: selectedDatasetName,
+                  versionLabel: selectedVersionLabel,
+                  textKeys: textKeys.length ? textKeys : undefined,
+                })
+              : '# (未配置算子)'}
+          </pre>
+        </Paragraph>
+      </Card>
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
