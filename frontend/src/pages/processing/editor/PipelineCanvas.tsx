@@ -189,22 +189,23 @@ const OperatorNode = ({ data }: NodeProps) => {
 };
 
 const nodeTypes = {
-  input: EndpointNode,
-  output: EndpointNode,
+  // 类型名不能叫 input/output:那是 xyflow 内置类型,style.css 会给包装层加
+  // 默认盒样式(150px 宽实线框),套在自定义节点外面造成双框溢出
+  endpoint: EndpointNode,
   operator: OperatorNode,
 };
 
 const endpointNodes = (outputX: number): Node[] => [
   {
     id: 'input',
-    type: 'input',
+    type: 'endpoint',
     data: {},
     position: { x: 0, y: 80 },
     deletable: false,
   },
   {
     id: 'output',
-    type: 'output',
+    type: 'endpoint',
     data: {},
     position: { x: outputX, y: 80 },
     deletable: false,
