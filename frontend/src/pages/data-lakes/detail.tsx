@@ -8,6 +8,8 @@ import {
   ProFormCheckbox,
   ProFormDependency,
   ProFormDigit,
+  ProFormGroup,
+  ProFormList,
   ProFormRadio,
   ProFormSelect,
   ProFormText,
@@ -293,7 +295,7 @@ const DataLakeDetailPage: FC = () => {
         datasetId?: string;
         datasetName?: string;
         description?: string;
-        fieldMappings?: Record<string, string>;
+        fieldMappings?: Record<string, { field?: string; template?: string }[]>;
         docSeparator?: string;
         docMaxLength?: number;
         docOverlap?: number;
@@ -315,13 +317,22 @@ const DataLakeDetailPage: FC = () => {
           if (!id || !extractItems) return false;
           const hide = message.loading('正在抽取...', 0);
           try {
-            const fieldMapping = values.fieldMappings
-              ? Object.fromEntries(
-                  Object.entries(values.fieldMappings).filter(([, template]) =>
-                    template?.trim(),
-                  ),
-                )
-              : undefined;
+            // 行列表 → {输出字段: 模板};跳过字段名/模板为空的行
+            const fieldMapping: Record<string, Record<string, string>> = {};
+            for (const [snapId, rows] of Object.entries(
+              values.fieldMappings ?? {},
+            )) {
+              const mapping: Record<string, string> = {};
+              for (const row of rows ?? []) {
+                const field = row?.field?.trim();
+                if (field && row?.template?.trim()) {
+                  mapping[field] = row.template;
+                }
+              }
+              if (Object.keys(mapping).length > 0) {
+                fieldMapping[snapId] = mapping;
+              }
+            }
 
             const hasDocItems = extractItems.some(
               (s) => s.dataCategory === 'document',
@@ -335,9 +346,7 @@ const DataLakeDetailPage: FC = () => {
                 values.targetMode === 'new' ? values.datasetName : undefined,
               description: values.description,
               fieldMapping:
-                fieldMapping && Object.keys(fieldMapping).length > 0
-                  ? fieldMapping
-                  : undefined,
+                Object.keys(fieldMapping).length > 0 ? fieldMapping : undefined,
               docSegment: hasDocItems
                 ? {
                     separator: values.docSeparator || '\\n\\n',
@@ -440,8 +449,9 @@ const DataLakeDetailPage: FC = () => {
               字段映射配置（可选）
             </Typography.Title>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              为表格类版本配置字段映射模板，使用 {'{字段名}'} 占位符拼接多字段为
-              text
+              为表格类版本配置输出字段，每行一个字段，模板中用 {'{源字段名}'}{' '}
+              占位符引用源列，如 id → {'{order_id}'}、text → 用户提问：
+              {'{question}'}。不配置则保留全部原始列。
             </Typography.Text>
             <div style={{ marginTop: 12 }}>
               {(extractItems ?? [])
@@ -469,11 +479,28 @@ const DataLakeDetailPage: FC = () => {
                         )}
                       </Space>
                     </div>
-                    <ProFormTextArea
+                    <ProFormList
                       name={['fieldMappings', item.snapshotId]}
-                      placeholder="用户提问：{question}，客服回答：{answer}"
-                      fieldProps={{ rows: 2, maxLength: 500 }}
-                    />
+                      initialValue={[{ field: 'text', template: '' }]}
+                      creatorButtonProps={{
+                        creatorButtonText: '添加输出字段',
+                      }}
+                      copyIconProps={false}
+                    >
+                      <ProFormGroup>
+                        <ProFormText
+                          name="field"
+                          width="xs"
+                          placeholder="输出字段名,如 id"
+                        />
+                        <ProFormText
+                          name="template"
+                          width="lg"
+                          placeholder="模板,如 {order_id} 或 用户提问：{question}"
+                          fieldProps={{ maxLength: 500 }}
+                        />
+                      </ProFormGroup>
+                    </ProFormList>
                   </div>
                 ))}
             </div>

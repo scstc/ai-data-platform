@@ -170,7 +170,9 @@ async def test_extract_to_existing_dataset_appends_without_recomputing_semantic(
         created_calls.append(kwargs)
         return SimpleNamespace(id="dset-should-not-exist", name=kwargs["name"])
 
-    async def fake_extract(session, lake_id, source_version, *, inject_lineage=True):
+    async def fake_extract(
+        session, lake_id, source_version, *, inject_lineage=True, doc_options=None
+    ):
         return [{"v": source_version}]
 
     async def fake_add_table_member(
@@ -247,7 +249,7 @@ async def test_extract_from_lake_snapshot_accepts_doc_formats(db_session, monkey
     db_session.add(snap)
     await db_session.commit()
 
-    async def fake_read_raw(snapshot):
+    async def fake_read_raw(snapshot, *, doc_options=None):
         # 真实实现会下载字节再走 landing._doc_to_records(markitdown/OCR),
         # 这里只验证网关放行 + 血缘注入,文档解析本身已有独立单测覆盖。
         return [{"text": "解析出的段落"}]
@@ -368,7 +370,9 @@ async def test_extract_names_members_by_lake_file_name(db_session, monkeypatch):
     async def fake_create_dataset(session, **kwargs):
         return SimpleNamespace(id="dset-name01", name=kwargs["name"])
 
-    async def fake_extract(session, lake_id, source_version, *, inject_lineage=True):
+    async def fake_extract(
+        session, lake_id, source_version, *, inject_lineage=True, doc_options=None
+    ):
         return [{"v": source_version}]
 
     async def fake_add_table_member(session, dataset_id, records, *, table_name, **kw):
@@ -417,7 +421,9 @@ async def test_extract_names_db_members_by_db_table(db_session, monkeypatch):
     async def fake_create_dataset(session, **kwargs):
         return SimpleNamespace(id="dset-dbt01", name=kwargs["name"])
 
-    async def fake_extract(session, lake_id, source_version, *, inject_lineage=True):
+    async def fake_extract(
+        session, lake_id, source_version, *, inject_lineage=True, doc_options=None
+    ):
         return [{"v": source_version}]
 
     async def fake_add_table_member(session, dataset_id, records, *, table_name, **kw):

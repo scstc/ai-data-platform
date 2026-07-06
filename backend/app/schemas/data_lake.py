@@ -181,10 +181,13 @@ class ExtractToDatasetRequest(CamelModel):
     dataset_id: str | None = None
     dataset_name: str | None = None
     description: str | None = None
-    # 字段映射模板(可选):key=快照ID, value=模板字符串
-    # 如 {"snap-123": "用户提问：{question}，客服回答：{answer}"}
+    # 字段映射(可选):key=快照ID,value 两种形式:
+    # - {输出字段: 模板} 字典(多字段输出):
+    #   {"snap-123": {"id": "{order_id}", "text": "问:{question} 答:{answer}"}}
+    # - 模板字符串(旧格式,等价于 {"text": 模板}):
+    #   {"snap-123": "用户提问：{question}，客服回答：{answer}"}
     # 适用于表格类快照(database/tabular:数据库表、CSV、Excel等)。
-    field_mapping: dict[str, str] | None = None
+    field_mapping: dict[str, str | dict[str, str]] | None = None
     # 文档分段/预处理配置(可选):对本次抽取的所有文档类快照生效
     doc_segment: DocSegmentConfig | None = None
 

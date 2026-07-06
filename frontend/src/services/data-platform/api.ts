@@ -2555,7 +2555,8 @@ export async function extractLakeToDataset(
     datasetId?: string | null;
     datasetName?: string | null;
     description?: string | null;
-    fieldMapping?: Record<string, string> | null;
+    /** 字段映射:快照ID → {输出字段: 模板}(或旧格式单模板字符串,等价 {text: 模板}) */
+    fieldMapping?: Record<string, string | Record<string, string>> | null;
     /** 文档类快照(word/pdf 等)分段与预处理配置;ppt/pptx 固定一页一条 text */
     docSegment?: {
       separator?: string;

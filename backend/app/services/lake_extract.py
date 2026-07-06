@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 from typing import Any
 
 import pyarrow.parquet as pq
@@ -38,61 +39,48 @@ _logger = logging.getLogger(__name__)
 # 元数据统一嵌套在记录的 "meta" 键下(DJ 标准格式,如 Arxiv 数据集的
 # {"text": ..., "meta": {"src": ..., "date": ..., "version": ...}}),由
 # _inject_lineage_fields 注入(仅 src/date/version 三元组,version 可反查
-# 快照追溯血缘)。字段映射裁列时只保留 text + meta,丢弃原始源列。
-_KEPT_KEYS = frozenset({"text", "meta"})
+# 快照追溯血缘)。字段映射裁列时只保留映射输出字段 + meta,丢弃原始源列。
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
 
-async def _apply_field_mapping_transform(
-    records: list[dict[str, Any]], template: str
+def _render_template(template: str, row: dict[str, Any]) -> str:
+    """渲染单条映射模板:{字段名} 占位符替换为源列值(缺列/None → 空串)。
+
+    纯文本替换,不经 eval/f-string,模板含引号、非法占位符({a.b} 等)均原样保留。
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        value = row.get(match.group(1))
+        return "" if value is None else str(value)
+
+    return _PLACEHOLDER_RE.sub(_sub, template)
+
+
+def _apply_field_mapping_transform(
+    records: list[dict[str, Any]], mapping: dict[str, str]
 ) -> list[dict[str, Any]]:
-    """对记录应用字段映射模板,生成 text 字段并裁列为 text + meta。
+    """对记录应用字段映射,生成映射输出字段并裁列为 输出字段 + meta。
 
     Args:
         records: 原始记录列表(已注入 meta 元数据)
-        template: 映射模板(如 "用户提问：{question}，客服回答：{answer}")
+        mapping: {输出字段: 模板},如 {"id": "{order_id}",
+            "text": "用户提问：{question}，客服回答：{answer}"}
 
     Returns:
-        裁列后的记录列表:只含 text(算子生成)+ meta(src/date/version),
+        裁列后的记录列表:只含映射产出的输出字段 + meta(src/date/version),
         丢弃 question/answer/category 等原始源列。
-
-    Raises:
-        ExternalStoreError: 算子执行失败
 
     适用于表格类数据(database/tabular):数据库表、CSV、TSV、Excel、JSONL 等。
     """
-    if not records or not template.strip():
+    if not records or not mapping:
         return records
 
-    import re
-
-    # 构造 lambda_str(与 ingest_tasks._apply_field_mapping 同逻辑)
-    fields = re.findall(r"\{(\w+)\}", template)
-    safe_template = template
-    for field in fields:
-        safe_template = safe_template.replace(
-            f"{{{field}}}", f'{{row.get("{field}", "")}}'
-        )
-    lambda_str = f"lambda row: {{**row, 'text': f'{safe_template}'}}"
-
-    operators = [{"name": "python_lambda_mapper", "params": {"lambda_str": lambda_str}}]
-
-    # 调用 engine.filter_records 执行算子
-    from app.services.engine import EngineError, filter_records
-
-    try:
-        result, _log = await filter_records(
-            records, operators, project_name="lake-extract"
-        )
-    except EngineError as exc:
-        raise ExternalStoreError(f"字段映射失败: {exc}") from exc
-
-    # 裁列:只留 text + meta,丢弃原始源列(question/answer 等)。
-    # 缺 text 键(理论上算子必产)时保留原记录,不静默吞成空。
     return [
-        {k: v for k, v in rec.items() if k in _KEPT_KEYS}
-        if "text" in rec
-        else rec
-        for rec in result
+        {
+            **{field: _render_template(tpl, rec) for field, tpl in mapping.items()},
+            **({"meta": rec["meta"]} if "meta" in rec else {}),
+        }
+        for rec in records
     ]
 
 
@@ -372,7 +360,7 @@ async def extract_to_new_dataset(
     dataset_id: str | None = None,
     description: str | None = None,
     creator: str = "admin",
-    field_mapping: dict[str, str] | None = None,
+    field_mapping: dict[str, str | dict[str, str]] | None = None,
     doc_segment: DocSegmentOptions | None = None,
 ) -> Any:
     """从若干湖快照抽取生成数据集,目标数据集**新建或追加到已有**(治理改造契约地基)。
@@ -384,7 +372,9 @@ async def extract_to_new_dataset(
        见 _lake_file_name;同名冲突时追加 _2/_3… 后缀避免覆盖)
     3. 血缘追踪字段(source_version 等)在 add_table_member 前已由
        extract_from_lake_snapshot 注入到 records
-    4. 字段映射(可选):为每个快照单独配置模板,拼接多字段为 text
+    4. 字段映射(可选):为每个快照单独配置 {输出字段: 模板},支持多输出字段
+       (如 {"id": "{order_id}", "text": "问:{question} 答:{answer}"});
+       旧的单模板字符串格式等价于 {"text": 模板}
 
     Args:
         db: 数据库会话
@@ -394,7 +384,8 @@ async def extract_to_new_dataset(
         dataset_id: 目标已有数据集 id(与 dataset_name 二选一)
         description: 数据集描述(仅新建时生效)
         creator: 创建人
-        field_mapping: 字段映射模板字典(key=快照ID, value=模板字符串)
+        field_mapping: 字段映射字典(key=快照ID, value={输出字段: 模板} 字典,
+            或旧格式模板字符串,等价于 {"text": 模板})
         doc_segment: 文档类快照(word/pdf 等)的分段/清洗配置,本次抽取内
             所有文档快照共用;ppt/pptx 固定一页一条 text,不受分段参数影响
 
@@ -488,18 +479,28 @@ async def extract_to_new_dataset(
             doc_options=doc_segment,
         )
 
-        # 应用字段映射(表格类快照:database/tabular + 该快照配置了模板时执行)
+        # 应用字段映射(表格类快照:database/tabular + 该快照配置了映射时执行)
         # tabular 包含 csv/tsv/xlsx/xls/jsonl 等结构化文件
-        template = field_mapping.get(snapshot.id) if field_mapping else None
-        if (
-            template
-            and template.strip()
-            and snapshot.data_category in ("database", "tabular")
-        ):
+        raw_mapping = field_mapping.get(snapshot.id) if field_mapping else None
+        # 旧格式单模板字符串 → {"text": 模板};过滤空字段名/空模板行
+        if isinstance(raw_mapping, str):
+            raw_mapping = {"text": raw_mapping}
+        mapping = {
+            field.strip(): tpl
+            for field, tpl in (raw_mapping or {}).items()
+            if field.strip() and tpl and tpl.strip()
+        }
+        if mapping and snapshot.data_category in ("database", "tabular"):
+            if "meta" in mapping:
+                raise ExternalStoreError(
+                    "字段映射输出字段不能叫 meta(保留给血缘元数据)"
+                )
             _logger.info(
-                "[字段映射] snapshot=%s 应用模板,裁列为 text + 血缘字段", snapshot.id
+                "[字段映射] snapshot=%s 应用映射,裁列为 %s + 血缘字段",
+                snapshot.id,
+                sorted(mapping),
             )
-            records = await _apply_field_mapping_transform(records, template)
+            records = _apply_field_mapping_transform(records, mapping)
 
         base = _safe_table_name(_lake_file_name(snapshot))
         table_name = base
