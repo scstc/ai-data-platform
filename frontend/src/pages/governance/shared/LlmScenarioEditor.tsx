@@ -71,7 +71,8 @@ export type LlmScenarioEditorProps<TGoal extends object> = {
   jobsHref: string;
   /** suggestTaskName 第二参数,如 "数据蒸馏" */
   taskNameNoun: TaskType;
-  textKeyTooltip: string;
+  /** 「文本字段」多选的提示;不传 = 隐藏该选择器,后端自动探测主文本字段 */
+  textKeyTooltip?: string;
   /** 版本为二进制格式时禁用项的提示后缀,如 "二进制不可蒸馏" */
   binaryDisabledSuffix: string;
   defaultGoal: TGoal;
@@ -185,14 +186,14 @@ function LlmScenarioEditor<TGoal extends object>({
   // 版本变化:拉一条预览取列名,供「文本字段」多选;切版本时清空已选(列可能不同)
   useEffect(() => {
     setTextKeys([]);
-    if (!versionId) {
+    if (!versionId || !textKeyTooltip) {
       setColumns([]);
       return;
     }
     previewDatasetVersion(versionId, { limit: 1 })
       .then((r) => setColumns(r.columns ?? []))
       .catch(() => setColumns([]));
-  }, [versionId]);
+  }, [versionId, textKeyTooltip]);
 
   // 从数据集版本表「流程」入口跳入时,按 URL 预选数据集 + 版本
   const location = useLocation();
@@ -383,19 +384,21 @@ function LlmScenarioEditor<TGoal extends object>({
             };
           })}
         />
-        <Tooltip title={textKeyTooltip}>
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder="文本字段(留空=自动)"
-            style={{ minWidth: 220, maxWidth: 360 }}
-            value={textKeys}
-            onChange={setTextKeys}
-            disabled={!versionId || columns.length === 0}
-            options={columns.map((c) => ({ label: c, value: c }))}
-            maxTagCount="responsive"
-          />
-        </Tooltip>
+        {textKeyTooltip && (
+          <Tooltip title={textKeyTooltip}>
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder="文本字段(留空=自动)"
+              style={{ minWidth: 220, maxWidth: 360 }}
+              value={textKeys}
+              onChange={setTextKeys}
+              disabled={!versionId || columns.length === 0}
+              options={columns.map((c) => ({ label: c, value: c }))}
+              maxTagCount="responsive"
+            />
+          </Tooltip>
+        )}
       </Space>
 
       <Card size="small" style={{ marginBottom: 16 }}>

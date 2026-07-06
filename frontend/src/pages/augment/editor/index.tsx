@@ -18,7 +18,6 @@ const AugmentEditor: React.FC = () => (
     successMessage="增强任务已创建，正在后台运行"
     jobsHref="/governance/augment/jobs"
     taskNameNoun="数据增强"
-    textKeyTooltip="算子作用的字段;留空则自动探测主文本字段。数据无 text 字段(如 GIS address)时在此显式指定。"
     binaryDisabledSuffix="二进制不支持"
     defaultGoal={DEFAULT_GOAL}
     GoalPanel={AugmentGoalPanel}
