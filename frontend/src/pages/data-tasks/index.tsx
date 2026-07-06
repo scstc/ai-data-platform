@@ -4,7 +4,15 @@
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history, useAccess, useSearchParams } from '@umijs/max';
-import { Button, Drawer, message, Popconfirm, Progress, Tag } from 'antd';
+import {
+  Button,
+  Drawer,
+  message,
+  Popconfirm,
+  Progress,
+  Tag,
+  Typography,
+} from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { JobDetail } from '@/components';
 import {
@@ -274,17 +282,21 @@ const DataTasks: React.FC = () => {
       title: '任务名',
       dataIndex: 'name',
       width: 240,
-      ellipsis: true,
-      render: (dom, record) => (
-        <a
+      // Tailwind preflight 把裸 <a> 的颜色重置为 inherit,须用 Typography.Link
+      // 才有链接蓝色与 hover 反馈;省略也交给它做——列级 ellipsis 会把内容包进
+      // Typography.Text,其自带文字色会盖掉链接蓝
+      render: (_, record) => (
+        <Typography.Link
+          ellipsis
           title={record.name}
+          style={{ width: '100%' }}
           onClick={(e) => {
             e.preventDefault();
             openDetail(record);
           }}
         >
-          {dom}
-        </a>
+          {record.name}
+        </Typography.Link>
       ),
     },
     {
