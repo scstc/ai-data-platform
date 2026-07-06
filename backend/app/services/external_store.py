@@ -783,6 +783,40 @@ async def upload_jsonl_member(
     return f"s3://{bucket}/{key}"
 
 
+async def copy_object_to_uploads(
+    src_uri: str, dataset_id: str, version_no: int, table_name: str, fmt: str
+) -> str:
+    """平台 MinIO 内 server-side copy:把已有对象复制为新版本成员对象。
+
+    供加工产新版本时全拷贝结转未处理成员:新版本物理持有全部成员文件、
+    版本间零共享(删版本可整前缀删对象,不再依赖 storage_uri 引用计数)。
+    复制在 MinIO 服务端完成,不经后端网络、不占本地磁盘。
+    仅适用于平台 MinIO 内的源对象(单对象上限 5 GiB,与 MAX_MATERIALIZE_BYTES
+    一致);外部 S3 / 本地路径来源由调用方下载后上传。
+    返回新对象的 storage_uri。S3 错误抛 ExternalStoreError。
+    """
+    from minio.commonconfig import CopySource
+
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    src_bucket, src_key = parse_s3_uri(src_uri)
+    dst_key = f"{dataset_id}/v{version_no}/{table_name}.{fmt}"
+    client = client_for(cfg)
+    try:
+        await asyncio.to_thread(
+            client.copy_object, bucket, dst_key, CopySource(src_bucket, src_key)
+        )
+    except S3Error as exc:
+        raise ExternalStoreError(
+            f"复制对象失败 {src_bucket}/{src_key} → {bucket}/{dst_key}:{exc}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 连接类错误统一上报
+        raise ExternalStoreError(
+            f"复制对象失败 {src_bucket}/{src_key} → {bucket}/{dst_key}:{exc}"
+        ) from exc
+    return f"s3://{bucket}/{dst_key}"
+
+
 async def upload_file_to_uploads(
     dataset_id: str, version_no: int, path: Path
 ) -> str:

@@ -17,13 +17,31 @@ describe('stepsToYaml', () => {
     expect(stepsToYaml([])).toContain('process: []');
   });
 
-  it('编排粒度=文件:dataset 渲染数据集本名,file 单独一行,避免语义混淆', () => {
+  it('与后端 build_config 同构:staging 相对路径,数据集上下文以注释呈现', () => {
     const y = stepsToYaml([{ name: 'clean_html_mapper', params: {} }], {
       datasetName: '测试6666',
       versionLabel: 'v2026.7.2 (#1)',
       fileName: '安全审核_银行业务QA_2500条',
     });
-    expect(y).toContain('dataset: 测试6666 / v2026.7.2 (#1)');
-    expect(y).toContain('file: 安全审核_银行业务QA_2500条');
+    expect(y).toContain('# dataset: 测试6666 / v2026.7.2 (#1)');
+    expect(y).toContain(
+      'dataset_path: inputs/安全审核_银行业务QA_2500条.jsonl',
+    );
+    expect(y).toContain(
+      'export_path: outputs/安全审核_银行业务QA_2500条/安全审核_银行业务QA_2500条.jsonl',
+    );
+  });
+
+  it('parquet 成员按 parquet 渲染路径,其余格式规范化为 jsonl', () => {
+    const pq = stepsToYaml([{ name: 'clean_html_mapper', params: {} }], {
+      fileName: 'users',
+      fileFormat: 'parquet',
+    });
+    expect(pq).toContain('dataset_path: inputs/users.parquet');
+    const csv = stepsToYaml([{ name: 'clean_html_mapper', params: {} }], {
+      fileName: 'users',
+      fileFormat: 'csv',
+    });
+    expect(csv).toContain('dataset_path: inputs/users.jsonl');
   });
 });

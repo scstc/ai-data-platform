@@ -151,6 +151,8 @@ const QualityEditor: React.FC = () => {
       datasetName: selectedDatasetName,
       versionLabel: selectedVersionLabel,
       fileName: memberName,
+      fileFormat: versionMembers.find((m) => m.tableName === memberName)
+        ?.format,
       textKeys: cfg.textKeys,
     });
   };

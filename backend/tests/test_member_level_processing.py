@@ -44,10 +44,12 @@ async def test_process_selected_members(db_session):
     assert len(members) == 3
     assert {m.table_name for m in members} == {"users", "orders", "logs"}
 
-    # 4. 结转成员零拷贝:logs 直接引用输入版本的原对象
+    # 4. 结转成员全拷贝:新版本自包含,logs 物理复制到 v2 前缀下、不与 v1 共享对象
+    #    (删版本因此可整前缀删对象,不依赖 storage_uri 共享引用计数)
     v1_members = {m.table_name: m for m in await _get_version_members(db_session, v1.id)}
     v2_logs = next(m for m in members if m.table_name == "logs")
-    assert v2_logs.storage_uri == v1_members["logs"].storage_uri
+    assert v2_logs.storage_uri != v1_members["logs"].storage_uri
+    assert f"/{ds.id}/v{v2.version_no}/" in v2_logs.storage_uri
 
     # 5. 验证版本汇总统计
     assert v2.rows == sum(m.rows or 0 for m in members)

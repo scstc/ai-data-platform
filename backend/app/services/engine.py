@@ -8,12 +8,14 @@ data-juicer venv(py3.11)的 dj-process,进程隔离、规避版本冲突。
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import secrets
+import shutil
 import signal
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -26,15 +28,20 @@ from app.models.dataset_version_table import DatasetVersionTable
 from app.models.job_input import JobInput
 from app.services import operator_catalog as oc
 from app.services.external_store import (
+    _version_cfg,
     cached_bytes,
+    copy_object_to_uploads,
     materialized_version,
     parse_s3_uri,
     persist_manifest_output,
     platform_config,
-    upload_file_to_uploads,
-    upload_parquet_file_to_uploads,
+    upload_object,
 )
-from app.services.landing import MANIFEST_FORMAT, parquet_bytes_to_records
+from app.services.landing import (
+    MANIFEST_FORMAT,
+    normalize_to_records,
+    parquet_bytes_to_records,
+)
 from app.services.llm_config import get_active_llm_config
 
 # 多 job 并发上限
@@ -220,16 +227,25 @@ def build_config(
 
 
 
-# 仅运行期有意义、对用户无价值的内部键:中转输入路径(S3 对象的一次性本地副本)、
-# 本地工作产出路径、job_id 充当的 project_name、单机并行度 np。落库展示前剥掉,
-# 用户看到的只剩"配方"(算子链 + 清洗字段)。磁盘上喂给 dj-process 的 job.yaml 不受影响。
-_DISPLAY_DROP_KEYS = frozenset(
-    {"project_name", "dataset_path", "export_path", "np"}
-)
+# 仅运行期有意义、对用户无价值的内部键:job_id 充当的 project_name、单机并行度 np。
+# 落库展示前剥掉。dataset_path/export_path 在 staging 流程下是相对路径(inputs/…
+# → outputs/…),可展示、与前端编辑器 YAML 预览同构;仅 manifest 等仍用绝对路径的
+# 场景按值剥掉(不泄漏服务器路径)。磁盘上喂给 dj-process 的 job.yaml 不受影响。
+_DISPLAY_DROP_KEYS = frozenset({"project_name", "np"})
+_PATH_KEYS = ("dataset_path", "export_path")
+
+
+def _is_absolute_path(value: Any) -> bool:
+    """POSIX 或 Windows 意义上的绝对路径(部署/开发平台任一判定命中即算)。"""
+    if not isinstance(value, str):
+        return True
+    return (
+        PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+    )
 
 
 def config_yaml_for_display(yaml_text: str) -> str:
-    """把执行用 YAML 清理成面向用户的展示版:剥掉内部中转/运行期键。
+    """把执行用 YAML 清理成面向用户的展示版:剥掉内部运行期键与绝对路径。
 
     解析失败或非 dict(理论上不会)时原样返回,绝不因展示美化而丢真实配置。
     """
@@ -239,15 +255,24 @@ def config_yaml_for_display(yaml_text: str) -> str:
         return yaml_text
     if not isinstance(cfg, dict):
         return yaml_text
-    kept = {k: v for k, v in cfg.items() if k not in _DISPLAY_DROP_KEYS}
+    kept = {
+        k: v
+        for k, v in cfg.items()
+        if k not in _DISPLAY_DROP_KEYS
+        and not (k in _PATH_KEYS and _is_absolute_path(v))
+    }
     return yaml.safe_dump(kept, allow_unicode=True, sort_keys=False)
 
 
-async def _run_dj(yaml_path: Path, *, job_id: str | None = None) -> tuple[int, str]:
+async def _run_dj(
+    yaml_path: Path, *, job_id: str | None = None, cwd: Path | None = None
+) -> tuple[int, str]:
     """异步起 dj-process 子进程,返回 (退出码, 合并日志)。
 
     传 job_id 时把子进程登记进 _running_procs(供 terminate_job 停止);进程结束即注销。
     超过 settings.engine_job_timeout 秒(>0 时)则杀进程并抛 EngineError。
+    cwd:子进程工作目录。DJ 对 dataset_path/export_path 做 os.path.abspath
+    (按进程 cwd 解析),YAML 里写相对路径时必须固定 cwd(staging 目录)。
     """
     proc = await asyncio.create_subprocess_exec(
         settings.dj_process_bin,
@@ -255,6 +280,7 @@ async def _run_dj(yaml_path: Path, *, job_id: str | None = None) -> tuple[int, s
         str(yaml_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        cwd=str(cwd) if cwd is not None else None,
         # 自成进程组:停止/超时时可整组杀,连带 dj fork 出的子孙(uv/pip 等)
         start_new_session=True,
         # 配了 LLM 时把 OPENAI_* 注入,供 needs_api 算子的 openai 客户端读取
@@ -551,6 +577,116 @@ def _get_member_output_path(
     return out_dir / f"{table_name}.{format}"
 
 
+def _new_staging_dir(job_id: str) -> Path:
+    """建随机命名的 staging 目录(datasets 卷上,容量随数据卷),调用方负责清理。"""
+    staging = (
+        Path(settings.datasets_dir)
+        / ".staging"
+        / f"{job_id}-{secrets.token_hex(4)}"
+    )
+    (staging / "inputs").mkdir(parents=True, exist_ok=True)
+    (staging / "outputs").mkdir(parents=True, exist_ok=True)
+    return staging
+
+
+async def _stage_member_input(
+    session: AsyncSession,
+    input_version: DatasetVersion,
+    member: DatasetVersionTable,
+    in_dir: Path,
+    *,
+    pseudo: bool,
+) -> tuple[Path, str]:
+    """把一个成员的输入数据物化到 staging inputs/ 下,返回 (本地路径, 落地格式)。
+
+    pseudo(无成员表的版本合成的伪成员)走 materialized_version——它处理
+    hosted 下载、csv/xlsx 规范化、BOM 剥离等全部输入形态;真实成员按
+    storage_uri scheme 取字节,非 parquet/jsonl 格式规范化为 jsonl(DJ 不读 csv)。
+    """
+    if pseudo:
+        async with materialized_version(input_version, session) as src:
+            if not src.exists():
+                raise EngineError(
+                    f"输入版本数据文件不存在:{input_version.storage_uri}"
+                )
+            fmt = "parquet" if src.suffix == ".parquet" else "jsonl"
+            dst = in_dir / f"{member.table_name}.{fmt}"
+            await asyncio.to_thread(shutil.copyfile, src, dst)
+        return dst, fmt
+
+    uri = member.storage_uri
+    fmt = member.format if member.format in ("parquet", "jsonl") else "jsonl"
+    dst = in_dir / f"{member.table_name}.{fmt}"
+    if uri.startswith("s3://"):
+        cfg = await _version_cfg(input_version, session)
+        bucket, key = parse_s3_uri(uri)
+        data = await cached_bytes(cfg, bucket, key)
+    else:
+        src = Path(uri)
+        if not src.exists():
+            raise EngineError(f"成员 {member.table_name} 数据文件不存在:{uri}")
+        data = await asyncio.to_thread(src.read_bytes)
+    if member.format not in ("parquet", "jsonl"):
+        records = normalize_to_records(data, member.format)
+        text = "".join(
+            json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in records
+        )
+        await asyncio.to_thread(dst.write_text, text, "utf-8")
+    else:
+        await asyncio.to_thread(dst.write_bytes, data)
+    return dst, fmt
+
+
+async def _upload_product(
+    dataset_id: str, version_no: int, table_name: str, fmt: str, path: Path
+) -> str:
+    """流式上传一个成员产物到平台 MinIO,键 = <id>/v<n>/<table>.<fmt>,返回 URI。"""
+    cfg = platform_config()
+    bucket = settings.storage_minio_upload_bucket
+    key = f"{dataset_id}/v{version_no}/{table_name}.{fmt}"
+    size = path.stat().st_size
+    content_type = (
+        "application/x-ndjson" if fmt == "jsonl" else "application/octet-stream"
+    )
+    with path.open("rb") as f:
+        await upload_object(cfg, bucket, key, f, size, content_type=content_type)
+    return f"s3://{bucket}/{key}"
+
+
+async def _copy_carried_member(
+    session: AsyncSession,
+    input_version: DatasetVersion,
+    member_data: dict[str, Any],
+    dataset_id: str,
+    new_vno: int,
+) -> dict[str, Any]:
+    """全拷贝一个结转成员:对象复制到新版本前缀下,返回改指新对象的成员数据。
+
+    平台 MinIO 内对象走 server-side copy(不经后端网络);外部 S3(hosted)与
+    本地路径来源取字节后上传。新版本因此自包含,版本间零共享。
+    """
+    uri = member_data["storage_uri"]
+    table = member_data["table_name"]
+    fmt = member_data["format"]
+    if uri.startswith("s3://") and not input_version.source_datasource_id:
+        new_uri = await copy_object_to_uploads(uri, dataset_id, new_vno, table, fmt)
+    elif uri.startswith("s3://"):
+        cfg = await _version_cfg(input_version, session)
+        bucket, key = parse_s3_uri(uri)
+        data = await cached_bytes(cfg, bucket, key)
+        cfg_dst = platform_config()
+        dst_bucket = settings.storage_minio_upload_bucket
+        dst_key = f"{dataset_id}/v{new_vno}/{table}.{fmt}"
+        await upload_object(cfg_dst, dst_bucket, dst_key, io.BytesIO(data), len(data))
+        new_uri = f"s3://{dst_bucket}/{dst_key}"
+    else:
+        src = Path(uri)
+        if not src.exists():
+            raise EngineError(f"结转成员 {table} 数据文件不存在:{uri}")
+        new_uri = await _upload_product(dataset_id, new_vno, table, fmt, src)
+    return {**member_data, "storage_uri": new_uri}
+
+
 async def run_process_job(
     session: AsyncSession,
     *,
@@ -563,7 +699,14 @@ async def run_process_job(
     target_members: list[str] | None = None,
     member_configs: list[dict[str, Any]] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
-    """对输入版本的指定成员跑算子流水线,产出新版本。
+    """对输入版本的指定成员跑算子流水线,产出新版本(staging 两阶段执行)。
+
+    执行模型:随机 staging 目录内物化输入、逐成员跑 dj-process(相对路径 YAML +
+    cwd=staging),**全部成员成功后**才占版本号(版本行 flush,并发同数据集任务在
+    uq_dataset_version_no 上互斥)、上传产物、全拷贝结转未处理成员、单事务提交
+    版本+成员+血缘;任一步失败回滚并清理已传对象,不留半套产物。finally 整目录
+    清理 staging。新版本自包含:全部成员文件物理落在 v<n> 前缀下,版本间零共享
+    (存量零拷贝结转的版本仍在,删除侧的 storage_uri 共享引用检查须保留)。
 
     text_keys:用户显式指定的清洗作用字段(可多字段);留空则按字段名优先级自动探测。
     use_ray(G6):切 DJ ray executor(调用方须先经 capabilities.ray 门控)。
@@ -571,12 +714,15 @@ async def run_process_job(
     target_members:要处理的成员名列表;None=处理所有成员(向后兼容,需配合 operators)。
     member_configs:新版成员独立配置,格式 [{member_name, operators, text_keys?}, ...]。
                    优先于 operators+target_members 模式;指定时 operators/text_keys 参数被忽略。
+    无成员表记录的版本(construct/push 等路径产出)合成单一伪成员 'data' 走同一
+    流程,产出版本自此拥有真实成员行。
+    并发信号量由调用方(job_runner)持有,此处不获取(asyncio.Semaphore 非重入)。
     返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 EngineError。
     """
     # manifest 媒体集不落 dataset_version_tables(见 landing.land_media_manifest),
     # 一个版本天然只有一个成员(整版本一套算子,见 datasets._attach_tables 合成的
-    # MANIFEST_MEMBER_NAME 伪成员与 jobs._start_job 的对应校验)——复用已跑通的
-    # 整版本处理路径(含物化清单/媒体、产出媒体回传 MinIO),不按表成员拆分执行。
+    # MANIFEST_MEMBER_NAME 伪成员与 jobs._start_job 的对应校验)——走独立的
+    # 媒体处理路径(物化清单/媒体、产出媒体回传 MinIO),不按表成员拆分执行。
     if input_version.format == MANIFEST_FORMAT:
         if member_configs:
             if len(member_configs) != 1:
@@ -585,7 +731,7 @@ async def run_process_job(
             text_keys = member_configs[0].get("text_keys")
         if not operators:
             raise EngineError("媒体(manifest)数据集必须提供算子配置")
-        return await _run_process_job_legacy(
+        return await _run_manifest_job(
             session,
             job_id=job_id,
             input_version=input_version,
@@ -595,34 +741,35 @@ async def run_process_job(
             media_keys=media_keys,
         )
 
-    # 1. 查询输入版本的成员
+    # 1. 查询输入版本的成员;无成员(早于回填迁移 / construct·push 等路径产出)
+    #    合成单一伪成员 'data'(不入 session),统一走成员级流程
     members = await _get_version_members(session, input_version.id)
-
-    # 如果版本无成员表（旧版本），回退到原逻辑
-    if not members:
-        # 旧版调用必须提供 operators
+    pseudo = not members
+    if pseudo:
         if not operators:
-            raise EngineError("旧版单文件版本必须提供 operators 参数")
-        return await _run_process_job_legacy(
-            session,
-            job_id=job_id,
-            input_version=input_version,
-            operators=operators,
-            text_keys=text_keys,
-            use_ray=use_ray,
-            media_keys=media_keys,
-        )
+            raise EngineError("该版本无成员表记录,必须提供 operators 参数")
+        members = [
+            DatasetVersionTable(
+                id="",
+                dataset_version_id=input_version.id,
+                table_name="data",
+                storage_uri=input_version.storage_uri,
+                format=input_version.format,
+                rows=input_version.rows,
+                size=input_version.size,
+                schema_snapshot=input_version.schema_snapshot,
+                schema_variant=input_version.schema_variant,
+            )
+        ]
 
     # 2. 确定处理模式：优先使用 member_configs，否则回退到 operators 统一配置
     if member_configs:
-        # 新版：每个成员独立配置
         config_map = {cfg["member_name"]: cfg for cfg in member_configs}
         members_to_process = [m for m in members if m.table_name in config_map]
 
         if not members_to_process:
             raise EngineError("未找到 member_configs 中指定的成员")
     else:
-        # 旧版：target_members + operators
         if not operators:
             raise EngineError("未提供 member_configs 时必须提供 operators 参数")
 
@@ -640,153 +787,199 @@ async def run_process_job(
             for m in members_to_process
         }
 
-    # 3. 创建新版本目录和基础结构
     dataset_id = input_version.dataset_id
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
-    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 4. 对每个成员独立处理
+    staging = _new_staging_dir(job_id)
     all_logs: list[str] = []
     all_yamls: list[str] = []
-    new_members_data: list[dict[str, Any]] = []
+    # 阶段一产出:[{member, out_format, out_path, rows, size}],阶段二统一上传
+    products: list[dict[str, Any]] = []
+    try:
+        # ── 阶段一:staging 内逐成员跑 DJ(不碰对象存储、不写 DB)──
+        for member in members_to_process:
+            member_cfg = config_map[member.table_name]
+            member_operators = member_cfg["operators"]
+            member_text_keys = member_cfg.get("text_keys")
 
-    for member in members_to_process:
-        # 获取该成员的配置
-        member_cfg = config_map[member.table_name]
-        member_operators = member_cfg["operators"]
-        member_text_keys = member_cfg.get("text_keys")
+            input_path, in_format = await _stage_member_input(
+                session, input_version, member, staging / "inputs", pseudo=pseudo
+            )
+            out_format = in_format
+            # 产物落成员独立子目录:DJ 把 work_dir 定为 export_path 所在目录,
+            # 会往里写 cli.yaml/metadata 等内部产物,独立子目录避免混入他成员产物
+            out_rel = f"outputs/{member.table_name}/{member.table_name}.{out_format}"
+            (staging / "outputs" / member.table_name).mkdir(
+                parents=True, exist_ok=True
+            )
+            yaml_path = staging / f"{member.table_name}_job.yaml"
 
-        # 物化成员文件
-        input_path = await _materialize_member(session, member)
+            detected_key = (
+                None
+                if member_text_keys
+                else detect_text_key(_read_head_records(input_path, 50))
+            )
+            cfg = build_config(
+                project_name=f"{job_id}-{member.table_name}",
+                # 相对路径 + cwd=staging:YAML 可移植、不泄漏服务器路径,
+                # DJ 侧 os.path.abspath 按子进程 cwd 解析
+                input_path=f"inputs/{input_path.name}",
+                output_path=out_rel,
+                operators=member_operators,
+                text_key=detected_key,
+                text_keys=member_text_keys,
+                executor_type="ray" if use_ray else None,
+                media_keys=None,
+            )
+            yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+            yaml_path.write_text(yaml_content, encoding="utf-8")
+            all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
 
-        # 确定输出格式（保持输入格式）
-        out_format = member.format if member.format in ("parquet", "jsonl") else "jsonl"
-        output_path = _get_member_output_path(
-            dataset_id, new_vno, member.table_name, out_format
-        )
-        yaml_path = out_dir / f"{member.table_name}_job.yaml"
+            # 信号量由 job_runner 持有;子进程以 job_id 注册,POST /jobs/{id}/stop
+            # 的 terminate_job(job_id) 才能命中(成员串行执行,同刻至多一个进程)
+            code, log = await _run_dj(yaml_path, job_id=job_id, cwd=staging)
 
-        # 构建 DJ 配置（使用该成员的算子）
-        detected_key = (
-            None
-            if member_text_keys
-            else detect_text_key(_read_head_records(input_path, 50))
-        )
-        cfg = build_config(
-            project_name=f"{job_id}-{member.table_name}",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            operators=member_operators,
-            text_key=detected_key,
-            text_keys=member_text_keys,
-            executor_type="ray" if use_ray else None,
-            media_keys=media_keys if member.format == MANIFEST_FORMAT else None,
-        )
-        yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
-        yaml_path.write_text(yaml_content, encoding="utf-8")
-
-        # 收集该成员的 YAML（带标识）
-        all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
-
-        # 运行 DJ
-        async with _semaphore:
-            code, log = await _run_dj(
-                yaml_path, job_id=f"{job_id}-{member.table_name}"
+            operator_names = [op["name"] for op in member_operators]
+            all_logs.append(
+                f"=== {member.table_name} ===\n算子: {operator_names}\n{log}"
             )
 
-        # 日志中注明使用的算子
-        operator_names = [op["name"] for op in member_operators]
-        all_logs.append(
-            f"=== {member.table_name} ===\n算子: {operator_names}\n{log}"
-        )
+            out_path = staging / out_rel
+            if code != 0 or not out_path.exists():
+                tail = "\n".join(log.strip().splitlines()[-8:])
+                raise EngineError(
+                    f"成员 {member.table_name} 处理失败"
+                    f"(dj-process 退出码 {code})\n{tail}"
+                )
 
-        if code != 0 or not output_path.exists():
-            tail = "\n".join(log.strip().splitlines()[-8:])
-            raise EngineError(
-                f"成员 {member.table_name} 处理失败(dj-process 退出码 {code})\n{tail}"
+            if out_format == "parquet":
+                rows = len(parquet_bytes_to_records(out_path.read_bytes()))
+            else:
+                rows = sum(
+                    1 for line in out_path.open(encoding="utf-8") if line.strip()
+                )
+            products.append(
+                {
+                    "member": member,
+                    "out_format": out_format,
+                    "out_path": out_path,
+                    "rows": rows,
+                    "size": out_path.stat().st_size,
+                }
             )
 
-        # 上传产出文件并记录成员数据
-        from app.services.external_store import (
-            upload_jsonl_member,
-            upload_parquet_member,
+        # ── 阶段二:占版本号 → 上传/复制 → 成员行 → 单事务提交 ──
+        carried = carry_over_members(
+            members, {m.table_name for m in members_to_process}
         )
-
-        if out_format == "parquet":
-            data_bytes = output_path.read_bytes()
-            storage_uri = await upload_parquet_member(
-                dataset_id, new_vno, member.table_name, data_bytes
+        max_vno = await session.scalar(
+            select(func.max(DatasetVersion.version_no)).where(
+                DatasetVersion.dataset_id == dataset_id
             )
-            rows = len(parquet_bytes_to_records(data_bytes))
-        else:
-            data_bytes = output_path.read_bytes()
-            storage_uri = await upload_jsonl_member(
-                dataset_id, new_vno, member.table_name, data_bytes
-            )
-            rows = sum(
-                1 for line in output_path.open(encoding="utf-8") if line.strip()
-            )
-
-        new_members_data.append(
-            {
-                "table_name": member.table_name,
-                "storage_uri": storage_uri,
-                "format": out_format,
-                "rows": rows,
-                "size": len(data_bytes),
-                "schema_variant": member.schema_variant,
-            }
         )
-
-    # 5. 未配置算子的成员原样结转,再创建新版本和成员记录
-    new_members_data += carry_over_members(
-        members, {m.table_name for m in members_to_process}
-    )
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
-        format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
-        rows=sum(m["rows"] or 0 for m in new_members_data),
-        size=sum(m["size"] or 0 for m in new_members_data),
-        origin="managed",
-        produced_by_job_id=job_id,
-        note=f"加工产出(来自 v{input_version.version_no})",
-    )
-    session.add(version)
-    await session.flush()
-
-    for m_data in new_members_data:
-        member_rec = DatasetVersionTable(
-            id=_new_member_id(),
-            dataset_version_id=version.id,
-            **m_data,
+        new_vno = (max_vno or 0) + 1
+        total_rows = sum(p["rows"] for p in products) + sum(
+            m["rows"] or 0 for m in carried
         )
-        session.add(member_rec)
+        total_size = sum(p["size"] for p in products) + sum(
+            m["size"] or 0 for m in carried
+        )
+        member_count = len(products) + len(carried)
+        version = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=new_vno,
+            storage_uri=(
+                f"s3://{settings.storage_minio_upload_bucket}"
+                f"/{dataset_id}/v{new_vno}/"
+            ),
+            format="multi" if member_count > 1 else products[0]["out_format"],
+            rows=total_rows,
+            size=total_size,
+            origin="managed",
+            produced_by_job_id=job_id,
+            note=f"加工产出(来自 v{input_version.version_no})",
+        )
+        # 先 flush 占版本号:并发同数据集任务在唯一约束上互斥,
+        # 之后的对象上传才不会与他人混写同一 v<n> 前缀
+        session.add(version)
+        await session.flush()
+        try:
+            new_members_data: list[dict[str, Any]] = []
+            for p in products:
+                member = p["member"]
+                storage_uri = await _upload_product(
+                    dataset_id,
+                    new_vno,
+                    member.table_name,
+                    p["out_format"],
+                    p["out_path"],
+                )
+                new_members_data.append(
+                    {
+                        "table_name": member.table_name,
+                        "storage_uri": storage_uri,
+                        "format": p["out_format"],
+                        "rows": p["rows"],
+                        "size": p["size"],
+                        "schema_variant": member.schema_variant,
+                    }
+                )
+            for m_data in carried:
+                new_members_data.append(
+                    await _copy_carried_member(
+                        session, input_version, m_data, dataset_id, new_vno
+                    )
+                )
+            for m_data in new_members_data:
+                session.add(
+                    DatasetVersionTable(
+                        id=_new_member_id(),
+                        dataset_version_id=version.id,
+                        **m_data,
+                    )
+                )
+            session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+            await session.commit()
+        except BaseException:
+            # 回滚未提交的版本/成员行(否则 job_runner 落 failed 态的 commit 会把
+            # 半成品版本一并提交),并 best-effort 清掉本次已传到 v<n> 前缀的对象
+            await session.rollback()
+            try:
+                from app.services.external_store import remove_prefix
 
-    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
-    await session.commit()
-    await session.refresh(version)
+                await remove_prefix(
+                    platform_config(),
+                    settings.storage_minio_upload_bucket,
+                    f"{dataset_id}/v{new_vno}/",
+                )
+            except Exception:  # noqa: BLE001 清理失败不掩盖原始错误
+                pass
+            raise
+        await session.refresh(version)
 
-    # 6. 汇总日志
-    combined_log = "\n\n".join(all_logs)
-    log_path = out_dir / "run.log"
-    log_path.write_text(combined_log, encoding="utf-8")
+        # ── 归档:run.log / 各成员 YAML / DJ stats 落最终版本目录(staging 即将删)──
+        archive_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        combined_log = "\n\n".join(all_logs)
+        log_path = archive_dir / "run.log"
+        log_path.write_text(combined_log, encoding="utf-8")
+        for p in products:
+            member = p["member"]
+            src_yaml = staging / f"{member.table_name}_job.yaml"
+            if src_yaml.exists():
+                shutil.copyfile(src_yaml, archive_dir / src_yaml.name)
+            stats = p["out_path"].with_name(
+                f"{p['out_path'].stem}_stats.jsonl"
+            )
+            if stats.exists():
+                shutil.copyfile(stats, archive_dir / stats.name)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
-    # 返回所有成员的 YAML（用 --- 分隔，便于查看每个成员的完整配置）
     combined_yaml = "\n\n---\n\n".join(all_yamls)
-
     return version, combined_yaml, str(log_path)
 
 
-async def _run_process_job_legacy(
+async def _run_manifest_job(
     session: AsyncSession,
     *,
     job_id: str,
@@ -796,7 +989,12 @@ async def _run_process_job_legacy(
     use_ray: bool = False,
     media_keys: dict[str, str] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
-    """旧版单文件处理逻辑（无成员表的版本）。"""
+    """manifest(媒体)版本加工:整版本单成员,物化清单+媒体 → DJ → 产物回传 MinIO。
+
+    媒体文件与清单必须同目录(DJ rel2abs 以 jsonl 所在目录为锚),由
+    materialized_version 的临时目录保证;产出经 persist_manifest_output 自包含化。
+    非 manifest 版本一律走 run_process_job 的 staging 成员级流程,不再进此函数。
+    """
     dataset_id = input_version.dataset_id
     max_vno = await session.scalar(
         select(func.max(DatasetVersion.version_no)).where(
@@ -806,13 +1004,11 @@ async def _run_process_job_legacy(
     new_vno = (max_vno or 0) + 1
     out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    is_parquet = input_version.format == "parquet"
-    out_path = out_dir / ("data.parquet" if is_parquet else "data.jsonl")
+    out_path = out_dir / "data.jsonl"
     yaml_path = out_dir / "job.yaml"
     log_path = out_dir / "run.log"
 
-    # 输入经解析器拿本地路径:hosted 按需从 S3 拉取并规范化(临时),managed 透传。
-    # 产出仍写受管存储(origin=managed),源不动;血缘 JobInput 指向 hosted 输入版本。
+    # 物化清单+媒体到同一临时目录(用完即清);产出写受管存储,源不动
     async with materialized_version(input_version, session) as input_path:
         # 用户显式指定 text_keys 则用之;否则自动探测主文本字段(数据无 text 字段时
         # 如新闻用 title,不显式指定 DJ load_dataset 会报错)
@@ -827,10 +1023,7 @@ async def _run_process_job_legacy(
             text_key=detected_key,
             text_keys=text_keys,
             executor_type="ray" if use_ray else None,
-            # 媒体键仅对 manifest 输入有意义,避免污染纯文本/parquet YAML
-            media_keys=(
-                media_keys if input_version.format == MANIFEST_FORMAT else None
-            ),
+            media_keys=media_keys,
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
@@ -838,61 +1031,33 @@ async def _run_process_job_legacy(
         # 并发信号量由调用方(job_runner)持有;此处只负责跑子进程(可被 terminate_job 停止)
         code, log = await _run_dj(yaml_path, job_id=job_id)
 
-        # manifest 输入:产物里的媒体引用指向物化临时目录(用完即清),趁临时文件还在,
+        # 产物里的媒体引用指向物化临时目录(用完即清),趁临时文件还在,
         # 把媒体回传平台 MinIO、清单改写为对象引用 → 产物仍是自包含的 manifest 版本。
         manifest_out: tuple[str, int, int] | None = None
-        if code == 0 and out_path.exists() and input_version.format == MANIFEST_FORMAT:
+        if code == 0 and out_path.exists():
             manifest_out = await persist_manifest_output(
                 jsonl_path=out_path, dataset_id=dataset_id, version_no=new_vno
             )
     log_path.write_text(log, encoding="utf-8")
 
-    if code != 0 or not out_path.exists():
+    if code != 0 or not out_path.exists() or manifest_out is None:
         tail = "\n".join(log.strip().splitlines()[-8:])
         raise EngineError(f"dj-process 退出码 {code}\n{tail}")
 
-    if manifest_out is not None:
-        # 媒体加工产出:storage_uri 指向平台 MinIO 上的清单,与媒体批量接入版本同形
-        storage_uri, rows, size = manifest_out
-        version = DatasetVersion(
-            id=_new_version_id(),
-            dataset_id=dataset_id,
-            version_no=new_vno,
-            storage_uri=storage_uri,
-            format=MANIFEST_FORMAT,
-            rows=rows,
-            size=size,
-            origin="managed",
-            produced_by_job_id=job_id,
-            note=f"加工产出(来自 v{input_version.version_no})",
-        )
-    else:
-        stats_path = out_dir / "data_stats.jsonl"
-        # 产出文件上传 MinIO(治理产出必须持久化到对象存储,不能只在本地;
-        # 读路径 preview/download/materialize 已按 s3:// scheme 走,无需改动)
-        if is_parquet:
-            rows = len(parquet_bytes_to_records(out_path.read_bytes()))
-            storage_uri = await upload_parquet_file_to_uploads(
-                dataset_id, new_vno, out_path
-            )
-            out_fmt = "parquet"
-        else:
-            rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
-            storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
-            out_fmt = "jsonl"
-        version = DatasetVersion(
-            id=_new_version_id(),
-            dataset_id=dataset_id,
-            version_no=new_vno,
-            storage_uri=storage_uri,
-            stats_uri=str(stats_path) if stats_path.exists() else None,
-            format=out_fmt,
-            rows=rows,
-            size=out_path.stat().st_size,
-            origin="managed",
-            produced_by_job_id=job_id,
-            note=f"加工产出(来自 v{input_version.version_no})",
-        )
+    # 媒体加工产出:storage_uri 指向平台 MinIO 上的清单,与媒体批量接入版本同形
+    storage_uri, rows, size = manifest_out
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset_id,
+        version_no=new_vno,
+        storage_uri=storage_uri,
+        format=MANIFEST_FORMAT,
+        rows=rows,
+        size=size,
+        origin="managed",
+        produced_by_job_id=job_id,
+        note=f"加工产出(来自 v{input_version.version_no})",
+    )
     session.add(version)
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
     await session.commit()

@@ -221,6 +221,8 @@ const Editor: React.FC<{
       datasetName: selectedDatasetName,
       versionLabel: selectedVersionLabel,
       fileName: memberName,
+      fileFormat: versionMembers.find((m) => m.tableName === memberName)
+        ?.format,
     });
   };
 
