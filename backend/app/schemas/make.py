@@ -1,8 +1,8 @@
-"""数据合成(make)相关 schema。
+"""数据合并(make)相关 schema。
 
-需求文档 #8:数据合成——LLM 造新数据。
-增强(改写)走 augment 模块,本模块专管「LLM 造新数据」(1→N / batch+gen_num)。
-所有算子都需 LLM,未配 OPENAI_API_KEY 时由后端 needs_api 拦截。
+现主路径为 merge/concat:多 jsonl 成员按行拼接/追加(纯 Python)。
+存量 synthesize 模式(需求文档 #8:LLM 造新数据,1→N / batch+gen_num)保留,
+其算子都需 LLM,未配 OPENAI_API_KEY 时由后端 needs_api 拦截。
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ from app.schemas.job import MemberOperatorConfig, OperatorSpec
 
 
 class MakeGoal(CamelModel):
-    """数据合成目标(任务级参数)。"""
+    """数据合并目标(任务级参数)。"""
 
-    # 合成模式:merge(多 jsonl 成员按行拼接,纯 Python 不走 DJ/LLM,当前主路径)
+    # 合并模式:merge(多 jsonl 成员按行拼接,纯 Python 不走 DJ/LLM,当前主路径)
     # | concat(多 jsonl 成员整体追加,行数相加,纯 Python 不走 DJ/LLM)
     # | synthesize(LLM 造新数据,保留给存量任务重跑/流水线)
     mode: str = "synthesize"
@@ -42,7 +42,7 @@ class MakeGoal(CamelModel):
 
 
 class MakeJobCreate(CamelModel):
-    """新建数据合成任务入参。"""
+    """新建数据合并任务入参。"""
 
     name: str
     dataset_version_id: str
@@ -64,7 +64,7 @@ class MakeJobCreate(CamelModel):
 
 
 class MakeReport(CamelModel):
-    """合成报告(任务跑完后)。"""
+    """合并报告(任务跑完后)。"""
 
     job_id: str
     input_version_id: str

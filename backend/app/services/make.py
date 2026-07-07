@@ -1,4 +1,4 @@
-"""数据合成(make)执行引擎。
+"""数据合并(make)执行引擎。
 
 mode='merge':多个 jsonl 成员按行(号或 id)对齐,拼接共同字段(如 text)成
 新行——横向拼接,产物行数 = 主文件行数。
@@ -311,7 +311,7 @@ async def _run_merge_job(
         mode="merge",
         input_count=total_input,
         output_count=len(merged),
-        expansion_ratio=(len(merged) / total_input) if total_input else None,
+        # 合并没有"扩增比"概念(不造新数据),expansion_ratio 留空
         elapsed_seconds=round(time.time() - started, 2),
         operator_chain=[],
         warnings=warnings,
@@ -461,7 +461,7 @@ async def _run_concat_job(
         mode="concat",
         input_count=total_input,
         output_count=len(merged),
-        expansion_ratio=(len(merged) / total_input) if total_input else None,
+        # 合并没有"扩增比"概念(不造新数据),expansion_ratio 留空
         elapsed_seconds=round(time.time() - started, 2),
         operator_chain=[],
         warnings=[],

@@ -25,7 +25,7 @@ export const renderState = (s: DataPlatform.Job['state']) => {
 export const JOB_TYPE_LABEL: Record<string, string> = {
   clean: '数据清洗',
   distillation: '数据蒸馏',
-  synthesis: '数据合成',
+  synthesis: '数据合并',
   augmentation: '数据增强',
   quality: '质量评估',
   review: '内容安全',

@@ -1,17 +1,16 @@
-"""数据合成(make) API:8 个端点,Job.type='synthesis'(沿用,不改 schema)。
+"""数据合并(make) API:8 个端点,Job.type='synthesis'(沿用,不改 schema)。
 
-需求文档 #8:数据合成——LLM 造新数据(1→N)。算子在 MAKE_OPS(3 个 LLM Mapper),
-未配 LLM Key → needs_api 拦截。产物 ``DatasetVersion.origin='synthetic'``。
+现主路径为 merge/concat:多 jsonl 按行拼接/追加(纯 Python)。存量 synthesize
+模式(LLM 造新数据,需求文档 #8)代码保留,未配 LLM Key → needs_api 拦截。
+产物 ``DatasetVersion.origin='synthetic'``。
 
-注意:虽然 type='synthesis' 名字沿用(避免 alembic 变更),URL 用 /synthesis/jobs 表示"合成"。
+注意:type='synthesis' 与 URL /synthesis/jobs 均沿用(避免契约变更),界面名为"数据合并"。
 增强走 augment.py(URL /augmentation/jobs, type='augmentation')。
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
@@ -32,13 +31,12 @@ from app.api.v1.jobs import (
     _reset_for_edit_rerun,
     BatchDeleteRequest,
 )
-from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
 from app.schemas.common import PageResponse
 from app.schemas.job import JobRead
-from app.schemas.make import MakeJobCreate, MakeReport
+from app.schemas.make import MakeJobCreate
 from app.services import job_runner
 from app.services import operator_catalog as oc
 from app.services.llm_config import get_active_llm_config
@@ -148,7 +146,7 @@ async def _start_make(
 async def create_make_job(
     body: MakeJobCreate, session: SessionDep
 ) -> JSONResponse:
-    """新建数据合成任务并异步执行(URL 用 /synthesis,job type 沿用 synthesis)。"""
+    """新建数据合并任务并异步执行(URL 用 /synthesis,job type 沿用 synthesis)。"""
     return await _start_make(session, body)
 
 
@@ -163,7 +161,7 @@ async def list_make_jobs(
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出合成任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
+    """分页列出合并任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
     count_stmt = select(func.count()).select_from(Job).where(Job.type == _MAKE_TYPE)
     list_stmt = select(Job).where(Job.type == _MAKE_TYPE)
     if dataset_id:
@@ -189,11 +187,11 @@ async def list_make_jobs(
 
 @router.get("/synthesis/jobs/{job_id}")
 async def get_make_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """合成任务详情。"""
+    """合并任务详情。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _MAKE_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "合成任务不存在"}
+            status_code=404, content={"success": False, "message": "合并任务不存在"}
         )
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
@@ -204,14 +202,14 @@ async def get_make_job(job_id: str, session: SessionDep) -> JSONResponse:
 async def update_make_job(
     job_id: str, body: MakeJobCreate, session: SessionDep
 ) -> JSONResponse:
-    """编辑合成任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
+    """编辑合并任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
 
     仅终态/已暂停任务可编辑;运行中/排队中 → 409(先停止)。
     """
     job = await session.get(Job, job_id)
     if job is None or job.type != _MAKE_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "合成任务不存在"}
+            status_code=404, content={"success": False, "message": "合并任务不存在"}
         )
     if job.state in ("pending", "running"):
         return JSONResponse(
@@ -229,7 +227,7 @@ async def rerun_make_job(job_id: str, session: SessionDep) -> JSONResponse:
     job = await session.get(Job, job_id)
     if job is None or job.type != _MAKE_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "合成任务不存在"}
+            status_code=404, content={"success": False, "message": "合并任务不存在"}
         )
     if not job.spec:
         return JSONResponse(
@@ -248,11 +246,11 @@ async def rerun_make_job(job_id: str, session: SessionDep) -> JSONResponse:
     "/synthesis/jobs/{job_id}/stop", dependencies=[Depends(require_admin)]
 )
 async def stop_make_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """停止运行中/排队的合成任务。"""
+    """停止运行中/排队的合并任务。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _MAKE_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "合成任务不存在"}
+            status_code=404, content={"success": False, "message": "合并任务不存在"}
         )
     if job.state not in ("pending", "running"):
         return JSONResponse(
@@ -281,11 +279,11 @@ async def _delete_make_cascade(session: AsyncSession, job: Job) -> None:
     "/synthesis/jobs/{job_id}", dependencies=[Depends(require_admin)]
 )
 async def delete_make_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """删除合成任务(只删任务,产物版本保留)。"""
+    """删除合并任务(只删任务,产物版本保留)。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _MAKE_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "合成任务不存在"}
+            status_code=404, content={"success": False, "message": "合并任务不存在"}
         )
     if job.state == "running":
         return JSONResponse(
@@ -302,7 +300,7 @@ async def delete_make_job(job_id: str, session: SessionDep) -> JSONResponse:
 async def batch_delete_make_jobs(
     body: BatchDeleteRequest, session: SessionDep
 ) -> JSONResponse:
-    """批量删除合成任务。"""
+    """批量删除合并任务。"""
     deleted = 0
     for job_id in body.ids:
         job = await session.get(Job, job_id)
@@ -312,44 +310,3 @@ async def batch_delete_make_jobs(
         deleted += 1
     await session.commit()
     return JSONResponse(content={"data": {"deleted": deleted}, "success": True})
-
-
-@router.get("/synthesis/jobs/{job_id}/report")
-async def get_make_report(job_id: str, session: SessionDep) -> JSONResponse:
-    """读 report.json 拿合成报告(输入/输出条数/扩增比/warnings)。"""
-    job = await session.get(Job, job_id)
-    if job is None or job.type != _MAKE_TYPE:
-        return JSONResponse(
-            status_code=404, content={"success": False, "message": "合成任务不存在"}
-        )
-    stmt = (
-        select(DatasetVersion)
-        .where(DatasetVersion.produced_by_job_id == job_id)
-        .order_by(DatasetVersion.created_at.desc())
-    )
-    version = (await session.scalars(stmt)).first()
-    if version is None:
-        spec = job.spec or {}
-        goal_mode = (spec.get("goal") or {}).get("mode", "synthesize")
-        empty = MakeReport(
-            job_id=job.id,
-            input_version_id=spec.get("dataset_version_id", ""),
-            mode=goal_mode,
-            input_count=0,
-            operator_chain=[o["name"] for o in spec.get("operators", [])],
-            warnings=["任务尚未完成"] if job.state != "success" else [],
-        )
-        return JSONResponse(content={"data": empty.model_dump(mode="json"), "success": True})
-    out_dir = Path(settings.datasets_dir) / version.dataset_id / f"v{version.version_no}"
-    report_path = out_dir / "report.json"
-    if not report_path.exists():
-        return JSONResponse(
-            status_code=404, content={"success": False, "message": "报告文件不存在"}
-        )
-    try:
-        raw: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return JSONResponse(
-            status_code=500, content={"success": False, "message": f"报告解析失败:{exc}"}
-        )
-    return JSONResponse(content={"data": raw, "success": True})

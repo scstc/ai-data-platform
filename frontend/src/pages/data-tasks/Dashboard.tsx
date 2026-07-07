@@ -25,7 +25,7 @@ export interface DataTaskStatsData {
 const TYPE_LABEL: Record<string, string> = {
   clean: '数据清洗',
   distillation: '数据蒸馏',
-  synthesis: '数据合成',
+  synthesis: '数据合并',
   augmentation: '数据增强',
   trainset: '训练集生成',
   quality: '质量评估',

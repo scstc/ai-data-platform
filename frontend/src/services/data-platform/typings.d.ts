@@ -673,7 +673,7 @@ declare namespace DataPlatform {
     errors: string[];
   };
 
-  /** 数据合成(make)目标(任务级参数) */
+  /** 数据合并(make)目标(任务级参数) */
   type MakeGoal = {
     /** merge=多 jsonl 按行拼接(纯 Python,当前主路径);concat=多 jsonl 整体追加
      * (纯 Python,行数相加);synthesize=LLM 造新数据(存量) */
@@ -691,7 +691,7 @@ declare namespace DataPlatform {
      * 须为所有参与文件的共同字段,留空=按行号对齐 */
     mergeKey?: string;
   };
-  /** 新建合成任务入参 */
+  /** 新建合并任务入参 */
   type MakeJobCreate = {
     name: string;
     datasetVersionId: string;
@@ -703,21 +703,6 @@ declare namespace DataPlatform {
      *  显式指定用于数据无 text 字段的场景(如 GIS address) */
     textKeys?: string[];
   };
-  /** 合成报告 */
-  type MakeReport = {
-    jobId: string;
-    inputVersionId: string;
-    outputVersionId?: string;
-    mode: string;
-    inputCount: number;
-    outputCount?: number;
-    expansionRatio?: number;
-    elapsedSeconds?: number;
-    operatorChain: string[];
-    warnings: string[];
-    raw?: Record<string, any>;
-  };
-
   /** 数据增强(augment)目标 */
   type AugmentGoal = {
     mode?: 'augment';

@@ -1351,9 +1351,9 @@ export async function getDistillationReport(
 }
 
 // ---------------------------------------------------------------------------
-// 数据合成(make)——LLM 造新数据
+// 数据合并(make)——多 jsonl 按行拼接/追加(URL 沿用 /synthesis)
 // ---------------------------------------------------------------------------
-/** 新建合成任务 POST /api/v1/synthesis/jobs */
+/** 新建合并任务 POST /api/v1/synthesis/jobs */
 export async function createMakeJob(
   body: DataPlatform.MakeJobCreate,
   options?: { [key: string]: any },
@@ -1369,7 +1369,7 @@ export async function createMakeJob(
   );
 }
 
-/** 分页列出合成任务 GET /api/v1/synthesis/jobs */
+/** 分页列出合并任务 GET /api/v1/synthesis/jobs */
 export async function listMakeJobs(
   params: { current?: number; pageSize?: number; datasetId?: string } = {},
   options?: { [key: string]: any },
@@ -1385,7 +1385,7 @@ export async function listMakeJobs(
   });
 }
 
-/** 合成任务详情 GET /api/v1/synthesis/jobs/{id} */
+/** 合并任务详情 GET /api/v1/synthesis/jobs/{id} */
 export async function getMakeJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1396,7 +1396,7 @@ export async function getMakeJob(
   );
 }
 
-/** 编辑合成任务 PUT /api/v1/synthesis/jobs/{id}（覆盖原任务配置并原地重跑） */
+/** 编辑合并任务 PUT /api/v1/synthesis/jobs/{id}（覆盖原任务配置并原地重跑） */
 export async function updateMakeJob(
   jobId: string,
   body: DataPlatform.MakeJobCreate,
@@ -1413,7 +1413,7 @@ export async function updateMakeJob(
   );
 }
 
-/** 重跑合成任务 POST /api/v1/synthesis/jobs/{id}/rerun */
+/** 重跑合并任务 POST /api/v1/synthesis/jobs/{id}/rerun */
 export async function rerunMakeJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1424,7 +1424,7 @@ export async function rerunMakeJob(
   );
 }
 
-/** 停止合成任务 POST /api/v1/synthesis/jobs/{id}/stop */
+/** 停止合并任务 POST /api/v1/synthesis/jobs/{id}/stop */
 export async function stopMakeJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1435,7 +1435,7 @@ export async function stopMakeJob(
   );
 }
 
-/** 删除合成任务 DELETE /api/v1/synthesis/jobs/{id} */
+/** 删除合并任务 DELETE /api/v1/synthesis/jobs/{id} */
 export async function deleteMakeJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1446,7 +1446,7 @@ export async function deleteMakeJob(
   );
 }
 
-/** 批量删除合成任务 POST /api/v1/synthesis/jobs/batch-delete */
+/** 批量删除合并任务 POST /api/v1/synthesis/jobs/batch-delete */
 export async function batchDeleteMakeJobs(
   ids: string[],
   options?: { [key: string]: any },
@@ -1459,17 +1459,6 @@ export async function batchDeleteMakeJobs(
       data: { ids },
       ...(options || {}),
     },
-  );
-}
-
-/** 读取合成报告 GET /api/v1/synthesis/jobs/{id}/report */
-export async function getMakeReport(
-  jobId: string,
-  options?: { [key: string]: any },
-) {
-  return request<{ data: DataPlatform.MakeReport; success: boolean }>(
-    `/api/v1/synthesis/jobs/${jobId}/report`,
-    { method: 'GET', ...(options || {}) },
   );
 }
 

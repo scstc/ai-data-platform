@@ -1,4 +1,4 @@
-// 数据合成编辑器:多 jsonl 文件按行拼接合并(后端纯 Python 执行,不走 data-juicer/LLM)。
+// 数据合并编辑器:多 jsonl 文件按行拼接合并(后端纯 Python 执行,不走 data-juicer/LLM)。
 // 选版本 → 勾选 ≥2 个 jsonl 成员 → 自动探测各文件字段并求共同字段 →
 // 配置合并字段/分隔符 → 首行示例预览 → 提交异步任务,产物落新版本。
 import { PageContainer } from '@ant-design/pro-components';
@@ -142,7 +142,7 @@ const MakeEditor: React.FC = () => {
         }
         if (!['merge', 'concat'].includes(job.editSpec.goal?.mode)) {
           message.warning(
-            '仅字段拼接/追加合并模式的合成任务支持编辑,将按新建处理',
+            '仅字段拼接/追加合并模式的合并任务支持编辑,将按新建处理',
           );
           return;
         }
@@ -189,7 +189,7 @@ const MakeEditor: React.FC = () => {
 
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
   const suggestedName = useMemo(
-    () => suggestTaskName(selectedDatasetName, '数据合成'),
+    () => suggestTaskName(selectedDatasetName, '数据合并'),
     [selectedDatasetName],
   );
   useEffect(() => {
@@ -339,7 +339,7 @@ const MakeEditor: React.FC = () => {
     setSubmitting(true);
     try {
       await createMakeJob(body);
-      message.success('合成任务已创建，正在后台运行');
+      message.success('合并任务已创建，正在后台运行');
       history.push('/governance/make/jobs');
     } finally {
       setSubmitting(false);
@@ -350,7 +350,7 @@ const MakeEditor: React.FC = () => {
 
   return (
     <PageContainer
-      title={editing ? '编辑数据合成' : '新建数据合成'}
+      title={editing ? '编辑数据合并' : '新建数据合并'}
       extra={
         <Button
           type="primary"
@@ -408,7 +408,7 @@ const MakeEditor: React.FC = () => {
           </Card>
         ) : (
           <>
-            <Card size="small" title="合成方式">
+            <Card size="small" title="合并方式">
               <Segmented
                 value={mode}
                 onChange={(v) => setMode(v as 'merge' | 'concat')}

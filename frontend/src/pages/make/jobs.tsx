@@ -1,4 +1,4 @@
-// 数据合成任务列表页:复用 distillation 的 ProTable + 报告缓存模式
+// 数据合并任务列表页:复用 distillation 的 ProTable 模式(合并无报告/扩增比概念)
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
@@ -178,7 +178,7 @@ const Make: React.FC = () => {
   return (
     <PageContainer>
       <ProTable<DataPlatform.Job>
-        headerTitle="数据合成任务"
+        headerTitle="数据合并任务"
         actionRef={actionRef}
         rowKey="id"
         search={false}
@@ -230,7 +230,7 @@ const Make: React.FC = () => {
               key="new"
               onClick={() => history.push('/governance/make/editor')}
             >
-              新建合成
+              新建合并
             </Button>
           ),
         ]}
