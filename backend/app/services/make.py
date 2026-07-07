@@ -1,7 +1,10 @@
 """数据合成(make)执行引擎。
 
-主路径 mode='merge':多个 jsonl 成员按行号对齐,拼接共同字段(如 text)成新行,
-纯 Python 执行,不进 data-juicer 子进程、不依赖 LLM。
+mode='merge':多个 jsonl 成员按行(号或 id)对齐,拼接共同字段(如 text)成
+新行——横向拼接,产物行数 = 主文件行数。
+mode='concat':多个 jsonl 成员整体追加(A 10 行 + B 10 行 → 20 行)——纵向
+堆叠,不拼字段,每行保留自身原始字段。
+两者均纯 Python 执行,不进 data-juicer 子进程、不依赖 LLM。
 mode='synthesize' 保留:走 data-juicer LLM Mapper 链(存量任务重跑/流水线)。
 产物 ``DatasetVersion.origin='synthetic'``(与 augment 共享约定)。
 """
@@ -39,28 +42,99 @@ from app.services.engine import (
 _TERMINAL_SEPARATORS = ("。", ".", "!", "?", "！", "？", ";", "；")
 
 
+def _fragment(row: dict[str, Any], field: str, terminal: str) -> str | None:
+    if row.get(field) is None:
+        return None
+    frag = str(row[field]).strip()
+    if terminal:
+        frag = frag.rstrip(terminal)
+    return frag or None
+
+
 def merge_records(
     named_rows: list[tuple[str, list[dict[str, Any]]]],
     field: str,
     separator: str,
+    key_field: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """多文件记录按行号对齐,拼接 ``field`` 字段;纯函数,便于单测。
+    """多文件记录对齐,拼接 ``field`` 字段;纯函数,便于单测。
 
+    ``key_field`` 为空:按行号位置对齐(兼容早于按 id 匹配特性创建的任务)。
     产物行数 = 主文件(第一个)行数,其余字段沿用主文件对应行;
     扩展文件比主文件短则缺失行少拼一段,长则多余行丢弃,均记 warning。
+
+    ``key_field`` 非空:按该字段的值跨文件匹配对应行,而非位置——各扩展
+    文件先建「键值→行」索引(重复键取首次出现,记 warning);主文件仍逐行
+    驱动输出(行数与顺序不变),缺键的主行/扩展文件里找不到匹配键的,只是
+    该片段跳过,不影响其余片段拼接。
     """
     warnings: list[str] = []
     primary_name, primary = named_rows[0]
     terminal = separator if separator in _TERMINAL_SEPARATORS else ""
     merged: list[dict[str, Any]] = []
+
+    if key_field:
+        indexes: list[tuple[str, dict[Any, dict[str, Any]]]] = []
+        for name, rows in named_rows[1:]:
+            index: dict[Any, dict[str, Any]] = {}
+            duplicates = 0
+            for row in rows:
+                key = row.get(key_field)
+                if key is None:
+                    continue
+                if key in index:
+                    duplicates += 1
+                    continue
+                index[key] = row
+            if duplicates:
+                warnings.append(
+                    f"{name} 存在 {duplicates} 个重复「{key_field}」,"
+                    "已取首次出现的行参与匹配"
+                )
+            indexes.append((name, index))
+
+        missing_key_in_primary = 0
+        unmatched_counts = dict.fromkeys((name for name, _ in indexes), 0)
+        for base in primary:
+            key = base.get(key_field)
+            if key is None:
+                missing_key_in_primary += 1
+            parts: list[str] = []
+            own = _fragment(base, field, terminal)
+            if own:
+                parts.append(own)
+            if key is not None:
+                for name, index in indexes:
+                    row = index.get(key)
+                    if row is None:
+                        unmatched_counts[name] += 1
+                        continue
+                    frag = _fragment(row, field, terminal)
+                    if frag:
+                        parts.append(frag)
+            rec = dict(base)
+            rec[field] = separator.join(parts) + (terminal if parts else "")
+            merged.append(rec)
+
+        if missing_key_in_primary:
+            warnings.append(
+                f"{primary_name} 有 {missing_key_in_primary} 行缺少键字段"
+                f"「{key_field}」,未参与按 id 匹配"
+            )
+        for name, count in unmatched_counts.items():
+            if count:
+                warnings.append(
+                    f"{name} 未找到 {count} 行匹配的「{key_field}」,"
+                    "缺失片段未拼接"
+                )
+        return merged, warnings
+
     for i, base in enumerate(primary):
-        parts: list[str] = []
+        parts = []
         for _name, rows in named_rows:
-            if i >= len(rows) or rows[i].get(field) is None:
+            if i >= len(rows):
                 continue
-            frag = str(rows[i][field]).strip()
-            if terminal:
-                frag = frag.rstrip(terminal)
+            frag = _fragment(rows[i], field, terminal)
             if frag:
                 parts.append(frag)
         rec = dict(base)
@@ -96,6 +170,7 @@ async def _run_merge_job(
     names = goal.merge_members or []
     field = (goal.merge_field or "").strip()
     separator = goal.merge_separator or "。"
+    key_field = (goal.merge_key or "").strip() or None
     if len(names) < 2 or not field:
         raise EngineError("合并模式需要至少 2 个成员文件和合并字段")
 
@@ -136,9 +211,14 @@ async def _run_merge_job(
                 f"成员 {n} 缺少合并字段「{field}」,"
                 f"可用字段:{', '.join(sampled_fields) or '(空文件)'}"
             )
+        if key_field and key_field not in sampled_fields:
+            raise EngineError(
+                f"成员 {n} 缺少键字段「{key_field}」,"
+                f"可用字段:{', '.join(sampled_fields) or '(空文件)'}"
+            )
         named_rows.append((n, rows))
 
-    merged, warnings = merge_records(named_rows, field, separator)
+    merged, warnings = merge_records(named_rows, field, separator, key_field)
 
     # 落盘 + 上传:产物成员沿用主文件名
     max_vno = await session.scalar(
@@ -206,13 +286,16 @@ async def _run_merge_job(
             "members": names,
             "field": field,
             "separator": separator,
+            "key_field": key_field,
         },
         allow_unicode=True,
         sort_keys=False,
     )
     out_dir = out_path.parent
+    align_desc = f"按「{key_field}」匹配" if key_field else "按行号位置对齐"
     log_lines = [
-        f"merge 模式:{' + '.join(names)},字段={field},分隔符={separator!r}",
+        f"merge 模式:{' + '.join(names)},字段={field},"
+        f"分隔符={separator!r},{align_desc}",
         *(f"输入 {n}: {len(rows)} 行" for n, rows in named_rows),
         f"输出 {primary_name}: {len(merged)} 行",
         *warnings,
@@ -232,6 +315,156 @@ async def _run_merge_job(
         elapsed_seconds=round(time.time() - started, 2),
         operator_chain=[],
         warnings=warnings,
+        raw={
+            "goal": goal.model_dump(mode="json"),
+            "input_rows": {n: len(rows) for n, rows in named_rows},
+        },
+    )
+    (out_dir / "report.json").write_text(
+        json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return version, yaml_text, str(log_path), report
+
+
+async def _run_concat_job(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    input_version: DatasetVersion,
+    goal: MakeGoal,
+    output_dataset_id: str | None = None,
+) -> tuple[DatasetVersion, str, str, MakeReport]:
+    """concat 模式:多 jsonl 成员整体追加 → 新版本(纵向堆叠,不拼字段)。
+
+    A 10 行 + B 10 行 → 产物 20 行,每行保留自身原始字段(与 merge 模式的
+    横向字段拼接不同,产物行数 = 各成员行数之和)。产物成员沿用第一个
+    成员的文件名,被追加的其余成员不结转,未参与的其他成员原样结转。
+    """
+    names = goal.merge_members or []
+    if len(names) < 2:
+        raise EngineError("追加合并模式需要至少 2 个成员文件")
+
+    dataset_id = output_dataset_id or input_version.dataset_id
+    target_ds = await session.get(Dataset, dataset_id)
+    if target_ds is None:
+        raise EngineError(f"输出数据集不存在:{dataset_id}")
+
+    from app.services.engine import (
+        _get_member_output_path,
+        _get_version_members,
+        _materialize_member,
+        _new_member_id,
+    )
+    from app.services.external_store import upload_jsonl_member
+
+    members = await _get_version_members(session, input_version.id)
+    by_name = {m.table_name: m for m in members}
+    if missing := [n for n in names if n not in by_name]:
+        raise EngineError(f"版本中不存在成员:{', '.join(missing)}")
+    if non_jsonl := [n for n in names if by_name[n].format != "jsonl"]:
+        raise EngineError(f"仅支持 jsonl 成员追加合并:{', '.join(non_jsonl)}")
+
+    started = time.time()
+
+    named_rows: list[tuple[str, list[dict[str, Any]]]] = []
+    for n in names:
+        path = await _materialize_member(session, by_name[n])
+        rows = [
+            json.loads(line)
+            for line in path.open(encoding="utf-8")
+            if line.strip()
+        ]
+        named_rows.append((n, rows))
+
+    merged: list[dict[str, Any]] = []
+    for _n, rows in named_rows:
+        merged.extend(rows)
+
+    # 落盘 + 上传:产物成员沿用第一个成员的文件名
+    max_vno = await session.scalar(
+        select(func.max(DatasetVersion.version_no)).where(
+            DatasetVersion.dataset_id == dataset_id
+        )
+    )
+    new_vno = (max_vno or 0) + 1
+    primary_name = names[0]
+    out_path = _get_member_output_path(dataset_id, new_vno, primary_name, "jsonl")
+    data_bytes = "".join(
+        json.dumps(r, ensure_ascii=False) + "\n" for r in merged
+    ).encode("utf-8")
+    out_path.write_bytes(data_bytes)
+    storage_uri = await upload_jsonl_member(
+        dataset_id, new_vno, primary_name, data_bytes
+    )
+
+    new_members_data: list[dict[str, Any]] = [
+        {
+            "table_name": primary_name,
+            "storage_uri": storage_uri,
+            "format": "jsonl",
+            "rows": len(merged),
+            "size": len(data_bytes),
+            "schema_variant": by_name[primary_name].schema_variant,
+        }
+    ]
+    from app.models.dataset_version_table import DatasetVersionTable
+    from app.services.engine import carry_over_members
+
+    if dataset_id == input_version.dataset_id:
+        new_members_data += carry_over_members(members, set(names))
+
+    version = DatasetVersion(
+        id=_new_version_id(),
+        dataset_id=dataset_id,
+        version_no=new_vno,
+        storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
+        format="multi" if len(new_members_data) > 1 else "jsonl",
+        rows=sum(m["rows"] or 0 for m in new_members_data),
+        size=sum(m["size"] or 0 for m in new_members_data),
+        origin="synthetic",
+        produced_by_job_id=job_id,
+        note=goal.note
+        or f"追加合并产出({' + '.join(names)},来自 v{input_version.version_no})",
+    )
+    session.add(version)
+    await session.flush()
+    for m_data in new_members_data:
+        session.add(
+            DatasetVersionTable(
+                id=_new_member_id(), dataset_version_id=version.id, **m_data
+            )
+        )
+    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+    await session.commit()
+    await session.refresh(version)
+
+    yaml_text = yaml.safe_dump(
+        {"mode": "concat", "members": names},
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    out_dir = out_path.parent
+    log_lines = [
+        f"concat 模式(追加合并):{' + '.join(names)}",
+        *(f"输入 {n}: {len(rows)} 行" for n, rows in named_rows),
+        f"输出 {primary_name}: {len(merged)} 行",
+    ]
+    log_path = out_dir / "run.log"
+    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+
+    total_input = sum(len(rows) for _n, rows in named_rows)
+    report = MakeReport(
+        job_id=job_id,
+        input_version_id=input_version.id,
+        output_version_id=version.id,
+        mode="concat",
+        input_count=total_input,
+        output_count=len(merged),
+        expansion_ratio=(len(merged) / total_input) if total_input else None,
+        elapsed_seconds=round(time.time() - started, 2),
+        operator_chain=[],
+        warnings=[],
         raw={
             "goal": goal.model_dump(mode="json"),
             "input_rows": {n: len(rows) for n, rows in named_rows},
@@ -264,9 +497,17 @@ async def run_make_job(
     goal: 全局合成目标参数（不按成员区分）
     产物 origin='synthetic',返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
     """
-    # merge 模式:纯 Python 按行拼接,不走下方 DJ 算子链
+    # merge/concat 模式:纯 Python 处理,不走下方 DJ 算子链
     if goal.mode == "merge":
         return await _run_merge_job(
+            session,
+            job_id=job_id,
+            input_version=input_version,
+            goal=goal,
+            output_dataset_id=output_dataset_id,
+        )
+    if goal.mode == "concat":
+        return await _run_concat_job(
             session,
             job_id=job_id,
             input_version=input_version,

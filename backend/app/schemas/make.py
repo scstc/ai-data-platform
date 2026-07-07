@@ -18,6 +18,7 @@ class MakeGoal(CamelModel):
     """数据合成目标(任务级参数)。"""
 
     # 合成模式:merge(多 jsonl 成员按行拼接,纯 Python 不走 DJ/LLM,当前主路径)
+    # | concat(多 jsonl 成员整体追加,行数相加,纯 Python 不走 DJ/LLM)
     # | synthesize(LLM 造新数据,保留给存量任务重跑/流水线)
     mode: str = "synthesize"
     # 每个输入样本生成的目标条数(1→N 的 N;QA 类算子可 >1)
@@ -35,6 +36,9 @@ class MakeGoal(CamelModel):
     merge_field: str | None = None
     # 片段分隔符;句末标点(。.!?！？;；)会同时补到整段结尾
     merge_separator: str = "。"
+    # 按该字段的值跨文件匹配对应行(而非按行号位置对齐);须为所有参与文件的
+    # 共同字段。留空 = 沿用按行号对齐(兼容早于此特性创建的任务)
+    merge_key: str | None = None
 
 
 class MakeJobCreate(CamelModel):

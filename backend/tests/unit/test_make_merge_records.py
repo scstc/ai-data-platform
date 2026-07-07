@@ -72,3 +72,56 @@ def test_missing_field_row_skipped_not_crash():
     merged, _ = merge_records([("main", main), ("ext", ext)], "text", "。")
     assert merged[0]["text"] == "A。"
     assert merged[1]["text"] == "B。"
+
+
+def test_key_field_matches_out_of_order_rows():
+    """按 id 匹配:扩展文件顺序打乱,仍按 id 值对上正确的行,而非位置。"""
+    main = [
+        {"id": 1, "text": "主句A"},
+        {"id": 2, "text": "主句B"},
+    ]
+    ext = [
+        {"id": 2, "text": "扩展B"},  # 顺序颠倒
+        {"id": 1, "text": "扩展A"},
+    ]
+    merged, warnings = merge_records(
+        [("main", main), ("ext", ext)], "text", "。", key_field="id"
+    )
+    assert merged[0]["text"] == "主句A。扩展A。"
+    assert merged[1]["text"] == "主句B。扩展B。"
+    assert warnings == []
+
+
+def test_key_field_missing_match_skips_fragment_and_warns():
+    """扩展文件里找不到匹配 id 的行:该片段跳过,主文件片段仍保留,并 warning。"""
+    main = [{"id": 1, "text": "A"}, {"id": 2, "text": "B"}]
+    ext = [{"id": 1, "text": "扩展A"}]  # 没有 id=2 的行
+    merged, warnings = merge_records(
+        [("main", main), ("ext", ext)], "text", "。", key_field="id"
+    )
+    assert merged[0]["text"] == "A。扩展A。"
+    assert merged[1]["text"] == "B。"
+    assert any("未找到 1 行匹配" in w for w in warnings)
+
+
+def test_key_field_missing_in_primary_row_warns():
+    """主文件行本身缺键字段:该行不参与匹配(只保留自身片段),并 warning。"""
+    main = [{"text": "A"}, {"id": 2, "text": "B"}]
+    ext = [{"id": 2, "text": "扩展B"}]
+    merged, warnings = merge_records(
+        [("main", main), ("ext", ext)], "text", "。", key_field="id"
+    )
+    assert merged[0]["text"] == "A。"
+    assert merged[1]["text"] == "B。扩展B。"
+    assert any("缺少键字段" in w for w in warnings)
+
+
+def test_key_field_duplicate_in_extension_warns_and_uses_first():
+    """扩展文件里同一 id 出现两次:取首次出现的行参与匹配,并 warning。"""
+    main = [{"id": 1, "text": "A"}]
+    ext = [{"id": 1, "text": "第一条"}, {"id": 1, "text": "第二条"}]
+    merged, warnings = merge_records(
+        [("main", main), ("ext", ext)], "text", "。", key_field="id"
+    )
+    assert merged[0]["text"] == "A。第一条。"
+    assert any("重复" in w for w in warnings)

@@ -11,6 +11,7 @@ import {
   Input,
   Modal,
   message,
+  Segmented,
   Select,
   Space,
   Table,
@@ -80,8 +81,12 @@ const MakeEditor: React.FC = () => {
   >({});
   const [detecting, setDetecting] = useState(false);
 
+  // merge=字段拼接(横向,按行/id对齐拼字段);concat=追加合并(纵向堆叠,行数相加)
+  const [mode, setMode] = useState<'merge' | 'concat'>('merge');
   const [mergeField, setMergeField] = useState<string>();
   const [separator, setSeparator] = useState('。');
+  // 按该字段的值跨文件匹配对应行;留空则按行号位置对齐(仅 merge 模式适用)
+  const [mergeKey, setMergeKey] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -104,6 +109,7 @@ const MakeEditor: React.FC = () => {
     setFieldsByMember({});
     setSampleByMember({});
     setMergeField(undefined);
+    setMergeKey(undefined);
     if (!versionId) return;
     const version = versions.find((v) => v.id === versionId);
     setMembers(version?.tables ?? []);
@@ -134,8 +140,10 @@ const MakeEditor: React.FC = () => {
           message.error('该任务无可编辑的配置(早于重跑特性创建)');
           return;
         }
-        if (job.editSpec.goal?.mode !== 'merge') {
-          message.warning('仅合并模式的合成任务支持编辑,将按新建处理');
+        if (!['merge', 'concat'].includes(job.editSpec.goal?.mode)) {
+          message.warning(
+            '仅字段拼接/追加合并模式的合成任务支持编辑,将按新建处理',
+          );
           return;
         }
         setEditSpec(job.editSpec);
@@ -155,6 +163,7 @@ const MakeEditor: React.FC = () => {
   // 字段探测出共同字段后再回填(见下方 commonFields effect),否则会被缺省逻辑覆盖
   const editApplied = useRef(false);
   const pendingMergeField = useRef<string | undefined>(undefined);
+  const pendingMergeKey = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (
       !editSpec ||
@@ -172,8 +181,10 @@ const MakeEditor: React.FC = () => {
     );
     setSelected(picked);
     if (picked.length) setPrimary(picked[0]);
+    setMode(goal.mode === 'concat' ? 'concat' : 'merge');
     if (goal.mergeSeparator) setSeparator(goal.mergeSeparator);
     pendingMergeField.current = goal.mergeField;
+    pendingMergeKey.current = goal.mergeKey;
   }, [members, versionId, editSpec]);
 
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
@@ -231,19 +242,48 @@ const MakeEditor: React.FC = () => {
     }
   }, [commonFields]);
 
+  // 编辑回填的按 id 匹配字段;换文件后若已选字段不再共同则清空(视为改按行号对齐)
+  useEffect(() => {
+    const pending = pendingMergeKey.current;
+    if (pending && commonFields.includes(pending)) {
+      pendingMergeKey.current = undefined;
+      setMergeKey(pending);
+    } else if (mergeKey && !commonFields.includes(mergeKey)) {
+      setMergeKey(undefined);
+    }
+  }, [commonFields, mergeKey]);
+
   // 合并顺序:主文件在前,其余按成员列表序
   const orderedMembers = useMemo(() => {
     if (!primary) return selected;
     return [primary, ...selected.filter((n) => n !== primary)];
   }, [selected, primary]);
 
+  // 首行示例预览:仅字段拼接模式、且未启用按 id 匹配时才有意义(按 id 匹配的
+  // 真实配对未必是各文件的首行,client 侧无法用抽样预览还原)
   const exampleText = useMemo(() => {
-    if (!mergeField || !allDetected || orderedMembers.length < 2) return '';
+    if (
+      mode !== 'merge' ||
+      mergeKey ||
+      !mergeField ||
+      !allDetected ||
+      orderedMembers.length < 2
+    ) {
+      return '';
+    }
     return mergePreview(
       orderedMembers.map((n) => sampleByMember[n]?.[mergeField]),
       separator,
     );
-  }, [orderedMembers, sampleByMember, mergeField, separator, allDetected]);
+  }, [
+    mode,
+    mergeKey,
+    orderedMembers,
+    sampleByMember,
+    mergeField,
+    separator,
+    allDetected,
+  ]);
 
   const rowCounts = orderedMembers.map(
     (n) => members.find((m) => m.tableName === n)?.rows,
@@ -261,19 +301,23 @@ const MakeEditor: React.FC = () => {
       message.warning('请至少勾选 2 个 jsonl 文件参与合并');
       return;
     }
-    if (!mergeField) {
+    if (mode === 'merge' && !mergeField) {
       message.warning('所选文件没有共同字段,无法合并');
       return;
     }
     const body: DataPlatform.MakeJobCreate = {
       name,
       datasetVersionId: versionId,
-      goal: {
-        mode: 'merge',
-        mergeMembers: orderedMembers,
-        mergeField,
-        mergeSeparator: separator,
-      },
+      goal:
+        mode === 'concat'
+          ? { mode: 'concat', mergeMembers: orderedMembers }
+          : {
+              mode: 'merge',
+              mergeMembers: orderedMembers,
+              mergeField,
+              mergeSeparator: separator || '。',
+              mergeKey: mergeKey || undefined,
+            },
     };
     if (editing && editJobId) {
       Modal.confirm({
@@ -311,7 +355,9 @@ const MakeEditor: React.FC = () => {
         <Button
           type="primary"
           loading={submitting}
-          disabled={orderedMembers.length < 2 || !mergeField}
+          disabled={
+            orderedMembers.length < 2 || (mode === 'merge' && !mergeField)
+          }
           onClick={submit}
         >
           {editing ? '保存并重新运行' : '创建任务'}
@@ -362,7 +408,33 @@ const MakeEditor: React.FC = () => {
           </Card>
         ) : (
           <>
-            <Card size="small" title="选择合并文件(按行号对齐拼接,勾选 ≥2 个)">
+            <Card size="small" title="合成方式">
+              <Segmented
+                value={mode}
+                onChange={(v) => setMode(v as 'merge' | 'concat')}
+                options={[
+                  { label: '字段拼接(横向)', value: 'merge' },
+                  { label: '追加合并(纵向堆叠)', value: 'concat' },
+                ]}
+              />
+              <Paragraph
+                type="secondary"
+                style={{ marginTop: 8, marginBottom: 0 }}
+              >
+                字段拼接:按行(号或 id)对齐,把各文件的指定字段拼成一段新文本,
+                产物行数=主文件行数。追加合并:把各文件的记录整体追加在一起, 如 A
+                10 行 + B 10 行 → 产物 20 行,不拼字段,每行保留自身原始字段。
+              </Paragraph>
+            </Card>
+
+            <Card
+              size="small"
+              title={
+                mode === 'concat'
+                  ? '选择追加合并文件(整体追加,勾选 ≥2 个)'
+                  : '选择合并文件(按行号/id 对齐拼接,勾选 ≥2 个)'
+              }
+            >
               <Table<DataPlatform.DatasetTable>
                 rowKey="tableName"
                 size="small"
@@ -431,43 +503,57 @@ const MakeEditor: React.FC = () => {
                   },
                 ]}
               />
-              {selected.length >= 2 && allDetected && !detecting && (
-                <div style={{ marginTop: 12 }}>
-                  {commonFields.length === 0 ? (
-                    <Alert
-                      type="error"
-                      showIcon
-                      title="所选文件没有共同字段,无法合并;请检查各文件的字段(绿色标签为共同字段)"
-                    />
-                  ) : (
-                    <Alert
-                      type="success"
-                      showIcon
-                      title={
-                        <Space size="small" wrap>
-                          共同字段:
-                          {commonFields.map((c) => (
-                            <Tag key={c} color="green">
-                              {c}
-                            </Tag>
-                          ))}
-                        </Space>
-                      }
-                    />
-                  )}
-                  {rowsMismatch && (
-                    <Alert
-                      style={{ marginTop: 8 }}
-                      type="warning"
-                      showIcon
-                      title="所选文件行数不一致:合并按行号对齐,以主文件行数为准;扩展文件多出的行会被丢弃,缺失的行不拼接(任务报告中会提示)"
-                    />
-                  )}
-                </div>
-              )}
+              {mode === 'merge' &&
+                selected.length >= 2 &&
+                allDetected &&
+                !detecting && (
+                  <div style={{ marginTop: 12 }}>
+                    {commonFields.length === 0 ? (
+                      <Alert
+                        type="error"
+                        showIcon
+                        title="所选文件没有共同字段,无法合并;请检查各文件的字段(绿色标签为共同字段)"
+                      />
+                    ) : (
+                      <Alert
+                        type="success"
+                        showIcon
+                        title={
+                          <Space size="small" wrap>
+                            共同字段:
+                            {commonFields.map((c) => (
+                              <Tag key={c} color="green">
+                                {c}
+                              </Tag>
+                            ))}
+                          </Space>
+                        }
+                      />
+                    )}
+                    {rowsMismatch && !mergeKey && (
+                      <Alert
+                        style={{ marginTop: 8 }}
+                        type="warning"
+                        showIcon
+                        title="所选文件行数不一致:合并按行号对齐,以主文件行数为准;扩展文件多出的行会被丢弃,缺失的行不拼接(任务报告中会提示)"
+                      />
+                    )}
+                    {rowsMismatch && mergeKey && (
+                      <Alert
+                        style={{ marginTop: 8 }}
+                        type="info"
+                        showIcon
+                        title="所选文件行数不一致:已启用按 id 匹配,不代表数据丢失;个别未找到匹配 id 的行只是该片段不参与拼接(任务报告中会提示)"
+                      />
+                    )}
+                  </div>
+                )}
             </Card>
 
-            <Card size="small" title="合并配置">
+            <Card
+              size="small"
+              title={mode === 'concat' ? '追加合并配置' : '合并配置'}
+            >
               <Space wrap align="center">
                 <span>主文件</span>
                 <Select
@@ -477,30 +563,57 @@ const MakeEditor: React.FC = () => {
                   disabled={selected.length < 2}
                   options={selected.map((n) => ({ label: n, value: n }))}
                 />
-                <span>合并字段</span>
-                <Select
-                  style={{ width: 180 }}
-                  value={mergeField}
-                  onChange={setMergeField}
-                  disabled={commonFields.length === 0}
-                  options={commonFields.map((c) => ({ label: c, value: c }))}
-                />
-                <span>分隔符</span>
-                <Input
-                  style={{ width: 80 }}
-                  value={separator}
-                  onChange={(e) => setSeparator(e.target.value || '。')}
-                />
+                {mode === 'merge' && (
+                  <>
+                    <span>合并字段</span>
+                    <Select
+                      style={{ width: 180 }}
+                      value={mergeField}
+                      onChange={setMergeField}
+                      disabled={commonFields.length === 0}
+                      options={commonFields.map((c) => ({
+                        label: c,
+                        value: c,
+                      }))}
+                    />
+                    <span>分隔符</span>
+                    <Input
+                      style={{ width: 80 }}
+                      value={separator}
+                      onChange={(e) => setSeparator(e.target.value)}
+                    />
+                    <span>按 id 匹配</span>
+                    <Select
+                      style={{ width: 180 }}
+                      allowClear
+                      placeholder="不匹配(按行号对齐)"
+                      value={mergeKey}
+                      onChange={setMergeKey}
+                      disabled={commonFields.length === 0}
+                      options={commonFields
+                        .filter((c) => c !== mergeField)
+                        .map((c) => ({ label: c, value: c }))}
+                    />
+                  </>
+                )}
               </Space>
               <Paragraph
                 type="secondary"
                 style={{ marginTop: 8, marginBottom: 0 }}
               >
-                产物沿用主文件的文件名和其余字段;其余勾选文件仅贡献合并字段的拼接片段。
-                句末标点分隔符(。 . !
-                ?)会同时补到整段结尾。未勾选的文件原样结转进新版本。
+                {mode === 'concat' ? (
+                  '产物沿用主文件的文件名;各勾选文件的记录整体追加在一起(主文件在前),每行保留自身原始字段,不做字段拼接。未勾选的文件原样结转进新版本。'
+                ) : (
+                  <>
+                    产物沿用主文件的文件名和其余字段;其余勾选文件仅贡献合并字段的拼接片段。
+                    「按 id
+                    匹配」留空则按行号位置对齐;选定字段后按该字段的值跨文件匹配对应行,
+                    更适合文件间行序不保证一致的场景。句末标点分隔符(。 . !
+                    ?)会同时补到整段结尾。 未勾选的文件原样结转进新版本。
+                  </>
+                )}
               </Paragraph>
-              {exampleText && mergeField && (
+              {mode === 'merge' && exampleText && mergeField && (
                 <Card
                   size="small"
                   type="inner"

@@ -71,26 +71,26 @@ async def _start_make(
 
     传入 job = 编辑任务:校验通过后覆盖该任务配置并原地重跑,不新建记录。
     """
-    if body.goal.mode not in ("synthesize", "make", "merge"):
+    if body.goal.mode not in ("synthesize", "make", "merge", "concat"):
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": f"goal.mode 非法:{body.goal.mode}"},
         )
-    if body.goal.mode == "merge":
-        # 合并模式:纯 Python 按行拼接,不走 DJ/LLM,只校验合并配置。
-        # 字段是否真为共同字段在执行时逐文件复核(services/make.merge 报错到任务)。
+    if body.goal.mode in ("merge", "concat"):
+        # 合并/追加模式:纯 Python 处理,不走 DJ/LLM,只校验成员配置。
+        # 字段是否真为共同字段在执行时逐文件复核(services/make 报错到任务)。
         names = body.goal.merge_members or []
         if len(names) < 2:
             return JSONResponse(
                 status_code=400,
-                content={"success": False, "message": "合并模式至少选择 2 个成员文件"},
+                content={"success": False, "message": "至少选择 2 个成员文件"},
             )
         if len(set(names)) != len(names):
             return JSONResponse(
                 status_code=400,
-                content={"success": False, "message": "合并成员文件名重复"},
+                content={"success": False, "message": "成员文件名重复"},
             )
-        if not (body.goal.merge_field or "").strip():
+        if body.goal.mode == "merge" and not (body.goal.merge_field or "").strip():
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": "请指定合并字段"},
