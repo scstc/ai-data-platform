@@ -1,6 +1,6 @@
-"""训练集生成(trainset) API:8 个端点,Job.type='trainset'。
+"""数据合成(trainset) API:8 个端点,Job.type='trainset'。
 
-训练集生成——LLM 从源数据造训练样本(QA/COT/偏好,1→N)。算子需 LLM,
+数据合成——LLM 从源数据造训练样本(QA/COT/偏好,1→N)。算子需 LLM,
 未配 LLM Key → needs_api 拦截。产物 ``DatasetVersion.origin='synthetic'``。
 与 augment(1→1 改写)、make(merge 拼接)共享 origin 约定,但 Job.type 独立。
 
@@ -51,7 +51,7 @@ def _trainset_operator_block(operators: list) -> str | None:
     """资源前置校验:算子不限白名单,仅按运行时能力(LLM/GPU)拦截。"""
     llm_configured = bool(get_active_llm_config().api_key)
     if not llm_configured:
-        return "训练集生成需 LLM 支持:请先在运维监控 / LLM 配置页设置 OPENAI_API_KEY"
+        return "数据合成需 LLM 支持:请先在运维监控 / LLM 配置页设置 OPENAI_API_KEY"
     blocked = [
         reason
         for o in operators
@@ -65,7 +65,7 @@ def _trainset_operator_block(operators: list) -> str | None:
 async def _start_trainset(
     session: AsyncSession, body: TrainsetJobCreate
 ) -> JSONResponse:
-    """训练集生成版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。"""
+    """数据合成版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。"""
     if not body.operators:
         return JSONResponse(
             status_code=400,
@@ -117,7 +117,7 @@ async def _start_trainset(
 async def create_trainset_job(
     body: TrainsetJobCreate, session: SessionDep
 ) -> JSONResponse:
-    """新建训练集生成任务并异步执行。"""
+    """新建数据合成任务并异步执行。"""
     return await _start_trainset(session, body)
 
 
@@ -132,7 +132,7 @@ async def list_trainset_jobs(
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出训练集生成任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
+    """分页列出数据合成任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
     count_stmt = select(func.count()).select_from(Job).where(Job.type == _TRAINSET_TYPE)
     list_stmt = select(Job).where(Job.type == _TRAINSET_TYPE)
     if dataset_id:
@@ -158,11 +158,11 @@ async def list_trainset_jobs(
 
 @router.get("/trainset/jobs/{job_id}")
 async def get_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """训练集生成任务详情。"""
+    """数据合成任务详情。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _TRAINSET_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "训练集生成任务不存在"}
+            status_code=404, content={"success": False, "message": "数据合成任务不存在"}
         )
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
@@ -177,7 +177,7 @@ async def rerun_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
     job = await session.get(Job, job_id)
     if job is None or job.type != _TRAINSET_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "训练集生成任务不存在"}
+            status_code=404, content={"success": False, "message": "数据合成任务不存在"}
         )
     if not job.spec:
         return JSONResponse(
@@ -196,11 +196,11 @@ async def rerun_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
     "/trainset/jobs/{job_id}/stop", dependencies=[Depends(require_admin)]
 )
 async def stop_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """停止运行中/排队的训练集生成任务。"""
+    """停止运行中/排队的数据合成任务。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _TRAINSET_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "训练集生成任务不存在"}
+            status_code=404, content={"success": False, "message": "数据合成任务不存在"}
         )
     if job.state not in ("pending", "running"):
         return JSONResponse(
@@ -229,11 +229,11 @@ async def _delete_trainset_cascade(session: AsyncSession, job: Job) -> None:
     "/trainset/jobs/{job_id}", dependencies=[Depends(require_admin)]
 )
 async def delete_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """删除训练集生成任务(只删任务,产物版本保留)。"""
+    """删除数据合成任务(只删任务,产物版本保留)。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _TRAINSET_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "训练集生成任务不存在"}
+            status_code=404, content={"success": False, "message": "数据合成任务不存在"}
         )
     if job.state == "running":
         return JSONResponse(
@@ -250,7 +250,7 @@ async def delete_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
 async def batch_delete_trainset_jobs(
     body: BatchDeleteRequest, session: SessionDep
 ) -> JSONResponse:
-    """批量删除训练集生成任务。"""
+    """批量删除数据合成任务。"""
     deleted = 0
     for job_id in body.ids:
         job = await session.get(Job, job_id)
@@ -268,7 +268,7 @@ async def get_trainset_report(job_id: str, session: SessionDep) -> JSONResponse:
     job = await session.get(Job, job_id)
     if job is None or job.type != _TRAINSET_TYPE:
         return JSONResponse(
-            status_code=404, content={"success": False, "message": "训练集生成任务不存在"}
+            status_code=404, content={"success": False, "message": "数据合成任务不存在"}
         )
     stmt = (
         select(DatasetVersion)

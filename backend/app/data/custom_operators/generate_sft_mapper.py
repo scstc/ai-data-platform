@@ -1,4 +1,4 @@
-"""训练集生成——SFT 微调样本生成算子(平台自定义算子,API 型)。
+"""数据合成——SFT 微调样本生成算子(平台自定义算子,API 型)。
 
 单步 LLM 调用:对每条样本的主文本生成一条 SFT 监督微调样本
 {"instruction","input","output"},分别写入 instruction_key / input_key /

@@ -1,4 +1,4 @@
-// 训练集生成任务列表页(独立侧边栏菜单入口):复用增强的 ProTable
+// 数据合成任务列表页(独立侧边栏菜单入口):复用增强的 ProTable
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
 import { PageContainer, ProTable } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
@@ -168,7 +168,7 @@ const Trainset: React.FC = () => {
   return (
     <PageContainer>
       <ProTable<DataPlatform.Job>
-        headerTitle="训练集生成任务"
+        headerTitle="数据合成任务"
         actionRef={actionRef}
         rowKey="id"
         search={false}
@@ -220,7 +220,7 @@ const Trainset: React.FC = () => {
               key="new"
               onClick={() => history.push('/governance/trainset/editor')}
             >
-              新建训练集生成
+              新建数据合成
             </Button>
           ),
         ]}

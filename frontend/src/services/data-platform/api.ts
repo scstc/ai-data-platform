@@ -1586,9 +1586,9 @@ export async function getAugmentReport(
 }
 
 // ---------------------------------------------------------------------------
-// 训练集生成(trainset):LLM 从源数据造 QA/COT/偏好训练样本(Job.type='trainset')
+// 数据合成(trainset):LLM 从源数据造 QA/COT/偏好训练样本(Job.type='trainset')
 // ---------------------------------------------------------------------------
-/** 新建训练集生成任务 POST /api/v1/trainset/jobs */
+/** 新建数据合成任务 POST /api/v1/trainset/jobs */
 export async function createTrainsetJob(
   body: DataPlatform.TrainsetJobCreate,
   options?: { [key: string]: any },
@@ -1604,7 +1604,7 @@ export async function createTrainsetJob(
   );
 }
 
-/** 分页列出训练集生成任务 GET /api/v1/trainset/jobs */
+/** 分页列出数据合成任务 GET /api/v1/trainset/jobs */
 export async function listTrainsetJobs(
   params: { current?: number; pageSize?: number; datasetId?: string } = {},
   options?: { [key: string]: any },
@@ -1620,7 +1620,7 @@ export async function listTrainsetJobs(
   });
 }
 
-/** 训练集生成任务详情 GET /api/v1/trainset/jobs/{id} */
+/** 数据合成任务详情 GET /api/v1/trainset/jobs/{id} */
 export async function getTrainsetJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1631,7 +1631,7 @@ export async function getTrainsetJob(
   );
 }
 
-/** 重跑训练集生成任务 POST /api/v1/trainset/jobs/{id}/rerun */
+/** 重跑数据合成任务 POST /api/v1/trainset/jobs/{id}/rerun */
 export async function rerunTrainsetJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1642,7 +1642,7 @@ export async function rerunTrainsetJob(
   );
 }
 
-/** 停止训练集生成任务 POST /api/v1/trainset/jobs/{id}/stop */
+/** 停止数据合成任务 POST /api/v1/trainset/jobs/{id}/stop */
 export async function stopTrainsetJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1653,7 +1653,7 @@ export async function stopTrainsetJob(
   );
 }
 
-/** 删除训练集生成任务 DELETE /api/v1/trainset/jobs/{id} */
+/** 删除数据合成任务 DELETE /api/v1/trainset/jobs/{id} */
 export async function deleteTrainsetJob(
   jobId: string,
   options?: { [key: string]: any },
@@ -1664,7 +1664,7 @@ export async function deleteTrainsetJob(
   );
 }
 
-/** 批量删除训练集生成任务 POST /api/v1/trainset/jobs/batch-delete */
+/** 批量删除数据合成任务 POST /api/v1/trainset/jobs/batch-delete */
 export async function batchDeleteTrainsetJobs(
   ids: string[],
   options?: { [key: string]: any },
@@ -1680,7 +1680,7 @@ export async function batchDeleteTrainsetJobs(
   );
 }
 
-/** 读取训练集生成报告 GET /api/v1/trainset/jobs/{id}/report */
+/** 读取数据合成报告 GET /api/v1/trainset/jobs/{id}/report */
 export async function getTrainsetReport(
   jobId: string,
   options?: { [key: string]: any },

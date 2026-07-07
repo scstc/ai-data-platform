@@ -1,6 +1,6 @@
-"""训练集生成(trainset)相关 schema。
+"""数据合成(trainset)相关 schema。
 
-训练集生成——LLM 从源数据造训练样本(QA 对 / COT 推理链 / 偏好对),1→N。
+数据合成——LLM 从源数据造训练样本(QA 对 / COT 推理链 / 偏好对),1→N。
 与 augment(1→1 改写)、make(merge 拼接)区分:本模块专管「造新训练样本」。
 所有算子都需 LLM,未配 OPENAI_API_KEY 时由后端 needs_api 拦截。
 
@@ -16,7 +16,7 @@ from app.schemas.job import MemberOperatorConfig, OperatorSpec
 
 
 class TrainsetGoal(CamelModel):
-    """训练集生成目标(任务级参数)。"""
+    """数据合成目标(任务级参数)。"""
 
     # 生成模式:synthesize(LLM 造新样本);沿用 make 的 synthesize 语义
     mode: str = "synthesize"
@@ -28,7 +28,7 @@ class TrainsetGoal(CamelModel):
 
 
 class TrainsetJobCreate(CamelModel):
-    """新建训练集生成任务入参。"""
+    """新建数据合成任务入参。"""
 
     name: str
     dataset_version_id: str
@@ -49,7 +49,7 @@ class TrainsetJobCreate(CamelModel):
 
 
 class TrainsetReport(CamelModel):
-    """训练集生成报告(任务跑完后)。"""
+    """数据合成报告(任务跑完后)。"""
 
     job_id: str
     input_version_id: str

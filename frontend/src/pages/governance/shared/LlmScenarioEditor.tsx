@@ -60,7 +60,7 @@ export type LlmScenarioEditorProps<TGoal extends object> = {
   scenario?: 'distillation' | 'synthesis' | 'augmentation';
   /** OperatorLibrary 业务桶(锁定算子库子集);历史命名与 scenario 不一致 */
   bucket: string;
-  /** 为真时算子库只展示该 bucket 的算子(训练集生成:只列生成类算子);
+  /** 为真时算子库只展示该 bucket 的算子(数据合成:只列生成类算子);
    *  默认 false 沿用各场景「展示全量算子」的既有行为。 */
   restrictToBucket?: boolean;
   pageTitle: string;

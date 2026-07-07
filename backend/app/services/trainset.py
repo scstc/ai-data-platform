@@ -1,4 +1,4 @@
-"""训练集生成(trainset)执行引擎:走 data-juicer LLM Mapper 链,产物落新版本。
+"""数据合成(trainset)执行引擎:走 data-juicer LLM Mapper 链,产物落新版本。
 
 与 ``services/augment.py`` 的差异:本模块专管 LLM 造新训练样本(QA/COT/偏好,1→N),
 不做 1→1 扩增比告警(生成场景合法扩增)。引擎逻辑与 augment/make 同构(成员级 dj-process)。
@@ -44,7 +44,7 @@ async def run_trainset_job(
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, TrainsetReport]:
-    """对输入版本跑训练集生成算子链 → 写回 dataset 新版本。
+    """对输入版本跑数据合成算子链 → 写回 dataset 新版本。
 
     member_configs: 新版成员独立配置，格式 [{member_name, operators}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
@@ -172,7 +172,7 @@ async def run_trainset_job(
         if code != 0 or not output_path.exists():
             tail = "\n".join(log.strip().splitlines()[-8:])
             raise EngineError(
-                f"成员 {member.table_name} 训练集生成失败(dj-process 退出码 {code})\n{tail}"
+                f"成员 {member.table_name} 数据合成失败(dj-process 退出码 {code})\n{tail}"
             )
 
         # 上传产出文件
@@ -223,7 +223,7 @@ async def run_trainset_job(
         size=sum(m["size"] or 0 for m in new_members_data),
         origin="synthetic",
         produced_by_job_id=job_id,
-        note=f"训练集生成产出(来自 v{input_version.version_no})",
+        note=f"数据合成产出(来自 v{input_version.version_no})",
     )
     session.add(version)
     await session.flush()
@@ -357,7 +357,7 @@ async def _run_trainset_job_legacy(
         size=out_path.stat().st_size,
         origin="synthetic",
         produced_by_job_id=job_id,
-        note=f"训练集生成产出(来自 v{input_version.version_no})",
+        note=f"数据合成产出(来自 v{input_version.version_no})",
     )
     session.add(version)
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))

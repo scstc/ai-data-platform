@@ -735,14 +735,14 @@ declare namespace DataPlatform {
     warnings: string[];
     raw?: Record<string, any>;
   };
-  /** 训练集生成(trainset)目标 */
+  /** 数据合成(trainset)目标 */
   type TrainsetGoal = {
     mode?: 'synthesize';
     targetPerSample?: number;
     targetTotal?: number;
     note?: string;
   };
-  /** 新建训练集生成任务入参 */
+  /** 新建数据合成任务入参 */
   type TrainsetJobCreate = {
     name: string;
     datasetVersionId: string;
@@ -752,7 +752,7 @@ declare namespace DataPlatform {
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段 */
     textKeys?: string[];
   };
-  /** 训练集生成报告 */
+  /** 数据合成报告 */
   type TrainsetReport = {
     jobId: string;
     inputVersionId: string;

@@ -51,7 +51,7 @@ def _make_operator_block(operators: list) -> str | None:
     """资源前置校验(合成特有):算子不限白名单,仅按运行时能力(LLM/GPU)拦截。"""
     llm_configured = bool(get_active_llm_config().api_key)
     if not llm_configured:
-        return "数据合成需 LLM 支持:请先在运维监控 / LLM 配置页设置 OPENAI_API_KEY"
+        return "数据合并需 LLM 支持:请先在运维监控 / LLM 配置页设置 OPENAI_API_KEY"
     blocked = [
         reason
         for o in operators
