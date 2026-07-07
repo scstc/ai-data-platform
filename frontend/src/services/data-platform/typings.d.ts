@@ -274,6 +274,8 @@ declare namespace DataPlatform {
     type: string;
     default: string;
     desc: string;
+    /** 参数中文说明(快照全量翻译);无则回退字典/英文 desc */
+    descZh?: string | null;
   };
 
   /** 算子市场:全量目录算子项 */

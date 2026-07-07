@@ -5,11 +5,12 @@ import { PARAM_ZH_DESC } from '../market/_paramZhDict';
 
 const { Text } = Typography;
 
-/** 参数提示语:desc 本身是中文(自定义算子)直接用;英文 desc 先查中文字典
- *  (与市场详情页同一份),未命中回退英文原文,不吞信息。 */
-const paramTooltip = (name: string, desc?: string) => {
-  if (desc && /[一-鿿]/.test(desc)) return desc;
-  return PARAM_ZH_DESC[name] ?? desc;
+/** 参数提示语:优先快照全量翻译 descZh;desc 本身是中文(自定义算子)直接用;
+ *  再查中文字典(与市场详情页同一份),未命中回退英文原文,不吞信息。 */
+const paramTooltip = (p: DataPlatform.CatalogParam) => {
+  if (p.descZh) return p.descZh;
+  if (p.desc && /[一-鿿]/.test(p.desc)) return p.desc;
+  return PARAM_ZH_DESC[p.name] ?? p.desc;
 };
 
 // LLM 模型参数(DJ 各算子命名不统一):执行时后端按 LLM 配置页的激活模型注入
@@ -54,7 +55,7 @@ const StepParamsForm: React.FC<{
             <Form.Item
               key={p.name}
               label={p.name}
-              tooltip={paramTooltip(p.name, p.desc)}
+              tooltip={paramTooltip(p)}
               help="自动使用 LLM 配置页的激活模型"
             >
               <Input
@@ -69,7 +70,7 @@ const StepParamsForm: React.FC<{
           <Form.Item
             key={p.name}
             label={p.name}
-            tooltip={paramTooltip(p.name, p.desc)}
+            tooltip={paramTooltip(p)}
             help={p.default ? `默认 ${p.default}` : undefined}
           >
             {t.includes('bool') ? (

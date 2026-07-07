@@ -86,10 +86,9 @@ const PARAM_COLUMNS = [
   {
     title: '中文说明',
     dataIndex: 'desc',
-    render: (desc: string, row: { name: string }) => {
-      const zh = PARAM_ZH_DESC[row.name];
-      // 命中字典 → 显示中文;未命中 → 回退到英文 desc(避免吞掉原始信息)
-      return zh ?? desc;
+    render: (desc: string, row: { name: string; descZh?: string | null }) => {
+      // 优先快照全量翻译 descZh;未翻译 → 查字典;都没有 → 回退英文 desc(不吞信息)
+      return row.descZh ?? PARAM_ZH_DESC[row.name] ?? desc;
     },
   },
   {

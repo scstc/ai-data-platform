@@ -380,6 +380,12 @@ def to_api(op: dict[str, Any]) -> dict[str, Any]:
     表达,与场景维度解耦。
     """
     out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items() if k != "source_object_key"}
+    # 参数内层键 camelCase:desc_zh(全量中文翻译,快照富化)→ descZh
+    if out.get("params"):
+        out["params"] = [
+            {("descZh" if k == "desc_zh" else k): v for k, v in p.items()}
+            for p in out["params"]
+        ]
     # 市场/编辑器口径:只看环境能力(media_ok=True),不预判数据集格式——
     # 媒体算子按环境(GPU/LLM/...)判 ready,数据集适配留到提交期 runnable_reason。
     out["runnable"] = effective_runnable(op, media_ok=True)
