@@ -296,7 +296,7 @@ const DatasetsList: React.FC = () => {
       render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
     },
     {
-      title: '版本',
+      title: '最新版本',
       dataIndex: 'latestVersionLabel',
       search: false,
       width: 150,

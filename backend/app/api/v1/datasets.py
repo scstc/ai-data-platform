@@ -1803,10 +1803,9 @@ async def list_datasets(
                 )
             ).all()
         )
-    # 一次查出本页各数据集的「当前展示版本」标签,避免 N+1。优先取已发布版本
-    # (publish_version 不变量保证同数据集至多一个 published——算法侧消费的唯一当前
-    # 发布版);无已发布版本时回退最新版本(version_no 最大者,供纯草稿数据集展示)。
-    # 否则会把更新的草稿版本号当成"已发布版本号"显示,与详情页对不上。
+    # 一次查出本页各数据集的版本标签,避免 N+1。版本列展示**最新版本**
+    # (version_no 最大者,含草稿);train_type/schema_variant/modalities 仍取
+    # 展示版本(优先 published)口径。
     # 治理整改 G1:同时取 train_type、schema_variant 回填列表展示。
     latest_label: dict[str, str] = {}
     showcase_train_type: dict[str, str | None] = {}
@@ -1833,13 +1832,12 @@ async def list_datasets(
             if cur is None or vno > cur[0]:
                 latest[ds_id] = (vno, created, tt, sv)
         for ds_id, (vno, created, tt, sv) in latest.items():
-            # 已发布版本优先;无则用最新版本
-            pick_vno, pick_created, pick_tt, pick_sv = published.get(
-                ds_id, (vno, created, tt, sv)
-            )
+            # 版本列直接展示最新版本号(含草稿)
             latest_label[ds_id] = format_version_label(
-                pick_vno, pick_created  # type: ignore[arg-type]
+                vno, created  # type: ignore[arg-type]
             )
+            # train_type/schema_variant 仍按展示版本(已发布优先)口径
+            _, _, pick_tt, pick_sv = published.get(ds_id, (vno, created, tt, sv))
             showcase_train_type[ds_id] = pick_tt
             showcase_schema_variant[ds_id] = pick_sv
     # 展示版本(优先 published,否则最新)的多模态模态集合,回填 modalities(子标签)

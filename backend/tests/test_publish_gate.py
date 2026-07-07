@@ -104,15 +104,15 @@ async def test_publish_version_not_found(client: AsyncClient) -> None:
     assert resp.status_code == 404
 
 
-# --- 列表展示:已发布版本号优先于更新的草稿版本号 ------------------------
-async def test_list_latest_label_prefers_published_over_newer_draft(
+# --- 列表展示:版本列展示最新版本号(含草稿) ------------------------------
+async def test_list_latest_label_shows_newest_version(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
-    """列表 latestVersionLabel 必须展示「已发布版本」号,而非更新的草稿版本号。
+    """列表 latestVersionLabel 必须展示「最新版本」号(version_no 最大者,含草稿)。
 
-    场景:同一数据集有 published v1,之后又产出更新的 draft v2/v3。publish 不变量
-    保证同数据集至多一个 published 版本(算法侧消费的唯一当前发布版),故列表应显示
-    已发布的 #1;若取 version_no 最大者会显示草稿 #3,与详情页「实际发布版本」对不上。
+    场景:同一数据集有 published v1,之后又产出更新的 draft v2/v3。版本列的语义是
+    "该数据集当前演进到哪一版",故显示最新的 #3 而非已发布的 #1;发布态由详情页
+    版本历史区分。
     """
     await _seed(
         session_factory,
@@ -132,9 +132,9 @@ async def test_list_latest_label_prefers_published_over_newer_draft(
     assert item is not None, "种子数据集应出现在列表中"
     label = item["latestVersionLabel"]
     assert label is not None
-    # 展示已发布版本 #1,而非最新草稿 #3
-    assert label.endswith("(#1)"), label
-    assert "(#3)" not in label, label
+    # 展示最新版本 #3(草稿),而非已发布的 #1
+    assert label.endswith("(#3)"), label
+    assert "(#1)" not in label, label
 
 
 # --- 下架:仅对 published 生效 --------------------------------------------
