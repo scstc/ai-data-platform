@@ -44,6 +44,7 @@ async def run_distillation_job(
     target_members: list[str] | None = None,
     goal: DistillationGoal,
     output_dataset_id: str | None = None,
+    text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
     """对输入版本跑蒸馏算子链 → 写回 dataset(output_dataset_id 或 input 同 dataset)新版本。
 
@@ -72,6 +73,7 @@ async def run_distillation_job(
             operators=operators,
             goal=goal,
             output_dataset_id=output_dataset_id,
+            text_keys=text_keys,
         )
 
     # 蒸馏不支持 manifest 输入
@@ -94,7 +96,9 @@ async def run_distillation_job(
         if not members_to_process:
             raise EngineError("未找到要处理的成员")
         config_map = {
-            m.table_name: {"operators": operators}
+            m.table_name: (
+                {**{"operators": operators}, **({"text_keys": text_keys} if text_keys else {})}
+            )
             for m in members_to_process
         }
 
