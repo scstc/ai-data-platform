@@ -26,6 +26,7 @@ from app.api.v1.jobs import (
     _item,
     _new_job_id,
     _now,
+    _reset_for_edit_rerun,
     BatchDeleteRequest,
 )
 from app.core.config import settings
@@ -66,9 +67,12 @@ def _distill_operator_block(
 
 
 async def _start_distillation(
-    session: AsyncSession, body: DistillationJobCreate
+    session: AsyncSession, body: DistillationJobCreate, job: Job | None = None
 ) -> JSONResponse:
-    """蒸馏版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。"""
+    """蒸馏版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。
+
+    传入 job = 编辑任务:校验通过后覆盖该任务配置并原地重跑,不新建记录。
+    """
     if not body.operators:
         return JSONResponse(
             status_code=400,
@@ -112,18 +116,21 @@ async def _start_distillation(
             content={"success": False, "message": "蒸馏不支持 manifest 输入"},
         )
 
-    job = Job(
-        id=_new_job_id(),
-        name=body.name,
-        type=_DISTILL_TYPE,
-        state="pending",
-        progress=0,
-        created_by="admin",
-        # 完整存 body(goal + output_dataset_id + 算子链),供 rerun 整参重跑
-        spec=body.model_dump(mode="json"),
-        pipeline_id=body.pipeline_id,
-    )
-    session.add(job)
+    if job is None:
+        job = Job(
+            id=_new_job_id(),
+            name=body.name,
+            type=_DISTILL_TYPE,
+            state="pending",
+            progress=0,
+            created_by="admin",
+            # 完整存 body(goal + output_dataset_id + 算子链),供 rerun 整参重跑
+            spec=body.model_dump(mode="json"),
+            pipeline_id=body.pipeline_id,
+        )
+        session.add(job)
+    else:
+        await _reset_for_edit_rerun(session, job, body)
     await session.commit()
     await session.refresh(job)
     # spawn 只传 job_id:goal/output_dataset_id 已随 body 落进 job.spec,
@@ -191,6 +198,30 @@ async def get_distillation_job(job_id: str, session: SessionDep) -> JSONResponse
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
     return JSONResponse(content=_item(job, output, input_))
+
+
+@router.put(
+    "/distillation/jobs/{job_id}", dependencies=[Depends(require_admin)]
+)
+async def update_distillation_job(
+    job_id: str, body: DistillationJobCreate, session: SessionDep
+) -> JSONResponse:
+    """编辑蒸馏任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
+
+    仅终态/已暂停任务可编辑;运行中/排队中 → 409(先停止)。
+    """
+    job = await session.get(Job, job_id)
+    if job is None or job.type != _DISTILL_TYPE:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "蒸馏任务不存在"},
+        )
+    if job.state in ("pending", "running"):
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务运行中,请先停止再编辑"},
+        )
+    return await _start_distillation(session, body, job=job)
 
 
 @router.post(

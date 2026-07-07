@@ -15,10 +15,12 @@ import {
 } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { JobDetail } from '@/components';
+import DistillationReportModal from '@/pages/distillation/ReportModal';
 import {
   batchDeleteJobs,
   dataTaskStats,
   deleteJob,
+  getDistillationReport,
   getJob,
   listDatasets,
   listDataTasks,
@@ -72,11 +74,12 @@ const STATE_VALUE_ENUM: Record<string, { text: string }> = {
 
 /** 成功任务的「查看报告」跳转——回各类型页(那里有各自的报告/统计视图)。
  *  quality/review 有独立报告页,点击处带 ?jobId= 直达该任务报告。
- *  augmentation 无此入口:/governance/augment 是治理工场薄入口(渲染 Workbench,
- *  不认 jobId),报告实际在 /governance/augment/jobs 里按行展开,此处不接;
+ *  distillation 不走跳转:/governance/distillation 是治理工场薄入口(渲染
+ *  Workbench,无报告),报告改为本页内弹 Modal(getDistillationReport)。
+ *  augmentation 无此入口:/governance/augment 同为工场薄入口,
+ *  报告实际在 /governance/augment/jobs 里按行展开,此处不接;
  *  故不在此表中,「查看报告」按钮相应不出现。 */
 const REPORT_PAGE: Record<string, string> = {
-  distillation: '/governance/distillation',
   synthesis: '/governance/make',
   quality: '/assessment/quality/report',
   review: '/governance/content-safety/report',
@@ -142,6 +145,23 @@ const DataTasks: React.FC = () => {
   const [pipelineMap, setPipelineMap] = useState<
     Record<string, { name: string; scenario: string }>
   >({});
+  // 蒸馏报告 Modal:本页内直接展示(蒸馏无独立报告页可跳)
+  const [reportJobId, setReportJobId] = useState<string>();
+  const [report, setReport] = useState<DataPlatform.DistillationReport>();
+
+  const openDistillReport = async (jobId: string) => {
+    try {
+      const res = await getDistillationReport(jobId);
+      if (res.data) {
+        setReport(res.data);
+        setReportJobId(jobId);
+      }
+    } catch (e: any) {
+      message.error(
+        e?.info?.errorMessage || e?.data?.message || '读取报告失败',
+      );
+    }
+  };
 
   useEffect(() => {
     listDatasets({ current: 1, pageSize: 1000 })
@@ -446,8 +466,15 @@ const DataTasks: React.FC = () => {
             </Popconfirm>,
           );
         }
-        // 终态:查看报告(quality/review 直达该任务的报告页,其余回类型页) / 重新运行 / 删除
-        if (r.state === 'success' && REPORT_PAGE[r.type]) {
+        // 终态:查看报告(蒸馏本页弹 Modal;quality/review 直达该任务的报告页,
+        // 其余回类型页) / 重新运行 / 删除
+        if (r.state === 'success' && r.type === 'distillation') {
+          actions.push(
+            <a key="report" onClick={() => openDistillReport(r.id)}>
+              查看报告
+            </a>,
+          );
+        } else if (r.state === 'success' && REPORT_PAGE[r.type]) {
           actions.push(
             <a
               key="report"
@@ -576,6 +603,16 @@ const DataTasks: React.FC = () => {
       >
         {currentJob && <JobDetail job={currentJob} />}
       </Drawer>
+
+      <DistillationReportModal
+        open={!!reportJobId}
+        jobId={reportJobId}
+        report={report}
+        onClose={() => {
+          setReportJobId(undefined);
+          setReport(undefined);
+        }}
+      />
     </PageContainer>
   );
 };

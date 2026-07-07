@@ -94,6 +94,10 @@ class JobRead(CamelModel):
     input: dict[str, Any] | None = None
     # 是否可重跑(存有原始执行规格 spec;早于重跑特性的任务为 False)
     can_rerun: bool = False
+    # 原始执行规格(camelCase),供编辑器回填;仅详情端点(_item)填充,列表不带。
+    # 字段名与 ORM 的 spec(snake_case 原始存储)错开,避免 from_attributes 自动
+    # 把 snake 键的原始 dict 带进所有列表响应。
+    edit_spec: dict[str, Any] | None = None
 
     # 以下三个控制位由 state 派生,供「数据任务」统一控制台按状态渲染操作按钮。
     # computed_field + to_camel 别名 → 序列化为 canPause / canResume / canStop,

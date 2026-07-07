@@ -63,7 +63,7 @@ async def test_rerun_reexecutes_with_saved_spec(
     calls: list[tuple[str, str, list]] = []
 
     async def fake_run(
-        session, *, job_id, input_version, operators
+        session, *, job_id, input_version, operators, **_
     ):
         calls.append((job_id, input_version.id, operators))
         session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))

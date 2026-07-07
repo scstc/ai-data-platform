@@ -22,9 +22,11 @@ import {
   createJob,
   createPipeline,
   getDataset,
+  getJob,
   getPipeline,
   listDatasets,
   listOperatorCatalog,
+  updateJob,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 import CollapsiblePanes from './CollapsiblePanes';
@@ -163,6 +165,63 @@ const Editor: React.FC<{
     const vId = new URLSearchParams(location.search).get('versionId');
     if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
   }, [versions]);
+
+  // 编辑模式:URL 带 jobId 时按任务的 editSpec 回填(名称/数据集/版本/成员算子链),
+  // 提交改走 updateJob(覆盖原任务配置并原地重跑,不新建记录)
+  const editJobId = new URLSearchParams(location.search).get('jobId');
+  const [editSpec, setEditSpec] = useState<Record<string, any>>();
+  useEffect(() => {
+    if (!editJobId) return;
+    getJob(editJobId)
+      .then((r) => {
+        const job = r.data;
+        if (!job.editSpec) {
+          message.error('该任务无可编辑的配置(早于重跑特性创建)');
+          return;
+        }
+        setEditSpec(job.editSpec);
+        setName(job.name);
+        setNameDirty(true);
+        const dsId = job.input?.datasetId;
+        if (dsId) setDatasetId(dsId);
+        else message.error('原输入数据集已不存在,无法回填,请重新选择');
+      })
+      .catch(() => message.error('加载任务失败'));
+  }, []);
+  useEffect(() => {
+    const vId = editSpec?.datasetVersionId;
+    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+  }, [versions, editSpec]);
+
+  // 任务配置回填:版本成员就绪后套用 editSpec 的成员算子链(仅一次,晚于成员初始化)
+  const editSpecAppliedRef = useRef(false);
+  useEffect(() => {
+    if (
+      !editSpec ||
+      editSpecAppliedRef.current ||
+      versionMembers.length === 0 ||
+      versionId !== editSpec.datasetVersionId
+    ) {
+      return;
+    }
+    editSpecAppliedRef.current = true;
+    setMemberConfigs((prev) => {
+      const next = { ...prev };
+      if (editSpec.memberConfigs?.length) {
+        for (const cfg of editSpec.memberConfigs) {
+          if (next[cfg.memberName]) {
+            next[cfg.memberName] = { operators: cfg.operators ?? [] };
+          }
+        }
+      } else if (editSpec.operators?.length) {
+        // 旧版统一配置:同一条算子链套用到所有成员
+        for (const m of versionMembers) {
+          next[m.tableName] = { operators: editSpec.operators };
+        }
+      }
+      return next;
+    });
+  }, [versionMembers, versionId, editSpec]);
 
   // 流水线预载:URL 带 pipelineId 时,版本成员就绪后把 spec.operators
   // 套用到每个成员(仅套用一次;加载失败不阻塞正常编辑)
@@ -336,22 +395,30 @@ const Editor: React.FC<{
     }
 
     const carryCount = versionMembers.length - configs.length;
+    const body = {
+      name,
+      type: jobType,
+      datasetVersionId: versionId,
+      memberConfigs: configs,
+      outputMode: 'version' as const,
+    };
     Modal.confirm({
-      title: '确认创建任务',
+      title: editJobId ? '确认保存并重新运行' : '确认创建任务',
       content: `将对 ${configs.length} 个文件执行${noun}${
         carryCount > 0 ? `,其余 ${carryCount} 个未配置文件原样结转` : ''
-      },产物合并为新版本。`,
+      },产物合并为新版本。${
+        editJobId ? '保存会覆盖原任务配置并原地重跑,不新建任务记录。' : ''
+      }`,
       onOk: async () => {
         setSubmitting(true);
         try {
-          await createJob({
-            name,
-            type: jobType,
-            datasetVersionId: versionId,
-            memberConfigs: configs,
-            outputMode: 'version',
-          });
-          message.success(`${noun}任务已创建，正在后台运行`);
+          if (editJobId) {
+            await updateJob(editJobId, body);
+            message.success(`${noun}任务已更新，正在重新运行`);
+          } else {
+            await createJob(body);
+            message.success(`${noun}任务已创建，正在后台运行`);
+          }
           history.push(redirectHref);
         } finally {
           setSubmitting(false);
@@ -362,7 +429,7 @@ const Editor: React.FC<{
 
   return (
     <PageContainer
-      header={{ title }}
+      header={{ title: editJobId ? title.replace('新建', '编辑') : title }}
       extra={[
         scenario && (
           <Button key="save-pipeline" onClick={openSavePipeline}>
@@ -375,7 +442,7 @@ const Editor: React.FC<{
           loading={submitting}
           onClick={onSubmit}
         >
-          创建任务
+          {editJobId ? '保存并重新运行' : '创建任务'}
         </Button>,
       ]}
     >

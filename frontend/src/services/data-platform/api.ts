@@ -1025,6 +1025,23 @@ export async function createJob(
   });
 }
 
+/** 编辑加工任务 PUT /api/v1/jobs/:id（覆盖原任务配置并原地重跑，不新建记录） */
+export async function updateJob(
+  id: string,
+  body: DataPlatform.JobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/jobs/${id}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
 /** 重跑加工任务 POST /api/v1/jobs/:id/rerun（用原配置对原输入版本再跑一次，产新版本） */
 export async function rerunJob(id: string, options?: { [key: string]: any }) {
   return request<{ data: DataPlatform.Job; success: boolean }>(
@@ -1256,6 +1273,23 @@ export async function getDistillationJob(
   );
 }
 
+/** 编辑蒸馏任务 PUT /api/v1/distillation/jobs/{id}（覆盖原任务配置并原地重跑） */
+export async function updateDistillationJob(
+  jobId: string,
+  body: DataPlatform.DistillationJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/distillation/jobs/${jobId}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
 /** 重跑蒸馏任务 POST /api/v1/distillation/jobs/{id}/rerun */
 export async function rerunDistillationJob(
   jobId: string,
@@ -1362,6 +1396,23 @@ export async function getMakeJob(
   );
 }
 
+/** 编辑合成任务 PUT /api/v1/synthesis/jobs/{id}（覆盖原任务配置并原地重跑） */
+export async function updateMakeJob(
+  jobId: string,
+  body: DataPlatform.MakeJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/synthesis/jobs/${jobId}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
 /** 重跑合成任务 POST /api/v1/synthesis/jobs/{id}/rerun */
 export async function rerunMakeJob(
   jobId: string,
@@ -1465,6 +1516,23 @@ export async function getAugmentJob(
   return request<{ data: DataPlatform.Job; success: boolean }>(
     `/api/v1/augmentation/jobs/${jobId}`,
     { method: 'GET', ...(options || {}) },
+  );
+}
+
+/** 编辑增强任务 PUT /api/v1/augmentation/jobs/{id}（覆盖原任务配置并原地重跑） */
+export async function updateAugmentJob(
+  jobId: string,
+  body: DataPlatform.AugmentJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/augmentation/jobs/${jobId}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
   );
 }
 

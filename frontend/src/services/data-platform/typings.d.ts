@@ -485,6 +485,8 @@ declare namespace DataPlatform {
     input?: IngestOutput;
     /** 是否可重跑（存有原始执行规格；早于重跑特性的任务为 false） */
     canRerun?: boolean;
+    /** 原始执行规格(camelCase,供编辑器回填);仅详情接口返回,列表不带 */
+    editSpec?: Record<string, any>;
     /** 可暂停(pending/running)——由后端 JobRead.can_pause 派生 */
     canPause?: boolean;
     /** 可继续(仅 paused)——由后端 JobRead.can_resume 派生 */

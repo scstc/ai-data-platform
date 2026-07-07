@@ -158,9 +158,17 @@ const Processing: React.FC<{
               ]
             : [];
         }
-        // 终态:可重跑 + 可删除
+        // 终态:可编辑(改配置原地重跑) + 可重跑 + 可删除
         const actions = [];
         if (r.canRerun && canRerunPerm) {
+          actions.push(
+            <a
+              key="edit"
+              onClick={() => history.push(`${createHref}?jobId=${r.id}`)}
+            >
+              编辑
+            </a>,
+          );
           actions.push(
             <Popconfirm
               key="rerun"

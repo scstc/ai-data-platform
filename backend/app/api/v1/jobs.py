@@ -182,11 +182,26 @@ async def _build_input(session: AsyncSession, job_id: str) -> dict | None:
     }
 
 
+def _edit_spec(job: Job) -> dict | None:
+    """把 job.spec(snake_case 原始存储)经对应 Create schema 转成 camelCase。
+
+    供前端编辑器按 jobId 回填配置;spec 缺失/损坏返回 None(前端据此提示不可编辑)。
+    """
+    if not job.spec:
+        return None
+    try:
+        body = job_runner.body_from_spec(job)
+    except (ValidationError, ValueError):
+        return None
+    return body.model_dump(mode="json", by_alias=True)
+
+
 def _item(
     job: Job, output: dict | None = None, input_: dict | None = None
 ) -> dict:
     read = JobRead.model_validate(job)
     read.can_rerun = bool(job.spec)
+    read.edit_spec = _edit_spec(job)
     if output is not None:
         read.output = output
     if input_ is not None:
@@ -249,12 +264,36 @@ async def list_jobs(
     return PageResponse[JobRead](data=data, total=total)
 
 
-async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
+async def _reset_for_edit_rerun(
+    session: AsyncSession, job: Job, body: CamelModel
+) -> None:
+    """「编辑任务」覆盖原任务配置并复位为 pending 以原地重跑,不 commit。
+
+    复用同一 Job 行(沿用 id,不新建记录);清掉旧运行的 job_inputs 血缘边——
+    联合主键 (job_id, dataset_version_id) 下重跑同一输入版本会撞主键,且血缘
+    应反映最新一次运行的输入。旧产物版本保留(produced_by_job_id 不动)。
+    四场景(clean/distillation/synthesis/augmentation)的更新端点共用。
+    """
+    job.name = body.name  # type: ignore[attr-defined]
+    job.spec = body.model_dump(mode="json")
+    job.pipeline_id = getattr(body, "pipeline_id", None)
+    job.state = "pending"
+    job.progress = 0
+    job.error = None
+    job.started_at = None
+    job.finished_at = None
+    await session.execute(delete(JobInput).where(JobInput.job_id == job.id))
+
+
+async def _start_job(
+    session: AsyncSession, body: JobCreate, job: Job | None = None
+) -> JSONResponse:
     """校验 → 建任务(pending,存 spec 以备重跑)→ 起后台任务执行 → 立即返回(不等跑完)。
 
     实际执行在 job_runner 后台进行(状态机 pending→running→success/failed/cancelled),
     任务可经 POST /jobs/{id}/stop 停止;create_job 与 rerun_job 共用此入口
-    (rerun 用原任务存下的 spec 重建 body)。
+    (rerun 用原任务存下的 spec 重建 body)。传入 job = 编辑任务:校验通过后
+    覆盖该任务的配置并原地重跑,不新建记录。
     """
     # 校验算子配置（二选一）
     if body.member_configs and body.operators:
@@ -381,18 +420,21 @@ async def _start_job(session: AsyncSession, body: JobCreate) -> JSONResponse:
             },
         )
 
-    job = Job(
-        id=_new_job_id(),
-        name=body.name,
-        type=body.type,
-        state="pending",
-        progress=0,
-        created_by="admin",
-        # 存原始执行规格(算子 + 输出去向 + 输入版本),供 rerun 原样重跑
-        spec=body.model_dump(mode="json"),
-        pipeline_id=body.pipeline_id,
-    )
-    session.add(job)
+    if job is None:
+        job = Job(
+            id=_new_job_id(),
+            name=body.name,
+            type=body.type,
+            state="pending",
+            progress=0,
+            created_by="admin",
+            # 存原始执行规格(算子 + 输出去向 + 输入版本),供 rerun 原样重跑
+            spec=body.model_dump(mode="json"),
+            pipeline_id=body.pipeline_id,
+        )
+        session.add(job)
+    else:
+        await _reset_for_edit_rerun(session, job, body)
     await session.commit()
     await session.refresh(job)
     # 交后台执行:产物去向(含另存新数据集的构建)由 job_runner 在加工时处理
@@ -408,6 +450,30 @@ async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
     立即返回 pending 任务(不阻塞到跑完);进度经轮询 GET 反映,可经 stop 端点停止。
     """
     return await _start_job(session, body)
+
+
+@router.put("/jobs/{job_id}", dependencies=[Depends(require_admin)])
+async def update_job(
+    job_id: str, body: JobCreate, session: SessionDep
+) -> JSONResponse:
+    """编辑任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
+
+    仅终态/已暂停任务可编辑;运行中/排队中 → 409(先停止)。type 以库中任务为准,
+    不允许经编辑改变任务类型。质量评估等其他类型不走本端点 → 404。
+    """
+    job = await session.get(Job, job_id)
+    if job is None or job.type not in ("process", "clean"):
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "任务不存在"},
+        )
+    if job.state in ("pending", "running"):
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务运行中,请先停止再编辑"},
+        )
+    body.type = job.type
+    return await _start_job(session, body, job=job)
 
 
 @router.post("/jobs/{job_id}/rerun", dependencies=[Depends(require_admin)])

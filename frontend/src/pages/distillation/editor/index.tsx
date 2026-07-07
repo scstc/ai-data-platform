@@ -1,6 +1,10 @@
 // 数据蒸馏新建页:薄壳,把差异点传给共用的 LlmScenarioEditor(蒸馏/合成/增强共用)。
 import LlmScenarioEditor from '@/pages/governance/shared/LlmScenarioEditor';
-import { createDistillationJob } from '@/services/data-platform';
+import {
+  createDistillationJob,
+  getDistillationJob,
+  updateDistillationJob,
+} from '@/services/data-platform';
 import DistillationGoalPanel from './DistillationGoalPanel';
 
 const DEFAULT_GOAL: DataPlatform.DistillationGoal = {
@@ -26,6 +30,8 @@ const DistillationEditor: React.FC = () => (
     defaultGoal={DEFAULT_GOAL}
     GoalPanel={DistillationGoalPanel}
     createJob={createDistillationJob}
+    getJob={getDistillationJob}
+    updateJob={updateDistillationJob}
     validateSteps={(steps, opMap) => {
       // 蒸馏必须按某字段取子集:至少 1 个 selector(如 topk_specified_field_selector)
       const hasSelector = steps.some(

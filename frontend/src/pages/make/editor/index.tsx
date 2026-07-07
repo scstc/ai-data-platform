@@ -9,6 +9,7 @@ import {
   Card,
   Empty,
   Input,
+  Modal,
   message,
   Select,
   Space,
@@ -16,12 +17,14 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createMakeJob,
   getDataset,
+  getMakeJob,
   listDatasets,
   previewDatasetVersion,
+  updateMakeJob,
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 
@@ -117,6 +120,62 @@ const MakeEditor: React.FC = () => {
     if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
   }, [versions]);
 
+  // 编辑模式:URL 带 jobId 时按任务的 editSpec 回填(名称/数据集/版本/合并配置),
+  // 提交改走 updateMakeJob(覆盖原任务配置并原地重跑,不新建记录)
+  const editJobId = new URLSearchParams(location.search).get('jobId');
+  const [editSpec, setEditSpec] = useState<Record<string, any>>();
+  const editing = Boolean(editJobId && editSpec);
+  useEffect(() => {
+    if (!editJobId) return;
+    getMakeJob(editJobId)
+      .then((r) => {
+        const job = r.data;
+        if (!job.editSpec) {
+          message.error('该任务无可编辑的配置(早于重跑特性创建)');
+          return;
+        }
+        if (job.editSpec.goal?.mode !== 'merge') {
+          message.warning('仅合并模式的合成任务支持编辑,将按新建处理');
+          return;
+        }
+        setEditSpec(job.editSpec);
+        setName(job.name);
+        setNameDirty(true);
+        const dsId = job.input?.datasetId;
+        if (dsId) setDatasetId(dsId);
+        else message.error('原输入数据集已不存在,无法回填,请重新选择');
+      })
+      .catch(() => message.error('加载任务失败'));
+  }, []);
+  useEffect(() => {
+    const vId = editSpec?.datasetVersionId;
+    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+  }, [versions, editSpec]);
+  // 合并配置回填:成员就绪后套用勾选/主文件/分隔符(仅一次);合并字段需等
+  // 字段探测出共同字段后再回填(见下方 commonFields effect),否则会被缺省逻辑覆盖
+  const editApplied = useRef(false);
+  const pendingMergeField = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (
+      !editSpec ||
+      editApplied.current ||
+      members.length === 0 ||
+      versionId !== editSpec.datasetVersionId
+    ) {
+      return;
+    }
+    editApplied.current = true;
+    const goal = editSpec.goal ?? {};
+    const names = members.map((m) => m.tableName);
+    const picked = (goal.mergeMembers ?? []).filter((n: string) =>
+      names.includes(n),
+    );
+    setSelected(picked);
+    if (picked.length) setPrimary(picked[0]);
+    if (goal.mergeSeparator) setSeparator(goal.mergeSeparator);
+    pendingMergeField.current = goal.mergeField;
+  }, [members, versionId, editSpec]);
+
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
   const suggestedName = useMemo(
     () => suggestTaskName(selectedDatasetName, '数据合成'),
@@ -163,6 +222,15 @@ const MakeEditor: React.FC = () => {
     setMergeField(commonFields.includes('text') ? 'text' : commonFields[0]);
   }, [commonFields]);
 
+  // 编辑回填的合并字段:等共同字段探测完成后套用(声明在缺省逻辑之后,覆盖其结果)
+  useEffect(() => {
+    const pending = pendingMergeField.current;
+    if (pending && commonFields.includes(pending)) {
+      pendingMergeField.current = undefined;
+      setMergeField(pending);
+    }
+  }, [commonFields]);
+
   // 合并顺序:主文件在前,其余按成员列表序
   const orderedMembers = useMemo(() => {
     if (!primary) return selected;
@@ -197,18 +265,36 @@ const MakeEditor: React.FC = () => {
       message.warning('所选文件没有共同字段,无法合并');
       return;
     }
-    setSubmitting(true);
-    try {
-      await createMakeJob({
-        name,
-        datasetVersionId: versionId,
-        goal: {
-          mode: 'merge',
-          mergeMembers: orderedMembers,
-          mergeField,
-          mergeSeparator: separator,
+    const body: DataPlatform.MakeJobCreate = {
+      name,
+      datasetVersionId: versionId,
+      goal: {
+        mode: 'merge',
+        mergeMembers: orderedMembers,
+        mergeField,
+        mergeSeparator: separator,
+      },
+    };
+    if (editing && editJobId) {
+      Modal.confirm({
+        title: '确认保存并重新运行',
+        content: '保存会覆盖原任务配置并原地重跑,不新建任务记录。',
+        onOk: async () => {
+          setSubmitting(true);
+          try {
+            await updateMakeJob(editJobId, body);
+            message.success('任务已更新，正在重新运行');
+            history.push('/governance/make/jobs');
+          } finally {
+            setSubmitting(false);
+          }
         },
       });
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await createMakeJob(body);
       message.success('合成任务已创建，正在后台运行');
       history.push('/governance/make/jobs');
     } finally {
@@ -220,7 +306,7 @@ const MakeEditor: React.FC = () => {
 
   return (
     <PageContainer
-      title="新建数据合成"
+      title={editing ? '编辑数据合成' : '新建数据合成'}
       extra={
         <Button
           type="primary"
@@ -228,7 +314,7 @@ const MakeEditor: React.FC = () => {
           disabled={orderedMembers.length < 2 || !mergeField}
           onClick={submit}
         >
-          创建任务
+          {editing ? '保存并重新运行' : '创建任务'}
         </Button>
       }
     >

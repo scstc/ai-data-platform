@@ -79,6 +79,9 @@ export type LlmScenarioEditorProps<TGoal extends object> = {
   defaultGoal: TGoal;
   GoalPanel: React.ComponentType<GoalPanelProps<TGoal>>;
   createJob: (body: LlmJobBody<TGoal>) => Promise<{ data: DataPlatform.Job }>;
+  /** 编辑模式(URL ?jobId=)所需的任务详情/更新接口;不传则该场景不支持编辑任务 */
+  getJob?: (id: string) => Promise<{ data: DataPlatform.Job }>;
+  updateJob?: (id: string, body: LlmJobBody<TGoal>) => Promise<unknown>;
   /** 提交前对 goal 做归一化(合成/增强强制写死 mode,蒸馏不需要) */
   normalizeGoal?: (goal: TGoal) => TGoal;
   /** 额外前置校验(蒸馏:算子链需含至少 1 个 selector);返回提示文案则中断提交 */
@@ -107,6 +110,8 @@ function LlmScenarioEditor<TGoal extends object>({
   defaultGoal,
   GoalPanel,
   createJob,
+  getJob,
+  updateJob,
   normalizeGoal,
   validateSteps,
   llmAlert,
@@ -227,6 +232,50 @@ function LlmScenarioEditor<TGoal extends object>({
       .catch(() => message.error('加载流水线失败'));
   }, []);
 
+  // 编辑模式:URL 带 jobId 时按任务的 editSpec 回填(名称/数据集/版本/算子链/goal),
+  // 提交改走 updateJob(覆盖原任务配置并原地重跑,不新建记录)
+  const editJobId = new URLSearchParams(location.search).get('jobId');
+  const editing = Boolean(editJobId && getJob && updateJob);
+  const [editSpec, setEditSpec] = useState<Record<string, any>>();
+  useEffect(() => {
+    if (!editJobId || !getJob) return;
+    getJob(editJobId)
+      .then((r) => {
+        const job = r.data;
+        if (!job.editSpec) {
+          message.error('该任务无可编辑的配置(早于重跑特性创建)');
+          return;
+        }
+        setEditSpec(job.editSpec);
+        setName(job.name);
+        setNameDirty(true);
+        setSteps(
+          (job.editSpec.operators ?? []).map(
+            (o: DataPlatform.OperatorSpec) => ({
+              name: o.name,
+              params: o.params ?? {},
+            }),
+          ),
+        );
+        if (job.editSpec.goal) setGoal(job.editSpec.goal as TGoal);
+        setOutputDatasetId(job.editSpec.outputDatasetId ?? undefined);
+        const dsId = job.input?.datasetId;
+        if (dsId) setDatasetId(dsId);
+        else message.error('原输入数据集已不存在,无法回填,请重新选择');
+      })
+      .catch(() => message.error('加载任务失败'));
+  }, []);
+  useEffect(() => {
+    const vId = editSpec?.datasetVersionId;
+    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+  }, [versions, editSpec]);
+  // textKeys 回填:版本切换 effect 会先清空,此 effect 声明在其后,回填目标版本的已选字段
+  useEffect(() => {
+    if (editSpec?.textKeys?.length && versionId === editSpec.datasetVersionId) {
+      setTextKeys(editSpec.textKeys);
+    }
+  }, [versionId, editSpec]);
+
   const activeStep = steps[activeIdx];
   const activeOp = activeStep ? opMap[activeStep.name] : undefined;
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
@@ -312,16 +361,34 @@ function LlmScenarioEditor<TGoal extends object>({
       message.warning(validationError);
       return;
     }
+    const body: LlmJobBody<TGoal> = {
+      name,
+      datasetVersionId: versionId,
+      operators: steps,
+      goal: normalizeGoal ? normalizeGoal(goal) : goal,
+      outputDatasetId,
+      textKeys: textKeys.length ? textKeys : undefined,
+    };
+    if (editing && editJobId && updateJob) {
+      Modal.confirm({
+        title: '确认保存并重新运行',
+        content: '保存会覆盖原任务配置并原地重跑,不新建任务记录。',
+        onOk: async () => {
+          setSubmitting(true);
+          try {
+            await updateJob(editJobId, body);
+            message.success('任务已更新，正在重新运行');
+            history.push(jobsHref);
+          } finally {
+            setSubmitting(false);
+          }
+        },
+      });
+      return;
+    }
     setSubmitting(true);
     try {
-      await createJob({
-        name,
-        datasetVersionId: versionId,
-        operators: steps,
-        goal: normalizeGoal ? normalizeGoal(goal) : goal,
-        outputDatasetId,
-        textKeys: textKeys.length ? textKeys : undefined,
-      });
+      await createJob(body);
       message.success(successMessage);
       history.push(jobsHref);
     } finally {
@@ -331,7 +398,9 @@ function LlmScenarioEditor<TGoal extends object>({
 
   return (
     <PageContainer
-      header={{ title: pageTitle }}
+      header={{
+        title: editing ? pageTitle.replace('新建', '编辑') : pageTitle,
+      }}
       extra={[
         ...(scenario
           ? [
@@ -346,7 +415,7 @@ function LlmScenarioEditor<TGoal extends object>({
           loading={submitting}
           onClick={onSubmit}
         >
-          {submitLabel}
+          {editing ? '保存并重新运行' : submitLabel}
         </Button>,
       ]}
     >

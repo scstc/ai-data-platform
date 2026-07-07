@@ -1,7 +1,11 @@
 // 数据增强新建页:薄壳,把差异点传给共用的 LlmScenarioEditor(蒸馏/合成/增强共用)。
 import LlmRequiredAlert from '@/components/LlmRequiredAlert';
 import LlmScenarioEditor from '@/pages/governance/shared/LlmScenarioEditor';
-import { createAugmentJob } from '@/services/data-platform';
+import {
+  createAugmentJob,
+  getAugmentJob,
+  updateAugmentJob,
+} from '@/services/data-platform';
 import AugmentGoalPanel from './AugmentGoalPanel';
 
 const DEFAULT_GOAL: DataPlatform.AugmentGoal = {
@@ -22,6 +26,8 @@ const AugmentEditor: React.FC = () => (
     defaultGoal={DEFAULT_GOAL}
     GoalPanel={AugmentGoalPanel}
     createJob={createAugmentJob}
+    getJob={getAugmentJob}
+    updateJob={updateAugmentJob}
     normalizeGoal={(goal) => ({ ...goal, mode: 'augment' })}
     llmAlert={
       <LlmRequiredAlert description="数据增强(LLM 改写已有数据)需 LLM 支持。请先在运维监控 → LLM 配置页设置 OPENAI_API_KEY 并激活。" />
