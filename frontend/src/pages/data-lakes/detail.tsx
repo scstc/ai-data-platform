@@ -20,6 +20,7 @@ import { history, useParams } from '@umijs/max';
 import { Button, Empty, message, Space, Spin, Tag, Typography } from 'antd';
 import dayjs from 'dayjs';
 import { type FC, useEffect, useRef, useState } from 'react';
+import AclDrawer from '@/components/AclDrawer';
 import {
   extractLakeToDataset,
   getDataLakeDetail,
@@ -62,8 +63,9 @@ const formatSize = (bytes: number | null): string => {
  */
 const DataLakeDetailPage: FC = () => {
   const { id } = useParams<{ id: string }>();
-  const [meta, setMeta] = useState<DataPlatform.DataLake | null>(null);
+  const [meta, setMeta] = useState<DataPlatform.DataLakeDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [aclOpen, setAclOpen] = useState(false);
   const actionRef = useRef<ActionType | null>(null);
 
   const [selectedObjects, setSelectedObjects] = useState<
@@ -196,6 +198,11 @@ const DataLakeDetailPage: FC = () => {
           <Button key="lineage" onClick={() => history.push('/ops/lineage')}>
             查看血缘
           </Button>,
+          meta.myLevel === 'admin' ? (
+            <Button key="acl" onClick={() => setAclOpen(true)}>
+              权限管理
+            </Button>
+          ) : null,
         ],
       }}
     >
@@ -604,6 +611,14 @@ const DataLakeDetailPage: FC = () => {
         storageFormat={previewSnapshot?.storageFormat}
         open={!!previewSnapshot}
         onClose={() => setPreviewSnapshot(null)}
+      />
+
+      <AclDrawer
+        open={aclOpen}
+        onClose={() => setAclOpen(false)}
+        resource="data-lakes"
+        resourceId={meta.id}
+        owner={meta.owner}
       />
     </PageContainer>
   );

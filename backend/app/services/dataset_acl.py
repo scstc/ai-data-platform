@@ -3,8 +3,9 @@
 级别序:view < edit < admin。owner/超管隐式 admin;匿名(user None)在调用方放行,
 本模块的 can_access 对匿名直接 True(兼容现状,生产无匿名)。
 
-subject_type 三种:user(直授特定用户)/ role(持该角色者继承)/
+subject_type 两种生效:user(直授特定用户)/
 all(组织内所有登录用户,subject_id 固定为 ALL_SUBJECT_ID)。
+role 授权已取消:存量 role 行不再参与可见性/级别计算,仅在列表展示供删除。
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.user import User
-from app.services import rbac
 
 # 级别排序:数值越大权限越高
 _RANK = {"view": 1, "edit": 2, "admin": 3}
@@ -27,19 +27,11 @@ ALL_SUBJECT_ID = "*"
 async def _visible_dataset_ids(
     session: AsyncSession, user: User
 ) -> list[str]:
-    """用户经 ACL 可见的数据集 id(直授 + 持有角色授权 + 组织内所有人授权),不含 owner/超管隐式项。"""
-    role_ids = [r.id for r in await rbac.get_user_roles(session, user)]
+    """用户经 ACL 可见的数据集 id(直授 + 组织内所有人授权),不含 owner/超管隐式项。"""
     subject_conds = [
         and_(DatasetAcl.subject_type == "user", DatasetAcl.subject_id == user.id),
         DatasetAcl.subject_type == "all",
     ]
-    if role_ids:
-        subject_conds.append(
-            and_(
-                DatasetAcl.subject_type == "role",
-                DatasetAcl.subject_id.in_(role_ids),
-            )
-        )
     return list(
         (
             await session.scalars(
@@ -69,7 +61,7 @@ async def visible_dataset_filter(stmt, session: AsyncSession, user: User | None)
 async def get_acl_level(
     session: AsyncSession, user: User | None, dataset_id: str
 ) -> str | None:
-    """用户对某数据集的生效级别:owner/超管⇒admin;否则直授+角色授中最高;无⇒None。"""
+    """用户对某数据集的生效级别:owner/超管⇒admin;否则直授/all 授权中最高;无⇒None。"""
     if user is None:
         return None
     if user.role == "admin":
@@ -79,18 +71,10 @@ async def get_acl_level(
         dataset.owner == user.id or dataset.creator == user.id
     ):
         return "admin"
-    role_ids = [r.id for r in await rbac.get_user_roles(session, user)]
     subject_conds = [
         and_(DatasetAcl.subject_type == "user", DatasetAcl.subject_id == user.id),
         DatasetAcl.subject_type == "all",
     ]
-    if role_ids:
-        subject_conds.append(
-            and_(
-                DatasetAcl.subject_type == "role",
-                DatasetAcl.subject_id.in_(role_ids),
-            )
-        )
     conds = [DatasetAcl.dataset_id == dataset_id, or_(*subject_conds)]
     levels = list((await session.scalars(select(DatasetAcl.level).where(*conds))).all())
     if not levels:

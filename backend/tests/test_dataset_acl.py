@@ -1,9 +1,9 @@
-"""数据集级 ACL 测试(共享/成员权限:用户/角色 × view/edit/admin)。
+"""数据集级 ACL 测试(共享/成员权限:指定用户 × view/edit/admin)。
 
 测试意图(为何重要):
 - 私有默认:u-mgr 建的数据集,u-staff 在列表里**绝不可见**、直取 404——不靠前端隐藏;
 - 授权后按级别生效(view 能看不能改、edit 能改不能管 ACL、admin 能管 ACL);
-- 角色授权被持该角色者继承;owner/超管绕过;匿名沿用现状(看全部)。
+- 角色授权已取消:新增被拒、存量 role 行不再生效;owner/超管绕过;匿名沿用现状(看全部)。
 """
 
 from __future__ import annotations
@@ -112,10 +112,10 @@ async def test_visible_filter_after_user_grant(session_factory, seed_rbac) -> No
         assert ids == {"dset-staff", "dset-mgr"}
 
 
-async def test_get_acl_level_owner_and_admin_and_role_inheritance(
+async def test_get_acl_level_owner_and_admin_and_role_not_inherited(
     session_factory, seed_rbac
 ) -> None:
-    """owner⇒admin;超管⇒admin;角色授 edit 被持该角色者继承;无授权⇒None。"""
+    """owner⇒admin;超管⇒admin;角色授权已取消——存量 role 行不再生效;无授权⇒None。"""
     from sqlalchemy import select
 
     from app.models.dataset import Dataset
@@ -125,7 +125,7 @@ async def test_get_acl_level_owner_and_admin_and_role_inheritance(
 
     await _make_datasets(session_factory)
     async with session_factory() as s:
-        # 给 r-dc(u-mgr 持有)授 dset-staff 的 edit
+        # 存量遗留:给 r-dc(u-mgr 持有)授 dset-staff 的 edit——不应再生效
         s.add(
             DatasetAcl(
                 id="dac-role1",
@@ -145,8 +145,12 @@ async def test_get_acl_level_owner_and_admin_and_role_inheritance(
         assert await dataset_acl.get_acl_level(s, mgr, "dset-mgr") == "admin"
         # 超管 ⇒ admin
         assert await dataset_acl.get_acl_level(s, sup, "dset-staff") == "admin"
-        # u-mgr 经 r-dc 角色继承 edit(对 dset-staff)
-        assert await dataset_acl.get_acl_level(s, mgr, "dset-staff") == "edit"
+        # 角色授权取消:u-mgr 虽持 r-dc,对 dset-staff 不再继承 edit ⇒ None
+        assert await dataset_acl.get_acl_level(s, mgr, "dset-staff") is None
+        # 存量 role 行也不带来可见性
+        stmt = await dataset_acl.visible_dataset_filter(select(Dataset), s, mgr)
+        ids = {d.id for d in (await s.scalars(stmt)).all()}
+        assert ids == {"dset-mgr"}
         # u-staff 对 dset-mgr 无任何授权 ⇒ None
         assert await dataset_acl.get_acl_level(s, staff, "dset-mgr") is None
 
@@ -339,12 +343,13 @@ async def test_api_acl_all_subject_via_post(client, session_factory, seed_rbac) 
 
     client.cookies.set("adp_session", sign_token("u-mgr"))
 
-    # 非法 subject_type → 400
-    bad = await client.post(
-        "/api/v1/datasets/dset-allpost/acl",
-        json={"subjectType": "foo", "subjectId": "whatever", "level": "view"},
-    )
-    assert bad.status_code == 400, bad.text
+    # 非法 subject_type → 400(role 已取消,同样被拒)
+    for st in ("foo", "role"):
+        bad = await client.post(
+            "/api/v1/datasets/dset-allpost/acl",
+            json={"subjectType": st, "subjectId": "whatever", "level": "view"},
+        )
+        assert bad.status_code == 400, bad.text
 
     # subjectType=all:传入的 subjectId 被忽略,归一为 "*"
     add = await client.post(
@@ -363,18 +368,28 @@ async def test_api_acl_all_subject_via_post(client, session_factory, seed_rbac) 
 async def test_api_acl_list_resolves_subject_names(
     client, session_factory, seed_rbac
 ) -> None:
-    """list 端点回填 subjectName:user→display_name/username,role→name,all→固定文案。"""
+    """list 端点回填 subjectName:user/存量 role/all 都要有显示名。"""
     from app.models.dataset import Dataset
+    from app.models.dataset_acl import DatasetAcl
     from app.services.auth import sign_token
 
     async with session_factory() as s:
         s.add(Dataset(id="dset-name", name="n", owner="u-mgr", creator="u-mgr"))
+        # 存量遗留 role 行(新增已被拒),列表仍需解析名称供删除
+        s.add(
+            DatasetAcl(
+                id="dac-namerole",
+                dataset_id="dset-name",
+                subject_type="role",
+                subject_id="r-dc",
+                level="edit",
+            )
+        )
         await s.commit()
 
     client.cookies.set("adp_session", sign_token("u-mgr"))
     for body in (
         {"subjectType": "user", "subjectId": "u-staff", "level": "view"},
-        {"subjectType": "role", "subjectId": "r-dc", "level": "edit"},
         {"subjectType": "all", "subjectId": "ignored", "level": "view"},
     ):
         resp = await client.post("/api/v1/datasets/dset-name/acl", json=body)
@@ -391,7 +406,7 @@ async def test_api_acl_list_resolves_subject_names(
 async def test_acl_candidates_requires_admin_and_searches(
     client, session_factory, seed_rbac
 ) -> None:
-    """candidates 端点:非 acl-admin → 403;admin 能按关键字搜到匹配用户/角色。"""
+    """candidates:非 acl-admin → 403;admin 可搜用户;type=role 已取消 → 400。"""
     from app.models.dataset import Dataset
     from app.services.auth import sign_token
 
@@ -414,12 +429,11 @@ async def test_acl_candidates_requires_admin_and_searches(
     assert users.status_code == 200, users.text
     assert any(u["id"] == "u-staff" for u in users.json()["data"])
 
-    # owner 搜角色:r-dc(名称"部门及子")命中
+    # 角色授权已取消:type=role → 400
     roles = await client.get(
         "/api/v1/datasets/dset-cand/acl/candidates?q=部门&type=role"
     )
-    assert roles.status_code == 200, roles.text
-    assert any(r["id"] == "r-dc" for r in roles.json()["data"])
+    assert roles.status_code == 400, roles.text
 
 
 async def test_acl_candidates_escapes_like_wildcards(

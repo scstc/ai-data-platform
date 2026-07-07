@@ -927,7 +927,10 @@ declare namespace DataPlatform {
   /** 数据集 ACL 授权级别 */
   type AclLevel = 'view' | 'edit' | 'admin';
 
-  /** 数据集 ACL 授权主体类型;'all' 表示组织内所有人 */
+  /** ACL 资源域:数据集或数据湖(两侧 /acl 端点契约一致) */
+  type AclResource = 'datasets' | 'data-lakes';
+
+  /** 数据集 ACL 授权主体类型;'all' 表示组织内所有人;'role' 已取消,仅存量条目展示/删除用 */
   type AclSubjectType = 'user' | 'role' | 'all';
 
   /** 数据集 ACL 授权条目 */
@@ -942,11 +945,11 @@ declare namespace DataPlatform {
     createdAt: string;
   };
 
-  /** ACL 授权对象候选(模糊搜索结果) */
+  /** ACL 授权对象候选(模糊搜索结果,仅用户) */
   type AclCandidate = {
     id: string;
     name: string;
-    type: 'user' | 'role';
+    type: 'user';
   };
 
   /** 新增 ACL 授权入参 */
@@ -1612,6 +1615,8 @@ declare namespace DataPlatform {
   /** 数据湖详情(元信息 + 快照列表) */
   interface DataLakeDetail extends DataLake {
     snapshots: DataLakeSnapshot[];
+    /** 当前用户对该数据湖的生效级别(view/edit/admin/null),供前端按钮门控 */
+    myLevel?: AclLevel | null;
   }
 
   /** 数据湖内的文件(一张表 / 一个对象的稳定身份,聚合多个版本快照) */

@@ -7,18 +7,21 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import secrets
 from pathlib import Path
 from typing import Annotated, Any
 
 import duckdb
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import current_user, require_admin, require_user
 from app.core.db import get_session
 from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
+from app.models.data_lake_acl import DataLakeAcl
+from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse
 from app.schemas.data_lake import (
     DataLakeCreate,
@@ -28,11 +31,13 @@ from app.schemas.data_lake import (
     DataLakeSnapshotRead,
     DataLakeUpdate,
     ExtractToDatasetRequest,
+    LakeAclRead,
     LakeMergeRequest,
     SnapshotRenameRequest,
 )
+from app.schemas.dataset_acl import AclCreate, AclUpdate
 from app.services import data_lake as data_lake_service
-from app.services import lake_extract
+from app.services import lake_acl, lake_extract
 from app.services.external_store import (
     MAX_MANIFEST_MEMBERS,
     ExternalStoreError,
@@ -121,12 +126,16 @@ async def create_data_lake(
 @router.get("/data-lakes", response_model=PageResponse[DataLakeRead])
 async def list_data_lakes(
     db: SessionDep,
+    user: Annotated[User | None, Depends(current_user)],
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     name: str | None = Query(None, description="名称模糊查询"),
 ) -> PageResponse[DataLakeRead]:
-    """分页列出数据湖（多源汇聚容器）。"""
+    """分页列出数据湖（多源汇聚容器）。登录用户按 owner+超管+ACL 授权过滤,匿名放行。"""
     query = select(DataLake)
+
+    # 数据湖 ACL 可见性过滤(镜像 datasets 列表)
+    query = await lake_acl.visible_lake_filter(query, db, user)
 
     # 名称模糊查询
     if name:
@@ -153,12 +162,11 @@ async def list_data_lakes(
 async def get_data_lake(
     lake_id: str,
     db: SessionDep,
+    user: Annotated[User | None, Depends(current_user)],
 ) -> DataLakeDetailRead:
-    """获取数据湖详情（含快照列表）。"""
+    """获取数据湖详情（含快照列表）。登录用户受 ACL 约束(无 view 级→404),匿名放行。"""
     lake = await data_lake_service.get_lake_by_id(db, lake_id)
-    if not lake:
-        from fastapi import HTTPException
-
+    if not lake or not await lake_acl.can_access(db, user, lake_id, "view"):
         raise HTTPException(status_code=404, detail="数据湖不存在")
 
     # 查询快照列表
@@ -167,6 +175,7 @@ async def get_data_lake(
     return DataLakeDetailRead(
         **DataLakeRead.model_validate(lake).model_dump(),
         snapshots=[DataLakeSnapshotRead.model_validate(s) for s in snapshots],
+        my_level=await lake_acl.get_acl_level(db, user, lake_id),
     )
 
 
@@ -175,14 +184,16 @@ async def update_data_lake(
     lake_id: str,
     body: DataLakeUpdate,
     db: SessionDep,
-    _admin: Annotated[None, Depends(require_admin)],
+    user: Annotated[User, Depends(require_user)],
 ) -> DataLakeRead:
-    """更新数据湖元数据。"""
+    """更新数据湖元数据:仅 owner/超管/ACL-edit+ 可改。"""
     lake = await data_lake_service.get_lake_by_id(db, lake_id)
     if not lake:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="数据湖不存在")
+    if not await lake_acl.can_access(db, user, lake_id, "edit"):
+        raise HTTPException(
+            status_code=403, detail={"success": False, "message": "无权限"}
+        )
 
     # 更新字段
     if body.name is not None:
@@ -200,13 +211,20 @@ async def update_data_lake(
 async def delete_data_lake(
     lake_id: str,
     db: SessionDep,
-    _admin: Annotated[None, Depends(require_admin)],
+    user: Annotated[User, Depends(require_user)],
 ) -> dict[str, bool]:
-    """删除数据湖（及其所有快照记录，物理文件保留）。"""
-    if not await _purge_lake(db, lake_id):
-        from fastapi import HTTPException
+    """删除数据湖（及其所有快照记录，物理文件保留）。
 
+    仅 owner/creator/超管可删(销毁性操作不给 ACL-admin,与 datasets 一致)。
+    """
+    lake = await data_lake_service.get_lake_by_id(db, lake_id)
+    if not lake:
         raise HTTPException(status_code=404, detail="数据湖不存在")
+    if user.role != "admin" and user.id not in (lake.owner, lake.creator):
+        raise HTTPException(
+            status_code=403, detail={"success": False, "message": "无权限"}
+        )
+    await _purge_lake(db, lake_id)
     await db.commit()
     return {"success": True}
 
@@ -392,13 +410,21 @@ async def list_object_versions(
     )
 
 
-@router.post("/data-lakes/{lake_id}/merge", dependencies=[Depends(require_admin)])
+@router.post("/data-lakes/{lake_id}/merge")
 async def merge_lake_objects(
     lake_id: str,
     body: LakeMergeRequest,
     db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> dict[str, Any]:
-    """湖内合并:多个结构化文件的某个版本 union/join 成一个宽表文件的新版本。"""
+    """湖内合并:多个结构化文件的某个版本 union/join 成一个宽表文件的新版本。
+
+    需 owner/超管/ACL-edit+。
+    """
+    if not await lake_acl.can_access(db, user, lake_id, "edit"):
+        raise HTTPException(
+            status_code=403, detail={"success": False, "message": "无权限"}
+        )
     try:
         snapshot = await data_lake_service.merge_lake_objects(
             db,
@@ -447,7 +473,7 @@ async def rename_snapshot(
     snapshot_id: str,
     body: SnapshotRenameRequest,
     db: SessionDep,
-    _admin: Annotated[None, Depends(require_admin)],
+    user: Annotated[User, Depends(require_user)],
 ) -> DataLakeSnapshotRead:
     """快照改名:更新 source_metadata.original_filename(展示名)。
 
@@ -461,6 +487,11 @@ async def rename_snapshot(
     snapshot = result.scalar_one_or_none()
     if not snapshot:
         raise HTTPException(status_code=404, detail="快照不存在")
+    # 快照挂在湖下,改名按所属湖的 ACL-edit 门控
+    if not await lake_acl.can_access(db, user, snapshot.lake_id, "edit"):
+        raise HTTPException(
+            status_code=403, detail={"success": False, "message": "无权限"}
+        )
 
     filename = body.filename.strip()
     if not filename:
@@ -655,7 +686,7 @@ async def extract_to_dataset(
     lake_id: str,
     body: ExtractToDatasetRequest,
     db: SessionDep,
-    _admin: Annotated[None, Depends(require_admin)],
+    user: Annotated[User, Depends(require_user)],
 ) -> dict[str, Any]:
     """从湖快照抽取生成数据集(治理改造契约地基,见 docs/数据治理.md §5)。
 
@@ -669,6 +700,12 @@ async def extract_to_dataset(
     """
     from app.services.external_store import ExternalStoreError
     from app.services.landing import DocSegmentOptions
+
+    # 抽取会读湖数据并产出数据集,按源湖的 ACL-edit 门控
+    if not await lake_acl.can_access(db, user, lake_id, "edit"):
+        raise HTTPException(
+            status_code=403, detail={"success": False, "message": "无权限"}
+        )
 
     doc_segment = (
         DocSegmentOptions(**body.doc_segment.model_dump())
@@ -687,8 +724,6 @@ async def extract_to_dataset(
             doc_segment=doc_segment,
         )
     except ExternalStoreError as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
@@ -701,7 +736,7 @@ async def extract_to_dataset(
 async def local_upload_to_lake(
     lake_id: str,
     db: SessionDep,
-    _admin: Annotated[None, Depends(require_admin)],
+    user: Annotated[User, Depends(require_user)],
     files: Annotated[list[UploadFile], File()],
 ) -> dict[str, Any]:
     """本地文件归档到数据湖:一批文件 → 一批快照(一文件一快照,原格式存储)。
@@ -724,11 +759,13 @@ async def local_upload_to_lake(
     错误策略(MVP):任一文件失败即抛 400,已入库快照留在湖里,前端提示
     "部分文件已入湖,请到数据湖详情页手动清理"——比复杂的补偿事务更清晰。
     """
-    from fastapi import HTTPException
-
     lake = await data_lake_service.get_lake_by_id(db, lake_id)
     if not lake:
         raise HTTPException(status_code=404, detail="数据湖不存在")
+    if not await lake_acl.can_access(db, user, lake_id, "edit"):
+        raise HTTPException(
+            status_code=403, detail={"success": False, "message": "无权限"}
+        )
 
     if not files:
         raise HTTPException(status_code=400, detail="请至少选择一个文件")
@@ -789,3 +826,215 @@ async def local_upload_to_lake(
         },
         "success": True,
     }
+
+
+# ---- 数据湖级 ACL(共享/成员权限)---------------------------------------------
+# 镜像 datasets 的 ACL 端点:管理 (lake × subject × level) 授权条目;
+# 需 admin 级(owner/creator/超管/ACL-admin)。主体仅 user/all(角色授权已取消)。
+
+
+def _new_lake_acl_id() -> str:
+    """生成形如 lac-<6位hex> 的 ACL 行主键。"""
+    return f"lac-{secrets.token_hex(3)}"
+
+
+def _lake_acl_payload(row: DataLakeAcl) -> dict:
+    return LakeAclRead.model_validate(row).model_dump(by_alias=True, mode="json")
+
+
+def _like_q(q: str) -> str:
+    r"""转义 ILIKE 通配符(%/_/\),防止 q 被当成通配符导致全员目录枚举。"""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def _require_lake_acl_admin(
+    db: SessionDep, lake_id: str, user: User
+) -> JSONResponse | None:
+    """校验当前用户对该数据湖有 admin 级;返回 None 表示放行,否则返回 403/404 响应。"""
+    if await db.get(DataLake, lake_id) is None:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "数据湖不存在"}
+        )
+    if not await lake_acl.can_access(db, user, lake_id, "admin"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无权限"}
+        )
+    return None
+
+
+@router.get("/data-lakes/{lake_id}/acl")
+async def list_lake_acl(
+    lake_id: str,
+    db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """列出数据湖的授权条目(需 admin 级);subjectName 批量解析显示名。"""
+    denied = await _require_lake_acl_admin(db, lake_id, user)
+    if denied is not None:
+        return denied
+    rows = (
+        await db.scalars(
+            select(DataLakeAcl)
+            .where(DataLakeAcl.lake_id == lake_id)
+            .order_by(DataLakeAcl.created_at)
+        )
+    ).all()
+    # 批量解析主体显示名:user→display_name/username,all→固定文案
+    name_map: dict[str, str] = {}
+    user_ids = [r.subject_id for r in rows if r.subject_type == "user"]
+    if user_ids:
+        users = (await db.scalars(select(User).where(User.id.in_(user_ids)))).all()
+        for u in users:
+            name_map[u.id] = u.display_name or u.username
+
+    def name_of(r: DataLakeAcl) -> str:
+        if r.subject_type == "all":
+            return "组织内所有人"
+        return name_map.get(r.subject_id, r.subject_id)
+
+    return JSONResponse(
+        {
+            "data": [
+                {**_lake_acl_payload(r), "subjectName": name_of(r)} for r in rows
+            ],
+            "success": True,
+        }
+    )
+
+
+@router.get("/data-lakes/{lake_id}/acl/candidates")
+async def search_lake_acl_candidates(
+    lake_id: str,
+    db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+    q: str = "",
+    type: str = "user",  # noqa: A002 - 与查询参数名一致
+) -> JSONResponse:
+    """模糊搜索可授权主体(仅用户);需 admin 级,避免泄露全员目录。"""
+    denied = await _require_lake_acl_admin(db, lake_id, user)
+    if denied is not None:
+        return denied
+    if type != "user":
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "type 非法"}
+        )
+    rows = (
+        await db.scalars(
+            select(User)
+            .where(
+                or_(
+                    User.username.ilike(f"%{_like_q(q)}%", escape="\\"),
+                    User.display_name.ilike(f"%{_like_q(q)}%", escape="\\"),
+                )
+            )
+            .order_by(User.username)
+            .limit(20)
+        )
+    ).all()
+    data = [
+        {"id": r.id, "name": r.display_name or r.username, "type": "user"}
+        for r in rows
+    ]
+    return JSONResponse({"data": data, "success": True})
+
+
+@router.post("/data-lakes/{lake_id}/acl")
+async def add_lake_acl(
+    lake_id: str,
+    body: AclCreate,
+    db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """新增授权条目;重复授权 (lake,subject) → 409。"""
+    denied = await _require_lake_acl_admin(db, lake_id, user)
+    if denied is not None:
+        return denied
+    if body.subject_type not in ("user", "all") or body.level not in (
+        "view",
+        "edit",
+        "admin",
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "subject_type/level 非法"},
+        )
+    if body.subject_type == "user" and not body.subject_id.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "subject_id 不能为空"},
+        )
+    # "组织内所有人" 每湖只此一行,subject_id 固定,忽略传入值
+    subject_id = (
+        lake_acl.ALL_SUBJECT_ID if body.subject_type == "all" else body.subject_id
+    )
+    exists = await db.scalar(
+        select(DataLakeAcl.id).where(
+            DataLakeAcl.lake_id == lake_id,
+            DataLakeAcl.subject_type == body.subject_type,
+            DataLakeAcl.subject_id == subject_id,
+        )
+    )
+    if exists is not None:
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "该主体已授权,请用修改"},
+        )
+    row = DataLakeAcl(
+        id=_new_lake_acl_id(),
+        lake_id=lake_id,
+        subject_type=body.subject_type,
+        subject_id=subject_id,
+        level=body.level,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return JSONResponse({"data": _lake_acl_payload(row), "success": True})
+
+
+@router.put("/data-lakes/{lake_id}/acl/{acl_id}")
+async def update_lake_acl(
+    lake_id: str,
+    acl_id: str,
+    body: AclUpdate,
+    db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """修改授权级别。"""
+    denied = await _require_lake_acl_admin(db, lake_id, user)
+    if denied is not None:
+        return denied
+    if body.level not in ("view", "edit", "admin"):
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "level 非法"}
+        )
+    row = await db.get(DataLakeAcl, acl_id)
+    if row is None or row.lake_id != lake_id:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "授权条目不存在"}
+        )
+    row.level = body.level
+    await db.commit()
+    await db.refresh(row)
+    return JSONResponse({"data": _lake_acl_payload(row), "success": True})
+
+
+@router.delete("/data-lakes/{lake_id}/acl/{acl_id}")
+async def delete_lake_acl(
+    lake_id: str,
+    acl_id: str,
+    db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """删除授权条目。"""
+    denied = await _require_lake_acl_admin(db, lake_id, user)
+    if denied is not None:
+        return denied
+    row = await db.get(DataLakeAcl, acl_id)
+    if row is None or row.lake_id != lake_id:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "授权条目不存在"}
+        )
+    await db.delete(row)
+    await db.commit()
+    return JSONResponse({"success": True})

@@ -40,20 +40,34 @@ const LEVEL_COLOR: Record<DataPlatform.AclLevel, string> = {
   admin: 'gold',
 };
 
-/** 主体方式:对每个级别独立切换「指定用户/角色」或「组织内所有人」 */
+const RESOURCE_TITLE: Record<DataPlatform.AclResource, string> = {
+  datasets: '数据集权限',
+  'data-lakes': '数据湖权限',
+};
+
+/** 主体方式:对每个级别独立切换「指定用户」或「组织内所有人」(角色授权已取消) */
 type SubjectMode = 'specify' | 'all';
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  datasetId: string;
+  /** ACL 资源域:数据集或数据湖(两侧 /acl 端点契约一致) */
+  resource: DataPlatform.AclResource;
+  /** 资源 id(数据集 id 或数据湖 id) */
+  resourceId: string;
   /** 详情页的归属字段,只读展示为 Owner */
   owner: string;
 };
 
-/** 数据集权限抽屉:顶部只读 Owner + 三级授权(每级可授给指定用户/角色或组织内所有人)。
+/** 资源权限抽屉(数据集/数据湖共用):顶部只读 Owner + 三级授权(每级可授给指定用户或组织内所有人)。
  *  已授条目支持改级别 / 删除;owner 天然管理、不在 ACL 列表里,无需移除。 */
-const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
+const AclDrawer: React.FC<Props> = ({
+  open,
+  onClose,
+  resource,
+  resourceId,
+  owner,
+}) => {
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState<DataPlatform.DatasetAcl[]>([]);
   // subjectId -> 显示名缓存:add 后、refresh 完成前这段窗口用候选名即时显示(list 已回填 subjectName)
@@ -62,23 +76,23 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await listAcl(datasetId);
+      const res = await listAcl(resource, resourceId);
       if (res?.success) setRows(res.data);
     } catch {
       message.error('加载授权列表失败');
     } finally {
       setLoading(false);
     }
-  }, [datasetId]);
+  }, [resource, resourceId]);
 
   useEffect(() => {
     if (open) load();
   }, [open, load]);
 
   const refresh = useCallback(async () => {
-    const res = await listAcl(datasetId);
+    const res = await listAcl(resource, resourceId);
     if (res?.success) setRows(res.data);
-  }, [datasetId]);
+  }, [resource, resourceId]);
 
   // 该级别下是否已存在「组织内所有人」条目(用于 Switch 受控 + 找行删除)
   const allRowOf = useCallback(
@@ -103,7 +117,7 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
         return;
       }
       try {
-        await addAcl(datasetId, {
+        await addAcl(resource, resourceId, {
           subjectType: candidate.type,
           subjectId: candidate.id,
           level,
@@ -115,14 +129,14 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
         message.error('授权失败,请重试');
       }
     },
-    [datasetId, refresh, rows],
+    [resource, resourceId, refresh, rows],
   );
 
   const handleToggleAll = useCallback(
     async (level: DataPlatform.AclLevel, checked: boolean) => {
       try {
         if (checked) {
-          await addAcl(datasetId, {
+          await addAcl(resource, resourceId, {
             subjectType: 'all',
             subjectId: '*',
             level,
@@ -130,7 +144,7 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
           message.success(`已对组织内所有人开放${LEVEL_LABEL[level]}权限`);
         } else {
           const row = allRowOf(level);
-          if (row) await deleteAcl(datasetId, row.id);
+          if (row) await deleteAcl(resource, resourceId, row.id);
           message.success(`已取消组织内所有人的${LEVEL_LABEL[level]}权限`);
         }
         await refresh();
@@ -138,34 +152,34 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
         message.error('操作失败,请重试');
       }
     },
-    [datasetId, allRowOf, refresh],
+    [resource, resourceId, allRowOf, refresh],
   );
 
   const handleChangeLevel = useCallback(
     async (row: DataPlatform.DatasetAcl, level: DataPlatform.AclLevel) => {
       if (level === row.level) return;
       try {
-        await updateAcl(datasetId, row.id, level);
+        await updateAcl(resource, resourceId, row.id, level);
         message.success('已修改授权级别');
         await refresh();
       } catch {
         message.error('修改失败,请重试');
       }
     },
-    [datasetId, refresh],
+    [resource, resourceId, refresh],
   );
 
   const handleDelete = useCallback(
     async (row: DataPlatform.DatasetAcl) => {
       try {
-        await deleteAcl(datasetId, row.id);
+        await deleteAcl(resource, resourceId, row.id);
         message.success('已移除授权');
         await refresh();
       } catch {
         message.error('移除失败,请重试');
       }
     },
-    [datasetId, refresh],
+    [resource, resourceId, refresh],
   );
 
   /** 主体显示名:优先用后端回填的 subjectName,再降级缓存(即时添加窗口),最后降级 id */
@@ -179,7 +193,7 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
 
   return (
     <Drawer
-      title="数据集权限"
+      title={RESOURCE_TITLE[resource]}
       width={768}
       open={open}
       onClose={onClose}
@@ -197,7 +211,8 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
         {LEVELS.map((lv) => (
           <LevelSection
             key={lv.value}
-            datasetId={datasetId}
+            resource={resource}
+            resourceId={resourceId}
             title={lv.label}
             allChecked={!!allRowOf(lv.value)}
             onAddSpecify={(c) => handleAddSpecify(lv.value, c)}
@@ -261,16 +276,23 @@ const AclDrawer: React.FC<Props> = ({ open, onClose, datasetId, owner }) => {
   );
 };
 
-/** 单个授权级别的授权区:主体方式切换 + 防抖远程搜索 Select(用户/角色) 或 组织内所有人 Switch */
+/** 单个授权级别的授权区:主体方式切换 + 防抖远程搜索 Select(仅用户) 或 组织内所有人 Switch */
 const LevelSection: React.FC<{
-  datasetId: string;
+  resource: DataPlatform.AclResource;
+  resourceId: string;
   title: string;
   allChecked: boolean;
   onAddSpecify: (c: DataPlatform.AclCandidate) => void;
   onToggleAll: (checked: boolean) => void;
-}> = ({ datasetId, title, allChecked, onAddSpecify, onToggleAll }) => {
+}> = ({
+  resource,
+  resourceId,
+  title,
+  allChecked,
+  onAddSpecify,
+  onToggleAll,
+}) => {
   const [mode, setMode] = useState<SubjectMode>('specify');
-  const [type, setType] = useState<'user' | 'role'>('user');
   const [fetching, setFetching] = useState(false);
   const [options, setOptions] = useState<DataPlatform.AclCandidate[]>([]);
   // 防抖请求竞态保护:只接受最新一次请求结果
@@ -282,7 +304,7 @@ const LevelSection: React.FC<{
       const seq = ++fetchRef.current;
       setOptions([]);
       setFetching(true);
-      searchAclCandidates(datasetId, { q, type })
+      searchAclCandidates(resource, resourceId, { q, type: 'user' })
         .then((res) => {
           if (seq !== fetchRef.current) return; // 过期结果丢弃
           setOptions(res?.data ?? []);
@@ -294,7 +316,7 @@ const LevelSection: React.FC<{
           if (seq === fetchRef.current) setFetching(false);
         });
     },
-    [datasetId, type],
+    [resource, resourceId],
   );
 
   const onSearch = useCallback(
@@ -312,11 +334,6 @@ const LevelSection: React.FC<{
       fetchRef.current += 1;
     };
   }, []);
-
-  // 切换 user/role 时清空旧候选,避免串档
-  useEffect(() => {
-    setOptions([]);
-  }, [type]);
 
   const selectOptions = useMemo(
     () =>
@@ -339,41 +356,30 @@ const LevelSection: React.FC<{
           value={mode}
           onChange={setMode}
           options={[
-            { label: '指定用户/角色', value: 'specify' },
+            { label: '指定用户', value: 'specify' },
             { label: '组织内所有人', value: 'all' },
           ]}
         />
         {mode === 'specify' ? (
-          <Space.Compact style={{ width: '100%' }}>
-            <Select<'user' | 'role'>
-              value={type}
-              style={{ width: 88 }}
-              onChange={setType}
-              options={[
-                { label: '用户', value: 'user' },
-                { label: '角色', value: 'role' },
-              ]}
-            />
-            <Select
-              showSearch
-              // value 不受控:选中即触发授权后立即清空,作为一次性「添加」入口
-              value={null}
-              placeholder={`搜索${type === 'user' ? '用户' : '角色'}名称`}
-              style={{ width: '100%' }}
-              filterOption={false}
-              loading={fetching}
-              onSearch={onSearch}
-              notFoundContent={fetching ? <Spin size="small" /> : null}
-              options={selectOptions}
-              onChange={(_, opt) => {
-                const candidate = (
-                  opt as { candidate?: DataPlatform.AclCandidate }
-                )?.candidate;
-                if (candidate) onAddSpecify(candidate);
-                setOptions([]);
-              }}
-            />
-          </Space.Compact>
+          <Select
+            showSearch
+            // value 不受控:选中即触发授权后立即清空,作为一次性「添加」入口
+            value={null}
+            placeholder="搜索用户名称"
+            style={{ width: '100%' }}
+            filterOption={false}
+            loading={fetching}
+            onSearch={onSearch}
+            notFoundContent={fetching ? <Spin size="small" /> : null}
+            options={selectOptions}
+            onChange={(_, opt) => {
+              const candidate = (
+                opt as { candidate?: DataPlatform.AclCandidate }
+              )?.candidate;
+              if (candidate) onAddSpecify(candidate);
+              setOptions([]);
+            }}
+          />
         ) : (
           <Space>
             <Switch checked={allChecked} onChange={onToggleAll} />

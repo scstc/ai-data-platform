@@ -3448,39 +3448,31 @@ async def search_acl_candidates(
     q: str = "",
     type: str = "user",  # noqa: A002 - 与查询参数名一致
 ) -> JSONResponse:
-    """模糊搜索可授权主体(用户/角色),供 ACL 抽屉的"指定主体"选择;需 admin 级,避免泄露全员目录。"""
+    """模糊搜索可授权主体(仅用户,角色授权已取消);需 admin 级,避免泄露全员目录。"""
     denied = await _require_acl_admin(session, dataset_id, user)
     if denied is not None:
         return denied
-    if type not in ("user", "role"):
+    if type != "user":
         return JSONResponse(
             status_code=400, content={"success": False, "message": "type 非法"}
         )
-    if type == "user":
-        rows = (
-            await session.scalars(
-                select(User)
-                .where(
-                    or_(
-                        User.username.ilike(f"%{_like_q(q)}%", escape="\\"),
-                        User.display_name.ilike(f"%{_like_q(q)}%", escape="\\"),
-                    )
+    rows = (
+        await session.scalars(
+            select(User)
+            .where(
+                or_(
+                    User.username.ilike(f"%{_like_q(q)}%", escape="\\"),
+                    User.display_name.ilike(f"%{_like_q(q)}%", escape="\\"),
                 )
-                .order_by(User.username)
-                .limit(20)
             )
-        ).all()
-        data = [
-            {"id": r.id, "name": r.display_name or r.username, "type": "user"}
-            for r in rows
-        ]
-    else:
-        rows = (
-            await session.scalars(
-                select(Role).where(Role.name.ilike(f"%{_like_q(q)}%", escape="\\")).order_by(Role.name).limit(20)
-            )
-        ).all()
-        data = [{"id": r.id, "name": r.name, "type": "role"} for r in rows]
+            .order_by(User.username)
+            .limit(20)
+        )
+    ).all()
+    data = [
+        {"id": r.id, "name": r.display_name or r.username, "type": "user"}
+        for r in rows
+    ]
     return JSONResponse({"data": data, "success": True})
 
 
@@ -3495,7 +3487,8 @@ async def add_dataset_acl(
     denied = await _require_acl_admin(session, dataset_id, user)
     if denied is not None:
         return denied
-    if body.subject_type not in ("user", "role", "all") or body.level not in (
+    # role 授权已取消,仅接受 user / all
+    if body.subject_type not in ("user", "all") or body.level not in (
         "view",
         "edit",
         "admin",
@@ -3504,8 +3497,8 @@ async def add_dataset_acl(
             status_code=400,
             content={"success": False, "message": "subject_type/level 非法"},
         )
-    # user/role 必须带真实主体 id(all 的 subjectId 由下面归一为 "*",不受此约束)
-    if body.subject_type in ("user", "role") and not body.subject_id.strip():
+    # user 必须带真实主体 id(all 的 subjectId 由下面归一为 "*",不受此约束)
+    if body.subject_type == "user" and not body.subject_id.strip():
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": "subject_id 不能为空"},

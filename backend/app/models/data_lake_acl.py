@@ -1,6 +1,6 @@
-"""数据集级 ACL ORM 模型(共享/成员权限)。
+"""数据湖级 ACL ORM 模型(共享/成员权限),镜像 dataset_acl 模式。
 
-一行 = 把某数据集授给某主体(用户或角色)某个级别(view/edit/admin)。
+一行 = 把某数据湖授给某主体(用户或组织内所有人)某个级别(view/edit/admin)。
 owner/超管隐式全权,不在此表;本表只记显式授权。
 """
 
@@ -14,22 +14,22 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.db import Base
 
 
-class DatasetAcl(Base):
-    """数据集授权条目:(dataset, subject) → level,唯一约束防重复授权。"""
+class DataLakeAcl(Base):
+    """数据湖授权条目:(lake, subject) → level,唯一约束防重复授权。"""
 
-    __tablename__ = "dataset_acl"
+    __tablename__ = "data_lake_acl"
     __table_args__ = (
         UniqueConstraint(
-            "dataset_id", "subject_type", "subject_id", name="uq_dataset_acl_subject"
+            "lake_id", "subject_type", "subject_id", name="uq_data_lake_acl_subject"
         ),
     )
 
-    # 主键形如 "dac-" + 6 位 hex
+    # 主键形如 "lac-" + 6 位 hex
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    dataset_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    # user | all(role 授权已取消,存量 role 行不再生效)
+    lake_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # user | all(与 dataset_acl 同,角色授权已取消)
     subject_type: Mapped[str] = mapped_column(String, nullable=False)
-    # 用户 id(all 固定为 "*";存量 role 行为角色 id)
+    # 用户 id(all 固定为 "*")
     subject_id: Mapped[str] = mapped_column(String, nullable=False)
     # view | edit | admin
     level: Mapped[str] = mapped_column(String, nullable=False)

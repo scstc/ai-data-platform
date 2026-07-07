@@ -803,62 +803,67 @@ export async function deleteDataset(id: string, options?: { [key: string]: any }
   });
 }
 
-/** 数据集 ACL 授权列表(需 admin 级)GET /api/v1/datasets/{id}/acl */
+/** ACL 授权列表(需 admin 级)GET /api/v1/{resource}/{id}/acl(数据集/数据湖契约一致) */
 export async function listAcl(
-  datasetId: string,
+  resource: DataPlatform.AclResource,
+  id: string,
   options?: { [key: string]: any },
 ) {
   return request<{ data: DataPlatform.DatasetAcl[]; success: boolean }>(
-    `/api/v1/datasets/${datasetId}/acl`,
+    `/api/v1/${resource}/${id}/acl`,
     { method: 'GET', ...(options || {}) },
   );
 }
 
-/** 新增 ACL 授权条目(subjectType='all' 时 subjectId 传 "*")POST /api/v1/datasets/{id}/acl */
+/** 新增 ACL 授权条目(subjectType='all' 时 subjectId 传 "*")POST /api/v1/{resource}/{id}/acl */
 export async function addAcl(
-  datasetId: string,
+  resource: DataPlatform.AclResource,
+  id: string,
   body: DataPlatform.AclCreate,
   options?: { [key: string]: any },
 ) {
   return request<{ data: DataPlatform.DatasetAcl; success: boolean }>(
-    `/api/v1/datasets/${datasetId}/acl`,
+    `/api/v1/${resource}/${id}/acl`,
     { method: 'POST', data: body, ...(options || {}) },
   );
 }
 
-/** 修改 ACL 授权级别 PUT /api/v1/datasets/{id}/acl/{aclId} */
+/** 修改 ACL 授权级别 PUT /api/v1/{resource}/{id}/acl/{aclId} */
 export async function updateAcl(
-  datasetId: string,
+  resource: DataPlatform.AclResource,
+  id: string,
   aclId: string,
   level: DataPlatform.AclLevel,
   options?: { [key: string]: any },
 ) {
   return request<{ data: DataPlatform.DatasetAcl; success: boolean }>(
-    `/api/v1/datasets/${datasetId}/acl/${aclId}`,
+    `/api/v1/${resource}/${id}/acl/${aclId}`,
     { method: 'PUT', data: { level }, ...(options || {}) },
   );
 }
 
-/** 删除 ACL 授权条目 DELETE /api/v1/datasets/{id}/acl/{aclId} */
+/** 删除 ACL 授权条目 DELETE /api/v1/{resource}/{id}/acl/{aclId} */
 export async function deleteAcl(
-  datasetId: string,
+  resource: DataPlatform.AclResource,
+  id: string,
   aclId: string,
   options?: { [key: string]: any },
 ) {
   return request<{ success: boolean }>(
-    `/api/v1/datasets/${datasetId}/acl/${aclId}`,
+    `/api/v1/${resource}/${id}/acl/${aclId}`,
     { method: 'DELETE', ...(options || {}) },
   );
 }
 
-/** 模糊搜索授权对象(用户/角色,需 admin 级)GET /api/v1/datasets/{id}/acl/candidates */
+/** 模糊搜索授权对象(仅用户,角色授权已取消;需 admin 级)GET /api/v1/{resource}/{id}/acl/candidates */
 export async function searchAclCandidates(
-  datasetId: string,
-  params: { q?: string; type: 'user' | 'role' },
+  resource: DataPlatform.AclResource,
+  id: string,
+  params: { q?: string; type: 'user' },
   options?: { [key: string]: any },
 ) {
   return request<{ data: DataPlatform.AclCandidate[]; success: boolean }>(
-    `/api/v1/datasets/${datasetId}/acl/candidates`,
+    `/api/v1/${resource}/${id}/acl/candidates`,
     { method: 'GET', params, ...(options || {}) },
   );
 }

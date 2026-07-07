@@ -145,6 +145,20 @@ class DataLakeDetailRead(DataLakeRead):
     """数据湖详情：元信息 + 快照列表。"""
 
     snapshots: list[DataLakeSnapshotRead] = []
+    # 当前用户对该数据湖的生效级别(view/edit/admin/None),供前端按钮门控
+    my_level: str | None = None
+
+
+class LakeAclRead(CamelModel):
+    """数据湖 ACL 授权条目读模型(镜像 dataset AclRead,仅外键字段名不同)。"""
+
+    id: str
+    lake_id: str
+    subject_type: str  # user | all
+    subject_id: str
+    subject_name: str | None = None  # 显示名:list 端点批量解析
+    level: str  # view | edit | admin
+    created_at: UtcDateTime
 
 
 class DocSegmentConfig(CamelModel):

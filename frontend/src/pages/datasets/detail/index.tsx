@@ -60,7 +60,7 @@ import { SemanticTypeTag } from '@/utils/semanticType';
 import { SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 import { TRAIN_TYPE_META, TrainTypeTag } from '@/utils/trainType';
-import AclDrawer from './components/AclDrawer';
+import AclDrawer from '@/components/AclDrawer';
 
 /** 自动打标匹配为空时的兜底标签(与后端 ai.py _DEFAULT_FALLBACK_TAG 同值) */
 const DEFAULT_FALLBACK_TAG = '通用业务（默认）';
@@ -1144,7 +1144,8 @@ const DatasetDetail: React.FC = () => {
         <AclDrawer
           open={aclOpen}
           onClose={() => setAclOpen(false)}
-          datasetId={detail.id}
+          resource="datasets"
+          resourceId={detail.id}
           owner={detail.owner}
         />
       )}

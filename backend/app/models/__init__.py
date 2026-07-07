@@ -4,6 +4,7 @@ from app.core.db import Base
 from app.models.audit_log import AuditLog
 from app.models.category import Category
 from app.models.data_lake import DataLake, DataLakeSnapshot
+from app.models.data_lake_acl import DataLakeAcl
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
@@ -33,6 +34,7 @@ __all__ = [
     "Base",
     "Category",
     "DataLake",
+    "DataLakeAcl",
     "DataLakeSnapshot",
     "DataSource",
     "Dataset",
