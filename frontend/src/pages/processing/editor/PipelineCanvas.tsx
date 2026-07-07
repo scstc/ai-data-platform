@@ -1,6 +1,7 @@
 // 算子流水线画布:xyflow 自由画布 + 强制线性链(dj-process 引擎只认线性算子序列)。
 // 「输入」→ N 个算子节点 →「输出」固定首尾且不可删;中间算子节点靠边首尾相连,
-// 边校验保证每节点最多一进一出、禁自环成环,删边重连即可调整顺序。
+// 边校验保证每节点最多一进一出、禁自环成环。调整顺序两种方式:拖动主链节点松手后
+// 按 x 坐标重排主链连线(onNodeDragStop);或删边重连手工改链。
 //
 // steps(父组件受控数组)是唯一数据源。父组件可能在每次渲染时重建 steps 数组
 // (如 processing/editor 的 memberSteps 由 cfg.operators.map 现算),因此同步
@@ -451,6 +452,32 @@ const PipelineCanvas: React.FC<{
     emitOrder(next);
   };
 
+  // 拖动主链节点松手:按 x 坐标重排主链、重建线性连线并上报。仅动主链边,
+  // 游离节点间的边原样保留(线性约束下凡触及主链节点的边必属主链,过滤安全)。
+  const onNodeDragStop = (_: MouseEvent | TouchEvent, node: Node) => {
+    if (node.type !== 'operator') return;
+    const eds = edgesRef.current;
+    const chain = computeChain(eds);
+    if (chain.length < 2 || !chain.includes(node.id)) return;
+    const xOf = new Map(nodes.map((n) => [n.id, n.position.x]));
+    xOf.set(node.id, node.position.x);
+    const sorted = [...chain].sort(
+      (a, b) => (xOf.get(a) ?? 0) - (xOf.get(b) ?? 0),
+    );
+    if (sorted.every((id, i) => id === chain[i])) return;
+    const chainNodes = new Set(['input', 'output', ...chain]);
+    const kept = eds.filter(
+      (e) => !chainNodes.has(e.source) && !chainNodes.has(e.target),
+    );
+    const path = ['input', ...sorted, 'output'];
+    const next = [
+      ...kept,
+      ...path.slice(0, -1).map((s, i) => mkEdge(s, path[i + 1])),
+    ];
+    updateEdges(next);
+    emitOrder(next);
+  };
+
   // 删边(选中 + Backspace)是调整顺序的入口,删完上报主链;其余变更(选中态)只落库
   const handleEdgesChange = (changes: EdgeChange[]) => {
     const next = applyEdgeChanges(changes, edgesRef.current);
@@ -504,6 +531,7 @@ const PipelineCanvas: React.FC<{
         edges={edges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
+        onNodeDragStop={onNodeDragStop}
         onEdgesChange={handleEdgesChange}
         onConnect={onConnect}
         fitView
