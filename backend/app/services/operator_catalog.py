@@ -285,6 +285,7 @@ TRAINSET_OPS: frozenset[str] = frozenset(
         "generate_qa_from_examples_mapper",  # Self-Instruct:从种子示例生成新 QA
         "pair_preference_mapper",  # 构造 DPO 偏好对
         "generate_cot_mapper",  # API 型 CoT 推理链生成(平台自定义算子)
+        "generate_sft_mapper",  # API 型 SFT 三元组生成(平台自定义算子)
     }
 )
 
