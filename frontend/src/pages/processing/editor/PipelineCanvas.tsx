@@ -17,7 +17,7 @@
 //    游离状态只在变化沿上报(orphanRef 去重);
 // 3. 上报非恒等全量排列时记 pendingPermRef,父组件重排后 steps 回流命中该排列
 //    → 只同步 id 映射,不再上报。
-import { DeleteOutlined } from '@ant-design/icons';
+import { DeleteOutlined, NodeIndexOutlined } from '@ant-design/icons';
 import { useDroppable } from '@dnd-kit/core';
 import {
   addEdge,
@@ -31,8 +31,10 @@ import {
   MarkerType,
   type Node,
   type NodeProps,
+  Panel,
   Position,
   ReactFlow,
+  type ReactFlowInstance,
   useNodesState,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -452,6 +454,33 @@ const PipelineCanvas: React.FC<{
     emitOrder(next);
   };
 
+  // 整理画布:主链按当前顺序排回横向链,游离节点排到下方一行;纯布局,不动顺序/连线
+  const rfRef = useRef<ReactFlowInstance | null>(null);
+  const tidyLayout = () => {
+    const chain = computeChain(edgesRef.current);
+    const orphans = stepNodeIdsRef.current.filter((id) => !chain.includes(id));
+    const pos = new Map<string, { x: number; y: number }>();
+    pos.set('input', { x: 0, y: 80 });
+    chain.forEach((id, i) => {
+      pos.set(id, { x: (i + 1) * STEP_GAP, y: 80 });
+    });
+    pos.set('output', { x: (chain.length + 1) * STEP_GAP, y: 80 });
+    orphans.forEach((id, i) => {
+      pos.set(id, { x: (i + 1) * STEP_GAP, y: 220 });
+    });
+    setNodes((nds) =>
+      nds.map((n) => {
+        const p = pos.get(n.id);
+        return p ? { ...n, position: p } : n;
+      }),
+    );
+    // setNodes 异步落地后再 fitView,否则按旧坐标取景
+    window.setTimeout(
+      () => rfRef.current?.fitView({ padding: 0.2, duration: 300 }),
+      50,
+    );
+  };
+
   // 拖动主链节点松手:按 x 坐标重排主链、重建线性连线并上报。仅动主链边,
   // 游离节点间的边原样保留(线性约束下凡触及主链节点的边必属主链,过滤安全)。
   const onNodeDragStop = (_: MouseEvent | TouchEvent, node: Node) => {
@@ -534,12 +563,24 @@ const PipelineCanvas: React.FC<{
         onNodeDragStop={onNodeDragStop}
         onEdgesChange={handleEdgesChange}
         onConnect={onConnect}
+        onInit={(inst) => {
+          rfRef.current = inst;
+        }}
         fitView
         minZoom={0.4}
         fitViewOptions={{ padding: 0.2 }}
       >
         <Background gap={16} />
         <Controls showInteractive={false} />
+        <Panel position="top-right">
+          <Button
+            size="small"
+            icon={<NodeIndexOutlined />}
+            onClick={tidyLayout}
+          >
+            整理画布
+          </Button>
+        </Panel>
       </ReactFlow>
     </div>
   );
