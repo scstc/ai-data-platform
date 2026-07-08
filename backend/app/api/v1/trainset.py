@@ -30,6 +30,7 @@ from app.api.v1.jobs import (
     _item,
     _new_job_id,
     _now,
+    _reset_for_edit_rerun,
 )
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
@@ -48,10 +49,12 @@ _TRAINSET_TYPE = "trainset"
 
 
 def _trainset_operator_block(operators: list) -> str | None:
-    """资源前置校验:算子不限白名单,仅按运行时能力(LLM/GPU)拦截。"""
+    """资源前置校验:算子不限白名单,仅按运行时能力(LLM/GPU)逐个拦截。
+
+    不整体强制配 LLM:算子可选用本地模型(hf_* 参数),仅 needs_api 算子
+    在未配 LLM 时被单独拦下(配置测试通过即算已配,无需激活)。
+    """
     llm_configured = bool(get_active_llm_config().api_key)
-    if not llm_configured:
-        return "数据合成需 LLM 支持:请先在运维监控 / LLM 配置页设置 OPENAI_API_KEY"
     blocked = [
         reason
         for o in operators
@@ -63,9 +66,12 @@ def _trainset_operator_block(operators: list) -> str | None:
 
 
 async def _start_trainset(
-    session: AsyncSession, body: TrainsetJobCreate
+    session: AsyncSession, body: TrainsetJobCreate, job: Job | None = None
 ) -> JSONResponse:
-    """数据合成版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。"""
+    """数据合成版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。
+
+    传入 job = 编辑任务:校验通过后覆盖该任务配置并原地重跑,不新建记录。
+    """
     if not body.operators:
         return JSONResponse(
             status_code=400,
@@ -94,17 +100,20 @@ async def _start_trainset(
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
 
-    job = Job(
-        id=_new_job_id(),
-        name=body.name,
-        type=_TRAINSET_TYPE,
-        state="pending",
-        progress=0,
-        created_by="admin",
-        spec=body.model_dump(mode="json"),
-        pipeline_id=body.pipeline_id,
-    )
-    session.add(job)
+    if job is None:
+        job = Job(
+            id=_new_job_id(),
+            name=body.name,
+            type=_TRAINSET_TYPE,
+            state="pending",
+            progress=0,
+            created_by="admin",
+            spec=body.model_dump(mode="json"),
+            pipeline_id=body.pipeline_id,
+        )
+        session.add(job)
+    else:
+        await _reset_for_edit_rerun(session, job, body)
     await session.commit()
     await session.refresh(job)
     # spawn 只传 job_id:goal/output_dataset_id 已随 body 落进 job.spec,
@@ -167,6 +176,29 @@ async def get_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
     output = await _build_output(session, job.id)
     input_ = await _build_input(session, job.id)
     return JSONResponse(content=_item(job, output, input_))
+
+
+@router.put(
+    "/trainset/jobs/{job_id}", dependencies=[Depends(require_admin)]
+)
+async def update_trainset_job(
+    job_id: str, body: TrainsetJobCreate, session: SessionDep
+) -> JSONResponse:
+    """编辑数据合成任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
+
+    仅终态/已暂停任务可编辑;运行中/排队中 → 409(先停止)。
+    """
+    job = await session.get(Job, job_id)
+    if job is None or job.type != _TRAINSET_TYPE:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "数据合成任务不存在"}
+        )
+    if job.state in ("pending", "running"):
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务运行中,请先停止再编辑"},
+        )
+    return await _start_trainset(session, body, job=job)
 
 
 @router.post(

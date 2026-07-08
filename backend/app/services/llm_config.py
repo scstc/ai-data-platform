@@ -53,10 +53,12 @@ def set_active_cache(cfg: ResolvedLLMConfig | None) -> None:
 
 
 async def refresh_cache(session: AsyncSession) -> None:
-    """从数据库查询激活的 LLM 提供商并刷新缓存。
+    """从数据库查询生效的 LLM 提供商并刷新缓存。
 
     找到 is_active=True 的第一条 → 更新缓存；
-    没有 → 清空缓存（回退到 env 变量）。
+    没有激活项 → 回退到最近更新的已配 Key 提供商（配置测试通过即可用，
+    无需显式激活；激活仅用于多提供商时指定优先）；
+    一条都没有 → 清空缓存（回退到 env 变量）。
     """
     from app.models.llm_provider import LlmProvider  # 延迟导入避免循环
 
@@ -65,6 +67,15 @@ async def refresh_cache(session: AsyncSession) -> None:
             select(LlmProvider).where(LlmProvider.is_active.is_(True)).limit(1)
         )
     ).first()
+    if row is None:
+        row = (
+            await session.scalars(
+                select(LlmProvider)
+                .where(LlmProvider.api_key != "")
+                .order_by(LlmProvider.updated_at.desc())
+                .limit(1)
+            )
+        ).first()
     if row is not None:
         set_active_cache(
             ResolvedLLMConfig(
@@ -86,6 +97,7 @@ async def record_usage(
     success: bool,
     latency_ms: int,
     provider_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Best-effort 记录一条 LLM 调用用量。
 
@@ -99,6 +111,7 @@ async def record_usage(
             usage = LlmUsage(
                 id=_new_llm_usage_id(),
                 provider_id=provider_id,
+                job_id=job_id,
                 feature=feature,
                 model=model,
                 prompt_tokens=prompt_tokens,

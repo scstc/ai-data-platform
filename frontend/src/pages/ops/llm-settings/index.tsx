@@ -107,6 +107,30 @@ type EditingProvider = Partial<DataPlatform.LlmProvider> | null;
 
 // ─── 用量监控子组件 ────────────────────────────────────────────────────────────
 
+// 用量 feature 标识 → 中文(operator = dj 算子经 llm-proxy 的调用;其余为平台内建 AI 功能)
+const FEATURE_ZH: Record<string, string> = {
+  operator: '算子调用',
+  infer_schema: 'Schema 推断',
+  generate_task: '任务生成',
+  qa: '智能问答',
+  suggest_name: '名称建议',
+  suggest_tags: '标签建议',
+  moderate: '内容审核',
+  judge: '质量评审',
+};
+const featureLabel = (f: string) => FEATURE_ZH[f] ?? f;
+
+// 任务类型 → 中文(与各任务列表菜单名对齐)
+const JOB_TYPE_ZH: Record<string, string> = {
+  clean: '数据清洗',
+  process: '数据加工',
+  distillation: '数据蒸馏',
+  synthesis: '数据合并',
+  augmentation: '数据增强',
+  trainset: '数据合成',
+  quality: '质量评估',
+};
+
 const UsagePanel: React.FC = () => {
   const [days, setDays] = useState<number>(7);
   const [loading, setLoading] = useState(false);
@@ -127,13 +151,34 @@ const UsagePanel: React.FC = () => {
   }, [days, load]);
 
   const byFeatureCols: ColumnsType<DataPlatform.LlmUsageByFeature> = [
-    { title: '功能', dataIndex: 'feature' },
+    {
+      title: '功能',
+      dataIndex: 'feature',
+      render: (_, r) => featureLabel(r.feature),
+    },
     { title: '调用次数', dataIndex: 'calls', align: 'right' },
     { title: 'Token 总量', dataIndex: 'tokens', align: 'right' },
   ];
 
+  const byJobCols: ColumnsType<DataPlatform.LlmUsageByJob> = [
+    { title: '任务', dataIndex: 'jobName', ellipsis: true },
+    {
+      title: '类型',
+      dataIndex: 'jobType',
+      width: 110,
+      render: (_, r) => JOB_TYPE_ZH[r.jobType] ?? r.jobType ?? '-',
+    },
+    { title: '调用次数', dataIndex: 'calls', align: 'right', width: 100 },
+    { title: 'Token 总量', dataIndex: 'tokens', align: 'right', width: 120 },
+  ];
+
   const recentCols: ColumnsType<DataPlatform.LlmUsageRecent> = [
-    { title: '功能', dataIndex: 'feature', ellipsis: true },
+    {
+      title: '功能',
+      dataIndex: 'feature',
+      ellipsis: true,
+      render: (_, r) => featureLabel(r.feature),
+    },
     { title: '模型', dataIndex: 'model', width: 160, ellipsis: true },
     { title: 'Token', dataIndex: 'totalTokens', align: 'right', width: 90 },
     {
@@ -219,6 +264,20 @@ const UsagePanel: React.FC = () => {
               dataSource={usage.byFeature}
               columns={byFeatureCols}
               pagination={false}
+            />
+          </div>
+
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ fontWeight: 500, marginBottom: 8 }}>
+              按任务分布(算子调用,Token 用量 Top 20)
+            </div>
+            <Table<DataPlatform.LlmUsageByJob>
+              size="small"
+              rowKey="jobId"
+              dataSource={usage.byJob}
+              columns={byJobCols}
+              pagination={false}
+              locale={{ emptyText: '暂无任务级调用(算子 LLM 调用完成后出现)' }}
             />
           </div>
 

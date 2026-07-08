@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.db import get_session
+from app.models.job import Job
 from app.models.llm_model import LlmModel, _new_llm_model_id
 from app.models.llm_provider import LlmProvider, _new_llm_provider_id
 from app.models.llm_usage import LlmUsage
@@ -258,6 +259,8 @@ async def create_llm_provider(
     session.add(row)
     await session.commit()
     await session.refresh(row)
+    # 无激活项时新建的提供商即回退生效项,刷新缓存使其立即可用
+    await refresh_cache(session)
     return JSONResponse(
         content={
             "data": _to_read(row).model_dump(by_alias=True, mode="json"),
@@ -312,6 +315,36 @@ async def llm_usage_stats(
     by_feature = [
         {"feature": r.feature, "calls": r.calls, "tokens": int(r.tokens)}
         for r in by_feature_rows
+    ]
+
+    # 按任务分组:算子经 llm-proxy 的调用带 job_id,取 token 用量 Top 20;
+    # 外连 jobs 补任务名/类型(任务被删后 job_id 仍在,回退显示 id)
+    tokens_col = func.coalesce(func.sum(LlmUsage.total_tokens), 0)
+    by_job_rows = (
+        await session.execute(
+            select(
+                LlmUsage.job_id,
+                func.max(Job.name).label("job_name"),
+                func.max(Job.type).label("job_type"),
+                func.count().label("calls"),
+                tokens_col.label("tokens"),
+            )
+            .join(Job, Job.id == LlmUsage.job_id, isouter=True)
+            .where(LlmUsage.created_at >= since, LlmUsage.job_id.is_not(None))
+            .group_by(LlmUsage.job_id)
+            .order_by(tokens_col.desc())
+            .limit(20)
+        )
+    ).all()
+    by_job = [
+        {
+            "jobId": r.job_id,
+            "jobName": r.job_name or r.job_id,
+            "jobType": r.job_type or "",
+            "calls": r.calls,
+            "tokens": int(r.tokens),
+        }
+        for r in by_job_rows
     ]
 
     # 按天分组（YYYY-MM-DD）。date_trunc 表达式必须复用同一对象,否则 SELECT 与
@@ -370,6 +403,7 @@ async def llm_usage_stats(
                 "completionTokens": int(agg.completion_tokens) if agg else 0,
                 "successRate": round(success_rate, 4),
                 "byFeature": by_feature,
+                "byJob": by_job,
                 "byDay": by_day,
                 "recent": recent,
             },
@@ -399,9 +433,8 @@ async def update_llm_provider(
 
     await session.commit()
     await session.refresh(row)
-    # 编辑的是当前激活项时刷新缓存，使 base_url / api_key / model 改动即时生效
-    if row.is_active:
-        await refresh_cache(session)
+    # 刷新缓存使 base_url / api_key / model 改动即时生效(激活项或回退生效项)
+    await refresh_cache(session)
     return JSONResponse(
         content={
             "data": _to_read(row).model_dump(by_alias=True, mode="json"),
@@ -418,15 +451,14 @@ async def delete_llm_provider(
     row = await session.get(LlmProvider, provider_id)
     if row is None:
         return _not_found()
-    was_active = row.is_active
     # 应用层级联：先清理名下模型（无 DB 外键）
     await session.execute(
         delete(LlmModel).where(LlmModel.provider_id == provider_id)
     )
     await session.delete(row)
     await session.commit()
-    if was_active:
-        await refresh_cache(session)
+    # 删除的可能是激活项或回退生效项,一律刷新缓存
+    await refresh_cache(session)
     return JSONResponse(content={"success": True})
 
 
@@ -657,7 +689,7 @@ async def select_llm_model(
 ) -> JSONResponse:
     """把指定模型设为该供应商的当前生效模型（写回 provider.model）。
 
-    若该供应商处于激活态，刷新模块级缓存使切换即时对所有 AI 功能生效。
+    刷新模块级缓存使切换即时对所有 AI 功能生效（激活项或回退生效项）。
     """
     row = await session.get(LlmProvider, provider_id)
     if row is None:
@@ -670,8 +702,7 @@ async def select_llm_model(
     row.model = model
     await session.commit()
     await session.refresh(row)
-    if row.is_active:
-        await refresh_cache(session)
+    await refresh_cache(session)
     return JSONResponse(
         content={
             "data": _to_read(row).model_dump(by_alias=True, mode="json"),

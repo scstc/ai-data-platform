@@ -80,7 +80,12 @@ const QualityEditor: React.FC = () => {
   const { token } = theme.useToken();
 
   useEffect(() => {
-    listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
+    // includeHidden:编辑既有任务时步骤可能引用已隐藏算子,缺元信息无法渲染
+    listOperatorCatalog({
+      current: 1,
+      pageSize: 500,
+      includeHidden: true,
+    }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
     });
   }, []);

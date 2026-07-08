@@ -25,6 +25,8 @@ class LlmUsage(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     # 关联的提供商 id（可空：env 回退时无 provider 记录）
     provider_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 关联的任务 id（可空：算子经 llm-proxy 调用时携带,平台内建 AI 功能无归属）
+    job_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # 调用特性：infer_schema | generate_task | qa | moderate | chat
     feature: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)

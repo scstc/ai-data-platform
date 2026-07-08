@@ -109,9 +109,14 @@ const Editor: React.FC<{
   const [submitting, setSubmitting] = useState(false);
   const { token } = theme.useToken();
 
-  // 算子元信息(供 label/params 渲染):一次取全量(212 ≤ 后端 pageSize 上限 500)
+  // 算子元信息(供 label/params 渲染):一次取全量(212 ≤ 后端 pageSize 上限 500)。
+  // includeHidden:编辑既有任务时步骤可能引用已隐藏算子,缺元信息无法渲染
   useEffect(() => {
-    listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
+    listOperatorCatalog({
+      current: 1,
+      pageSize: 500,
+      includeHidden: true,
+    }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
     });
   }, []);

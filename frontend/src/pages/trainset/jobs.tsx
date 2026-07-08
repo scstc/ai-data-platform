@@ -138,6 +138,16 @@ const Trainset: React.FC = () => {
         const actions: React.ReactNode[] = [];
         if (r.canRerun && canRerun) {
           actions.push(
+            <a
+              key="edit"
+              onClick={() =>
+                history.push(`/governance/trainset/editor?jobId=${r.id}`)
+              }
+            >
+              编辑
+            </a>,
+          );
+          actions.push(
             <Popconfirm
               key="rerun"
               title="用原配置重新运行，产出新版本？"

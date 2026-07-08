@@ -82,7 +82,12 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
     Record<string, DataPlatform.CatalogOperator>
   >({});
   useEffect(() => {
-    listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
+    // includeHidden:既有任务/流水线可能引用已隐藏算子,缺元信息无法渲染
+    listOperatorCatalog({
+      current: 1,
+      pageSize: 500,
+      includeHidden: true,
+    }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
     });
   }, []);

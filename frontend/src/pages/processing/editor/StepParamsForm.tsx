@@ -21,8 +21,9 @@ const paramTooltip = (p: DataPlatform.CatalogParam) => {
   return PARAM_ZH_DESC[p.name] ?? p.desc;
 };
 
-// LLM 模型参数(DJ 各算子命名不统一):执行时后端按 LLM 配置页的激活模型注入
-// (见 engine.build_config),表单只读展示注入结果,不让用户改出不一致。
+// LLM 模型参数(DJ 各算子命名不统一):留空时后端按 LLM 配置页生效模型注入
+// (见 engine.build_config,激活项优先,无激活回退最近配置);用户显式填写则尊重。
+// 下拉可选各提供商模型,api_or_hf_model 还可选模型仓库已就位的本地模型。
 const MODEL_PARAM_NAMES = new Set(['api_model', 'api_or_hf_model']);
 
 /** 本地 HF 模型参数(hf_model / hf_nsfw_model / sam2_hf_model…):
@@ -43,18 +44,26 @@ const StepParamsForm: React.FC<{
     (p) => p.name !== 'args' && p.name !== 'kwargs',
   );
   const needsModel = fields.some((p) => MODEL_PARAM_NAMES.has(p.name));
-  const [activeModel, setActiveModel] = useState<string>();
+  const [providers, setProviders] = useState<DataPlatform.LlmProvider[]>();
   useEffect(() => {
-    if (!needsModel || activeModel !== undefined) return;
+    if (!needsModel || providers !== undefined) return;
     listLlmProviders()
-      .then((res) =>
-        setActiveModel(res?.data?.find((p) => p.isActive)?.model ?? ''),
-      )
-      .catch(() => undefined);
-  }, [needsModel, activeModel]);
+      .then((res) => setProviders(res?.data ?? []))
+      .catch(() => setProviders([]));
+  }, [needsModel, providers]);
+  // 与后端 refresh_cache 同序:激活项优先,无激活回退最近更新的已配 Key 提供商
+  const configured = (providers ?? []).filter(
+    (p) => p.apiKeyMasked !== '未配置',
+  );
+  const effectiveModel =
+    configured.find((p) => p.isActive)?.model ??
+    [...configured].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+      ?.model;
 
-  // 本地模型仓库已就位的 HF 模型(供 hf_* 模型参数下拉;未配置仓库则为空)
-  const needsLocalModel = fields.some((p) => isLocalModelParam(p.name));
+  // 本地模型仓库已就位的 HF 模型(供 hf_* 与 api_or_hf_model 参数下拉;未配置仓库则为空)
+  const needsLocalModel = fields.some(
+    (p) => isLocalModelParam(p.name) || p.name === 'api_or_hf_model',
+  );
   const [localModels, setLocalModels] = useState<string[]>();
   useEffect(() => {
     if (!needsLocalModel || localModels !== undefined) return;
@@ -82,17 +91,48 @@ const StepParamsForm: React.FC<{
         const val = params[p.name];
         const t = p.type || '';
         if (MODEL_PARAM_NAMES.has(p.name)) {
+          const seen = new Set<string>();
+          const options = [
+            ...configured.map((prov) => ({
+              value: prov.model,
+              label: `${prov.model}（${prov.name}${
+                prov.model === effectiveModel ? '，默认' : ''
+              }）`,
+            })),
+            ...(p.name === 'api_or_hf_model'
+              ? (localModels ?? []).map((id) => ({
+                  value: id,
+                  label: `${id}（本地）`,
+                }))
+              : []),
+          ].filter((o) => !seen.has(o.value) && seen.add(o.value));
           return (
             <Form.Item
               key={p.name}
               label={p.name}
               tooltip={paramTooltip(p)}
-              help="自动使用 LLM 配置页的激活模型"
+              help={
+                effectiveModel
+                  ? `留空自动用 LLM 配置页生效模型 ${effectiveModel}`
+                  : '留空自动用 LLM 配置页生效模型'
+              }
             >
-              <Input
-                value={(val as string) || activeModel}
-                disabled
-                placeholder="未激活 LLM 配置"
+              <AutoComplete
+                value={(val as string) ?? ''}
+                onChange={(v) => {
+                  // 清空 = 删键:留着空串会挡掉后端的生效模型注入
+                  const next = { ...params };
+                  if (v) next[p.name] = v;
+                  else delete next[p.name];
+                  onChange(next);
+                }}
+                placeholder={effectiveModel ?? '未配置 LLM'}
+                options={options}
+                filterOption={(input, option) =>
+                  String(option?.value ?? '')
+                    .toLowerCase()
+                    .includes(input.toLowerCase())
+                }
               />
             </Form.Item>
           );

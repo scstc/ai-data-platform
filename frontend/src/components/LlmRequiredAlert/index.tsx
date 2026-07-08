@@ -1,5 +1,6 @@
 // LLM 未配提示:增强/数据合成这类 needs_api 算子页面顶部统一提示。
-// 挂载时拉一次 /llm-providers:已存在「激活且配了 Key」的供应商则不显示;
+// 挂载时拉一次 /llm-providers:已存在「配了 Key」的供应商则不显示(无需激活,
+// 后端无激活项时回退到最近配置的提供商);
 // 拉取失败(网络/权限)按未配置处理,保留提示(宁可多提示,不误吞)。
 
 import { history } from '@umijs/max';
@@ -16,7 +17,7 @@ interface Props {
 
 const LlmRequiredAlert: React.FC<Props> = ({
   show = true,
-  description = '数据增强等场景依赖 LLM 生成能力。请先在运维监控 → LLM 配置页设置 OPENAI_API_KEY 并激活。',
+  description = '数据增强等场景依赖 LLM 生成能力。请先在运维监控 → LLM 配置页配置并测试通过（无需激活）。',
 }) => {
   // undefined=加载中(先不渲染,避免"闪一下再消失")
   const [configured, setConfigured] = useState<boolean>();
@@ -24,9 +25,7 @@ const LlmRequiredAlert: React.FC<Props> = ({
     listLlmProviders()
       .then((res) =>
         setConfigured(
-          Boolean(
-            res?.data?.some((p) => p.isActive && p.apiKeyMasked !== '未配置'),
-          ),
+          Boolean(res?.data?.some((p) => p.apiKeyMasked !== '未配置')),
         ),
       )
       .catch(() => setConfigured(false));

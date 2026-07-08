@@ -30,7 +30,7 @@ const AugmentEditor: React.FC = () => (
     updateJob={updateAugmentJob}
     normalizeGoal={(goal) => ({ ...goal, mode: 'augment' })}
     llmAlert={
-      <LlmRequiredAlert description="数据增强(LLM 改写已有数据)需 LLM 支持。请先在运维监控 → LLM 配置页设置 OPENAI_API_KEY 并激活。" />
+      <LlmRequiredAlert description="数据增强(LLM 改写已有数据)需 LLM 支持。请先在运维监控 → LLM 配置页配置并测试通过(无需激活)。" />
     }
     footerNote="数据增强走 LLM 改写类算子(optimize_qa/query/response 进化指令、sentence_augmentation 通用改写、calibrate 事实校准、llm_extract 结构化抽取、pair_preference DPO 偏好构造等);产物 version 标记 origin=synthetic。需 LLM Key(见顶部提示)。"
   />

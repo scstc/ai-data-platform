@@ -29,6 +29,7 @@ from app.api.v1 import (
     ingest_tasks,
     jobs,
     llm_config,
+    llm_proxy,
     make,
     model_store,
     notifications,
@@ -153,6 +154,7 @@ def create_app() -> FastAPI:
     app.include_router(categories.router, prefix="/api/v1")
     app.include_router(tags.router, prefix="/api/v1")
     app.include_router(llm_config.router, prefix="/api/v1")
+    app.include_router(llm_proxy.router, prefix="/api/v1")
     app.include_router(model_store.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
     app.include_router(profile.router, prefix="/api/v1")

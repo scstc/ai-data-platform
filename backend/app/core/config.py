@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
 
+    # 本服务自指地址：dj-process 算子的 LLM 调用经 /api/v1/llm-proxy/{job_id}
+    # 回连本服务做用量统计;子进程与后端同机,默认 127.0.0.1:18003(dev 与容器一致),
+    # 端口不同时用 env LLM_PROXY_SELF_URL 覆盖
+    llm_proxy_self_url: str = "http://127.0.0.1:18003"
+
     # 平台 MinIO 对象存储(文件管理 #19);env STORAGE_MINIO_*。未配置→文件管理 503。
     storage_minio_endpoint: str | None = None
     storage_minio_access_key: str | None = None

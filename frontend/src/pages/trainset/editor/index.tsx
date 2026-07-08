@@ -2,7 +2,11 @@
 // 不传 scenario:数据合成走独立侧边栏菜单(非治理工场 Tab),不展示「保存为流水线」。
 import LlmRequiredAlert from '@/components/LlmRequiredAlert';
 import LlmScenarioEditor from '@/pages/governance/shared/LlmScenarioEditor';
-import { createTrainsetJob } from '@/services/data-platform';
+import {
+  createTrainsetJob,
+  getTrainsetJob,
+  updateTrainsetJob,
+} from '@/services/data-platform';
 import TrainsetGoalPanel from './TrainsetGoalPanel';
 
 const DEFAULT_GOAL: DataPlatform.TrainsetGoal = {
@@ -23,9 +27,11 @@ const TrainsetEditor: React.FC = () => (
     defaultGoal={DEFAULT_GOAL}
     GoalPanel={TrainsetGoalPanel}
     createJob={createTrainsetJob}
+    getJob={getTrainsetJob}
+    updateJob={updateTrainsetJob}
     normalizeGoal={(goal) => ({ ...goal, mode: 'synthesize' })}
     llmAlert={
-      <LlmRequiredAlert description="数据合成(LLM 从源数据造 QA/COT/偏好训练样本)需 LLM 支持。请先在运维监控 → LLM 配置页设置 OPENAI_API_KEY 并激活。" />
+      <LlmRequiredAlert description="数据合成(LLM 从源数据造 QA/COT/偏好训练样本):算子可选用本地模型,或使用 LLM 配置页设置的模型。用 API 模型请先在运维监控 → LLM 配置页配置并测试通过(无需激活)。" />
     }
     footerNote="数据合成走 LLM 生成类算子(generate_qa_from_text 无结构文本→QA、generate_qa_from_examples 种子示例→新 QA、pair_preference DPO 偏好构造、generate_cot 单步推理链生成等);产物 version 标记 origin=synthetic。需 LLM Key(见顶部提示)。"
   />
