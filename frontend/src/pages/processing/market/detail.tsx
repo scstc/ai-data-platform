@@ -17,13 +17,13 @@ import {
   getOperatorDetail,
   listOperatorCatalog,
 } from '@/services/data-platform';
-import { PARAM_ZH_DESC } from './_paramZhDict';
 import {
   CATEGORY_LABEL,
   MODALITY_LABEL,
   RESOURCE_LABEL,
   RUNNABLE_TAG,
 } from './_labels';
+import { PARAM_ZH_DESC } from './_paramZhDict';
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -191,236 +191,239 @@ const OperatorDetail: React.FC = () => {
           message="算子加载失败"
           description={error}
         />
-      ) : operator && (
-        <Space orientation="vertical" size="large" style={{ width: '100%' }}>
-          {/* 身份信息头 */}
-          <Card>
-            <Space align="start" size="middle">
-              <div
-                style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 10,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background:
-                    'linear-gradient(135deg, #6a5cff 0%, #4a8bff 100%)',
-                  color: '#fff',
-                  fontSize: 22,
-                  flex: 'none',
-                }}
-              >
-                <ExperimentOutlined />
-              </div>
-              <Space orientation="vertical" size={8} style={{ flex: 1 }}>
-                <Space align="baseline" size="middle" wrap>
-                  <Title level={4} style={{ margin: 0 }}>
-                    {operator.zhLabel}
-                  </Title>
-                  <Text
-                    type="secondary"
-                    style={{ fontFamily: 'monospace', fontSize: 12 }}
-                    copyable={{ text: operator.name }}
-                  >
-                    算子 ID: {operator.name}
-                  </Text>
-                  {operator.isCustom && <Tag color="purple">自定义</Tag>}
-                  {operator.recommend && <Tag color="gold">推荐</Tag>}
-                  {(operator.usageCount ?? 0) > 0 && (
-                    <Tag>{operator.usageCount} 次使用</Tag>
-                  )}
-                </Space>
-                <Space size="middle" wrap>
-                  {categoryLabel && (
-                    <ChipRow label="DJ 类型">
-                      <Tag color="blue">{categoryLabel}</Tag>
-                    </ChipRow>
-                  )}
-                  {operator.scenarioGroup && (
-                    <ChipRow label="场景">
-                      <Tag>{operator.scenarioGroup}</Tag>
-                    </ChipRow>
-                  )}
-                  {operator.modality && operator.modality.length > 0 && (
-                    <ChipRow label="模态">
-                      {operator.modality.map((m) => (
-                        <Tag key={m} color="cyan">
-                          {MODALITY_LABEL[m] ?? m}
-                        </Tag>
-                      ))}
-                    </ChipRow>
-                  )}
-                  <ChipRow label="资源">
-                    <Tag>
-                      {RESOURCE_LABEL[operator.resourceClass] ??
-                        operator.resourceClass}
-                    </Tag>
-                  </ChipRow>
-                  <ChipRow label="可运行">
-                    {runTag && <Tag color={runTag.color}>{runTag.label}</Tag>}
-                  </ChipRow>
-                </Space>
-              </Space>
-            </Space>
-          </Card>
-
-          <Row gutter={24}>
-            {/* 左:描述 + 参数 */}
-            <Col xs={24} lg={demos.length ? 16 : 24}>
-              <Space
-                orientation="vertical"
-                size="large"
-                style={{ width: '100%' }}
-              >
-                <Card title="算子描述">
-                  {operator.zhUsageTip && (
-                    <Alert
-                      type="info"
-                      showIcon
-                      style={{ marginBottom: 16 }}
-                      title="何时使用"
-                      description={operator.zhUsageTip}
-                    />
-                  )}
-                  <Paragraph
-                    style={{ whiteSpace: 'pre-line', marginBottom: 0 }}
-                  >
-                    {operator.descZh || operator.summaryZh || '暂无描述'}
-                  </Paragraph>
-                  {operator.descEn && (
-                    <Paragraph
+      ) : (
+        operator && (
+          <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+            {/* 身份信息头 */}
+            <Card>
+              <Space align="start" size="middle">
+                <div
+                  style={{
+                    width: 44,
+                    height: 44,
+                    borderRadius: 10,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background:
+                      'linear-gradient(135deg, #6a5cff 0%, #4a8bff 100%)',
+                    color: '#fff',
+                    fontSize: 22,
+                    flex: 'none',
+                  }}
+                >
+                  <ExperimentOutlined />
+                </div>
+                <Space orientation="vertical" size={8} style={{ flex: 1 }}>
+                  <Space align="baseline" size="middle" wrap>
+                    <Title level={4} style={{ margin: 0 }}>
+                      {operator.zhLabel}
+                    </Title>
+                    <Text
                       type="secondary"
-                      style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}
+                      style={{ fontFamily: 'monospace', fontSize: 12 }}
+                      copyable={{ text: operator.name }}
                     >
-                      {operator.descEn}
-                    </Paragraph>
-                  )}
-                </Card>
-
-                <Card title="算子参数">
-                  {operator.params?.length ? (
-                    <Table
-                      size="small"
-                      rowKey="name"
-                      pagination={false}
-                      dataSource={operator.params}
-                      columns={PARAM_COLUMNS}
-                    />
-                  ) : (
-                    <Text type="secondary">无参数</Text>
-                  )}
-                </Card>
-              </Space>
-            </Col>
-
-            {/* 右:效果展示(仅有样例时) */}
-            {demos.length > 0 && (
-              <Col xs={24} lg={8}>
-                <Card title="效果展示">
-                  <Space
-                    orientation="vertical"
-                    size="middle"
-                    style={{ width: '100%' }}
-                  >
-                    {demos.map((d, i) => (
-                      <div key={d.before + d.after + i}>
-                        <EffectBlock
-                          label="处理前"
-                          text={d.before}
-                          url={d.before_url}
-                          mediaType={d.media_type}
-                        />
-                        <EffectBlock
-                          label="处理后"
-                          text={d.after}
-                          highlight
-                          url={d.after_url}
-                          mediaType={d.media_type}
-                        />
-                        {i < demos.length - 1 && (
-                          <Divider style={{ margin: '12px 0 0' }} />
-                        )}
-                      </div>
-                    ))}
+                      算子 ID: {operator.name}
+                    </Text>
+                    {operator.isCustom && <Tag color="purple">自定义</Tag>}
+                    {operator.recommend && <Tag color="gold">推荐</Tag>}
+                    {(operator.usageCount ?? 0) > 0 && (
+                      <Tag>{operator.usageCount} 次使用</Tag>
+                    )}
                   </Space>
-                </Card>
-              </Col>
-            )}
-          </Row>
+                  <Space size="middle" wrap>
+                    {categoryLabel && (
+                      <ChipRow label="DJ 类型">
+                        <Tag color="blue">{categoryLabel}</Tag>
+                      </ChipRow>
+                    )}
+                    {operator.scenarioGroup && (
+                      <ChipRow label="场景">
+                        <Tag>{operator.scenarioGroup}</Tag>
+                      </ChipRow>
+                    )}
+                    {operator.modality && operator.modality.length > 0 && (
+                      <ChipRow label="模态">
+                        {operator.modality.map((m) => (
+                          <Tag key={m} color="cyan">
+                            {MODALITY_LABEL[m] ?? m}
+                          </Tag>
+                        ))}
+                      </ChipRow>
+                    )}
+                    <ChipRow label="资源">
+                      <Tag>
+                        {RESOURCE_LABEL[operator.resourceClass] ??
+                          operator.resourceClass}
+                      </Tag>
+                    </ChipRow>
+                    <ChipRow label="可运行">
+                      {runTag && <Tag color={runTag.color}>{runTag.label}</Tag>}
+                    </ChipRow>
+                  </Space>
+                </Space>
+              </Space>
+            </Card>
 
-          {/* 相关算子:同 scenarioGroup + category,卡片式 */}
-          {related.length > 0 && (
-            <Card title="相关算子">
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-                  gap: 12,
-                }}
-              >
-                {related.map((op) => {
-                  const tag = RUNNABLE_TAG[op.runnable];
-                  return (
-                    <Card
-                      key={op.name}
-                      hoverable
-                      size="small"
-                      variant="outlined"
-                      onClick={() => history.push(`/operators/${op.name}`)}
-                      styles={{
-                        body: {
-                          padding: 12,
-                          height: '100%',
-                          display: 'flex',
-                          flexDirection: 'column',
-                        },
-                      }}
-                      style={{ height: '100%' }}
+            <Row gutter={24}>
+              {/* 左:描述 + 参数 */}
+              <Col xs={24} lg={demos.length ? 16 : 24}>
+                <Space
+                  orientation="vertical"
+                  size="large"
+                  style={{ width: '100%' }}
+                >
+                  <Card title="算子描述">
+                    {operator.zhUsageTip && (
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 16 }}
+                        title="何时使用"
+                        description={operator.zhUsageTip}
+                      />
+                    )}
+                    <Paragraph
+                      style={{ whiteSpace: 'pre-line', marginBottom: 0 }}
                     >
-                      <Text strong ellipsis>
-                        {op.zhLabel}
-                      </Text>
-                      <Text
-                        type="secondary"
-                        ellipsis
-                        style={{ fontFamily: 'monospace', fontSize: 11 }}
-                      >
-                        {op.name}
-                      </Text>
+                      {operator.descZh || operator.summaryZh || '暂无描述'}
+                    </Paragraph>
+                    {operator.descEn && (
                       <Paragraph
                         type="secondary"
-                        ellipsis={{
-                          rows: 2,
-                          tooltip: op.zhUsageTip || op.summaryZh,
-                        }}
-                        style={{
-                          margin: '6px 0 0',
-                          fontSize: 12,
-                          minHeight: 32,
-                        }}
+                        style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}
                       >
-                        {op.zhUsageTip || op.summaryZh}
+                        {operator.descEn}
                       </Paragraph>
-                      {tag && (
-                        <Tag
-                          color={tag.color}
+                    )}
+                  </Card>
+
+                  <Card title="算子参数">
+                    {operator.params?.length ? (
+                      <Table
+                        size="small"
+                        rowKey="name"
+                        pagination={false}
+                        dataSource={operator.params}
+                        columns={PARAM_COLUMNS}
+                      />
+                    ) : (
+                      <Text type="secondary">无参数</Text>
+                    )}
+                  </Card>
+                </Space>
+              </Col>
+
+              {/* 右:效果展示(仅有样例时) */}
+              {demos.length > 0 && (
+                <Col xs={24} lg={8}>
+                  <Card title="效果展示">
+                    <Space
+                      orientation="vertical"
+                      size="middle"
+                      style={{ width: '100%' }}
+                    >
+                      {demos.map((d, i) => (
+                        <div key={d.before + d.after + i}>
+                          <EffectBlock
+                            label="处理前"
+                            text={d.before}
+                            url={d.before_url}
+                            mediaType={d.media_type}
+                          />
+                          <EffectBlock
+                            label="处理后"
+                            text={d.after}
+                            highlight
+                            url={d.after_url}
+                            mediaType={d.media_type}
+                          />
+                          {i < demos.length - 1 && (
+                            <Divider style={{ margin: '12px 0 0' }} />
+                          )}
+                        </div>
+                      ))}
+                    </Space>
+                  </Card>
+                </Col>
+              )}
+            </Row>
+
+            {/* 相关算子:同 scenarioGroup + category,卡片式 */}
+            {related.length > 0 && (
+              <Card title="相关算子">
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      'repeat(auto-fill, minmax(220px, 1fr))',
+                    gap: 12,
+                  }}
+                >
+                  {related.map((op) => {
+                    const tag = RUNNABLE_TAG[op.runnable];
+                    return (
+                      <Card
+                        key={op.name}
+                        hoverable
+                        size="small"
+                        variant="outlined"
+                        onClick={() => history.push(`/operators/${op.name}`)}
+                        styles={{
+                          body: {
+                            padding: 12,
+                            height: '100%',
+                            display: 'flex',
+                            flexDirection: 'column',
+                          },
+                        }}
+                        style={{ height: '100%' }}
+                      >
+                        <Text strong ellipsis>
+                          {op.zhLabel}
+                        </Text>
+                        <Text
+                          type="secondary"
+                          ellipsis
+                          style={{ fontFamily: 'monospace', fontSize: 11 }}
+                        >
+                          {op.name}
+                        </Text>
+                        <Paragraph
+                          type="secondary"
+                          ellipsis={{
+                            rows: 2,
+                            tooltip: op.zhUsageTip || op.summaryZh,
+                          }}
                           style={{
-                            marginTop: 'auto',
-                            marginInlineEnd: 0,
-                            alignSelf: 'flex-start',
+                            margin: '6px 0 0',
+                            fontSize: 12,
+                            minHeight: 32,
                           }}
                         >
-                          {tag.label}
-                        </Tag>
-                      )}
-                    </Card>
-                  );
-                })}
-              </div>
-            </Card>
-          )}
-        </Space>
+                          {op.zhUsageTip || op.summaryZh}
+                        </Paragraph>
+                        {tag && (
+                          <Tag
+                            color={tag.color}
+                            style={{
+                              marginTop: 'auto',
+                              marginInlineEnd: 0,
+                              alignSelf: 'flex-start',
+                            }}
+                          >
+                            {tag.label}
+                          </Tag>
+                        )}
+                      </Card>
+                    );
+                  })}
+                </div>
+              </Card>
+            )}
+          </Space>
+        )
       )}
     </PageContainer>
   );
@@ -459,7 +462,11 @@ const EffectBlock: React.FC<{
         }}
       >
         {mediaType === 'video' ? (
-          <video src={url} controls style={{ width: '100%', borderRadius: 4 }} />
+          <video
+            src={url}
+            controls
+            style={{ width: '100%', borderRadius: 4 }}
+          />
         ) : mediaType === 'audio' ? (
           <audio src={url} controls style={{ width: '100%' }} />
         ) : (
