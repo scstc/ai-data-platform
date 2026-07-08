@@ -8,10 +8,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, Form, Query, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.api.deps import SessionDep, require_user
+from app.api.deps import SessionDep, require_perm, require_user
 from app.core.config import settings
 from app.models.operator import Operator
 from app.models.user import User
@@ -77,12 +77,14 @@ async def catalog(
     runnable: Annotated[str | None, Query()] = None,
     recommend: Annotated[bool | None, Query()] = None,
     keyword: Annotated[str | None, Query()] = None,
+    include_hidden: Annotated[bool, Query(alias="includeHidden")] = False,
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=500, alias="pageSize")] = 24,
 ) -> JSONResponse:
     """算子市场主接口:多维分面过滤 + 分页。
 
     ``bucket`` 业务桶(cleansing/distillation/make/augment):任务编辑器按此只拉对应算子。
+    ``includeHidden`` 纳入已隐藏算子(市场管理视图用);默认只出可见算子。
     """
     result = oc.query_catalog(
         scenario=scenario,
@@ -93,6 +95,7 @@ async def catalog(
         runnable=runnable,
         recommend=recommend,
         keyword=keyword,
+        include_hidden=include_hidden,
         current=current,
         page_size=page_size,
     )
@@ -202,7 +205,6 @@ async def upload_custom_operator(
         await session.rollback()
         (dest_dir / rel_name).unlink(missing_ok=True)
         raise
-    oc.refresh_cache()
 
     return JSONResponse(
         content={"data": oc.to_api(oc.get_operator(info.op_name)), "success": True}
@@ -231,8 +233,30 @@ async def delete_custom_operator(
         (op_dir / record.source_object_key).unlink(missing_ok=True)
     await session.delete(record)
     await session.commit()
-    oc.refresh_cache()
     return JSONResponse(content={"success": True})
+
+
+@router.patch("/operators/{name}/visible")
+async def set_operator_visible(
+    name: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_perm("operator:visibility"))],
+    visible: Annotated[bool, Body(embed=True)],
+) -> JSONResponse:
+    """设置算子可见性:隐藏后市场与任务编排选择器不再展示。
+
+    已编排任务不受影响——执行与提交校验(get_operator/runnable_reason)仍走全量。
+    """
+    record = await session.get(Operator, name)
+    if record is None:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "算子不存在"}
+        )
+    record.visible = visible
+    await session.commit()
+    return JSONResponse(
+        content={"data": {"name": name, "visible": visible}, "success": True}
+    )
 
 
 @router.get("/operators/{name}")

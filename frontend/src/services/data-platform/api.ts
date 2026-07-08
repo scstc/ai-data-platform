@@ -1759,6 +1759,22 @@ export async function getOperatorDetail(
   );
 }
 
+/** 算子市场:设置算子可见性(隐藏后市场/编排不再展示) PATCH /api/v1/operators/{name}/visible */
+export async function updateOperatorVisible(
+  name: string,
+  visible: boolean,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { name: string; visible: boolean };
+    success: boolean;
+  }>(`/api/v1/operators/${name}/visible`, {
+    method: 'PATCH',
+    data: { visible },
+    ...(options || {}),
+  });
+}
+
 /** 算子市场:上传自定义算子(.py 源码,静态校验后注册) POST /api/v1/operators/custom */
 export async function uploadCustomOperator(
   formData: FormData,

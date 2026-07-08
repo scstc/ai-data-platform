@@ -1,8 +1,13 @@
-import { UploadOutlined } from '@ant-design/icons';
+import {
+  EyeInvisibleOutlined,
+  EyeOutlined,
+  UploadOutlined,
+} from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useAccess } from '@umijs/max';
 import {
   Alert,
+  App,
   Button,
   Card,
   Checkbox,
@@ -23,6 +28,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   getOperatorCapabilities,
   listOperatorCatalog,
+  updateOperatorVisible,
 } from '@/services/data-platform';
 import {
   CATEGORY_LABEL,
@@ -80,7 +86,10 @@ const PAGE_SIZE = 24;
 
 const Market: React.FC = () => {
   const access = useAccess();
+  const { message } = App.useApp();
   const canUploadOperator = access.hasPerm('operator:upload');
+  // 隐藏/恢复算子(隐藏后市场与编排不再展示,已编排任务不受影响)
+  const canManageVisibility = access.hasPerm('operator:visibility');
 
   // 全量算子(一次性拉取)
   const [allOps, setAllOps] = useState<DataPlatform.CatalogOperator[]>([]);
@@ -96,6 +105,7 @@ const Market: React.FC = () => {
   const [resources, setResources] = useState<string[]>([]);
   const [runnableFilter, setRunnableFilter] = useState<string>('all');
   const [onlyRecommended, setOnlyRecommended] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const [keyword, setKeyword] = useState<string | null>(null);
 
   // 分页
@@ -111,12 +121,18 @@ const Market: React.FC = () => {
         .catch((err) =>
           console.warn('[market] capabilities probe failed', err),
         );
-      const first = await listOperatorCatalog({ pageSize: 500, current: 1 });
+      // 有可见性管理权限时连已隐藏的一起拉,由「显示已隐藏」开关控制展示
+      const first = await listOperatorCatalog({
+        pageSize: 500,
+        current: 1,
+        includeHidden: canManageVisibility,
+      });
       const ops = [...(first.data ?? [])];
       while (ops.length < (first.total ?? 0)) {
         const next = await listOperatorCatalog({
           pageSize: 500,
           current: Math.floor(ops.length / 500) + 1,
+          includeHidden: canManageVisibility,
         });
         if (!next.data?.length) break;
         ops.push(...next.data);
@@ -127,16 +143,17 @@ const Market: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canManageVisibility]);
 
   useEffect(() => {
     loadCatalog();
   }, [loadCatalog]);
 
-  /** 公共过滤(不含 category 自身):chips + 搜索 + 推荐。 */
+  /** 公共过滤(不含 category 自身):chips + 搜索 + 推荐 + 已隐藏。 */
   const baseFiltered = useMemo(() => {
     const kw = keyword?.toLowerCase();
     return allOps.filter((op) => {
+      if (op.visible === false && !showHidden) return false;
       if (runnableFilter !== 'all' && op.runnable !== runnableFilter)
         return false;
       if (onlyRecommended && !op.recommend) return false;
@@ -158,7 +175,15 @@ const Market: React.FC = () => {
       }
       return true;
     });
-  }, [allOps, modalities, resources, runnableFilter, onlyRecommended, keyword]);
+  }, [
+    allOps,
+    modalities,
+    resources,
+    runnableFilter,
+    onlyRecommended,
+    showHidden,
+    keyword,
+  ]);
 
   /** 列表展示(在公共过滤之上再叠 category)。 */
   const filtered = useMemo(() => {
@@ -184,12 +209,35 @@ const Market: React.FC = () => {
 
   const headerStats = useMemo(() => {
     if (allOps.length === 0) return null;
-    const readyCount = allOps.filter((op) => op.runnable === 'ready').length;
-    return `共 ${allOps.length} 个算子 · ${readyCount} 个现在可运行`;
+    const visibleOps = allOps.filter((op) => op.visible !== false);
+    const readyCount = visibleOps.filter(
+      (op) => op.runnable === 'ready',
+    ).length;
+    const hiddenCount = allOps.length - visibleOps.length;
+    const base = `共 ${visibleOps.length} 个算子 · ${readyCount} 个现在可运行`;
+    return hiddenCount > 0 ? `${base} · ${hiddenCount} 个已隐藏` : base;
   }, [allOps]);
 
   // 顶部 chips 重置:任何 filter 变化都翻回第 1 页
   const resetPage = () => setCurrent(1);
+
+  /** 隐藏/恢复算子:落库后本地同步,免整页重拉。 */
+  const toggleVisible = async (op: DataPlatform.CatalogOperator) => {
+    const next = op.visible === false;
+    try {
+      await updateOperatorVisible(op.name, next);
+      setAllOps((prev) =>
+        prev.map((o) => (o.name === op.name ? { ...o, visible: next } : o)),
+      );
+      message.success(
+        next
+          ? `已恢复显示「${op.zhLabel}」`
+          : `已隐藏「${op.zhLabel}」,市场与编排不再展示`,
+      );
+    } catch {
+      message.error('操作失败,请重试');
+    }
+  };
 
   return (
     <PageContainer
@@ -301,6 +349,17 @@ const Market: React.FC = () => {
                   >
                     只看推荐
                   </Checkbox>
+                  {canManageVisibility && (
+                    <Checkbox
+                      checked={showHidden}
+                      onChange={(e) => {
+                        setShowHidden(e.target.checked);
+                        resetPage();
+                      }}
+                    >
+                      显示已隐藏
+                    </Checkbox>
+                  )}
                   {canUploadOperator && (
                     <Button
                       icon={<UploadOutlined />}
@@ -399,8 +458,29 @@ const Market: React.FC = () => {
                           <Text strong ellipsis style={{ flex: 1 }}>
                             {op.zhLabel}
                           </Text>
+                          {op.visible === false && <Tag>已隐藏</Tag>}
                           {op.isCustom && <Tag color="purple">自定义</Tag>}
                           {op.recommend && <Tag color="gold">推荐</Tag>}
+                          {canManageVisibility && (
+                            <Button
+                              size="small"
+                              type="text"
+                              title={
+                                op.visible === false ? '恢复显示' : '隐藏算子'
+                              }
+                              icon={
+                                op.visible === false ? (
+                                  <EyeOutlined />
+                                ) : (
+                                  <EyeInvisibleOutlined />
+                                )
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleVisible(op);
+                              }}
+                            />
+                          )}
                         </div>
                         <Text
                           type="secondary"

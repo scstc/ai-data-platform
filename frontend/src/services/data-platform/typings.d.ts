@@ -297,6 +297,8 @@ declare namespace DataPlatform {
     detailPage?: string | null;
     recommend: boolean;
     runnable: 'ready' | 'needs_api' | 'needs_media' | 'needs_compute';
+    /** 是否在市场/编排展示;false=管理员隐藏(已编排任务不受影响) */
+    visible?: boolean;
     usageCount?: number;
     /** 使用方式(离线/在线);data-juicer 算子均为离线批处理 */
     usageMode?: string;
@@ -448,6 +450,8 @@ declare namespace DataPlatform {
     runnable?: string;
     recommend?: boolean;
     keyword?: string;
+    /** 纳入已隐藏算子(市场管理视图用);默认只出可见算子 */
+    includeHidden?: boolean;
     current?: number;
     pageSize?: number;
   };

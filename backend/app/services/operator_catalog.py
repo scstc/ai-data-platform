@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
@@ -23,24 +22,18 @@ _MEDIA_MODALITIES = {"image", "video", "audio", "multimodal"}
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
 
 
-# 同步数据库会话工厂（用于初始化加载）
+# 同步会话工厂:引擎/连接池模块级单例(远程 PG 建连慢,连接必须复用),会话每查一开
+_sync_sessionmaker: sessionmaker | None = None
+
+
 def _get_sync_session() -> Session:
-    """创建同步会话（仅用于初始化缓存）。"""
-    sync_url = str(settings.database_url).replace("+asyncpg", "+psycopg2")
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    SessionLocal = sessionmaker(bind=engine)
-    return SessionLocal()
-
-
-@lru_cache(maxsize=1)
-def _load_all_operators() -> list[dict[str, Any]]:
-    """从数据库加载全部算子并缓存（启动时一次性加载）。"""
-    session = _get_sync_session()
-    try:
-        ops = session.execute(select(Operator)).scalars().all()
-        return [_operator_to_dict(op) for op in ops]
-    finally:
-        session.close()
+    """创建同步会话(每次查询用完即关,连接归还池)。"""
+    global _sync_sessionmaker
+    if _sync_sessionmaker is None:
+        sync_url = str(settings.database_url).replace("+asyncpg", "+psycopg2")
+        engine = create_engine(sync_url, pool_pre_ping=True)
+        _sync_sessionmaker = sessionmaker(bind=engine)
+    return _sync_sessionmaker()
 
 
 def _operator_to_dict(op: Operator) -> dict[str, Any]:
@@ -64,6 +57,7 @@ def _operator_to_dict(op: Operator) -> dict[str, Any]:
         "detail_page": op.detail_page,
         "recommend": op.recommend,
         "runnable": op.runnable,
+        "visible": op.visible,
         "usage_count": op.usage_count,
         "is_custom": op.is_custom,
         "source_object_key": op.source_object_key,
@@ -72,26 +66,37 @@ def _operator_to_dict(op: Operator) -> dict[str, Any]:
 
 
 def all_operators() -> list[dict[str, Any]]:
-    """获取全部算子（从缓存）。"""
-    return _load_all_operators()
+    """获取全部算子(含已隐藏)。每次直接落库查询——量小无需缓存,改库即时生效。"""
+    session = _get_sync_session()
+    try:
+        ops = session.execute(select(Operator)).scalars().all()
+        return [_operator_to_dict(op) for op in ops]
+    finally:
+        session.close()
 
 
-def refresh_cache() -> None:
-    """失效算子目录缓存(自定义算子上传/删除后调用,下次查询即时可见)。"""
-    _load_all_operators.cache_clear()
+def visible_operators() -> list[dict[str, Any]]:
+    """市场/编排口径:仅 visible 算子(管理员隐藏的不展示;执行校验仍走全量)。"""
+    return [op for op in all_operators() if op.get("visible", True)]
 
 
 def get_operator(name: str) -> dict[str, Any] | None:
-    """按名称获取单个算子。"""
-    for op in all_operators():
-        if op["name"] == name:
-            return op
-    return None
+    """按名称获取单个算子(含已隐藏——已编排任务的执行/校验不受隐藏影响)。"""
+    session = _get_sync_session()
+    try:
+        op = session.get(Operator, name)
+        return _operator_to_dict(op) if op is not None else None
+    finally:
+        session.close()
 
 
 def operator_names() -> set[str]:
-    """全部算子名(用于存在性校验)。"""
-    return {op["name"] for op in all_operators()}
+    """全部算子名(用于存在性校验,含已隐藏)。"""
+    session = _get_sync_session()
+    try:
+        return set(session.execute(select(Operator.name)).scalars().all())
+    finally:
+        session.close()
 
 
 # DJ OPERATORS 注册表不含的类别(formatter/pipeline 不经算子注册表)
@@ -131,8 +136,8 @@ def detect_operator_drift() -> dict[str, Any]:
 
 
 def catalog_meta() -> dict[str, Any]:
-    """目录概览(总数/各维度分布/推荐数)。"""
-    ops = all_operators()
+    """目录概览(总数/各维度分布/推荐数),仅统计可见算子。"""
+    ops = visible_operators()
     total = len(ops)
 
     # 按类别统计
@@ -401,7 +406,7 @@ def meta_api() -> dict[str, Any]:
     out = {_META_KEY_MAP.get(k, k): v for k, v in catalog_meta().items()}
     caps = get_capabilities()
     counts: dict[str, int] = {}
-    for op in all_operators():
+    for op in visible_operators():
         status = effective_runnable(op, caps, media_ok=True)
         counts[status] = counts.get(status, 0) + 1
     out["byRunnable"] = counts
@@ -583,7 +588,7 @@ def legacy_operators(
     if multimodal_ready:
         allowed.add("needs_media")
     result: list[dict[str, Any]] = []
-    for op in all_operators():
+    for op in visible_operators():
         if effective_runnable(op, caps) not in allowed:
             continue
         result.append(
@@ -611,6 +616,7 @@ def query_catalog(
     runnable: str | None = None,
     recommend: bool | None = None,
     keyword: str | None = None,
+    include_hidden: bool = False,
     current: int = 1,
     page_size: int = 24,
 ) -> dict[str, Any]:
@@ -618,8 +624,9 @@ def query_catalog(
 
     ``bucket``:业务桶(cleansing/distillation/make/augment),供任务编辑器只展示对应算子;
     按白名单集合成员判定(见 ``_BUCKET_SETS``),未知桶名退化为不限制。
+    ``include_hidden``:纳入已隐藏算子(市场管理视图用);默认只出可见算子。
     """
-    ops = all_operators()
+    ops = all_operators() if include_hidden else visible_operators()
     bucket_set = _BUCKET_SETS.get(bucket) if bucket else None
     caps = get_capabilities()
     kw = keyword.lower().strip() if keyword else None
@@ -671,7 +678,7 @@ def ready_operator_context(category: str | None = None) -> list[dict[str, Any]]:
     """
     caps = get_capabilities()
     ctx: list[dict[str, Any]] = []
-    for op in all_operators():
+    for op in visible_operators():
         if effective_runnable(op, caps) != "ready":
             continue
         if category and op["category"] != category:
@@ -681,7 +688,8 @@ def ready_operator_context(category: str | None = None) -> list[dict[str, Any]]:
                 "name": op["name"],
                 "label": op.get("zh_label") or op["name"],
                 "scenario": op.get("scenario_group") or "",
-                "params": [p["name"] for p in op.get("params", [])],
+                # 自定义算子 params 列可为 None,必须显式 `or []`(同 _ui_params)
+                "params": [p["name"] for p in (op.get("params") or [])],
             }
         )
     return ctx
