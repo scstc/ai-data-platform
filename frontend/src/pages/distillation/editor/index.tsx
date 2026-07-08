@@ -18,7 +18,6 @@ const DistillationEditor: React.FC = () => (
     successMessage="蒸馏任务已创建，正在后台运行"
     jobsHref="/governance/distillation/jobs"
     taskNameNoun="数据蒸馏"
-    textKeyTooltip="算子作用的字段;留空则自动探测主文本字段。蒸馏数据通常无 text 字段(如 instruction),建议在此显式指定。"
     binaryDisabledSuffix="二进制不可蒸馏"
     defaultGoal={{}}
     createJob={createDistillationJob}
