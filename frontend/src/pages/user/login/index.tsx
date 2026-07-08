@@ -58,7 +58,13 @@ const useStyles = createStyles(() => ({
     gap: 10,
     fontSize: 18,
     fontWeight: 600,
-    '& img': { height: 30 },
+    // 博云 logo 为深蓝色，深色背景下需白色底衬保证可读
+    '& img': {
+      height: 30,
+      padding: '3px 7px',
+      background: '#fff',
+      borderRadius: 6,
+    },
   },
   brandHero: {
     position: 'relative',
@@ -106,6 +112,11 @@ const useStyles = createStyles(() => ({
     // ProComponents 默认给 .ant-pro-form-login-container 加了左右各 32px padding,
     // 但其子元素左缘被拉到 0,右侧因此凭空溢出 32px,产生一条横向滚动条;清零横向 padding 即消除。
     '& .ant-pro-form-login-container': { paddingInline: 0 },
+  },
+  formLogo: {
+    display: 'block',
+    height: 72,
+    margin: '0 auto 8px',
   },
 }));
 
@@ -339,7 +350,7 @@ const Login: React.FC = () => {
       <div className={styles.left}>
         <div data-anim="glow" className={styles.leftGlow} />
         <div data-anim="brand-top" className={styles.brandTop}>
-          <img alt="logo" src="/logo.svg" />
+          <img alt="logo" src="/logo.png" />
           <span>AI 数据平台</span>
         </div>
         <div className={styles.brandHero}>
@@ -676,11 +687,12 @@ const Login: React.FC = () => {
           </p>
         </div>
         <div data-anim="foot" className={styles.brandFoot}>
-          © 2026 AI 数据平台
+          © 2025 AI 数据平台
         </div>
       </div>
       <div className={styles.right}>
         <div data-anim="card" className={styles.formWrap}>
+          <img alt="logo" src="/logo.png" className={styles.formLogo} />
           <LoginForm
             contentStyle={{
               minWidth: 280,

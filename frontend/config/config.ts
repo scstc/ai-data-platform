@@ -100,9 +100,9 @@ export default defineConfig({
   manifest: {},
   /**
    * @name 站点图标（浏览器标签页 favicon）
-   * @description 复用平台 logo.svg，替换 Ant Design Pro 默认图标
+   * @description 博云 logo 透明补方版本，替换 Ant Design Pro 默认图标
    */
-  favicons: ['/logo.svg'],
+  favicons: ['/favicon.png'],
   //============== 以下都是max的插件配置 ===============
   /**
    * @name 数据流插件

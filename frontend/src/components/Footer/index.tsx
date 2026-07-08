@@ -20,9 +20,8 @@ const useStyles = createStyles(({ token, css }) => ({
 
 const Footer: React.FC = () => {
   const { styles } = useStyles();
-  const year = new Date().getFullYear();
 
-  return <div className={styles.footer}>AI Data Platform &copy; {year}</div>;
+  return <div className={styles.footer}>AI Data Platform &copy; 2025</div>;
 };
 
 export default Footer;
