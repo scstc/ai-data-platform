@@ -124,7 +124,7 @@ async def _start_distillation(
             state="pending",
             progress=0,
             created_by="admin",
-            # 完整存 body(goal + output_dataset_id + 算子链),供 rerun 整参重跑
+            # 完整存 body(output_dataset_id + 算子链),供 rerun 整参重跑
             spec=body.model_dump(mode="json"),
             pipeline_id=body.pipeline_id,
         )
@@ -133,8 +133,8 @@ async def _start_distillation(
         await _reset_for_edit_rerun(session, job, body)
     await session.commit()
     await session.refresh(job)
-    # spawn 只传 job_id:goal/output_dataset_id 已随 body 落进 job.spec,
-    # job_runner._run_job 按 type=distillation 从 spec 重建 body 并取出 goal 等
+    # spawn 只传 job_id:output_dataset_id 已随 body 落进 job.spec,
+    # job_runner._run_job 按 type=distillation 从 spec 重建 body
     job_runner.spawn(job.id)
     return JSONResponse(content=_item(job))
 
@@ -230,7 +230,7 @@ async def update_distillation_job(
 async def rerun_distillation_job(
     job_id: str, session: SessionDep
 ) -> JSONResponse:
-    """用原 spec 重跑(goal + output_dataset_id 一并复用)。"""
+    """用原 spec 重跑(output_dataset_id 一并复用)。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _DISTILL_TYPE:
         return JSONResponse(

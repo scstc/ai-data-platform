@@ -28,7 +28,7 @@ from app.models.pipeline import Pipeline
 from app.models.user import User
 from app.schemas.augment import AugmentGoal, AugmentJobCreate
 from app.schemas.common import PageResponse
-from app.schemas.distillation import DistillationGoal, DistillationJobCreate
+from app.schemas.distillation import DistillationJobCreate
 from app.schemas.job import JobCreate, MemberOperatorConfig
 from app.schemas.make import MakeGoal, MakeJobCreate
 from app.schemas.pipeline import (
@@ -275,8 +275,20 @@ async def execute_pipeline(
     if pipeline.scenario == "clean":
         return await _execute_clean(session, pipeline, name, body.dataset_version_id)
 
-    # 蒸馏/合成/增强(LLM 场景):goal 缺失说明预置模板未定制,不猜默认值,提示用户先补全
-    if pipeline.scenario not in ("distillation", "synthesis", "augmentation"):
+    if pipeline.scenario == "distillation":
+        # 蒸馏没有任务级 goal:保留多少/按什么字段/去不去重完全由算子链自身参数
+        # 决定,故不像合成/增强那样要求预先配置目标。
+        distill_body = DistillationJobCreate(
+            name=name,
+            dataset_version_id=body.dataset_version_id,
+            pipeline_id=pipeline.id,
+            operators=pipeline.spec.operators,
+            text_keys=pipeline.spec.text_keys,
+        )
+        return await _start_distillation(session, distill_body)
+
+    # 合成/增强(LLM 场景):goal 缺失说明预置模板未定制,不猜默认值,提示用户先补全
+    if pipeline.scenario not in ("synthesis", "augmentation"):
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": f"未知场景:{pipeline.scenario}"},
@@ -291,23 +303,6 @@ async def execute_pipeline(
         )
     operators = pipeline.spec.operators
     text_keys = pipeline.spec.text_keys
-    if pipeline.scenario == "distillation":
-        try:
-            goal = DistillationGoal.model_validate(pipeline.spec.goal)
-        except ValidationError:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "流水线 goal 配置不合法"},
-            )
-        distill_body = DistillationJobCreate(
-            name=name,
-            dataset_version_id=body.dataset_version_id,
-            pipeline_id=pipeline.id,
-            operators=operators,
-            goal=goal,
-            text_keys=text_keys,
-        )
-        return await _start_distillation(session, distill_body)
     if pipeline.scenario == "synthesis":
         try:
             make_goal = MakeGoal.model_validate(pipeline.spec.goal)

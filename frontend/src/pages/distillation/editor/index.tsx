@@ -1,22 +1,15 @@
 // 数据蒸馏新建页:薄壳,把差异点传给共用的 LlmScenarioEditor(蒸馏/合成/增强共用)。
+// 蒸馏没有任务级目标参数(保留多少/按什么字段/去不去重完全由算子链自身参数决定),
+// 故不传 GoalPanel,defaultGoal 恒为空对象。
 import LlmScenarioEditor from '@/pages/governance/shared/LlmScenarioEditor';
 import {
   createDistillationJob,
   getDistillationJob,
   updateDistillationJob,
 } from '@/services/data-platform';
-import DistillationGoalPanel from './DistillationGoalPanel';
-
-const DEFAULT_GOAL: DataPlatform.DistillationGoal = {
-  keepRatio: 0.3,
-  scoreField: 'meta.score',
-  fallbackRandom: true,
-  enableDedup: true,
-  enableScoreFilter: true,
-};
 
 const DistillationEditor: React.FC = () => (
-  <LlmScenarioEditor<DataPlatform.DistillationGoal>
+  <LlmScenarioEditor<Record<string, never>>
     scenario="distillation"
     bucket="distillation"
     pageTitle="新建数据蒸馏"
@@ -27,8 +20,7 @@ const DistillationEditor: React.FC = () => (
     taskNameNoun="数据蒸馏"
     textKeyTooltip="算子作用的字段;留空则自动探测主文本字段。蒸馏数据通常无 text 字段(如 instruction),建议在此显式指定。"
     binaryDisabledSuffix="二进制不可蒸馏"
-    defaultGoal={DEFAULT_GOAL}
-    GoalPanel={DistillationGoalPanel}
+    defaultGoal={{}}
     createJob={createDistillationJob}
     getJob={getDistillationJob}
     updateJob={updateDistillationJob}

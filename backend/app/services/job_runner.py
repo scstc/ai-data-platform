@@ -274,7 +274,6 @@ async def _run_job(job_id: str) -> None:
                         operators=operators_arg,
                         member_configs=member_configs_arg,
                         target_members=target_members_arg,
-                        goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                         text_keys=getattr(body, "text_keys", None),
                     )

@@ -1,9 +1,10 @@
 """数据蒸馏执行引擎:和加工共享 dj-process 入口,产物落原数据集新版本。
 
 与 ``engine.run_process_job`` 的差异:
-- 任务级参数(goal)在落库前写到 report JSON,不进 data-juicer YAML
 - 报告里多保留 input/output 行数(蒸馏特有)
 - 不支持 manifest 输入(蒸馏白名单不收多模态算子)
+
+蒸馏没有任务级 goal:保留多少/按什么字段/要不要去重完全由算子链自身参数决定。
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
-from app.schemas.distillation import DistillationGoal, DistillationReport
+from app.schemas.distillation import DistillationReport
 from app.services.external_store import upload_file_to_uploads
 from app.services.engine import (
     EngineError,
@@ -42,7 +43,6 @@ async def run_distillation_job(
     operators: list[dict[str, Any]] | None = None,
     member_configs: list[dict[str, Any]] | None = None,
     target_members: list[str] | None = None,
-    goal: DistillationGoal,
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
@@ -51,7 +51,6 @@ async def run_distillation_job(
     operators: 统一应用到所有成员的算子列表（旧版兼容）
     member_configs: 新版成员独立配置，格式 [{member_name, operators, text_keys?}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
-    goal: 全局蒸馏目标参数（不按成员区分）
     返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
     """
     dataset_id = output_dataset_id or input_version.dataset_id
@@ -71,7 +70,6 @@ async def run_distillation_job(
             job_id=job_id,
             input_version=input_version,
             operators=operators,
-            goal=goal,
             output_dataset_id=output_dataset_id,
             text_keys=text_keys,
         )
@@ -278,7 +276,7 @@ async def run_distillation_job(
     warnings: list[str] = []
     if total_output_count == 0:
         warnings.append(
-            f"蒸馏后样本数为 0,可能 score_field({goal.score_field})不存在或过滤过严"
+            "蒸馏后样本数为 0,请检查算子链参数(如打分字段/过滤阈值)是否与数据匹配"
         )
     keep_ratio_actual = (
         (total_output_count / total_input_count) if total_input_count > 0 else None
@@ -302,7 +300,6 @@ async def run_distillation_job(
         elapsed_seconds=round(time.time() - started, 2),
         operator_chain=unique_operators,
         warnings=warnings,
-        raw={"goal": goal.model_dump(mode="json")},
     )
     report_path = out_dir / "report.json"
     report_path.write_text(
@@ -319,7 +316,6 @@ async def _run_distillation_job_legacy(
     job_id: str,
     input_version: DatasetVersion,
     operators: list[dict[str, Any]] | None = None,
-    goal: DistillationGoal,
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
@@ -346,7 +342,6 @@ async def _run_distillation_job_legacy(
     operator_chain = [op["name"] for op in operators]
 
     async with materialized_version(input_version, session) as input_path:
-        # 蒸馏的 goal 不进 DJ YAML(任务级参数,只用于报告/回放);算子链本身已经是可执行的
         # text_keys 用户显式指定优先;留空则按字段名优先级自动探测主文本字段
         detected_key = None if text_keys else detect_text_key(
             _read_head_records(Path(input_path), 50)
@@ -394,7 +389,7 @@ async def _run_distillation_job_legacy(
     warnings: list[str] = []
     if rows == 0:
         warnings.append(
-            f"蒸馏后样本数为 0,可能 score_field({goal.score_field})不存在或过滤过严"
+            "蒸馏后样本数为 0,请检查算子链参数(如打分字段/过滤阈值)是否与数据匹配"
         )
     keep_ratio_actual = (rows / input_count) if input_count > 0 else None
 
@@ -408,7 +403,6 @@ async def _run_distillation_job_legacy(
         elapsed_seconds=round(time.time() - started, 2),
         operator_chain=operator_chain,
         warnings=warnings,
-        raw={"goal": goal.model_dump(mode="json")},
     )
     report_path.write_text(
         json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),

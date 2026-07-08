@@ -545,21 +545,12 @@ declare namespace DataPlatform {
     hasStats: boolean;
   };
 
-  /** 数据蒸馏目标(任务级参数) */
-  type DistillationGoal = {
-    keepRatio?: number;
-    keepNum?: number;
-    scoreField?: string;
-    fallbackRandom?: boolean;
-    enableDedup?: boolean;
-    enableScoreFilter?: boolean;
-  };
-  /** 新建数据蒸馏任务入参 */
+  /** 新建数据蒸馏任务入参:蒸馏没有任务级目标参数,保留多少/按什么字段/去不去重
+   *  完全由算子链自身参数决定 */
   type DistillationJobCreate = {
     name: string;
     datasetVersionId: string;
     operators: { name: string; params?: Record<string, any> }[];
-    goal: DistillationGoal;
     outputDatasetId?: string;
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
      *  蒸馏数据通常无 text 字段(如 instruction),建议显式指定 */
@@ -1504,6 +1495,15 @@ declare namespace DataPlatform {
     tokens: number;
   }
 
+  /** 按任务聚合(算子经 llm-proxy 的调用带 jobId;token 用量 Top 20) */
+  interface LlmUsageByJob {
+    jobId: string;
+    jobName: string;
+    jobType: string;
+    calls: number;
+    tokens: number;
+  }
+
   interface LlmUsageRecent {
     feature: string;
     model: string;
@@ -1521,6 +1521,7 @@ declare namespace DataPlatform {
     /** 0..1 */
     successRate: number;
     byFeature: LlmUsageByFeature[];
+    byJob: LlmUsageByJob[];
     byDay: LlmUsageByDay[];
     recent: LlmUsageRecent[];
   }

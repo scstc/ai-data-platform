@@ -2,7 +2,8 @@
 
 - 预置模板(pipeline_presets)不入库,GET /pipelines 与库内自建流水线合并展示。
 - execute:clean 场景走 jobs.py _start_job(memberConfigs),打桩 job_runner.spawn
-  避免真跑 dj-process 子进程;LLM 场景(蒸馏/合成/增强)缺 goal → 400。
+  避免真跑 dj-process 子进程;合成/增强(LLM 场景)缺 goal → 400,蒸馏无 goal 概念
+  故不受此限(行为完全由算子链自身参数决定)。
 """
 
 from __future__ import annotations
@@ -218,7 +219,7 @@ async def test_execute_not_found(client: AsyncClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# execute:LLM 场景(蒸馏/合成/增强)缺 goal → 400
+# execute:LLM 场景(合成/增强)缺 goal → 400
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_execute_llm_scenario_without_goal_rejected(
@@ -226,7 +227,7 @@ async def test_execute_llm_scenario_without_goal_rejected(
 ) -> None:
     await _seed_version_with_members(session_factory, member_names=["only"])
     create_resp = await client.post(
-        "/api/v1/pipelines", json=_custom_payload(scenario="distillation", goal=None)
+        "/api/v1/pipelines", json=_custom_payload(scenario="synthesis", goal=None)
     )
     pipeline_id = create_resp.json()["data"]["id"]
 
@@ -236,3 +237,37 @@ async def test_execute_llm_scenario_without_goal_rejected(
     )
     assert resp.status_code == 400
     assert "goal" in resp.json()["message"]
+
+
+# ---------------------------------------------------------------------------
+# execute:蒸馏无 goal 概念,goal=None 也能正常执行(行为由算子链自身参数决定)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_execute_distillation_pipeline_without_goal(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_version_with_members(session_factory, member_names=["only"])
+    monkeypatch.setattr("app.services.job_runner.spawn", lambda job_id: None)
+
+    payload = {
+        "name": "随机采样蒸馏流水线",
+        "scenario": "distillation",
+        "spec": {
+            "operators": [
+                {"name": "random_selector", "params": {"select_ratio": 0.3}},
+            ],
+            "goal": None,
+            "textKeys": None,
+        },
+    }
+    create_resp = await client.post("/api/v1/pipelines", json=payload)
+    pipeline_id = create_resp.json()["data"]["id"]
+
+    resp = await client.post(
+        f"/api/v1/pipelines/{pipeline_id}/execute",
+        json={"datasetVersionId": VERSION_ID},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["type"] == "distillation"

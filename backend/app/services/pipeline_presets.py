@@ -6,11 +6,13 @@
 合成场景仍不做预置——goal 依赖 merge 布局,预置一个通用默认值反而误导用户,故留空,
 由用户在工场里另存为自定义流水线。
 
-蒸馏预置刻意避开 topk_specified_field_selector:该算子靠 goal.score_field 去读一个
-已经存在于数据里的打分字段(如 meta.score),预置任何字段名都是臆造、大概率在用户
-数据里不存在。故蒸馏预置只用「自己算分/自己判定」的算子:规则过滤类(不依赖外部
+蒸馏没有任务级 goal(保留多少/按什么字段/去不去重完全由算子链自身参数决定,
+见 schemas/distillation.py),故所有蒸馏预置的 "goal" 字段恒为 None,与 clean
+场景同口径。预置刻意避开 topk_specified_field_selector:该算子要读一个已经存在
+于数据里的打分字段(如 meta.score),预置任何字段名都是臆造、大概率在用户数据
+里不存在。故蒸馏预置只用「自己算分/自己判定」的算子:规则过滤类(不依赖外部
 字段)、去重类、random_selector(纯随机采样,select_ratio 自足)、llm_quality_score_filter
-(打分由 LLM 现算,不读预置字段)。
+(打分由 LLM 现算,不依赖预置字段)。
 
 增强/蒸馏预置的 LLM 算子(calibrate_qa / optimize_qa / optimize_response /
 llm_quality_score_filter)模型名与端点由 engine 按平台激活的 LLM 配置自动注入
@@ -129,7 +131,7 @@ PRESET_PIPELINES: list[dict[str, Any]] = [
                     },
                 },
             ],
-            "goal": {"enable_score_filter": True, "enable_dedup": False},
+            "goal": None,
             "text_keys": None,
         },
         "is_preset": True,
@@ -147,7 +149,7 @@ PRESET_PIPELINES: list[dict[str, Any]] = [
                 {"name": "document_deduplicator", "params": None},
                 {"name": "document_minhash_deduplicator", "params": None},
             ],
-            "goal": {"enable_dedup": True, "enable_score_filter": False},
+            "goal": None,
             "text_keys": None,
         },
         "is_preset": True,
@@ -169,7 +171,7 @@ PRESET_PIPELINES: list[dict[str, Any]] = [
             "operators": [
                 {"name": "llm_quality_score_filter", "params": None},
             ],
-            "goal": {"enable_score_filter": True, "enable_dedup": False},
+            "goal": None,
             "text_keys": None,
         },
         "is_preset": True,
@@ -186,11 +188,7 @@ PRESET_PIPELINES: list[dict[str, Any]] = [
             "operators": [
                 {"name": "random_selector", "params": {"select_ratio": 0.3}},
             ],
-            "goal": {
-                "keep_ratio": 0.3,
-                "enable_dedup": False,
-                "enable_score_filter": False,
-            },
+            "goal": None,
             "text_keys": None,
         },
         "is_preset": True,

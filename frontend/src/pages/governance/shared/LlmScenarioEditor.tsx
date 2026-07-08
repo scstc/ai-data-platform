@@ -77,7 +77,8 @@ export type LlmScenarioEditorProps<TGoal extends object> = {
   /** 版本为二进制格式时禁用项的提示后缀,如 "二进制不可蒸馏" */
   binaryDisabledSuffix: string;
   defaultGoal: TGoal;
-  GoalPanel: React.ComponentType<GoalPanelProps<TGoal>>;
+  /** 不传 = 该场景没有任务级目标参数(如蒸馏:行为完全由算子链自身参数决定) */
+  GoalPanel?: React.ComponentType<GoalPanelProps<TGoal>>;
   createJob: (body: LlmJobBody<TGoal>) => Promise<{ data: DataPlatform.Job }>;
   /** 编辑模式(URL ?jobId=)所需的任务详情/更新接口;不传则该场景不支持编辑任务 */
   getJob?: (id: string) => Promise<{ data: DataPlatform.Job }>;
@@ -167,9 +168,15 @@ function LlmScenarioEditor<TGoal extends object>({
     [],
   );
 
-  // 算子元信息(供 label/params 渲染):pageSize ≤ 后端 le=500 上限
+  // 算子元信息(供 label/params 渲染):pageSize ≤ 后端 le=500 上限。
+  // includeHidden:编辑既有任务时步骤可能引用已隐藏算子,缺元信息参数面板渲染不出;
+  // 可选列表由 OperatorLibrary 单独拉取(仍只出可见算子),此处不影响新编排。
   useEffect(() => {
-    listOperatorCatalog({ current: 1, pageSize: 500 }).then((r) => {
+    listOperatorCatalog({
+      current: 1,
+      pageSize: 500,
+      includeHidden: true,
+    }).then((r) => {
       setOpMap(Object.fromEntries(r.data.map((o) => [o.name, o])));
     });
   }, []);
@@ -471,16 +478,18 @@ function LlmScenarioEditor<TGoal extends object>({
         )}
       </Space>
 
-      <Card size="small" style={{ marginBottom: 16 }}>
-        <GoalPanel
-          value={goal}
-          onChange={setGoal}
-          datasets={datasets}
-          defaultDatasetId={datasetId}
-          outputDatasetId={outputDatasetId}
-          onOutputDatasetChange={setOutputDatasetId}
-        />
-      </Card>
+      {GoalPanel && (
+        <Card size="small" style={{ marginBottom: 16 }}>
+          <GoalPanel
+            value={goal}
+            onChange={setGoal}
+            datasets={datasets}
+            defaultDatasetId={datasetId}
+            outputDatasetId={outputDatasetId}
+            onOutputDatasetChange={setOutputDatasetId}
+          />
+        </Card>
+      )}
 
       <PipelineDndArea
         steps={steps}

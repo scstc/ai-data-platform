@@ -1,8 +1,8 @@
 """数据蒸馏（Distillation）相关 schema。
 
-蒸馏任务的"任务级参数"与"步骤级算子"分离：
-- 任务级参数（goal）：保留比例 / 排序字段 / 兜底策略
-- 步骤级算子（operators）：走 data-juicer ``process`` 段
+蒸馏没有任务级"目标"参数：保留多少、按什么字段排序、要不要去重,完全由
+用户选的算子链自身决定(如 topk_specified_field_selector / random_selector /
+document_minhash_deduplicator 各自的参数),不存在与算子链脱钩的另一套配置。
 """
 
 from __future__ import annotations
@@ -11,23 +11,6 @@ from typing import Any
 
 from app.schemas.common import CamelModel
 from app.schemas.job import MemberOperatorConfig, OperatorSpec
-
-
-
-class DistillationGoal(CamelModel):
-    """数据蒸馏目标(任务级参数,不写到 data-juicer 算子链里)。"""
-
-    # 保留比例(0~1)和保留条数二选一,均不填则默认按 ratio=0.3
-    keep_ratio: float | None = None
-    keep_num: int | None = None
-    # 排序字段(topk_specified_field_selector 取 top 用)
-    score_field: str = "meta.score"
-    # 不足时是否用 random_selector 兜底补齐
-    fallback_random: bool = True
-    # 是否启用 minhash 去重(语义记录,真正去重看算子链)
-    enable_dedup: bool = True
-    # 是否启用打分过滤(语义记录,真正过滤看算子链)
-    enable_score_filter: bool = True
 
 
 class DistillationJobCreate(CamelModel):
@@ -45,7 +28,6 @@ class DistillationJobCreate(CamelModel):
     operators: list[OperatorSpec] | None = None
     target_members: list[str] | None = None
 
-    goal: DistillationGoal
     # 选填:另存到别的数据集;默认沿用输入版本所属的数据集
     output_dataset_id: str | None = None
     # DJ text_keys:算子作用的主文本字段;留空则后端按字段名优先级自动探测。
