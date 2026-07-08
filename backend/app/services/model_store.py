@@ -237,7 +237,9 @@ def _hf_model_present(root: Path, repo_id: str) -> bool:
         return False
     if (d / "config.json").exists() or (d / "tokenizer_config.json").exists():
         return True
-    return any(d.rglob("*.safetensors")) or any(d.rglob("*.bin"))
+    # 无 config 的裸权重仓库(如 Ruicheng/moge-2-vitl 仅 model.pt)
+    weight_exts = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.onnx", "*.ckpt")
+    return any(any(d.glob(pat)) for pat in weight_exts)
 
 
 def scan_models() -> dict[str, Any]:
