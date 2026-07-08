@@ -1668,4 +1668,32 @@ declare namespace DataPlatform {
     name?: string | null;
     description?: string | null;
   }
+
+  /** 模型仓库配置(本地模型根路径) */
+  interface ModelStoreConfig {
+    path?: string | null;
+    pathExists: boolean;
+  }
+
+  /** 本地模型清单项(实时扫描,不落库) */
+  interface LocalModel {
+    id: string;
+    kind: 'hf' | 'file';
+    /** 分组:asset 基础资产 / llm 本地大模型 / vision 视觉多模态 / text 文本 / extra 额外 */
+    group: 'asset' | 'llm' | 'vision' | 'text' | 'extra';
+    present: boolean;
+    sizeBytes: number;
+    usedBy: string[];
+    params: string[];
+    note?: string | null;
+  }
+
+  /** 模型仓库扫描结果 */
+  interface ModelStoreScan {
+    path?: string | null;
+    pathExists: boolean;
+    presentCount: number;
+    totalCount: number;
+    models: LocalModel[];
+  }
 }

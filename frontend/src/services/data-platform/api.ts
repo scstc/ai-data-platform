@@ -2673,3 +2673,25 @@ export async function localUploadToLake(
     ...(options || {}),
   });
 }
+
+/** 模型仓库根路径配置 GET /api/v1/model-store/config */
+export async function getModelStoreConfig() {
+  return request<{ data: DataPlatform.ModelStoreConfig; success: boolean }>(
+    '/api/v1/model-store/config',
+  );
+}
+
+/** 保存模型仓库根路径(admin) PUT /api/v1/model-store/config */
+export async function updateModelStoreConfig(path: string) {
+  return request<{ data: DataPlatform.ModelStoreConfig; success: boolean }>(
+    '/api/v1/model-store/config',
+    { method: 'PUT', data: { path }, skipErrorHandler: true },
+  );
+}
+
+/** 本地模型清单(实时扫描) GET /api/v1/model-store/models */
+export async function listLocalModels() {
+  return request<{ data: DataPlatform.ModelStoreScan; success: boolean }>(
+    '/api/v1/model-store/models',
+  );
+}

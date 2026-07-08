@@ -1,6 +1,14 @@
-import { Empty, Form, Input, InputNumber, Switch, Typography } from 'antd';
+import {
+  AutoComplete,
+  Empty,
+  Form,
+  Input,
+  InputNumber,
+  Switch,
+  Typography,
+} from 'antd';
 import { useEffect, useState } from 'react';
-import { listLlmProviders } from '@/services/data-platform';
+import { listLlmProviders, listLocalModels } from '@/services/data-platform';
 import { PARAM_ZH_DESC } from '../market/_paramZhDict';
 
 const { Text } = Typography;
@@ -16,6 +24,13 @@ const paramTooltip = (p: DataPlatform.CatalogParam) => {
 // LLM 模型参数(DJ 各算子命名不统一):执行时后端按 LLM 配置页的激活模型注入
 // (见 engine.build_config),表单只读展示注入结果,不让用户改出不一致。
 const MODEL_PARAM_NAMES = new Set(['api_model', 'api_or_hf_model']);
+
+/** 本地 HF 模型参数(hf_model / hf_nsfw_model / sam2_hf_model…):
+ *  下拉列出模型仓库已就位的模型,仍可自由输入其他 repo id。 */
+const isLocalModelParam = (name: string) =>
+  name.includes('hf_') &&
+  name.includes('model') &&
+  !MODEL_PARAM_NAMES.has(name);
 
 /** 右栏:按选中算子的参数定义渲染表单,改动回填到该步骤的 params。 */
 const StepParamsForm: React.FC<{
@@ -37,6 +52,22 @@ const StepParamsForm: React.FC<{
       )
       .catch(() => undefined);
   }, [needsModel, activeModel]);
+
+  // 本地模型仓库已就位的 HF 模型(供 hf_* 模型参数下拉;未配置仓库则为空)
+  const needsLocalModel = fields.some((p) => isLocalModelParam(p.name));
+  const [localModels, setLocalModels] = useState<string[]>();
+  useEffect(() => {
+    if (!needsLocalModel || localModels !== undefined) return;
+    listLocalModels()
+      .then((res) =>
+        setLocalModels(
+          (res?.data?.models ?? [])
+            .filter((m) => m.kind === 'hf' && m.present)
+            .map((m) => m.id),
+        ),
+      )
+      .catch(() => setLocalModels([]));
+  }, [needsLocalModel, localModels]);
 
   if (!op) {
     return <Empty description="从中间选择一个步骤以配置参数" />;
@@ -62,6 +93,45 @@ const StepParamsForm: React.FC<{
                 value={(val as string) || activeModel}
                 disabled
                 placeholder="未激活 LLM 配置"
+              />
+            </Form.Item>
+          );
+        }
+        if (isLocalModelParam(p.name)) {
+          const defaultId =
+            typeof p.default === 'string'
+              ? p.default.replace(/^['"]|['"]$/g, '')
+              : '';
+          const ready = new Set(localModels ?? []);
+          const current = (val as string) || defaultId;
+          return (
+            <Form.Item
+              key={p.name}
+              label={p.name}
+              tooltip={paramTooltip(p)}
+              help={
+                current && ready.size
+                  ? ready.has(current)
+                    ? `${current} 已在模型仓库就位`
+                    : `${current} 不在模型仓库,离线环境将无法运行`
+                  : defaultId
+                    ? `默认 ${defaultId}`
+                    : undefined
+              }
+            >
+              <AutoComplete
+                value={(val as string) ?? ''}
+                onChange={(v) => set(p.name, v)}
+                placeholder={defaultId ? `默认 ${defaultId}` : '输入模型 ID'}
+                options={(localModels ?? []).map((id) => ({
+                  value: id,
+                  label: id === defaultId ? `${id}(默认)` : id,
+                }))}
+                filterOption={(input, option) =>
+                  String(option?.value ?? '')
+                    .toLowerCase()
+                    .includes(input.toLowerCase())
+                }
               />
             </Form.Item>
           );

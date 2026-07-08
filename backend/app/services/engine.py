@@ -77,6 +77,16 @@ def _subprocess_env() -> dict[str, str]:
         env["OPENAI_API_KEY"] = cfg.api_key
         if cfg.base_url:
             env["OPENAI_BASE_URL"] = cfg.base_url
+    # 本地模型仓库(离线环境):DJ 的 check_model_home/check_model 优先命中该
+    # 目录即不联网;nltk_data 子目录存在时一并指给 NLTK_DATA(punkt 分句)。
+    from app.services.model_store import get_model_home
+
+    home = get_model_home()
+    if home and Path(home).is_dir():
+        env["DATA_JUICER_EXTERNAL_MODELS_HOME"] = home
+        nltk_dir = Path(home) / "nltk_data"
+        if nltk_dir.is_dir():
+            env["NLTK_DATA"] = str(nltk_dir)
     return env
 
 

@@ -30,6 +30,7 @@ from app.api.v1 import (
     jobs,
     llm_config,
     make,
+    model_store,
     notifications,
     operators,
     pipelines,
@@ -65,6 +66,14 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             await refresh_cache(session)
     except Exception:  # noqa: BLE001
         _logger.warning("启动时刷新 LLM 配置缓存失败（已忽略）", exc_info=True)
+    # best-effort：模型仓库根路径缓存（供 engine 注入 dj-process env）
+    try:
+        from app.services import model_store as model_store_svc
+
+        async with async_session_factory() as session:
+            await model_store_svc.refresh_cache(session)
+    except Exception:  # noqa: BLE001
+        _logger.warning("启动时刷新模型仓库路径缓存失败（已忽略）", exc_info=True)
     # best-effort:确保平台上传桶 + 数据湖桶存在(未配置 MinIO 时静默跳过)
     try:
         from app.services.external_store import (
@@ -144,6 +153,7 @@ def create_app() -> FastAPI:
     app.include_router(categories.router, prefix="/api/v1")
     app.include_router(tags.router, prefix="/api/v1")
     app.include_router(llm_config.router, prefix="/api/v1")
+    app.include_router(model_store.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
     app.include_router(profile.router, prefix="/api/v1")
     app.include_router(system_menus.router, prefix="/api/v1")

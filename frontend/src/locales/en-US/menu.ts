@@ -91,6 +91,7 @@ export default {
   'menu.ops.lineage': 'Data Lineage',
   'menu.ops.security': 'Security Audit',
   'menu.ops.llmSettings': 'LLM Settings',
+  'menu.ops.modelStore': 'Model Store',
   'menu.assistant': 'AI Assistant',
   'menu.system': 'System',
   'menu.system.systemUser': 'Users',

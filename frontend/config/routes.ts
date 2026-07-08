@@ -360,6 +360,12 @@ export default [
         access: 'canAdmin',
         component: './ops/llm-settings',
       },
+      {
+        path: '/ops/model-store',
+        name: 'modelStore',
+        access: 'canAdmin',
+        component: './ops/model-store',
+      },
     ],
   },
   // 智能助手(独立顶级入口,放在菜单最后)
