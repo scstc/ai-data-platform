@@ -20,6 +20,9 @@ class DatasetTableRead(CamelModel):
     rows: int | None = None
     size: int | None = None
     schema_variant: str | None = None
+    # 湖→仓血缘:该成员的来源渠道,抽取时从 data_lake_snapshots.upload_channel 带过来;
+    # 非湖抽取来源为空
+    source_upload_channel: str | None = None
 
 
 class DatasetVersionRead(CamelModel):
@@ -40,6 +43,9 @@ class DatasetVersionRead(CamelModel):
     schema_variant: str | None = None
     # 多模态模态快照(images/audios/videos/text 子集);仅 multimodal 版本有值
     modalities: list[str] | None = None
+    # 来源渠道快照(去重列表):汇总该版本各表成员的 source_upload_channel;
+    # 全部成员都非湖抽取来源时为空
+    source_channels: list[str] | None = None
     origin: str
     # hosted 版本指向的数据源 id(S3 凭证来源);受管版本为空(#18)
     source_datasource_id: str | None = None
@@ -101,6 +107,9 @@ class DatasetRead(CamelModel):
     # 展示版本(优先 published,否则最新)的多模态模态集合;非 ORM,路由聚合填充。
     # 前端按其分类显示"图片/视频/音频/跨模态"子标签 + 列表筛选。非多模态/存量为 None。
     modalities: list[str] | None = None
+    # 展示版本的来源渠道快照(去重列表);非 ORM,路由聚合填充。
+    # 全部成员都非湖抽取来源时为 None。
+    source_channels: list[str] | None = None
     # 展示版本的训练用途元数据(治理整改 G1);非 ORM,路由聚合填充。
     train_type: str | None = None
     schema_variant: str | None = None

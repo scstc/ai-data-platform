@@ -346,6 +346,7 @@ async def extract_and_land_from_lake(
         produced_by_job_id=produced_by_job_id,
         storage_format="jsonl",
         source_snapshot_id=snapshot.id,
+        source_upload_channel=snapshot.upload_channel,
     )
 
     return version, member
@@ -519,6 +520,7 @@ async def extract_to_new_dataset(
             note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",
             storage_format="jsonl",
             source_snapshot_id=snapshot.id,
+            source_upload_channel=snapshot.upload_channel,
         )
 
     return dataset

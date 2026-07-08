@@ -63,6 +63,7 @@ class DataLakeObjectRead(CamelModel):
     storage_format: str | None = None
     latest_version_no: int
     latest_snapshot_id: str | None = None
+    latest_upload_channel: str | None = None
     version_count: int
     total_size: int | None = None
     latest_rows: int | None = None

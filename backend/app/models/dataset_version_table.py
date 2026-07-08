@@ -56,6 +56,9 @@ class DatasetVersionTable(Base):
     # 经 snapshot.object_id/version_no 可定位"哪个湖文件的哪一版"。
     # 非湖抽取来源(采集/上传/加工产出)为空。
     source_snapshot_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 该成员的来源渠道,抽取时从 data_lake_snapshots.upload_channel 带过来;
+    # 非湖抽取来源为空。
+    source_upload_channel: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

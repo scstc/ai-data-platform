@@ -151,6 +151,12 @@ def _to_detail(
     detail = DatasetDetailRead.model_validate(dataset)
     detail.versions = [DatasetVersionRead.model_validate(v) for v in versions]
     detail.hosted = any(v.origin == "hosted" for v in versions)
+    # 展示版本(优先 published,否则最新)的来源渠道,与 list_datasets 的
+    # showcase_source_channels 同口径(此处 versions 已加载,直接算不用再查库)
+    if versions:
+        published = [v for v in versions if v.publish_status == "published"]
+        showcase = max(published or versions, key=lambda v: v.version_no)
+        detail.source_channels = showcase.source_channels
     return detail
 
 
@@ -185,6 +191,7 @@ async def _attach_tables(
                 rows=m.rows,
                 size=m.size,
                 schema_variant=m.schema_variant,
+                source_upload_channel=m.source_upload_channel,
             )
         )
     for v in detail.versions:
@@ -1722,7 +1729,19 @@ async def list_datasets(
     if semantic_type:
         conds.append(Dataset.semantic_type == semantic_type)
     if source_kind:
-        conds.append(Dataset.source_kind == source_kind)
+        # 「来源」筛选跨两个轴:三轴模型的 source_kind(数据库/对象存储/HDFS/
+        # 本地上传/API 推送)+ 湖抽取带过来的 source_channels(local/oss/obs 等,
+        # 列表「来源」列没有 source_kind 时回退展示这个)——前端合并成一个下拉,
+        # 后端也要能命中任一轴,否则回退展示的行永远筛不出来
+        conds.append(
+            or_(
+                Dataset.source_kind == source_kind,
+                select(DatasetVersion.id)
+                .where(DatasetVersion.dataset_id == Dataset.id)
+                .where(DatasetVersion.source_channels.contains([source_kind]))
+                .exists(),
+            )
+        )
     if category_id:
         conds.append(Dataset.category_id == category_id)
     # 选父含子:categoryIds(逗号分隔)展开成 id 列表 IN 查询,选中父分类时连带所有子孙。
@@ -1810,6 +1829,7 @@ async def list_datasets(
     latest_label: dict[str, str] = {}
     showcase_train_type: dict[str, str | None] = {}
     showcase_schema_variant: dict[str, str | None] = {}
+    showcase_source_channels: dict[str, list[str] | None] = {}
     if page_ids:
         ver_rows = (
             await session.execute(
@@ -1820,26 +1840,34 @@ async def list_datasets(
                     DatasetVersion.publish_status,
                     DatasetVersion.train_type,
                     DatasetVersion.schema_variant,
+                    DatasetVersion.source_channels,
                 ).where(DatasetVersion.dataset_id.in_(page_ids))
             )
         ).all()
-        published: dict[str, tuple[int, object, str | None, str | None]] = {}
-        latest: dict[str, tuple[int, object, str | None, str | None]] = {}
-        for ds_id, vno, created, status, tt, sv in ver_rows:
+        published: dict[
+            str, tuple[int, object, str | None, str | None, list[str] | None]
+        ] = {}
+        latest: dict[
+            str, tuple[int, object, str | None, str | None, list[str] | None]
+        ] = {}
+        for ds_id, vno, created, status, tt, sv, sc in ver_rows:
             if status == "published":
-                published[ds_id] = (vno, created, tt, sv)
+                published[ds_id] = (vno, created, tt, sv, sc)
             cur = latest.get(ds_id)
             if cur is None or vno > cur[0]:
-                latest[ds_id] = (vno, created, tt, sv)
-        for ds_id, (vno, created, tt, sv) in latest.items():
+                latest[ds_id] = (vno, created, tt, sv, sc)
+        for ds_id, (vno, created, tt, sv, sc) in latest.items():
             # 版本列直接展示最新版本号(含草稿)
             latest_label[ds_id] = format_version_label(
                 vno, created  # type: ignore[arg-type]
             )
-            # train_type/schema_variant 仍按展示版本(已发布优先)口径
-            _, _, pick_tt, pick_sv = published.get(ds_id, (vno, created, tt, sv))
+            # train_type/schema_variant/source_channels 仍按展示版本(已发布优先)口径
+            _, _, pick_tt, pick_sv, pick_sc = published.get(
+                ds_id, (vno, created, tt, sv, sc)
+            )
             showcase_train_type[ds_id] = pick_tt
             showcase_schema_variant[ds_id] = pick_sv
+            showcase_source_channels[ds_id] = pick_sc
     # 展示版本(优先 published,否则最新)的多模态模态集合,回填 modalities(子标签)
     showcase_mods = await _showcase_modalities(session, page_ids)
     # 批量取本页分类名(避免 N+1),回填 categoryName
@@ -1856,6 +1884,7 @@ async def list_datasets(
         item.modalities = showcase_mods.get(r.id)
         item.train_type = showcase_train_type.get(r.id)
         item.schema_variant = showcase_schema_variant.get(r.id)
+        item.source_channels = showcase_source_channels.get(r.id)
         if r.category_id:
             item.category_name = cat_names.get(r.category_id)
         item.tags = tags_map.get(r.id, [])

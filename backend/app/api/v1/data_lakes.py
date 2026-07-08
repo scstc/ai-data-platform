@@ -341,13 +341,16 @@ async def list_objects(
         o.latest_snapshot_id for o in objects if o.latest_snapshot_id
     ]
     rows_by_snapshot: dict[str, int | None] = {}
+    channel_by_snapshot: dict[str, str] = {}
     if latest_snapshot_ids:
-        latest_query = select(DataLakeSnapshot.id, DataLakeSnapshot.rows).where(
-            DataLakeSnapshot.id.in_(latest_snapshot_ids)
-        )
-        rows_by_snapshot = {
-            row.id: row.rows for row in (await db.execute(latest_query)).all()
-        }
+        latest_query = select(
+            DataLakeSnapshot.id,
+            DataLakeSnapshot.rows,
+            DataLakeSnapshot.upload_channel,
+        ).where(DataLakeSnapshot.id.in_(latest_snapshot_ids))
+        latest_rows = (await db.execute(latest_query)).all()
+        rows_by_snapshot = {row.id: row.rows for row in latest_rows}
+        channel_by_snapshot = {row.id: row.upload_channel for row in latest_rows}
 
     data: list[DataLakeObjectRead] = []
     for obj in objects:
@@ -363,6 +366,9 @@ async def list_objects(
                 storage_format=obj.storage_format,
                 latest_version_no=obj.latest_version_no,
                 latest_snapshot_id=obj.latest_snapshot_id,
+                latest_upload_channel=channel_by_snapshot.get(
+                    obj.latest_snapshot_id
+                ),
                 merge_config=obj.merge_config,
                 created_at=obj.created_at,
                 updated_at=obj.updated_at,

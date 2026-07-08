@@ -27,6 +27,7 @@ import {
   listDatasets,
   listLakeObjects,
 } from '@/services/data-platform';
+import { UploadChannelTag } from '@/utils/uploadChannel';
 import type { ExtractItem } from './components/extractItem';
 import LakeSnapshotPreview from './components/LakeSnapshotPreview';
 import MergeObjectsModal from './components/MergeObjectsModal';
@@ -120,6 +121,12 @@ const DataLakeDetailPage: FC = () => {
       width: 100,
       render: (_, r) =>
         r.storageFormat ? <Tag color="default">{r.storageFormat}</Tag> : '-',
+    },
+    {
+      title: '来源',
+      dataIndex: 'latestUploadChannel',
+      width: 100,
+      render: (_, r) => <UploadChannelTag channel={r.latestUploadChannel} />,
     },
     {
       title: '最新版本',

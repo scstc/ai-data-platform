@@ -33,6 +33,7 @@ import {
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { VersionFilePreview } from '@/components';
+import AclDrawer from '@/components/AclDrawer';
 import {
   createDatasetVersion,
   deleteDatasetVersion,
@@ -60,7 +61,7 @@ import { SemanticTypeTag } from '@/utils/semanticType';
 import { SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 import { TRAIN_TYPE_META, TrainTypeTag } from '@/utils/trainType';
-import AclDrawer from '@/components/AclDrawer';
+import { UploadChannelTag } from '@/utils/uploadChannel';
 
 /** 自动打标匹配为空时的兜底标签(与后端 ai.py _DEFAULT_FALLBACK_TAG 同值) */
 const DEFAULT_FALLBACK_TAG = '通用业务（默认）';
@@ -567,6 +568,13 @@ const DatasetDetail: React.FC = () => {
                   render: (f: string) => <Tag>{f}</Tag>,
                 },
                 {
+                  title: '来源',
+                  dataIndex: 'sourceUploadChannel',
+                  render: (c?: DataPlatform.DataLakeUploadChannel | null) => (
+                    <UploadChannelTag channel={c} />
+                  ),
+                },
+                {
                   title: '行数',
                   dataIndex: 'rows',
                   render: (r?: number) => r ?? '-',
@@ -696,7 +704,18 @@ const DatasetDetail: React.FC = () => {
                 {
                   title: '来源',
                   dataIndex: 'sourceKind',
-                  render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
+                  render: (_, r) =>
+                    r.sourceKind ? (
+                      <SourceKindTag kind={r.sourceKind} />
+                    ) : r.sourceChannels?.length ? (
+                      <Space size={4} wrap>
+                        {r.sourceChannels.map((c) => (
+                          <UploadChannelTag key={c} channel={c} />
+                        ))}
+                      </Space>
+                    ) : (
+                      '-'
+                    ),
                 },
                 {
                   title: '数据类型',

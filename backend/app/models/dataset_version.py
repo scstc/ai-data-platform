@@ -49,6 +49,10 @@ class DatasetVersion(Base):
     # 仅 semantic_type=multimodal 版本写入(落地时算)。供列表"图片/视频/音频/跨模态"
     # 子标签与筛选;空(存量/非多模态)→ 列表仅显示"多模态"主标签(见 list_datasets)。
     modalities: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # 来源渠道快照(去重后的列表):汇总该版本各表成员 source_upload_channel,
+    # 每次 add_table_member 追加新渠道时并集更新。非湖抽取来源的成员不贡献值,
+    # 全部成员都非湖抽取时为空。
+    source_channels: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     # 来源:managed(平台受管) | hosted(三方 S3 托管,#18) | synthetic(LLM 合成/增强产出,#8)
     # synthetic 用于数据合成与增强任务,前端可按 origin 区分「原始数据 vs 合成数据」。
     origin: Mapped[str] = mapped_column(String, nullable=False, default="managed")

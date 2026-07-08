@@ -831,6 +831,8 @@ declare namespace DataPlatform {
     semanticType?: SemanticType;
     /** 多模态模态集合(images/audios/videos/text 子集);仅 multimodal 版本有值 */
     modalities?: string[];
+    /** 来源渠道快照(去重列表):汇总该版本各表成员的来源渠道;全部成员都非湖抽取来源时为空 */
+    sourceChannels?: DataLakeUploadChannel[];
     /** 训练用途(治理 G1);训练平台据此过滤 */
     trainType?: TrainType;
     /** 训练 schema 变体(治理 G1) */
@@ -864,6 +866,8 @@ declare namespace DataPlatform {
     rows?: number;
     size?: number;
     schemaVariant?: SchemaVariant;
+    /** 湖→仓血缘:该成员的来源渠道,抽取时从湖快照带过来;非湖抽取来源为空 */
+    sourceUploadChannel?: DataLakeUploadChannel | null;
   };
 
   /** 数据集（元信息） */
@@ -877,6 +881,8 @@ declare namespace DataPlatform {
     semanticType?: SemanticType;
     /** 展示版本的多模态模态集合(后端聚合填充);前端按其分类显示子标签 + 筛选 */
     modalities?: string[];
+    /** 展示版本的来源渠道快照(去重列表,后端聚合填充);全部成员都非湖抽取来源时为空 */
+    sourceChannels?: DataLakeUploadChannel[];
     /** 展示版本的训练用途(治理整改 G1,后端聚合填充) */
     trainType?: TrainType;
     /** 展示版本的 Schema 变体(治理整改 G1,后端聚合填充) */
@@ -1633,6 +1639,8 @@ declare namespace DataPlatform {
     storageFormat: string | null;
     latestVersionNo: number;
     latestSnapshotId: string | null;
+    /** 最新版本的来源渠道 */
+    latestUploadChannel: DataLakeUploadChannel | null;
     /** 该文件累计版本数 */
     versionCount: number;
     /** 该文件所有版本累计大小(字节) */

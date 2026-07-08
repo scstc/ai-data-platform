@@ -17,6 +17,7 @@ import {
   Popconfirm,
   Popover,
   Select,
+  Space,
   Tag,
   TreeSelect,
   Typography,
@@ -56,6 +57,7 @@ import {
 } from '@/utils/semanticType';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
+import { UPLOAD_CHANNEL_ENUM, UploadChannelTag } from '@/utils/uploadChannel';
 
 /** 数据集类型枚举（列表搜索 + 托管表单复用） */
 const DATA_TYPE_ENUM = {
@@ -292,8 +294,21 @@ const DatasetsList: React.FC = () => {
       title: '来源',
       dataIndex: 'sourceKind',
       valueType: 'select',
-      valueEnum: SOURCE_KIND_ENUM,
-      render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
+      // 列显示 sourceKind(三轴接入方式)或回退展示 sourceChannels(湖抽取渠道),
+      // 筛选下拉要覆盖两边的枚举,否则回退展示的行永远筛不出来
+      valueEnum: { ...SOURCE_KIND_ENUM, ...UPLOAD_CHANNEL_ENUM },
+      render: (_, r) =>
+        r.sourceKind ? (
+          <SourceKindTag kind={r.sourceKind} />
+        ) : r.sourceChannels?.length ? (
+          <Space size={4} wrap>
+            {r.sourceChannels.map((c) => (
+              <UploadChannelTag key={c} channel={c} />
+            ))}
+          </Space>
+        ) : (
+          '-'
+        ),
     },
     {
       title: '最新版本',

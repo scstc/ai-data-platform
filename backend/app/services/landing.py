@@ -867,6 +867,7 @@ async def add_table_member(
     schema_variant: str | None = None,
     note: str | None = None,
     source_snapshot_id: str | None = None,
+    source_upload_channel: str | None = None,
 ) -> tuple[DatasetVersion, DatasetVersionTable]:
     """把一张表的记录落成当前 draft 版本的一个成员(同名覆盖)。
 
@@ -962,6 +963,7 @@ async def add_table_member(
         existing.schema_variant = eff_variant
         # 同名覆盖即内容替换,血缘跟随新内容(非湖来源覆盖时置空,不残留旧血缘)
         existing.source_snapshot_id = source_snapshot_id
+        existing.source_upload_channel = source_upload_channel
         member = existing
     else:
         member = DatasetVersionTable(
@@ -975,6 +977,7 @@ async def add_table_member(
             schema_snapshot=snap,
             schema_variant=eff_variant,
             source_snapshot_id=source_snapshot_id,
+            source_upload_channel=source_upload_channel,
         )
         session.add(member)
 
@@ -987,6 +990,12 @@ async def add_table_member(
         version.semantic_type = effective_semantic
     if version_modalities is not None and version.modalities is None:
         version.modalities = version_modalities
+    # 来源渠道:与 train_type/modalities(仅首次写定)不同,每次追加成员都并集更新
+    # ——同一 draft 陆续从不同渠道抽取时,来源列表要跟着累加,而不是定格在第一次。
+    if source_upload_channel:
+        channels = set(version.source_channels or [])
+        if source_upload_channel not in channels:
+            version.source_channels = sorted(channels | {source_upload_channel})
     if produced_by_job_id and version.produced_by_job_id is None:
         version.produced_by_job_id = produced_by_job_id
     if note:

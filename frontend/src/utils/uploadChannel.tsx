@@ -31,6 +31,12 @@ export const UPLOAD_CHANNEL_META: Record<
   local: { label: '本地', color: 'green', icon: <UploadOutlined /> },
 };
 
+/** ProTable 列筛选用的 valueEnum(key → { text }) */
+export const UPLOAD_CHANNEL_ENUM: Record<string, { text: string }> =
+  Object.fromEntries(
+    Object.entries(UPLOAD_CHANNEL_META).map(([k, v]) => [k, { text: v.label }]),
+  );
+
 /** 统一的来源标签:图标 + 中文标签 + 预设色。空值回退 `-`,未知值回退原值。 */
 export const UploadChannelTag: React.FC<{
   channel?: DataPlatform.DataLakeUploadChannel | string | null;
