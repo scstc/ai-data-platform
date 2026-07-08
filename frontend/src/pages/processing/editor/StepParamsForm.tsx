@@ -27,11 +27,13 @@ const paramTooltip = (p: DataPlatform.CatalogParam) => {
 const MODEL_PARAM_NAMES = new Set(['api_model', 'api_or_hf_model']);
 
 /** 本地 HF 模型参数(hf_model / hf_nsfw_model / sam2_hf_model…):
- *  下拉列出模型仓库已就位的模型,仍可自由输入其他 repo id。 */
-const isLocalModelParam = (name: string) =>
-  name.includes('hf_') &&
-  name.includes('model') &&
-  !MODEL_PARAM_NAMES.has(name);
+ *  下拉列出模型仓库已就位的模型,仍可自由输入其他 repo id。
+ *  排除 bool 类型(如 is_hf_model 开关),避免误命中渲染成模型选择器。 */
+const isLocalModelParam = (p: DataPlatform.CatalogParam) =>
+  p.name.includes('hf_') &&
+  p.name.includes('model') &&
+  !MODEL_PARAM_NAMES.has(p.name) &&
+  !(p.type || '').includes('bool');
 
 /** 右栏:按选中算子的参数定义渲染表单,改动回填到该步骤的 params。 */
 const StepParamsForm: React.FC<{
@@ -62,7 +64,7 @@ const StepParamsForm: React.FC<{
 
   // 本地模型仓库已就位的 HF 模型(供 hf_* 与 api_or_hf_model 参数下拉;未配置仓库则为空)
   const needsLocalModel = fields.some(
-    (p) => isLocalModelParam(p.name) || p.name === 'api_or_hf_model',
+    (p) => isLocalModelParam(p) || p.name === 'api_or_hf_model',
   );
   const [localModels, setLocalModels] = useState<string[]>();
   useEffect(() => {
@@ -137,7 +139,7 @@ const StepParamsForm: React.FC<{
             </Form.Item>
           );
         }
-        if (isLocalModelParam(p.name)) {
+        if (isLocalModelParam(p)) {
           const defaultId =
             typeof p.default === 'string'
               ? p.default.replace(/^['"]|['"]$/g, '')
