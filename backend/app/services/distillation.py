@@ -174,8 +174,6 @@ async def run_distillation_job(
         all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
 
         # 计数输入行
-        from app.services.engine import _read_head_records
-
         if input_path.suffix == ".jsonl":
             member_input_count = sum(
                 1 for line in input_path.open(encoding="utf-8") if line.strip()
