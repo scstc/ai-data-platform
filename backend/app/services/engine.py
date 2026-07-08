@@ -52,12 +52,13 @@ _semaphore = asyncio.Semaphore(settings.engine_concurrency)
 _running_procs: dict[str, asyncio.subprocess.Process] = {}
 
 
-def _subprocess_env() -> dict[str, str]:
+def _subprocess_env(job_id: str | None = None) -> dict[str, str]:
     """dj-process 子进程环境。
 
     - 平台配了 LLM 时注入 OPENAI_*——needs_api 算子经 DJ 的 openai 客户端从
       环境变量读取凭证(pydantic 只把 .env 读进 settings,不写 os.environ,
-      故不显式注入子进程就拿不到)。
+      故不显式注入子进程就拿不到)。带 job_id 时 OPENAI_BASE_URL 指到本服务
+      /api/v1/llm-proxy/{job_id}(转发到真实端点并记算子/任务级用量)。
     - 自定义算子目录挂进 PYTHONPATH——HF datasets 多进程 map 的 worker 反序列化
       算子实例时按模块名 re-import;DJ 的 load_custom_operators 只把动态模块注册进
       主进程 sys.modules,spawn 平台(Windows/macOS)的 worker 找不到模块即猝死
@@ -75,7 +76,10 @@ def _subprocess_env() -> dict[str, str]:
     cfg = get_active_llm_config()
     if cfg.api_key:
         env["OPENAI_API_KEY"] = cfg.api_key
-        if cfg.base_url:
+        if job_id:
+            base = settings.llm_proxy_self_url.rstrip("/")
+            env["OPENAI_BASE_URL"] = f"{base}/api/v1/llm-proxy/{job_id}"
+        elif cfg.base_url:
             env["OPENAI_BASE_URL"] = cfg.base_url
     # 本地模型仓库(离线环境):DJ 的 check_model_home/check_model 优先命中该
     # 目录即不联网;nltk_data 子目录存在时一并指给 NLTK_DATA(punkt 分句)。
@@ -282,6 +286,13 @@ def config_yaml_for_display(yaml_text: str) -> str:
         if k not in _DISPLAY_DROP_KEYS
         and not (k in _PATH_KEYS and _is_absolute_path(v))
     }
+    # custom_operator_paths 是服务器上的绝对路径(build_config 按 upload_dir 现拼),
+    # 展示只留文件名,同样不泄漏服务器路径;PureWindowsPath 兼容 / 与 \ 两种分隔符。
+    paths = kept.get("custom_operator_paths")
+    if isinstance(paths, list):
+        kept["custom_operator_paths"] = [
+            PureWindowsPath(p).name if isinstance(p, str) else p for p in paths
+        ]
     return yaml.safe_dump(kept, allow_unicode=True, sort_keys=False)
 
 
@@ -305,7 +316,7 @@ async def _run_dj(
         # 自成进程组:停止/超时时可整组杀,连带 dj fork 出的子孙(uv/pip 等)
         start_new_session=True,
         # 配了 LLM 时把 OPENAI_* 注入,供 needs_api 算子的 openai 客户端读取
-        env=_subprocess_env(),
+        env=_subprocess_env(job_id),
     )
     if job_id is not None:
         _running_procs[job_id] = proc

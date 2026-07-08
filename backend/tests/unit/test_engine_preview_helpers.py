@@ -8,7 +8,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.services.engine import _column_union, _read_jsonl_head
+import yaml
+
+from app.services.engine import (
+    _column_union,
+    _read_jsonl_head,
+    config_yaml_for_display,
+)
 
 
 def _write(path: Path, lines: list[str]) -> None:
@@ -49,3 +55,27 @@ def test_column_union_preserves_first_seen_order() -> None:
 
 def test_column_union_empty_inputs() -> None:
     assert _column_union([], []) == []
+
+
+def test_display_yaml_strips_custom_operator_dirs() -> None:
+    # custom_operator_paths 由 build_config 按服务器 upload_dir 现拼绝对路径,
+    # 展示版必须只留文件名——否则把开发机/生产机目录结构泄漏给前端
+    raw = yaml.safe_dump(
+        {
+            "project_name": "job-x",
+            "np": 4,
+            "process": [{"generate_cot_mapper": None}],
+            "custom_operator_paths": [
+                "C:/Users/dev/ai-data-platform/backend/var/uploads/custom_operators/generate_cot_mapper.py",
+                "/data/uploads/custom_operators/generate_sft_mapper.py",
+            ],
+        }
+    )
+    shown = yaml.safe_load(config_yaml_for_display(raw))
+    assert shown["custom_operator_paths"] == [
+        "generate_cot_mapper.py",
+        "generate_sft_mapper.py",
+    ]
+    # 既有行为不回归:内部运行期键仍被剥掉,process 原样保留
+    assert "project_name" not in shown and "np" not in shown
+    assert shown["process"] == [{"generate_cot_mapper": None}]
