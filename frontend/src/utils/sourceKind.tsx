@@ -26,7 +26,7 @@ export const SOURCE_KIND_META: Record<string, SourceKindMeta> = {
     icon: <CloudServerOutlined />,
   },
   hdfs: { label: 'HDFS', color: 'geekblue', icon: <ClusterOutlined /> },
-  local_upload: { label: '本地上传', color: 'green', icon: <UploadOutlined /> },
+  local: { label: '本地', color: 'green', icon: <UploadOutlined /> },
   api_push: { label: 'API 推送', color: 'purple', icon: <ApiOutlined /> },
 };
 
