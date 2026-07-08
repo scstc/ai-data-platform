@@ -1604,6 +1604,23 @@ export async function createTrainsetJob(
   );
 }
 
+/** 编辑数据合成任务 PUT /api/v1/trainset/jobs/{id}（覆盖原任务配置并原地重跑） */
+export async function updateTrainsetJob(
+  jobId: string,
+  body: DataPlatform.TrainsetJobCreate,
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.Job; success: boolean }>(
+    `/api/v1/trainset/jobs/${jobId}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      ...(options || {}),
+    },
+  );
+}
+
 /** 分页列出数据合成任务 GET /api/v1/trainset/jobs */
 export async function listTrainsetJobs(
   params: { current?: number; pageSize?: number; datasetId?: string } = {},
@@ -1771,6 +1788,20 @@ export async function updateOperatorVisible(
   }>(`/api/v1/operators/${name}/visible`, {
     method: 'PATCH',
     data: { visible },
+    ...(options || {}),
+  });
+}
+
+/** 算子市场:五角星加星(纯人气计数,每次 +1,不可撤销) POST /api/v1/operators/{name}/star */
+export async function starOperator(
+  name: string,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { name: string; starCount: number };
+    success: boolean;
+  }>(`/api/v1/operators/${name}/star`, {
+    method: 'POST',
     ...(options || {}),
   });
 }

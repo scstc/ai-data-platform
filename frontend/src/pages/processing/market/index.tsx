@@ -1,6 +1,7 @@
 import {
   EyeInvisibleOutlined,
   EyeOutlined,
+  StarOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
@@ -28,6 +29,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   getOperatorCapabilities,
   listOperatorCatalog,
+  starOperator,
   updateOperatorVisible,
 } from '@/services/data-platform';
 import {
@@ -39,12 +41,12 @@ import {
 
 const { Paragraph, Text } = Typography;
 
-/** 顶部 segmented:执行要求。 */
-const RUNNABLE_FILTER_OPTIONS = [
-  { label: '全部', value: 'all' },
-  { label: '可直接执行', value: 'ready' },
-  { label: '需要 AI', value: 'needs_api' },
-  { label: '需要算力', value: 'needs_compute' },
+/** 隐藏项三态(仅 operator:visibility 权限可见):默认只看可见算子,
+ *  「含隐藏」混合展示,「仅隐藏」单独筛出已隐藏的——避免只能翻页肉眼找。 */
+const HIDDEN_FILTER_OPTIONS = [
+  { label: '可见', value: 'visible' },
+  { label: '含隐藏', value: 'all' },
+  { label: '仅隐藏', value: 'hidden' },
 ];
 
 /** DJ 算子 8 大类型(category 字段),与 Operators.md §Overview 一一对应。 */
@@ -103,9 +105,10 @@ const Market: React.FC = () => {
   const [category, setCategory] = useState<string | null>(null);
   const [modalities, setModalities] = useState<string[]>([]);
   const [resources, setResources] = useState<string[]>([]);
-  const [runnableFilter, setRunnableFilter] = useState<string>('all');
-  const [onlyRecommended, setOnlyRecommended] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
+  // 隐藏项三态:visible=不含已隐藏(默认) / all=含已隐藏 / hidden=只看已隐藏
+  const [hiddenFilter, setHiddenFilter] = useState<
+    'visible' | 'all' | 'hidden'
+  >('visible');
   const [keyword, setKeyword] = useState<string | null>(null);
 
   // 分页
@@ -153,10 +156,11 @@ const Market: React.FC = () => {
   const baseFiltered = useMemo(() => {
     const kw = keyword?.toLowerCase();
     return allOps.filter((op) => {
-      if (op.visible === false && !showHidden) return false;
-      if (runnableFilter !== 'all' && op.runnable !== runnableFilter)
+      if (hiddenFilter === 'hidden') {
+        if (op.visible !== false) return false;
+      } else if (hiddenFilter === 'visible' && op.visible === false) {
         return false;
-      if (onlyRecommended && !op.recommend) return false;
+      }
       if (
         modalities.length > 0 &&
         !modalities.some((m) => (op.modality ?? []).includes(m))
@@ -175,15 +179,7 @@ const Market: React.FC = () => {
       }
       return true;
     });
-  }, [
-    allOps,
-    modalities,
-    resources,
-    runnableFilter,
-    onlyRecommended,
-    showHidden,
-    keyword,
-  ]);
+  }, [allOps, modalities, resources, hiddenFilter, keyword]);
 
   /** 列表展示(在公共过滤之上再叠 category)。 */
   const filtered = useMemo(() => {
@@ -233,6 +229,19 @@ const Market: React.FC = () => {
         next
           ? `已恢复显示「${op.zhLabel}」`
           : `已隐藏「${op.zhLabel}」,市场与编排不再展示`,
+      );
+    } catch {
+      message.error('操作失败,请重试');
+    }
+  };
+
+  /** 加星:纯正向计数,每次点击 +1,不可撤销;落库后本地同步计数。 */
+  const handleStar = async (op: DataPlatform.CatalogOperator) => {
+    try {
+      const res = await starOperator(op.name);
+      const starCount = res.data.starCount;
+      setAllOps((prev) =>
+        prev.map((o) => (o.name === op.name ? { ...o, starCount } : o)),
       );
     } catch {
       message.error('操作失败,请重试');
@@ -316,7 +325,7 @@ const Market: React.FC = () => {
         <Col xs={24} md={18} lg={19} xl={20}>
           <Card>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              {/* 搜索 + runnable + 推荐 + 上传 */}
+              {/* 搜索 + 隐藏项筛选 + 上传 */}
               <Space
                 wrap
                 style={{ width: '100%', justifyContent: 'space-between' }}
@@ -331,34 +340,16 @@ const Market: React.FC = () => {
                   }}
                 />
                 <Space size="middle" wrap>
-                  <Segmented
-                    size="small"
-                    value={runnableFilter}
-                    options={RUNNABLE_FILTER_OPTIONS}
-                    onChange={(v) => {
-                      setRunnableFilter(v as string);
-                      resetPage();
-                    }}
-                  />
-                  <Checkbox
-                    checked={onlyRecommended}
-                    onChange={(e) => {
-                      setOnlyRecommended(e.target.checked);
-                      resetPage();
-                    }}
-                  >
-                    只看推荐
-                  </Checkbox>
                   {canManageVisibility && (
-                    <Checkbox
-                      checked={showHidden}
-                      onChange={(e) => {
-                        setShowHidden(e.target.checked);
+                    <Segmented
+                      size="small"
+                      value={hiddenFilter}
+                      options={HIDDEN_FILTER_OPTIONS}
+                      onChange={(v) => {
+                        setHiddenFilter(v as typeof hiddenFilter);
                         resetPage();
                       }}
-                    >
-                      显示已隐藏
-                    </Checkbox>
+                    />
                   )}
                   {canUploadOperator && (
                     <Button
@@ -460,19 +451,31 @@ const Market: React.FC = () => {
                           </Text>
                           {op.visible === false && <Tag>已隐藏</Tag>}
                           {op.isCustom && <Tag color="purple">自定义</Tag>}
-                          {op.recommend && <Tag color="gold">推荐</Tag>}
+                          <Button
+                            size="small"
+                            type="text"
+                            title={`已加星 ${op.starCount ?? 0} 次,点击 +1`}
+                            icon={<StarOutlined style={{ color: '#faad14' }} />}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleStar(op);
+                            }}
+                          />
+
                           {canManageVisibility && (
                             <Button
                               size="small"
                               type="text"
                               title={
-                                op.visible === false ? '恢复显示' : '隐藏算子'
+                                op.visible === false
+                                  ? '当前已隐藏,点击恢复显示'
+                                  : '当前可见,点击隐藏'
                               }
                               icon={
                                 op.visible === false ? (
-                                  <EyeOutlined />
-                                ) : (
                                   <EyeInvisibleOutlined />
+                                ) : (
+                                  <EyeOutlined />
                                 )
                               }
                               onClick={(e) => {

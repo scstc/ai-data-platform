@@ -10,6 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, Form, Query, UploadFile
 from fastapi.responses import JSONResponse
+from sqlalchemy import update
 
 from app.api.deps import SessionDep, require_perm, require_user
 from app.core.config import settings
@@ -256,6 +257,33 @@ async def set_operator_visible(
     await session.commit()
     return JSONResponse(
         content={"data": {"name": name, "visible": visible}, "success": True}
+    )
+
+
+@router.post("/operators/{name}/star")
+async def star_operator(
+    name: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """算子加星:纯正向人气计数,任意登录用户可点,每次 +1,不做撤销/去重。"""
+    record = await session.get(Operator, name)
+    if record is None:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "算子不存在"}
+        )
+    await session.execute(
+        update(Operator)
+        .where(Operator.name == name)
+        .values(star_count=Operator.star_count + 1)
+    )
+    await session.commit()
+    await session.refresh(record)
+    return JSONResponse(
+        content={
+            "data": {"name": name, "starCount": record.star_count},
+            "success": True,
+        }
     )
 
 

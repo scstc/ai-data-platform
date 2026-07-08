@@ -59,6 +59,7 @@ def _operator_to_dict(op: Operator) -> dict[str, Any]:
         "runnable": op.runnable,
         "visible": op.visible,
         "usage_count": op.usage_count,
+        "star_count": op.star_count,
         "is_custom": op.is_custom,
         "source_object_key": op.source_object_key,
         "created_by": op.created_by,
@@ -336,6 +337,7 @@ _OP_KEY_MAP = {
     "effect_demo": "effectDemo",
     "is_custom": "isCustom",
     "created_by": "createdBy",
+    "star_count": "starCount",
 }
 _META_KEY_MAP = {
     "with_detail_page": "withDetailPage",
@@ -478,7 +480,10 @@ def runnable_reason(
     if status == "ready":
         return None
     if status == "needs_api":
-        return f"算子 {name} 需要配置 LLM API(在 .env 设置 OPENAI_*)"
+        return (
+            f"算子 {name} 需要 LLM API:请在运维监控 → LLM 配置页"
+            "配置并测试通过(无需激活)"
+        )
     if status == "needs_media":
         if media_ok:
             return None

@@ -1,8 +1,10 @@
-import { ExperimentOutlined } from '@ant-design/icons';
+import { ExperimentOutlined, StarOutlined } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useParams } from '@umijs/max';
 import {
   Alert,
+  App,
+  Button,
   Card,
   Col,
   Divider,
@@ -16,6 +18,7 @@ import { useEffect, useState } from 'react';
 import {
   getOperatorDetail,
   listOperatorCatalog,
+  starOperator,
 } from '@/services/data-platform';
 import {
   CATEGORY_LABEL,
@@ -118,11 +121,25 @@ const ChipRow: React.FC<{ label: string; children: React.ReactNode }> = ({
 );
 
 const OperatorDetail: React.FC = () => {
+  const { message } = App.useApp();
   const { name } = useParams<{ name: string }>();
   const [operator, setOperator] = useState<DataPlatform.CatalogOperator>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [related, setRelated] = useState<DataPlatform.CatalogOperator[]>([]);
+
+  /** 加星:纯正向计数,每次点击 +1,不可撤销。 */
+  const handleStar = async () => {
+    if (!operator) return;
+    try {
+      const res = await starOperator(operator.name);
+      setOperator((prev) =>
+        prev ? { ...prev, starCount: res.data.starCount } : prev,
+      );
+    } catch {
+      message.error('操作失败,请重试');
+    }
+  };
 
   useEffect(() => {
     if (!name) return;
@@ -227,7 +244,13 @@ const OperatorDetail: React.FC = () => {
                       算子 ID: {operator.name}
                     </Text>
                     {operator.isCustom && <Tag color="purple">自定义</Tag>}
-                    {operator.recommend && <Tag color="gold">推荐</Tag>}
+                    <Button
+                      size="small"
+                      type="text"
+                      title={`已加星 ${operator.starCount ?? 0} 次,点击 +1`}
+                      icon={<StarOutlined style={{ color: '#faad14' }} />}
+                      onClick={handleStar}
+                    />
                     {(operator.usageCount ?? 0) > 0 && (
                       <Tag>{operator.usageCount} 次使用</Tag>
                     )}

@@ -300,6 +300,8 @@ declare namespace DataPlatform {
     /** 是否在市场/编排展示;false=管理员隐藏(已编排任务不受影响) */
     visible?: boolean;
     usageCount?: number;
+    /** 星标计数(市场/详情页五角星按钮点击数,纯人气信号,不可撤销) */
+    starCount?: number;
     /** 使用方式(离线/在线);data-juicer 算子均为离线批处理 */
     usageMode?: string;
     /** 标签(由场景分组 + 类别派生) */

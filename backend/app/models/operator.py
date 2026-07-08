@@ -77,6 +77,9 @@ class Operator(Base):
     # 使用次数统计（由 job 提交时更新）
     usage_count: Mapped[int] = mapped_column(default=0, nullable=False)
 
+    # 星标计数(市场/详情页五角星按钮,每次点击 +1,纯人气信号,不做撤销)
+    star_count: Mapped[int] = mapped_column(default=0, nullable=False)
+
     # 是否在市场/编排展示（False=管理员隐藏,不影响已编排任务的执行与校验）
     visible: Mapped[bool] = mapped_column(default=True, nullable=False)
 
