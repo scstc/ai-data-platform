@@ -235,11 +235,7 @@ export const Workbench: React.FC<{ scenario?: string }> = ({ scenario }) => {
             <Empty
               description={
                 activeMeta
-                  ? `暂无「${activeMeta.label}」流水线模板${
-                      activeMeta.key === 'distillation'
-                        ? '(LLM 场景无预置属预期)'
-                        : ''
-                    }，新建编排后可保存为流水线复用`
+                  ? `暂无「${activeMeta.label}」流水线模板，新建编排后可保存为流水线复用`
                   : '暂无流水线模板'
               }
             />

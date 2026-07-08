@@ -78,10 +78,12 @@ async def test_list_pipelines_includes_presets_first(client: AsyncClient) -> Non
     assert "preset-dedup-clean" in ids
     assert all(item["isPreset"] for item in body["data"][:2])
 
-    # 蒸馏场景暂无预置模板
+    # 蒸馏场景预置模板
     resp = await client.get("/api/v1/pipelines", params={"scenario": "distillation"})
     body = resp.json()
-    assert all(not item["isPreset"] for item in body["data"])
+    ids = [item["id"] for item in body["data"]]
+    assert "preset-distill-dedup" in ids
+    assert "preset-distill-rule-quality" in ids
 
 
 @pytest.mark.asyncio
