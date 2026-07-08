@@ -3,14 +3,10 @@
 // 在 200+ 数据集下既难翻页也难区分(同名前缀、来源不同等)。Drawer 内每项展示三行:
 // 名称 + 来源·格式·分类 + 最新版本·创建人·创建时间,选中即关 Drawer 并触发 onChange。
 import {
-  ApiOutlined,
   CaretRightOutlined,
-  CloudOutlined,
   DatabaseOutlined,
   DownOutlined,
-  HddOutlined,
   SearchOutlined,
-  UploadOutlined,
 } from '@ant-design/icons';
 import {
   Button,
@@ -18,7 +14,6 @@ import {
   Empty,
   Input,
   Pagination,
-  Segmented,
   Select,
   Skeleton,
   Space,
@@ -33,6 +28,8 @@ import {
   listDatasets,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+import { SOURCE_KIND_META } from '@/utils/sourceKind';
+import { UPLOAD_CHANNEL_META } from '@/utils/uploadChannel';
 
 /** 从完整版本标签 "v2026.6.22 (#7)" 抽出括号里的内部版本号 "7"。 */
 const extractVersionNo = (label: string): string => {
@@ -40,7 +37,21 @@ const extractVersionNo = (label: string): string => {
   return m ? m[1] : label;
 };
 
-// 来源 → 中文标签 + 图标。后端 sourceKind 自由串,未识别时退化为原始值。
+// 来源 → 中文标签 + 图标,复用 @/utils/sourceKind(三轴 source_kind)与
+// @/utils/uploadChannel(湖抽取 source_channels)的统一定义,避免与数据集列表页各自维护漂移。
+const SOURCE_META: Record<
+  string,
+  { label: string; icon: React.ReactNode; color: string }
+> = { ...SOURCE_KIND_META, ...UPLOAD_CHANNEL_META };
+
+/** 三轴 sourceKind 缺失时回退湖抽取 sourceChannels 首个渠道(同数据集列表页的回退逻辑)。 */
+const resolveSourceMeta = (d?: {
+  sourceKind?: string | null;
+  sourceChannels?: string[] | null;
+}) => {
+  const key = d?.sourceKind || d?.sourceChannels?.[0];
+  return key ? SOURCE_META[key] : undefined;
+};
 
 /** 防抖包装:返回 debounce 后的函数 + cancel 方法(避免引入 lodash)。 */
 function debounce<T extends (...args: any[]) => void>(fn: T, ms: number) {
@@ -54,17 +65,6 @@ function debounce<T extends (...args: any[]) => void>(fn: T, ms: number) {
   };
   return wrapped as T & { cancel: () => void };
 }
-
-const SOURCE_META: Record<
-  string,
-  { label: string; icon: React.ReactNode; color: string }
-> = {
-  database: { label: '数据库', icon: <DatabaseOutlined />, color: 'blue' },
-  object_store: { label: '对象存储', icon: <CloudOutlined />, color: 'cyan' },
-  hdfs: { label: 'HDFS', icon: <HddOutlined />, color: 'purple' },
-  local_upload: { label: '本地上传', icon: <UploadOutlined />, color: 'gold' },
-  api_push: { label: 'API', icon: <ApiOutlined />, color: 'magenta' },
-};
 
 interface Props {
   value?: string;
@@ -166,19 +166,17 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
     setOpen(false);
   };
 
-  // 来源 Segmented 选项(预定义 5 种 + "全部")
-  const sourceOptions = [
-    { label: '全部来源', value: '' },
-    ...Object.entries(SOURCE_META).map(([v, m]) => ({
-      label: (
-        <Space size={4}>
-          {m.icon}
-          {m.label}
-        </Space>
-      ),
-      value: v,
-    })),
-  ];
+  // 来源下拉选项(三轴 source_kind + 湖抽取 source_channels 合并去重,11 种,
+  // Segmented 装不下这么多项会挤成一排省略号,改用下拉更稳妥)
+  const sourceOptions = Object.entries(SOURCE_META).map(([v, m]) => ({
+    label: (
+      <Space size={4}>
+        {m.icon}
+        {m.label}
+      </Space>
+    ),
+    value: v,
+  }));
 
   return (
     <>
@@ -234,9 +232,7 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
             }}
           >
             {selected ? (
-              (SOURCE_META[selected.sourceKind ?? '']?.icon ?? (
-                <DatabaseOutlined />
-              ))
+              (resolveSourceMeta(selected)?.icon ?? <DatabaseOutlined />)
             ) : (
               <DatabaseOutlined />
             )}
@@ -280,8 +276,9 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
                     display: 'block',
                   }}
                 >
-                  {SOURCE_META[selected.sourceKind ?? '']?.label ??
+                  {resolveSourceMeta(selected)?.label ??
                     selected.sourceKind ??
+                    selected.sourceChannels?.[0] ??
                     '—'}
                   {selected.sourceFormat && ` · ${selected.sourceFormat}`}
                   {selected.categoryName && ` · ${selected.categoryName}`}
@@ -311,7 +308,7 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
       <Drawer
         title="选择数据集"
         placement="right"
-        width={560}
+        width={640}
         open={open}
         onClose={() => setOpen(false)}
         destroyOnHidden
@@ -339,6 +336,17 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
           />
           <Space size={8} wrap style={{ width: '100%' }}>
             <Select
+              placeholder="全部来源"
+              allowClear
+              value={sourceKind}
+              onChange={(v) => {
+                setSourceKind(v);
+                setCurrent(1);
+              }}
+              style={{ minWidth: 140, flex: 1 }}
+              options={sourceOptions}
+            />
+            <Select
               placeholder="全部分类"
               allowClear
               value={categoryId}
@@ -358,17 +366,6 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
               重置
             </Button>
           </Space>
-          <Segmented
-            block
-            size="small"
-            value={sourceKind ?? ''}
-            onChange={(v) => {
-              setSourceKind(v || undefined);
-              setCurrent(1);
-            }}
-            options={sourceOptions}
-            style={{ marginTop: 8 }}
-          />
         </div>
 
         {/* 列表 */}
@@ -386,7 +383,7 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
             <Empty description="无匹配数据集" style={{ marginTop: 48 }} />
           ) : (
             datasets.map((d) => {
-              const sm = SOURCE_META[d.sourceKind ?? ''];
+              const sm = resolveSourceMeta(d);
               const isSelected = d.id === selected?.id;
               return (
                 <div
@@ -441,8 +438,10 @@ const DatasetPicker: React.FC<Props> = ({ value, onChange }) => {
                           {sm.label}
                         </Tag>
                       ) : (
-                        d.sourceKind && (
-                          <Tag style={{ margin: 0 }}>{d.sourceKind}</Tag>
+                        (d.sourceKind || d.sourceChannels?.[0]) && (
+                          <Tag style={{ margin: 0 }}>
+                            {d.sourceKind || d.sourceChannels?.[0]}
+                          </Tag>
                         )
                       )}
                       {d.sourceFormat && (

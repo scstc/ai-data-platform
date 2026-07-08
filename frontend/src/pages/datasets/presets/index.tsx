@@ -40,6 +40,7 @@ import { SEMANTIC_TYPE_ENUM, SemanticTypeTag } from '@/utils/semanticType';
 import { SOURCE_KIND_ENUM, SourceKindTag } from '@/utils/sourceKind';
 import { tagColor } from '@/utils/tags';
 import { TRAIN_TYPE_META, TrainTypeTag } from '@/utils/trainType';
+import { UPLOAD_CHANNEL_ENUM, UploadChannelTag } from '@/utils/uploadChannel';
 
 const fmtSize = (n?: number) => {
   if (!n && n !== 0) return '-';
@@ -98,8 +99,21 @@ const DatasetsPresets: React.FC = () => {
       title: '来源',
       dataIndex: 'sourceKind',
       valueType: 'select',
-      valueEnum: SOURCE_KIND_ENUM,
-      render: (_, r) => <SourceKindTag kind={r.sourceKind} />,
+      // 筛选下拉需覆盖三轴 source_kind + 湖抽取 source_channels 两个枚举,
+      // 否则回退展示的行永远筛不出来(同 datasets/list 的处理)
+      valueEnum: { ...SOURCE_KIND_ENUM, ...UPLOAD_CHANNEL_ENUM },
+      render: (_, r) =>
+        r.sourceKind ? (
+          <SourceKindTag kind={r.sourceKind} />
+        ) : r.sourceChannels?.length ? (
+          <Space size={4} wrap>
+            {r.sourceChannels.map((c) => (
+              <UploadChannelTag key={c} channel={c} />
+            ))}
+          </Space>
+        ) : (
+          '-'
+        ),
     },
     {
       title: '数据类型',
