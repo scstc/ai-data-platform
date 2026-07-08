@@ -23,7 +23,8 @@ import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
 import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
 import PipelineSteps from '@/pages/processing/editor/PipelineSteps';
 import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
-import { stepsToYaml } from '@/pages/processing/editor/yaml';
+import YamlPreviewCard from '@/pages/processing/editor/YamlPreviewCard';
+import { stepsToYaml, yamlToSteps } from '@/pages/processing/editor/yaml';
 import {
   createQualityJob,
   getDataset,
@@ -32,7 +33,7 @@ import {
 } from '@/services/data-platform';
 import { suggestTaskName } from '@/utils/taskName';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 type MemberConfig = {
   operators: DataPlatform.OperatorSpec[];
@@ -485,13 +486,18 @@ const QualityEditor: React.FC = () => {
                     </Row>
                   </PipelineDndArea>
 
-                  <Card title="YAML 预览" size="small">
-                    <Paragraph>
-                      <pre style={{ margin: 0, fontSize: 12 }}>
-                        {memberYamlOf(memberName)}
-                      </pre>
-                    </Paragraph>
-                  </Card>
+                  <YamlPreviewCard
+                    computedYaml={memberYamlOf(memberName)}
+                    resetKey={memberName}
+                    onApply={(text) => {
+                      const parsed = yamlToSteps(text, opMap);
+                      setMemberOperators(memberName, parsed.steps);
+                      setMemberActiveIdx((prev) => ({
+                        ...prev,
+                        [memberName]: 0,
+                      }));
+                    }}
+                  />
                 </Space>
               );
             })()}

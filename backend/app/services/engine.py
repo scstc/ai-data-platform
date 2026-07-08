@@ -355,7 +355,9 @@ def _read_head_records(path: Path, n: int) -> list[dict[str, Any]]:
     return _read_jsonl_head(path, n)
 
 
-# 常见文本字段名:数据无 text 时按此优先级匹配主文本字段(text_key)
+# 常见文本字段名:数据无 text 时按此优先级匹配主文本字段(text_key)。
+# instruction/query/output/input 覆盖指令微调三元组(如 Alpaca 式
+# {instruction, input, output}),蒸馏数据常是这类形状,原候选表缺失。
 _TEXT_KEY_CANDIDATES = (
     "text",
     "content",
@@ -365,11 +367,15 @@ _TEXT_KEY_CANDIDATES = (
     "document",
     "passage",
     "prompt",
+    "instruction",
     "question",
+    "query",
     "answer",
     "response",
+    "output",
     "description",
     "raw",
+    "input",
 )
 
 

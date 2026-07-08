@@ -22,7 +22,8 @@ import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
 import PipelineCanvas from '@/pages/processing/editor/PipelineCanvas';
 import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
 import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
-import { stepsToYaml } from '@/pages/processing/editor/yaml';
+import YamlPreviewCard from '@/pages/processing/editor/YamlPreviewCard';
+import { stepsToYaml, yamlToSteps } from '@/pages/processing/editor/yaml';
 import {
   createPipeline,
   getDataset,
@@ -33,7 +34,7 @@ import {
 } from '@/services/data-platform';
 import { suggestTaskName, type TaskType } from '@/utils/taskName';
 
-const { Paragraph, Text } = Typography;
+const { Text } = Typography;
 
 /** 目标面板组件的统一 props 形状(蒸馏/合成/增强三份 GoalPanel 原地保留,签名对齐)。 */
 type GoalPanelProps<TGoal> = {
@@ -538,19 +539,30 @@ function LlmScenarioEditor<TGoal extends object>({
         />
       </PipelineDndArea>
 
-      <Card title="YAML 预览" size="small" style={{ marginTop: 16 }}>
-        <Paragraph>
-          <pre style={{ margin: 0, fontSize: 12 }}>
-            {steps.length
+      <div style={{ marginTop: 16 }}>
+        <YamlPreviewCard
+          computedYaml={
+            steps.length
               ? stepsToYaml(steps, {
                   datasetName: selectedDatasetName,
                   versionLabel: selectedVersionLabel,
                   textKeys: textKeys.length ? textKeys : undefined,
                 })
-              : '# (未配置算子)'}
-          </pre>
-        </Paragraph>
-      </Card>
+              : '# (未配置算子)'
+          }
+          resetKey={versionId}
+          supportsTextKeys={Boolean(textKeyTooltip)}
+          onApply={(text) => {
+            const parsed = yamlToSteps(text, opMap);
+            setSteps(parsed.steps);
+            setActiveIdx(0);
+            setHasOrphanSteps(false);
+            // 该场景未展示「文本字段」选择器时(如蒸馏),YAML 里的 text_keys
+            // 也不生效,与去掉手动选择器的口径保持一致,不留后门。
+            if (parsed.textKeys && textKeyTooltip) setTextKeys(parsed.textKeys);
+          }}
+        />
+      </div>
 
       <Card size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>

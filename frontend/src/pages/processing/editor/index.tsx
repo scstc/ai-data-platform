@@ -34,9 +34,10 @@ import OperatorLibrary from './OperatorLibrary';
 import PipelineCanvas from './PipelineCanvas';
 import PipelineDndArea from './PipelineDndArea';
 import StepParamsForm from './StepParamsForm';
-import { stepsToYaml } from './yaml';
+import YamlPreviewCard from './YamlPreviewCard';
+import { stepsToYaml, yamlToSteps } from './yaml';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 type MemberConfig = {
   operators: DataPlatform.OperatorSpec[];
@@ -687,13 +688,22 @@ const Editor: React.FC<{
                     />
                   </PipelineDndArea>
 
-                  <Card title="YAML 预览" size="small">
-                    <Paragraph>
-                      <pre style={{ margin: 0, fontSize: 12 }}>
-                        {memberYamlOf(memberName)}
-                      </pre>
-                    </Paragraph>
-                  </Card>
+                  <YamlPreviewCard
+                    computedYaml={memberYamlOf(memberName)}
+                    resetKey={memberName}
+                    onApply={(text) => {
+                      const parsed = yamlToSteps(text, opMap);
+                      setMemberOperators(memberName, parsed.steps);
+                      setMemberActiveIdx((prev) => ({
+                        ...prev,
+                        [memberName]: 0,
+                      }));
+                      setMemberHasOrphan((prev) => ({
+                        ...prev,
+                        [memberName]: false,
+                      }));
+                    }}
+                  />
                 </Space>
               );
             })()}
