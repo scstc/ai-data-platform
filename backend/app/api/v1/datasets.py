@@ -13,7 +13,7 @@ import zipfile
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import duckdb
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -859,6 +859,21 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             }
             if parts:
                 ops = [{"name": "审核配置", "params": parts}]
+        # 成员级血缘:各成员算子链独立列出,不跨成员去重/合并(与上面
+        # operators 的压平兼容层不同),供前端展示"哪个成员经了哪些算子"。
+        member_ops: list[dict[str, Any]] = []
+        if isinstance(spec.get("member_configs"), list):
+            for mc in spec["member_configs"]:
+                if not isinstance(mc, dict):
+                    continue
+                mname = mc.get("member_name")
+                mops = [
+                    {"name": o.get("name"), "params": o.get("params") or {}}
+                    for o in (mc.get("operators") or [])
+                    if isinstance(o, dict)
+                ]
+                if mname and mops:
+                    member_ops.append({"memberName": mname, "operators": mops})
         return {
             "id": job.id,
             "kind": "job",
@@ -866,6 +881,7 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             "jobType": job.type,
             "state": job.state,
             "operators": ops,
+            "memberOperators": member_ops,
             "createdAt": job.created_at.isoformat(),
         }
 
@@ -1083,6 +1099,70 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             task.datasource_id
         ):
             add_edge(task.datasource_id, jn["id"], "ingest")
+
+    # ---- 版本节点挂载成员级血缘:哪个文件来自哪个湖快照/走哪条渠道 ----
+    # 批量取全部版本节点的表成员,避免逐版本查询加重本端点已有的 N+1。
+    version_ids = [n["id"] for n in nodes.values() if n["kind"] == "version"]
+    if version_ids:
+        members = (
+            await session.scalars(
+                select(DatasetVersionTable).where(
+                    DatasetVersionTable.dataset_version_id.in_(version_ids)
+                )
+            )
+        ).all()
+        snap_ids = {m.source_snapshot_id for m in members if m.source_snapshot_id}
+        snaps_by_id: dict[str, DataLakeSnapshot] = {}
+        objs_by_id: dict[str, DataLakeObject] = {}
+        if snap_ids:
+            snaps_by_id = {
+                s.id: s
+                for s in (
+                    await session.scalars(
+                        select(DataLakeSnapshot).where(
+                            DataLakeSnapshot.id.in_(snap_ids)
+                        )
+                    )
+                ).all()
+            }
+            obj_ids = {s.object_id for s in snaps_by_id.values() if s.object_id}
+            if obj_ids:
+                objs_by_id = {
+                    o.id: o
+                    for o in (
+                        await session.scalars(
+                            select(DataLakeObject).where(
+                                DataLakeObject.id.in_(obj_ids)
+                            )
+                        )
+                    ).all()
+                }
+
+        def snapshot_display_name(snap: DataLakeSnapshot) -> str | None:
+            obj = objs_by_id.get(snap.object_id) if snap.object_id else None
+            base = obj.display_name if obj else snap.source_version
+            return f"{base} @v{snap.version_no}" if snap.version_no else base
+
+        by_version: dict[str, list[DatasetVersionTable]] = {}
+        for m in members:
+            by_version.setdefault(m.dataset_version_id, []).append(m)
+        for vid, ms in by_version.items():
+            if vid not in nodes:
+                continue
+            nodes[vid]["members"] = [
+                {
+                    "tableName": m.table_name,
+                    "rows": m.rows,
+                    "sourceSnapshotId": m.source_snapshot_id,
+                    "sourceName": (
+                        snapshot_display_name(snaps_by_id[m.source_snapshot_id])
+                        if m.source_snapshot_id in snaps_by_id
+                        else None
+                    ),
+                    "sourceUploadChannel": m.source_upload_channel,
+                }
+                for m in sorted(ms, key=lambda x: x.table_name)
+            ]
 
     return JSONResponse(
         content={"data": {"nodes": list(nodes.values()), "edges": edges}, "success": True}

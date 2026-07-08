@@ -973,6 +973,14 @@ declare namespace DataPlatform {
     isOriginal?: boolean;
     /** 属于当前选中数据集(前端高亮) */
     isFocus?: boolean;
+    /** 该版本的表成员及湖溯源(多表版本) */
+    members?: {
+      tableName: string;
+      rows?: number | null;
+      sourceSnapshotId?: string | null;
+      sourceName?: string | null;
+      sourceUploadChannel?: string | null;
+    }[];
     // job / datasource / lake_snapshot 共用
     name?: string;
     // job 字段
@@ -980,6 +988,11 @@ declare namespace DataPlatform {
     state?: string;
     /** 该任务执行的算子链(name+params,来自 job.spec.operators);review 类无 */
     operators?: { name: string; params: Record<string, any> }[];
+    /** 按成员表分组的算子链(多表版本经不同算子加工时);旧任务/单配置任务为空数组或缺省 */
+    memberOperators?: {
+      memberName: string;
+      operators: { name: string; params: Record<string, any> }[];
+    }[];
     // lake_snapshot 字段(湖对象某一版快照)
     lakeId?: string;
     lakeName?: string;

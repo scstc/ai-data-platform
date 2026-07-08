@@ -3,6 +3,7 @@
 // 渲染 + dagre 算上→下树形布局(rankdir=TB),节点复用 antd 卡片,自带平移/缩放/自适应。
 // 节点四层:datasource(数据源)→ lake_snapshot(湖快照)→ version(数据集版本)↔ job(任务);
 // 支持 ?datasetId= 直达(数据集详情/数据湖详情"查看血缘"入口跳转)。
+// 多表版本:version 节点展示成员表清单及各自湖溯源;job 节点按成员分组展示算子链。
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useSearchParams } from '@umijs/max';
 import {
@@ -77,7 +78,17 @@ const EDGE_LABEL: Record<string, string> = {
 // dagre 布局用的节点尺寸。每次须返回**新对象**——dagre layout 会往传入的 label 对象上
 // 写 x/y,若共享单例,同类型节点会共用同一个位置对象 → 全部叠到同一坐标。
 const sizeOf = (n: DataPlatform.LineageNode) => {
-  if (n.kind === 'job') return { width: 250, height: 178 };
+  if (n.kind === 'job') {
+    const memberCount = n.memberOperators?.length ?? 0;
+    if (memberCount > 1) {
+      return {
+        width: 250,
+        height:
+          178 + Math.min(memberCount, 2) * 26 + (memberCount > 2 ? 22 : 0),
+      };
+    }
+    return { width: 250, height: 178 };
+  }
   if (n.kind === 'datasource') return { width: 250, height: 96 };
   return { width: 250, height: 132 };
 };
@@ -125,6 +136,53 @@ const OperatorChips: React.FC<{
         );
       })}
       {rest > 0 && <Tag style={{ margin: 0, fontSize: 11 }}>+{rest} 算子</Tag>}
+    </Space>
+  );
+};
+
+/** 任务算子展示:多表版本按成员分组渲染算子链(最多显示 2 个成员 + 折叠),
+ *  否则回退为不分组的 OperatorChips */
+const JobOps: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
+  if (!n.memberOperators || n.memberOperators.length === 0) {
+    return <OperatorChips ops={n.operators} />;
+  }
+  const shown = n.memberOperators.slice(0, 2);
+  const rest = n.memberOperators.length - shown.length;
+  return (
+    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+      {shown.map((m) => (
+        <div
+          key={m.memberName}
+          style={{ display: 'flex', gap: 4, alignItems: 'center' }}
+        >
+          <Typography.Text
+            type="secondary"
+            ellipsis
+            style={{ fontSize: 11, maxWidth: 60, flexShrink: 0 }}
+          >
+            {m.memberName}
+          </Typography.Text>
+          <OperatorChips ops={m.operators} />
+        </div>
+      ))}
+      {rest > 0 && (
+        <Tooltip
+          title={
+            <span style={{ whiteSpace: 'pre-wrap' }}>
+              {n.memberOperators
+                .map(
+                  (m) =>
+                    `${m.memberName}: ${m.operators.map((o) => o.name).join(', ')}`,
+                )
+                .join('\n')}
+            </span>
+          }
+        >
+          <Tag style={{ margin: 0, fontSize: 11, width: 'fit-content' }}>
+            +{rest} 成员
+          </Tag>
+        </Tooltip>
+      )}
     </Space>
   );
 };
@@ -237,7 +295,7 @@ const JobNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
       <Tag color={st.c as any} style={{ margin: 0, width: 'fit-content' }}>
         {st.t}
       </Tag>
-      <OperatorChips ops={n.operators} />
+      <JobOps n={n} />
     </div>
   );
 };
@@ -290,6 +348,28 @@ const VersionNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
             已发布
           </Tag>
         )}
+        {n.members &&
+          (n.members.length > 1 ||
+            n.members.some((m) => m.sourceSnapshotId)) && (
+            <Tooltip
+              title={
+                <span style={{ whiteSpace: 'pre-wrap' }}>
+                  {n.members
+                    .map(
+                      (m) =>
+                        `${m.tableName} · ${m.rows ?? '-'} 行 · 来源: ${
+                          m.sourceName ?? m.sourceUploadChannel ?? '本任务加工'
+                        }`,
+                    )
+                    .join('\n')}
+                </span>
+              }
+            >
+              <Tag style={{ margin: 0, fontSize: 11 }}>
+                {n.members.length} 成员
+              </Tag>
+            </Tooltip>
+          )}
       </Space>
     </div>
   );
@@ -530,7 +610,7 @@ const Lineage: React.FC = () => {
                           '任务'}
                       </Typography.Text>
                       <div style={{ marginTop: 4 }}>
-                        <OperatorChips ops={job.operators} />
+                        <JobOps n={job} />
                       </div>
                     </div>
                   )}

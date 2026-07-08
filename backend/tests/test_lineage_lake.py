@@ -17,6 +17,7 @@ from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
 from app.models.ingest_task import IngestTask
 from app.models.job import Job
+from app.models.job_input import JobInput
 
 pytestmark = pytest.mark.asyncio
 
@@ -345,3 +346,126 @@ async def test_lineage_plain_root_version_unchanged(client, session_factory):
     data = resp.json()["data"]
     assert [n["kind"] for n in data["nodes"]] == ["version"]
     assert data["edges"] == []
+
+
+async def test_lineage_member_level_operators_and_sources(client, session_factory):
+    """多表版本 + member_configs 任务:血缘须保留「成员↔算子」归属,且输入版本
+    节点须能看到各成员来自哪个湖快照(回归钉:job_node 曾按算子名跨成员去重
+    压平算子链,丢失成员归属;版本节点也不曾暴露逐成员来源)。"""
+    async with session_factory() as session:
+        session.add_all(
+            [
+                DataLake(id="lake-lin006", name="会员湖"),
+                DataLakeObject(
+                    id="lobj-lin006",
+                    lake_id="lake-lin006",
+                    identity_key="db:users",
+                    display_name="users",
+                    data_category="database",
+                ),
+                DataLakeSnapshot(
+                    id="snap-lin006",
+                    lake_id="lake-lin006",
+                    source_version="source_v20260703_01_pg",
+                    storage_uri="s3://lake/users_v1.parquet",
+                    storage_format="parquet",
+                    data_category="database",
+                    upload_channel="database",
+                    object_id="lobj-lin006",
+                    version_no=3,
+                    rows=50,
+                ),
+                Dataset(id="dset-lin006", name="成员级血缘数据集"),
+                DatasetVersion(
+                    id="dsv-lin006v1",
+                    dataset_id="dset-lin006",
+                    version_no=1,
+                    storage_uri="s3://uploads/dset-lin006/v1/data.jsonl",
+                ),
+                DatasetVersionTable(
+                    id="dvt-lin006-users",
+                    dataset_version_id="dsv-lin006v1",
+                    table_name="users",
+                    storage_uri="s3://uploads/dset-lin006/v1/users.parquet",
+                    format="parquet",
+                    rows=50,
+                    source_snapshot_id="snap-lin006",
+                    source_upload_channel="database",
+                ),
+                DatasetVersionTable(
+                    id="dvt-lin006-orders",
+                    dataset_version_id="dsv-lin006v1",
+                    table_name="orders",
+                    storage_uri="s3://uploads/dset-lin006/v1/orders.parquet",
+                    format="parquet",
+                    rows=80,
+                ),
+                Job(
+                    id="job-lin006",
+                    name="成员级算子任务",
+                    type="process",
+                    state="success",
+                    spec={
+                        "member_configs": [
+                            {
+                                "member_name": "users",
+                                "operators": [
+                                    {
+                                        "name": "text_length_filter",
+                                        "params": {"min_len": 5},
+                                    }
+                                ],
+                            },
+                            {
+                                "member_name": "orders",
+                                "operators": [
+                                    {
+                                        "name": "text_length_filter",
+                                        "params": {"min_len": 20},
+                                    },
+                                    {
+                                        "name": "words_num_filter",
+                                        "params": {"min_num": 2},
+                                    },
+                                ],
+                            },
+                        ]
+                    },
+                ),
+                DatasetVersion(
+                    id="dsv-lin006v2",
+                    dataset_id="dset-lin006",
+                    version_no=2,
+                    storage_uri="s3://uploads/dset-lin006/v2/data.jsonl",
+                    produced_by_job_id="job-lin006",
+                ),
+            ]
+        )
+        await session.flush()
+        session.add(JobInput(job_id="job-lin006", dataset_version_id="dsv-lin006v1"))
+        await session.commit()
+
+    resp = await client.get("/api/v1/datasets/dset-lin006/lineage")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    nodes = {n["id"]: n for n in data["nodes"]}
+
+    # 成员级算子链:各成员独立分组,同名算子不同参数没有被跨成员去重吞掉
+    job_node = nodes["job-lin006"]
+    member_ops = {
+        m["memberName"]: m["operators"] for m in job_node["memberOperators"]
+    }
+    assert member_ops["users"] == [
+        {"name": "text_length_filter", "params": {"min_len": 5}}
+    ]
+    assert member_ops["orders"] == [
+        {"name": "text_length_filter", "params": {"min_len": 20}},
+        {"name": "words_num_filter", "params": {"min_num": 2}},
+    ]
+
+    # 输入版本节点的成员:tableName + sourceSnapshotId/sourceName
+    v1 = nodes["dsv-lin006v1"]
+    members_by_table = {m["tableName"]: m for m in v1["members"]}
+    assert members_by_table["users"]["sourceSnapshotId"] == "snap-lin006"
+    assert members_by_table["users"]["sourceName"] == "users @v3"
+    assert members_by_table["orders"]["sourceSnapshotId"] is None
