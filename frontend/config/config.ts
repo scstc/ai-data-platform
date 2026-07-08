@@ -42,7 +42,7 @@ export default defineConfig({
    * @description 让 build 之后的产物包含 hash 后缀。通常用于增量发布和避免浏览器加载缓存。
    * @doc https://umijs.org/docs/api/config#hash
    */
-  hash: true,
+  // hash: true,  // 暂时关闭，Umi 4.6.57 bug：dev 模式下 CSS 文件名包含项目路径导致资源加载失败
 
   publicPath: PUBLIC_PATH,
 

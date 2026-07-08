@@ -200,7 +200,7 @@ def build_config(
         params = dict(op.get("params") or {})
         if cfg.api_key:
             meta = oc.get_operator(op["name"])
-            valid = {p["name"] for p in meta.get("params", [])} if meta else set()
+            valid = {p["name"] for p in (meta.get("params") or [])} if meta else set()
             # DJ 各算子模型参数名不统一(api_model / api_or_hf_model),默认都写死
             # gpt-4o;不覆盖会向自定义端点请求不存在的模型而失败。用户显式填了则尊重。
             for model_key in ("api_model", "api_or_hf_model"):
