@@ -21,7 +21,7 @@ from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
 from app.schemas.construct import ConstructGoal, ConstructReport, FieldSource
 from app.services.engine import _new_version_id, _read_jsonl_head, materialized_version
-from app.services.external_store import upload_file_to_uploads
+from app.services.external_store import upload_file_to_datasets
 from app.services.landing import (
     MANIFEST_FORMAT,
     parquet_bytes_to_records,
@@ -221,7 +221,7 @@ async def run_construct_job(
         )
 
     out_path.write_bytes(records_to_jsonl_bytes(good))
-    storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
+    storage_uri = await upload_file_to_datasets(dataset_id, new_vno, out_path)
 
     version = DatasetVersion(
         id=_new_version_id(),

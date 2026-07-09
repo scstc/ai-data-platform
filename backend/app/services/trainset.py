@@ -29,7 +29,7 @@ from app.services.engine import (
     detect_text_key,
     materialized_version,
 )
-from app.services.external_store import upload_file_to_uploads
+from app.services.external_store import upload_file_to_datasets
 
 
 async def run_trainset_job(
@@ -225,7 +225,7 @@ async def run_trainset_job(
         id=_new_version_id(),
         dataset_id=dataset_id,
         version_no=new_vno,
-        storage_uri=f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/",
+        storage_uri=f"s3://{settings.storage_minio_datasets_bucket}/{dataset_id}/v{new_vno}/",
         format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
         rows=sum(m["rows"] or 0 for m in new_members_data),
         size=sum(m["size"] or 0 for m in new_members_data),
@@ -355,7 +355,7 @@ async def _run_trainset_job_legacy(
 
     rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
     # 产出上传 MinIO(治理产出持久化到对象存储;读路径已按 s3:// 走)
-    storage_uri = await upload_file_to_uploads(dataset_id, new_vno, out_path)
+    storage_uri = await upload_file_to_datasets(dataset_id, new_vno, out_path)
     version = DatasetVersion(
         id=_new_version_id(),
         dataset_id=dataset_id,

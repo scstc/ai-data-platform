@@ -41,8 +41,8 @@ import {
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 
-/** 文件管理默认桶:平台自有数据桶,固定为 uploads(对应后端 storage_minio_upload_bucket)。 */
-const DEFAULT_BUCKET = 'uploads';
+/** 文件管理默认桶:平台自有数据桶,固定为 adp-datasets(对应后端 storage_minio_datasets_bucket)。 */
+const DEFAULT_BUCKET = 'adp-datasets';
 
 /** 字节数转人类可读（与数据集列表保持一致） */
 const fmtSize = (n?: number) => {

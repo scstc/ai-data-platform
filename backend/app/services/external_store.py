@@ -528,7 +528,7 @@ async def materialized_version(
         return
 
     # 按 storage_uri scheme 路由(不再凭 origin 二分):本地路径直接透传;s3:// 走对象存储。
-    # 这样平台自有的 managed jsonl(单一格式批量上传,storage_uri=s3://uploads/…)也能物化,
+    # 这样平台自有的 managed jsonl(单一格式批量上传,storage_uri=s3://adp-datasets/…)也能物化,
     # 而不破坏 hosted 外部 S3 / 平台零拷贝(均为 s3://)与本地受管(本地路径)的既有行为。
     if not str(version.storage_uri).startswith("s3://"):
         raw = Path(version.storage_uri)
@@ -597,14 +597,14 @@ async def persist_manifest_output(
 
     加工 manifest 数据集时,dj 产物里的 images/audios/videos 引用指向物化临时目录
     (用完即清)。本函数趁临时文件还在,把各媒体回传平台 MinIO
-    (uploads/<dataset_id>/v<n>/...),路径改写为对象 key 并补回 __member,再把清单写到
-    uploads/<dataset_id>/v<n>/manifest.jsonl。返回 (storage_uri, 行数, 媒体总字节)。
+    (adp-datasets 桶 <dataset_id>/v<n>/...),路径改写为对象 key 并补回 __member,清单写到
+    同前缀 manifest.jsonl。返回 (storage_uri, 行数, 媒体总字节)。
 
     图像算子改图后产出的是**新文件**,照样按其产物路径原样上传,故对未来的多模态加工
     (GPU 上跑图像算子)同样自洽——产物始终自包含,不回指输入对象。
     """
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     prefix = f"{dataset_id}/v{version_no}"
     lines = [
         ln
@@ -687,15 +687,15 @@ def platform_config() -> dict[str, Any]:
     return {"endpoint": endpoint, "accessKey": access_key, "secretKey": secret_key}
 
 
-async def ensure_upload_bucket() -> None:
-    """启动时确保平台上传桶存在(best-effort,由调用方吞异常)。
+async def ensure_datasets_bucket() -> None:
+    """启动时确保平台数据集桶存在(best-effort,由调用方吞异常)。
 
     - 平台 MinIO 未配置 → 直接跳过(文件管理端点仍各自返回 503)。
     - 已配置:桶不存在则创建,已存在则幂等跳过。
     创建桶是写操作但不涉删除,符合"绝不删源"红线。
     """
     cfg = platform_config()  # 未配置抛 ExternalStoreError,由调用方吞掉
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     client = client_for(cfg)
 
     def _ensure() -> None:
@@ -723,16 +723,16 @@ async def ensure_lake_bucket() -> None:
     await asyncio.to_thread(_ensure)
 
 
-async def upload_jsonl_to_uploads(
+async def upload_jsonl_to_datasets(
     dataset_id: str, version_no: int, jsonl_bytes: bytes
 ) -> str:
-    """把 jsonl 字节上传到平台 MinIO uploads 桶,键 = ``<dataset_id>/v<n>/data.jsonl``。
+    """把 jsonl 字节上传到平台 MinIO 数据集桶,键 = ``<dataset_id>/v<n>/data.jsonl``。
 
     不同版本落不同文件夹(v1/v2/...),与 persist_manifest_output 同一前缀约定。
     返回 storage_uri(``s3://<bucket>/<key>``)。平台未配置 → ExternalStoreError。
     """
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/data.jsonl"
     await upload_object(
         cfg, bucket, key, io.BytesIO(jsonl_bytes), len(jsonl_bytes),
@@ -741,16 +741,16 @@ async def upload_jsonl_to_uploads(
     return f"s3://{bucket}/{key}"
 
 
-async def upload_parquet_to_uploads(
+async def upload_parquet_to_datasets(
     dataset_id: str, version_no: int, parquet_bytes: bytes
 ) -> str:
-    """把 parquet 字节上传到平台 MinIO uploads 桶,键 = ``<dataset_id>/v<n>/data.parquet``。
+    """把 parquet 字节上传到平台 MinIO 数据集桶,键 = ``<dataset_id>/v<n>/data.parquet``。
 
-    与 upload_jsonl_to_uploads 同前缀约定(不同版本落不同文件夹)。
+    与 upload_jsonl_to_datasets 同前缀约定(不同版本落不同文件夹)。
     返回 storage_uri(``s3://<bucket>/<key>``)。平台未配置 → ExternalStoreError。
     """
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/data.parquet"
     await upload_object(cfg, bucket, key, io.BytesIO(parquet_bytes), len(parquet_bytes))
     return f"s3://{bucket}/{key}"
@@ -761,7 +761,7 @@ async def upload_parquet_member(
 ) -> str:
     """上传一个表成员 parquet,键 = ``<dataset_id>/v<n>/<table>.parquet``。"""
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/{table_name}.parquet"
     await upload_object(
         cfg, bucket, key, io.BytesIO(parquet_bytes), len(parquet_bytes)
@@ -774,7 +774,7 @@ async def upload_jsonl_member(
 ) -> str:
     """上传一个表成员 jsonl,键 = ``<dataset_id>/v<n>/<table>.jsonl``。"""
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/{table_name}.jsonl"
     await upload_object(
         cfg, bucket, key, io.BytesIO(jsonl_bytes), len(jsonl_bytes),
@@ -783,7 +783,7 @@ async def upload_jsonl_member(
     return f"s3://{bucket}/{key}"
 
 
-async def copy_object_to_uploads(
+async def copy_object_to_datasets(
     src_uri: str, dataset_id: str, version_no: int, table_name: str, fmt: str
 ) -> str:
     """平台 MinIO 内 server-side copy:把已有对象复制为新版本成员对象。
@@ -798,7 +798,7 @@ async def copy_object_to_uploads(
     from minio.commonconfig import CopySource
 
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     src_bucket, src_key = parse_s3_uri(src_uri)
     dst_key = f"{dataset_id}/v{version_no}/{table_name}.{fmt}"
     client = client_for(cfg)
@@ -817,17 +817,17 @@ async def copy_object_to_uploads(
     return f"s3://{bucket}/{dst_key}"
 
 
-async def upload_file_to_uploads(
+async def upload_file_to_datasets(
     dataset_id: str, version_no: int, path: Path
 ) -> str:
-    """把本地 jsonl 文件**流式**上传到平台 MinIO uploads 桶(键同 upload_jsonl_to_uploads)。
+    """把本地 jsonl 文件**流式**上传到平台 MinIO 数据集桶(键同 upload_jsonl_to_datasets)。
 
     供治理任务产出持久化:DJ 写本地文件后调此上传,storage_uri 指向 s3://,
     产出不在本地停留(读路径 preview/download/materialize 已按 s3:// scheme 走)。
     流式上传(不全量入内存),适合大体量产出。平台未配置 → ExternalStoreError。
     """
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/data.jsonl"
     size = path.stat().st_size
     with path.open("rb") as f:
@@ -838,16 +838,16 @@ async def upload_file_to_uploads(
     return f"s3://{bucket}/{key}"
 
 
-async def upload_parquet_file_to_uploads(
+async def upload_parquet_file_to_datasets(
     dataset_id: str, version_no: int, path: Path
 ) -> str:
-    """把本地 parquet 产物**流式**上传到平台 MinIO uploads 桶,键 = ``<id>/v<n>/data.parquet``。
+    """把本地 parquet 产物**流式**上传到平台 MinIO 数据集桶,键 = ``<id>/v<n>/data.parquet``。
 
-    镜像 upload_file_to_uploads,但产物格式为 parquet。流式上传(不全量入内存),
+    镜像 upload_file_to_datasets,但产物格式为 parquet。流式上传(不全量入内存),
     适合大体量产出。平台未配置 → ExternalStoreError。
     """
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/data.parquet"
     size = path.stat().st_size
     with path.open("rb") as f:

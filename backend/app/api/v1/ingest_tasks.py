@@ -55,7 +55,7 @@ from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
 from app.services.external_store import (
     ExternalStoreError,
-    upload_jsonl_to_uploads,
+    upload_jsonl_to_datasets,
 )
 from app.services.landing import (
     _new_dataset_id,

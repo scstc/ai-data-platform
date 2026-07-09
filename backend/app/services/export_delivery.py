@@ -189,7 +189,7 @@ async def run_export_job(
     warnings: list[str] = []
 
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     prefix = (
         goal.target_prefix
         or f"{version.dataset_id}/v{version.version_no}/delivery"

@@ -19,7 +19,7 @@ async def test_land_records_parquet_sets_format(monkeypatch, session_factory: as
         return f"s3://uploads/{dataset_id}/v{version_no}/data.parquet"
 
     monkeypatch.setattr(
-        "app.services.external_store.upload_parquet_to_uploads", fake_upload_parquet
+        "app.services.external_store.upload_parquet_to_datasets", fake_upload_parquet
     )
     async with session_factory() as session:
         ds, ver = await landing.land_records(
@@ -40,7 +40,7 @@ async def test_land_records_parquet_falls_back_to_jsonl(monkeypatch, session_fac
         return f"s3://uploads/{dataset_id}/v{version_no}/data.jsonl"
 
     monkeypatch.setattr(
-        "app.services.external_store.upload_jsonl_to_uploads", fake_upload_jsonl
+        "app.services.external_store.upload_jsonl_to_datasets", fake_upload_jsonl
     )
     async with session_factory() as session:
         ds, ver = await landing.land_records(

@@ -76,14 +76,14 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             await model_store_svc.refresh_cache(session)
     except Exception:  # noqa: BLE001
         _logger.warning("启动时刷新模型仓库路径缓存失败（已忽略）", exc_info=True)
-    # best-effort:确保平台上传桶 + 数据湖桶存在(未配置 MinIO 时静默跳过)
+    # best-effort:确保平台数据集桶 + 数据湖桶存在(未配置 MinIO 时静默跳过)
     try:
         from app.services.external_store import (
+            ensure_datasets_bucket,
             ensure_lake_bucket,
-            ensure_upload_bucket,
         )
 
-        await ensure_upload_bucket()
+        await ensure_datasets_bucket()
         await ensure_lake_bucket()
     except Exception:  # noqa: BLE001
         _logger.warning("启动时确保平台 MinIO 桶失败（已忽略）", exc_info=True)

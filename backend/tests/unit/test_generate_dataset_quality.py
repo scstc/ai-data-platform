@@ -11,7 +11,7 @@
 - quality_policy=None → verdict="skipped",版本正常落地,无回归。
 
 避开真实 PG / MinIO:monkeypatch ``_fetch_db_records`` 返回受控 records,
-monkeypatch ``upload_*_to_uploads`` 返回假 URI;真走 DB(session_factory),
+monkeypatch ``upload_*_to_datasets`` 返回假 URI;真走 DB(session_factory),
 因路由全程依赖 session 读写 task/dataset/version。
 """
 
@@ -81,10 +81,10 @@ def _patch_fetch_and_uploads(
         "app.api.v1.ingest_tasks._fetch_db_records", _fake_fetch
     )
     monkeypatch.setattr(
-        "app.api.v1.ingest_tasks.upload_jsonl_to_uploads", _fake_upload_jsonl
+        "app.api.v1.ingest_tasks.upload_jsonl_to_datasets", _fake_upload_jsonl
     )
     monkeypatch.setattr(
-        "app.services.external_store.upload_parquet_to_uploads",
+        "app.services.external_store.upload_parquet_to_datasets",
         _fake_upload_parquet,
     )
     return state

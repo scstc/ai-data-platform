@@ -30,7 +30,7 @@ from app.services import operator_catalog as oc
 from app.services.external_store import (
     _version_cfg,
     cached_bytes,
-    copy_object_to_uploads,
+    copy_object_to_datasets,
     materialized_version,
     parse_s3_uri,
     persist_manifest_output,
@@ -696,7 +696,7 @@ async def _upload_product(
 ) -> str:
     """流式上传一个成员产物到平台 MinIO,键 = <id>/v<n>/<table>.<fmt>,返回 URI。"""
     cfg = platform_config()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version_no}/{table_name}.{fmt}"
     size = path.stat().st_size
     content_type = (
@@ -723,13 +723,13 @@ async def _copy_carried_member(
     table = member_data["table_name"]
     fmt = member_data["format"]
     if uri.startswith("s3://") and not input_version.source_datasource_id:
-        new_uri = await copy_object_to_uploads(uri, dataset_id, new_vno, table, fmt)
+        new_uri = await copy_object_to_datasets(uri, dataset_id, new_vno, table, fmt)
     elif uri.startswith("s3://"):
         cfg = await _version_cfg(input_version, session)
         bucket, key = parse_s3_uri(uri)
         data = await cached_bytes(cfg, bucket, key)
         cfg_dst = platform_config()
-        dst_bucket = settings.storage_minio_upload_bucket
+        dst_bucket = settings.storage_minio_datasets_bucket
         dst_key = f"{dataset_id}/v{new_vno}/{table}.{fmt}"
         await upload_object(cfg_dst, dst_bucket, dst_key, io.BytesIO(data), len(data))
         new_uri = f"s3://{dst_bucket}/{dst_key}"
@@ -949,7 +949,7 @@ async def run_process_job(
             dataset_id=dataset_id,
             version_no=new_vno,
             storage_uri=(
-                f"s3://{settings.storage_minio_upload_bucket}"
+                f"s3://{settings.storage_minio_datasets_bucket}"
                 f"/{dataset_id}/v{new_vno}/"
             ),
             format="multi" if member_count > 1 else products[0]["out_format"],
@@ -1009,7 +1009,7 @@ async def run_process_job(
 
                 await remove_prefix(
                     platform_config(),
-                    settings.storage_minio_upload_bucket,
+                    settings.storage_minio_datasets_bucket,
                     f"{dataset_id}/v{new_vno}/",
                 )
             except Exception:  # noqa: BLE001 清理失败不掩盖原始错误

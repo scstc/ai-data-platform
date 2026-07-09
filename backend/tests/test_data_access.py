@@ -502,7 +502,7 @@ async def test_upload_media_creates_one_manifest_dataset(client, monkeypatch):
 
     # manifest 内容符合 DJ 契约:images 数组 + <__dj__image> token + 平台旁路 __member
     dataset_id = data["id"]
-    manifest = store[("uploads", f"{dataset_id}/v1/manifest.jsonl")].decode()
+    manifest = store[("adp-datasets", f"{dataset_id}/v1/manifest.jsonl")].decode()
     rows = [json.loads(ln) for ln in manifest.splitlines() if ln.strip()]
     assert len(rows) == 2
     assert all(r["text"] == "<__dj__image>" for r in rows)
@@ -592,7 +592,7 @@ def _mem_store_patch_all(monkeypatch, *modules) -> dict:
 
 def _mem_store_patch_both(monkeypatch) -> dict:
     """共享内存 store 同时给 datasets 与 external_store 打补丁,使 upload-batch 的
-    「原件 upload_object(datasets 命名空间)」与「合并 jsonl upload_jsonl_to_uploads
+    「原件 upload_object(datasets 命名空间)」与「合并 jsonl upload_jsonl_to_datasets
     (external_store 命名空间)」写入同一内存 store(否则后者会走真 MinIO)。"""
     from app.api.v1 import datasets as dmod
     from app.services import external_store as esmod
@@ -645,13 +645,13 @@ async def test_upload_batch_single_format_originals_and_merged_jsonl(
 
     # 原件逐个入 MinIO 的 originals/ 前缀(2 个,保序编号)
     originals = sorted(
-        k[1] for k in store if k[0] == "uploads" and f"{did}/originals/" in k[1]
+        k[1] for k in store if k[0] == "adp-datasets" and f"{did}/originals/" in k[1]
     )
     assert len(originals) == 2
     assert originals[0].endswith("-a.csv")
     assert originals[1].endswith("-c.csv")
     # 合并 jsonl 作为成员落 <id>/v1/data.jsonl,3 行 = 各文件解析记录并集
-    jsonl = store[("uploads", f"{did}/v1/data.jsonl")].decode()
+    jsonl = store[("adp-datasets", f"{did}/v1/data.jsonl")].decode()
     rows = [json.loads(ln) for ln in jsonl.splitlines() if ln.strip()]
     assert len(rows) == 3
     assert rows[0] == {"a": "1", "b": "2"}
@@ -686,7 +686,7 @@ async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch)
     from app.services import external_store as es
 
     store = _mem_store_patch(monkeypatch, es)
-    store[("uploads", "ds-x/manifest.jsonl")] = (
+    store[("adp-datasets", "ds-x/manifest.jsonl")] = (
         json.dumps(
             {
                 # images 存相对 manifest 前缀(ds-x/)的文件名,非完整 key
@@ -694,7 +694,7 @@ async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch)
                 "images": ["000000-a.png"],
                 "text": "<__dj__image>",
                 "__member": {
-                    "bucket": "uploads",
+                    "bucket": "adp-datasets",
                     "key": "ds-x/000000-a.png",
                     "name": "a.png",
                     "size": 3,
@@ -704,7 +704,7 @@ async def test_materialize_manifest_rewrites_and_strips(db_session, monkeypatch)
         )
         + "\n"
     ).encode()
-    store[("uploads", "ds-x/000000-a.png")] = b"PNG"
+    store[("adp-datasets", "ds-x/000000-a.png")] = b"PNG"
 
     v = DatasetVersion(
         id="dsv-x",
@@ -753,14 +753,14 @@ async def test_persist_manifest_output_uploads_and_rewrites(monkeypatch, tmp_pat
     assert rows == 1
     assert size == len(b"\x89PNG-fake")
     # 媒体已回传到版本前缀(自包含)
-    assert ("uploads", "dset-x/v2/000000-000000-pic.png") in store
+    assert ("adp-datasets", "dset-x/v2/000000-000000-pic.png") in store
     # 清单:images 存相对 v2/ 前缀的文件名,__member 指回完整对象 key
     manifest_row = json.loads(
-        store[("uploads", "dset-x/v2/manifest.jsonl")].decode().strip()
+        store[("adp-datasets", "dset-x/v2/manifest.jsonl")].decode().strip()
     )
     assert manifest_row["images"] == ["000000-000000-pic.png"]
     assert manifest_row["__member"]["key"] == "dset-x/v2/000000-000000-pic.png"
-    assert manifest_row["__member"]["bucket"] == "uploads"
+    assert manifest_row["__member"]["bucket"] == "adp-datasets"
 
 
 @pytest.mark.asyncio
@@ -838,7 +838,7 @@ async def test_members_corrupt_manifest_returns_4xx(
     from app.models.dataset_version import DatasetVersion
 
     store = _mem_store_patch(monkeypatch, dmod)
-    store[("uploads", "ds-bad/manifest.jsonl")] = b"{not json]\n"
+    store[("adp-datasets", "ds-bad/manifest.jsonl")] = b"{not json]\n"
     async with session_factory() as session:
         session.add(Dataset(id="ds-bad", name="坏清单"))
         session.add(
@@ -899,7 +899,7 @@ async def test_add_members_appends_to_manifest(client, monkeypatch):
     ).json()["data"]
     assert {m["name"] for m in members} == {"a.png", "b.jpg", "c.png"}
     # 清单对象确实增到 3 行(成员与 manifest.jsonl 同前缀 <did>/v1/)
-    manifest = store[("uploads", f"{did}/v1/manifest.jsonl")].decode()
+    manifest = store[("adp-datasets", f"{did}/v1/manifest.jsonl")].decode()
     assert len([ln for ln in manifest.splitlines() if ln.strip()]) == 3
 
 
@@ -928,7 +928,7 @@ async def test_delete_member_removes_from_manifest(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["rows"] == 1
     # 成员对象已从存储移除
-    assert ("uploads", victim) not in store
+    assert ("adp-datasets", victim) not in store
     members = (
         await client.get(f"/api/v1/dataset-versions/{vid}/members")
     ).json()["data"]

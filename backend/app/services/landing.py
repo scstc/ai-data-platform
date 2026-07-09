@@ -1107,8 +1107,8 @@ async def land_records(
     # 平台未配置 → ExternalStoreError(回滚 pending dataset,不留脏对象)。
     from app.services.external_store import (  # 延迟 import 避免与 external_store 循环
         ExternalStoreError,
-        upload_jsonl_to_uploads,
-        upload_parquet_to_uploads,
+        upload_jsonl_to_datasets,
+        upload_parquet_to_datasets,
     )
 
     effective_format = "jsonl"
@@ -1117,14 +1117,14 @@ async def land_records(
     if storage_format == "parquet":
         try:
             parquet_bytes = records_to_parquet_bytes(records)
-            storage_uri = await upload_parquet_to_uploads(dataset.id, 1, parquet_bytes)
+            storage_uri = await upload_parquet_to_datasets(dataset.id, 1, parquet_bytes)
             effective_format = "parquet"
             size = len(parquet_bytes)
         except ParquetCodecError:
             # 兜底:无法推断 parquet schema(空/嵌套/异构)→ 退回 jsonl,采集照常成功
             jsonl_bytes = records_to_jsonl_bytes(records)
             try:
-                storage_uri = await upload_jsonl_to_uploads(dataset.id, 1, jsonl_bytes)
+                storage_uri = await upload_jsonl_to_datasets(dataset.id, 1, jsonl_bytes)
             except ExternalStoreError:
                 await session.rollback()
                 raise
@@ -1135,7 +1135,7 @@ async def land_records(
     else:
         jsonl_bytes = records_to_jsonl_bytes(records)
         try:
-            storage_uri = await upload_jsonl_to_uploads(dataset.id, 1, jsonl_bytes)
+            storage_uri = await upload_jsonl_to_datasets(dataset.id, 1, jsonl_bytes)
         except ExternalStoreError:
             await session.rollback()
             raise
@@ -1300,7 +1300,7 @@ async def _land_raw_member(
     version = await _target_draft_version(session, dataset_id)
     table_name = _safe_table_name(filename)
     ext = source_format.lower()
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset_id}/v{version.version_no}/{table_name}.{ext}"
     try:
         await upload_object(
@@ -1392,7 +1392,7 @@ async def land_media_manifest(
 
     cfg = platform_config()  # ExternalStoreError(未配置)原样上抛,不转 LandingError
 
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     existing_draft = (
         await session.execute(
             select(DatasetVersion)
@@ -1603,7 +1603,7 @@ async def land_upload_raw(
     )
 
     fname = Path(filename).name or f"data.{source_format}"
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     key = f"{dataset.id}/v1/{fname}"
     try:
         await upload_object(

@@ -35,7 +35,7 @@ async def test_land_records_persists_quality_stats_and_schema_snapshot(
         return f"s3://uploads/{dataset_id}/v{version_no}/data.jsonl"
 
     monkeypatch.setattr(
-        "app.services.external_store.upload_jsonl_to_uploads", fake_upload_jsonl
+        "app.services.external_store.upload_jsonl_to_datasets", fake_upload_jsonl
     )
 
     records = [
@@ -88,7 +88,7 @@ async def test_land_records_quality_stats_reflect_post_coercion_records(
         return f"s3://uploads/{dataset_id}/v{version_no}/data.jsonl"
 
     monkeypatch.setattr(
-        "app.services.external_store.upload_jsonl_to_uploads", fake_upload_jsonl
+        "app.services.external_store.upload_jsonl_to_datasets", fake_upload_jsonl
     )
 
     records = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}, {"a": 3, "b": "z"}]

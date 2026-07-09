@@ -569,7 +569,7 @@ async def upload_batch_as_dataset(
     一个表成员,落进所选数据集的 draft 版本。
 
     必选 `datasetId`(缺失 422、不存在 404、无写权 403)。可选 `tableName`(默认
-    由首个文件名派生)。原件逐个存 uploads/<id>/originals/;合并 jsonl 作为该
+    由首个文件名派生)。原件逐个存 adp-datasets/<id>/originals/;合并 jsonl 作为该
     版本一个成员(table_name)。
 
     `raw=true`("单一数据"页):纯文件存储,不对内容做任何解析/提取——表成员只记
@@ -635,7 +635,7 @@ async def upload_batch_as_dataset(
             status_code=503, content={"success": False, "message": str(exc)}
         )
 
-    bucket = settings.storage_minio_upload_bucket
+    bucket = settings.storage_minio_datasets_bucket
     # 数据集已存在(数据集优先);原件直接落数据集根下的 originals/,与其它批次
     # 共享该前缀。失败回收按本批已上传的 key 逐个删,不按前缀删,绝不误删其它
     # 批次已存的原件。
@@ -1056,7 +1056,7 @@ async def delete_version_members(
                 try:
                     await remove_object(
                         cfg,
-                        bucket or settings.storage_minio_upload_bucket,
+                        bucket or settings.storage_minio_datasets_bucket,
                         obj_key,
                     )
                 except ExternalStoreError:
@@ -1066,7 +1066,7 @@ async def delete_version_members(
             deleted += 1
         else:
             # originals/ 原件:只删 MinIO 对象
-            bucket = settings.storage_minio_upload_bucket
+            bucket = settings.storage_minio_datasets_bucket
             try:
                 await remove_object(cfg, bucket, key)
                 deleted += 1
@@ -1111,7 +1111,7 @@ async def get_member_url(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
         )
-    # 解析该版本自身对象的桶/键(manifest→uploads桶;单文件 hosted→其源桶;
+    # 解析该版本自身对象的桶/键(manifest→数据集桶 adp-datasets;单文件 hosted→其源桶;
     # managed 本地版本无 s3 位置)。
     own_bucket = ""
     own_key = ""
@@ -2579,8 +2579,8 @@ async def create_dataset_version(
 
     与 `landing._target_draft_version`(上传时的隐式选取:latest 是 draft 则复用,
     是 published 才开 v+1)是两条独立路径——这是用户的显式动作,不管当前最新版本
-    状态如何,永远新建 v(max+1),不克隆成员、不复用现有 draft。同步在 uploads
-    桶写一个空占位对象,让 `v<n>/` 目录在「文件管理」页立即可见(S3 无空目录,
+    状态如何,永远新建 v(max+1),不克隆成员、不复用现有 draft。同步在数据集桶
+    (adp-datasets)写一个空占位对象,让 `v<n>/` 目录在「文件管理」页立即可见(S3 无空目录,
     靠公共前缀+至少一个对象体现)。
     """
     dataset = await session.get(Dataset, dataset_id)
@@ -2616,7 +2616,7 @@ async def create_dataset_version(
         cfg = platform_config()
         await upload_object(
             cfg,
-            settings.storage_minio_upload_bucket,
+            settings.storage_minio_datasets_bucket,
             f"{dataset_id}/v{next_no}/.keep",
             io.BytesIO(b""),
             0,

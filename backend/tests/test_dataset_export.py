@@ -144,7 +144,7 @@ async def test_download_s3_redirects_to_presigned(
     fake_url = "http://minio.local/uploads/x/manifest.jsonl?sig=abc"
 
     async def _fake_presigned(cfg, bucket, key):
-        assert (bucket, key) == ("uploads", "dset-ex1/v3/manifest.jsonl")
+        assert (bucket, key) == ("adp-datasets", "dset-ex1/v3/manifest.jsonl")
         return fake_url
 
     monkeypatch.setattr(ds, "platform_config", lambda: {"endpoint": "x"})

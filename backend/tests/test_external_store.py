@@ -286,9 +286,9 @@ async def test_host_s3_flow(client: AsyncClient, seeded_object: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# upload_parquet_to_uploads 单元测试
+# upload_parquet_to_datasets 单元测试
 # ---------------------------------------------------------------------------
-async def test_upload_parquet_to_uploads_key_and_uri(monkeypatch):
+async def test_upload_parquet_to_datasets_key_and_uri(monkeypatch):
     from app.services import external_store
 
     captured = {}
@@ -301,9 +301,9 @@ async def test_upload_parquet_to_uploads_key_and_uri(monkeypatch):
     monkeypatch.setattr(
         external_store, "platform_config", lambda: {"endpoint": "e", "accessKey": "a", "secretKey": "s"}
     )
-    monkeypatch.setattr(external_store.settings, "storage_minio_upload_bucket", "uploads")
+    monkeypatch.setattr(external_store.settings, "storage_minio_datasets_bucket", "adp-datasets")
     monkeypatch.setattr(external_store, "upload_object", fake_upload_object)
 
-    uri = await external_store.upload_parquet_to_uploads("dset-abc123", 2, b"PAR1data")
-    assert uri == "s3://uploads/dset-abc123/v2/data.parquet"
+    uri = await external_store.upload_parquet_to_datasets("dset-abc123", 2, b"PAR1data")
+    assert uri == "s3://adp-datasets/dset-abc123/v2/data.parquet"
     assert captured["key"] == "dset-abc123/v2/data.parquet"

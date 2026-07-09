@@ -294,7 +294,7 @@ async def run_review(
         dataset_id=dataset_id,
         version_no=new_vno,
         storage_uri=(
-            f"s3://{settings.storage_minio_upload_bucket}/{dataset_id}/v{new_vno}/"
+            f"s3://{settings.storage_minio_datasets_bucket}/{dataset_id}/v{new_vno}/"
         ),
         format="multi" if len(new_members_data) > 1 else "jsonl",
         rows=sum(m["rows"] or 0 for m in new_members_data),

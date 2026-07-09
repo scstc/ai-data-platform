@@ -461,7 +461,7 @@ class S3Connector:
         data_type: str | None,
         job_id: str,
     ) -> tuple[Dataset, DatasetVersion]:
-        """原样归档:从源对象存储下载 key,**原封不动**拷进平台内置 MinIO(uploads 桶),
+        """原样归档:从源对象存储下载 key,**原封不动**拷进平台内置 MinIO(数据集桶),
         建一个 Dataset + DatasetVersion(format=原始扩展名,不解析/不转换/不限大小)。
         返回 (Dataset, DatasetVersion)。
 
@@ -475,7 +475,7 @@ class S3Connector:
                 f"平台内置存储(MinIO)未配置,无法归档文件:{exc}"
             ) from exc
 
-        dst_bucket = settings.storage_minio_upload_bucket
+        dst_bucket = settings.storage_minio_datasets_bucket
         dataset_id = _new_dataset_id()
         prefix = f"{dataset_id}/"
         fmt = _ext(key)  # 原始扩展名(可能为空)

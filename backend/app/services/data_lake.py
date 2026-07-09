@@ -257,7 +257,7 @@ async def _put_object_to_lake_minio(
     """上传对象到数据湖专用 MinIO 桶（异步包装）。
 
     数据湖使用独立桶 `storage_minio_lake_bucket`(默认 adp-data-lake),
-    与数据集加工产物桶 `storage_minio_upload_bucket` 物理隔离:
+    与数据集加工产物桶 `storage_minio_datasets_bucket` 物理隔离:
     - 湖桶:ODS 原始归档,不可变,长期保留,单独生命周期/配额/备份
     - 加工桶:数据集产物,可回收
 

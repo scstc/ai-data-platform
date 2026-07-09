@@ -16,7 +16,7 @@ class ExportGoal(CamelModel):
     export_shard_size: int | None = None  # 每片约 N 条;None=单文件
     include_stats: bool = True
     include_card: bool = True
-    # 目标存储:None=平台内置 MinIO uploads 桶;否则指向 s3 数据源(本期默认平台)
+    # 目标存储:None=平台内置 MinIO 数据集桶;否则指向 s3 数据源(本期默认平台)
     target_datasource_id: str | None = None
     target_bucket: str | None = None
     target_prefix: str | None = None
