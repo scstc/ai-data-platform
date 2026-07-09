@@ -955,10 +955,11 @@ declare namespace DataPlatform {
     level: AclLevel;
   };
 
-  /** 血缘图节点:数据源 / 湖快照 / 版本 / 任务(全链路:源→湖→集→任务) */
+  /** 血缘图节点:数据源 / 湖快照 / 版本 / 任务 / 成员(全链路:源→湖→集→任务;
+   * member 为版本内某个表/文件的一等节点,仅 expand_members 场景或本地展开时出现) */
   type LineageNode = {
     id: string;
-    kind: 'version' | 'job' | 'lake_snapshot' | 'datasource';
+    kind: 'version' | 'job' | 'lake_snapshot' | 'datasource' | 'member';
     createdAt?: string;
     // version 字段
     datasetId?: string;
@@ -973,6 +974,9 @@ declare namespace DataPlatform {
     isOriginal?: boolean;
     /** 属于当前选中数据集(前端高亮) */
     isFocus?: boolean;
+    /** 数据集声明的来源(治理整改 P1-②) */
+    sourceKind?: string | null;
+    sourceFormat?: string | null;
     /** 该版本的表成员及湖溯源(多表版本) */
     members?: {
       tableName: string;
@@ -980,6 +984,7 @@ declare namespace DataPlatform {
       sourceSnapshotId?: string | null;
       sourceName?: string | null;
       sourceUploadChannel?: string | null;
+      sourceKind?: string | null;
     }[];
     // job / datasource / lake_snapshot 共用
     name?: string;
@@ -993,6 +998,8 @@ declare namespace DataPlatform {
       memberName: string;
       operators: { name: string; params: Record<string, any> }[];
     }[];
+    /** LLM 快照(P0-① 可复现凭证):任务执行时固化的 model/base_url;老任务/无 LLM 为 null */
+    llmSnapshot?: { model?: string | null; baseUrl?: string | null } | null;
     // lake_snapshot 字段(湖对象某一版快照)
     lakeId?: string;
     lakeName?: string;
@@ -1007,14 +1014,28 @@ declare namespace DataPlatform {
     // datasource 字段
     sourceType?: string;
     dbKind?: string;
+    // member 字段(kind='member' 时填充;versionId 为所属版本,sourceKind 复用上方版本级字段)
+    versionId?: string;
+    tableName?: string;
+    sourceSnapshotId?: string | null;
+    sourceName?: string | null;
+    sourceUploadChannel?: string | null;
   };
 
-  /** 血缘边:input/output=版本↔任务;extract=湖快照→版本;ingest=数据源→快照/采集任务;
-   * merge=湖内合并源→合并快照;hosted_source=数据源→版本(绕湖直连兜底) */
+  /** 血缘边:input/output=版本↔任务;extract=湖快照→版本(或→成员);ingest=数据源→快照/采集任务;
+   * merge=湖内合并源→合并快照;hosted_source=数据源→版本(绕湖直连兜底);
+   * contains=版本→成员(版本内表/文件展开为一等节点) */
   type LineageEdge = {
     from: string;
     to: string;
-    kind: 'input' | 'output' | 'extract' | 'ingest' | 'merge' | 'hosted_source';
+    kind:
+      | 'input'
+      | 'output'
+      | 'extract'
+      | 'ingest'
+      | 'merge'
+      | 'hosted_source'
+      | 'contains';
   };
 
   type LineageGraph = { nodes: LineageNode[]; edges: LineageEdge[] };

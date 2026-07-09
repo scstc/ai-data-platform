@@ -787,6 +787,23 @@ export async function getDatasetLineage(
   );
 }
 
+/** 血缘图(实体无关 anchor):kind=job 取该任务节点 + 其完整输入链(不含下游消费者);
+ * kind=member 取某个表成员节点 + 其上游湖快照/数据源链 GET /api/v1/lineage */
+export async function getLineageByAnchor(
+  params: {
+    kind: 'job' | 'member';
+    jobId?: string;
+    versionId?: string;
+    tableName?: string;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.LineageGraph; success: boolean }>(
+    '/api/v1/lineage',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
 /** 更新数据集元数据 PATCH /api/v1/datasets/{id} */
 export async function updateDataset(id: string, body: DataPlatform.DatasetUpdate) {
   return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(

@@ -1,17 +1,17 @@
 import { ProDescriptions } from '@ant-design/pro-components';
-import { Space, Typography } from 'antd';
+import { Space, Tabs, Typography } from 'antd';
 import { formatDateTime } from '@/utils/format';
 import { renderJobType, renderState } from '@/utils/jobState';
 import VersionFilePreview from '../VersionFilePreview';
+import AssetManifest from './AssetManifest';
 
 export interface JobDetailProps {
   job: DataPlatform.Job;
 }
 
-/** 任务详情统一展示:基础信息(ProDescriptions)+ 算子配置 + 数据集 + 输入/产物版本
- *  按文件预览。抽自数据任务(任务中心)详情抽屉,供 governance 各任务列表抽屉共用,
- *  保证治理/评估各页"点任务看详情"的样式一致。 */
-const JobDetail: React.FC<JobDetailProps> = ({ job }) => {
+/** 概览:基础信息(ProDescriptions)+ 算子配置 + 数据集 + 输入/产物版本按文件预览。
+ *  原 JobDetail 的全部内容,现作为「概览」Tab 与「资产清单」Tab 并列。 */
+const JobOverview: React.FC<{ job: DataPlatform.Job }> = ({ job }) => {
   const inputVer = job.input;
   const outputVer = job.output;
   return (
@@ -115,5 +115,21 @@ const JobDetail: React.FC<JobDetailProps> = ({ job }) => {
     </Space>
   );
 };
+
+/** 任务详情统一展示:概览 + 资产清单(可溯源可复现整改 P1-②:算子链参数/LLM 快照/
+ *  上游快照数据源全链路汇总)两个 Tab。抽自数据任务(任务中心)详情抽屉,供 governance
+ *  各任务列表抽屉共用,保证治理/评估各页"点任务看详情"的样式一致。 */
+const JobDetail: React.FC<JobDetailProps> = ({ job }) => (
+  <Tabs
+    items={[
+      { key: 'overview', label: '概览', children: <JobOverview job={job} /> },
+      {
+        key: 'assets',
+        label: '资产清单',
+        children: <AssetManifest job={job} />,
+      },
+    ]}
+  />
+);
 
 export default JobDetail;

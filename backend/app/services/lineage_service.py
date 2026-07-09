@@ -115,6 +115,13 @@ def describe_job(job: Job) -> dict[str, Any]:
         "operators": ops,
         "memberOperators": member_ops,
         "createdAt": job.created_at.isoformat(),
+        # LLM 快照(P0-① 可复现凭证):任务执行时固化的 model/base_url(不含 key)。
+        # 资产清单据此展示"这次用了哪个模型/端点";老任务无此键为 None。
+        "llmSnapshot": (
+            {"model": _llm.get("model"), "baseUrl": _llm.get("base_url")}
+            if (_llm := spec.get("llm_snapshot"))
+            else None
+        ),
     }
 
 
