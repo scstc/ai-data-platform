@@ -424,6 +424,28 @@ async def test_focus_kind_source_resolves_downstream_and_is_focus(
     assert "dsv-fx010v2" in nodes
 
 
+async def test_focus_kind_lake_marks_all_lake_snapshots_as_focus(
+    client, session_factory
+):
+    """kind=lake:选中数据湖 → 其名下全部快照标 isFocus,向下游追到消费数据集
+    (数据湖详情「查看血缘」入口 ?lakeId= 走此)。"""
+    await _seed_source_chain(session_factory)
+
+    resp = await client.get(
+        "/api/v1/lineage/focus", params={"kind": "lake", "lakeId": "lake-fx010"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert nodes["snap-fx010"]["isFocus"] is True
+    assert "dsv-fx010" in nodes
+
+
+async def test_focus_kind_lake_missing_param_400(client):
+    resp = await client.get("/api/v1/lineage/focus", params={"kind": "lake"})
+    assert resp.status_code == 400
+
+
 async def test_focus_kind_lake_object_marks_all_snapshots_as_focus(
     client, session_factory
 ):

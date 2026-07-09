@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
-from app.models.data_lake import DataLakeObject, DataLakeSnapshot
+from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
@@ -320,6 +320,7 @@ async def _resolve_focus_target(
     source_id: str | None,
     object_id: str | None,
     snapshot_id: str | None,
+    lake_id: str | None,
 ) -> _FocusTarget:
     """按 `kind` 把请求参数解析成 `_FocusTarget`。缺参 `HTTPException(400)`、
     实体不存在 `_NotFound`(由调用方转 404 JSON)。逻辑对齐
@@ -427,6 +428,38 @@ async def _resolve_focus_target(
         # 的前缀区分手段,从不出现在返回节点里。
         return _FocusTarget([sid_anchor], down_anchors, {source_id})
 
+    if kind == "lake":
+        if not lake_id:
+            raise HTTPException(400, "kind=lake 需 lakeId 参数")
+        lake = await session.get(DataLake, lake_id)
+        if lake is None:
+            raise _NotFound("数据湖不存在")
+        snap_ids = list(
+            (
+                await session.scalars(
+                    select(DataLakeSnapshot.id).where(
+                        DataLakeSnapshot.lake_id == lake_id
+                    )
+                )
+            ).all()
+        )
+        downstream_vids = (
+            (
+                await session.scalars(
+                    select(DatasetVersionTable.dataset_version_id).where(
+                        DatasetVersionTable.source_snapshot_id.in_(snap_ids)
+                    )
+                )
+            ).all()
+            if snap_ids
+            else []
+        )
+        snap_anchors = [snapshot_anchor_id(sid) for sid in snap_ids]
+        down_anchors = snap_anchors + list(dict.fromkeys(downstream_vids))
+        # 无独立 "lake" 节点(build_lineage 从不产出该 kind),该湖名下全部快照
+        # 节点一并标 isFocus——「聚焦一个数据湖」= 看其所有快照及下游数据集。
+        return _FocusTarget(snap_anchors, down_anchors, set(snap_ids))
+
     if kind == "lake_object":
         if not object_id:
             raise HTTPException(400, "kind=lake_object 需 objectId 参数")
@@ -499,13 +532,15 @@ async def lineage_focus(
     source_id: Annotated[str | None, Query(alias="sourceId")] = None,
     object_id: Annotated[str | None, Query(alias="objectId")] = None,
     snapshot_id: Annotated[str | None, Query(alias="snapshotId")] = None,
+    lake_id: Annotated[str | None, Query(alias="lakeId")] = None,
     up: Annotated[int, Query(ge=0, le=3)] = 2,
     down: Annotated[int, Query(ge=0, le=3)] = 2,
     members: Annotated[bool, Query()] = False,
 ) -> JSONResponse:
-    """焦点探索(OpenMetadata 式):以任意实体(6 类 kind,与 `GET /lineage` 一致)
-    为中心,上/下游各展开 `up`/`down` 跳(默认 2,上限 3)后合并去重。焦点节点
-    (kind=lake_object 时为该对象下全部快照节点)标 `isFocus=True`;每个入图
+    """焦点探索(OpenMetadata 式):以任意实体(7 类 kind——`GET /lineage` 的 6 类
+    + focus 专属的 `lake`「整个数据湖」)为中心,上/下游各展开 `up`/`down` 跳
+    (默认 2,上限 3)后合并去重。焦点节点(kind=lake_object 时为该对象下、
+    kind=lake 时为该湖下的全部快照节点)标 `isFocus=True`;每个入图
     节点再挂整数 `moreUp`/`moreDown`——它在完整血缘森林里还有多少条本图未覆盖
     的直接上/下游邻居(0=无更多),供前端渲染"+N"展开按钮。`members=true` 时
     额外展开成员一等节点(透传 `build_lineage` 的 `expand_members`)。
@@ -520,6 +555,7 @@ async def lineage_focus(
             source_id=source_id,
             object_id=object_id,
             snapshot_id=snapshot_id,
+            lake_id=lake_id,
         )
     except _NotFound as exc:
         return JSONResponse(
@@ -551,6 +587,7 @@ async def lineage_neighbors(
     source_id: Annotated[str | None, Query(alias="sourceId")] = None,
     object_id: Annotated[str | None, Query(alias="objectId")] = None,
     snapshot_id: Annotated[str | None, Query(alias="snapshotId")] = None,
+    lake_id: Annotated[str | None, Query(alias="lakeId")] = None,
     members: Annotated[bool, Query()] = False,
 ) -> JSONResponse:
     """单节点邻居增量:只返回该实体紧邻一层的上游(`direction=up`)或下游
@@ -570,6 +607,7 @@ async def lineage_neighbors(
             source_id=source_id,
             object_id=object_id,
             snapshot_id=snapshot_id,
+            lake_id=lake_id,
         )
     except _NotFound as exc:
         return JSONResponse(
