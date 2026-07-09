@@ -6,12 +6,10 @@ import {
   Button,
   Card,
   Checkbox,
-  Col,
   Empty,
   Input,
   Modal,
   message,
-  Row,
   Select,
   Space,
   Typography,
@@ -19,9 +17,10 @@ import {
 } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { isBinaryFormat } from '@/pages/ingest/access/constants';
+import CollapsiblePanes from '@/pages/processing/editor/CollapsiblePanes';
 import OperatorLibrary from '@/pages/processing/editor/OperatorLibrary';
+import PipelineCanvas from '@/pages/processing/editor/PipelineCanvas';
 import PipelineDndArea from '@/pages/processing/editor/PipelineDndArea';
-import PipelineSteps from '@/pages/processing/editor/PipelineSteps';
 import StepParamsForm from '@/pages/processing/editor/StepParamsForm';
 import YamlPreviewCard from '@/pages/processing/editor/YamlPreviewCard';
 import { stepsToYaml, yamlToSteps } from '@/pages/processing/editor/yaml';
@@ -51,7 +50,7 @@ const formatSize = (bytes?: number | null): string => {
 
 /** 质量评估编辑器:布局对齐清洗页 processing/editor 的 master-detail——
  *  左侧常驻文件清单(每个文件显示格式/大小/配置状态,点行切换),右侧编排
- *  当前文件的 filter 类算子;各文件配置按文件名缓存,切文件不丢,行内
+ *  当前文件的质量算子;各文件配置按文件名缓存,切文件不丢,行内
  *  「复制」可批量套用同一套算子。文本字段由后端自动探测,前端不下发 text_keys。 */
 const QualityEditor: React.FC = () => {
   const access = useAccess();
@@ -73,6 +72,13 @@ const QualityEditor: React.FC = () => {
   const [memberActiveIdx, setMemberActiveIdx] = useState<
     Record<string, number>
   >({});
+  // 每个成员画布是否存在游离(未接入主链)算子节点,提交前据此阻断
+  const [memberHasOrphan, setMemberHasOrphan] = useState<
+    Record<string, boolean>
+  >({});
+  // 左「算子库」/右「参数」折叠状态:放顶层跨成员共享
+  const [libCollapsed, setLibCollapsed] = useState(false);
+  const [paramsCollapsed, setParamsCollapsed] = useState(false);
 
   const [opMap, setOpMap] = useState<
     Record<string, DataPlatform.CatalogOperator>
@@ -112,6 +118,7 @@ const QualityEditor: React.FC = () => {
     setMemberConfigs({});
     setActiveMember(undefined);
     setMemberActiveIdx({});
+    setMemberHasOrphan({});
     if (!versionId || !datasetId) return;
 
     getDataset(datasetId).then((r) => {
@@ -140,6 +147,7 @@ const QualityEditor: React.FC = () => {
   }, [versions]);
 
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
+  const categoryOf = (n: string) => opMap[n]?.category || '';
 
   const selectedDatasetName = datasets.find((d) => d.id === datasetId)?.name;
   const suggestedName = useMemo(
@@ -201,6 +209,11 @@ const QualityEditor: React.FC = () => {
       for (const t of copyTargets) next[t] = 0;
       return next;
     });
+    setMemberHasOrphan((prev) => {
+      const next = { ...prev };
+      for (const t of copyTargets) next[t] = false;
+      return next;
+    });
     message.success(`已复制到 ${copyTargets.length} 个文件`);
     setCopySource(undefined);
   };
@@ -224,6 +237,10 @@ const QualityEditor: React.FC = () => {
 
     if (configs.length === 0) {
       message.warning('请至少为一个成员配置质量算子');
+      return;
+    }
+    if (configs.some((c) => memberHasOrphan[c.memberName])) {
+      message.warning('存在未接入流水线的算子');
       return;
     }
 
@@ -421,69 +438,76 @@ const QualityEditor: React.FC = () => {
                       setMemberOperators(memberName, next);
                     }}
                   >
-                    <Row gutter={16}>
-                      <Col span={7}>
-                        <Card
-                          title="质量算子库"
-                          size="small"
-                          styles={{ body: { height: 360, padding: 12 } }}
-                        >
-                          <OperatorLibrary
-                            category="filter"
-                            onAdd={appendOperator}
-                          />
-                        </Card>
-                      </Col>
-                      <Col span={10}>
-                        <Card
-                          title="已选质量算子"
-                          size="small"
-                          styles={{ body: { height: 360, overflow: 'auto' } }}
-                        >
-                          <PipelineSteps
-                            steps={memberSteps}
-                            labelOf={labelOf}
-                            activeIdx={idx}
-                            onSelect={(i) =>
-                              setMemberActiveIdx((prev) => ({
+                    <CollapsiblePanes
+                      leftTitle="算子库"
+                      left={
+                        <OperatorLibrary hideScenario onAdd={appendOperator} />
+                      }
+                      centerTitle="算子流水线"
+                      center={
+                        <PipelineCanvas
+                          steps={memberSteps}
+                          labelOf={labelOf}
+                          categoryOf={categoryOf}
+                          activeIdx={idx}
+                          onSelect={(i) =>
+                            setMemberActiveIdx((prev) => ({
+                              ...prev,
+                              [memberName]: i,
+                            }))
+                          }
+                          onRemove={(i) => {
+                            setMemberOperators(
+                              memberName,
+                              cfg.operators.filter((_, j) => j !== i),
+                            );
+                            setMemberActiveIdx((prev) => ({
+                              ...prev,
+                              [memberName]: 0,
+                            }));
+                          }}
+                          onOrderChange={(perm) => {
+                            if (perm.length !== cfg.operators.length) {
+                              setMemberHasOrphan((prev) => ({
                                 ...prev,
-                                [memberName]: i,
-                              }))
-                            }
-                            onRemove={(i) => {
-                              setMemberOperators(
-                                memberName,
-                                cfg.operators.filter((_, j) => j !== i),
-                              );
-                              setMemberActiveIdx((prev) => ({
-                                ...prev,
-                                [memberName]: 0,
+                                [memberName]: true,
                               }));
-                            }}
-                          />
-                        </Card>
-                      </Col>
-                      <Col span={7}>
-                        <Card
-                          title="参数"
-                          size="small"
-                          styles={{ body: { height: 360, overflow: 'auto' } }}
-                        >
-                          <StepParamsForm
-                            op={activeOpOfMember}
-                            params={activeStepOfMember?.params ?? {}}
-                            onChange={(p) =>
-                              setMemberOperators(
-                                memberName,
-                                cfg.operators.map((op, i) =>
-                                  i === idx ? { ...op, params: p } : op,
-                                ),
-                              )
+                              return;
                             }
-                          />
-                        </Card>
-                      </Col>
-                    </Row>
+                            setMemberHasOrphan((prev) => ({
+                              ...prev,
+                              [memberName]: false,
+                            }));
+                            if (perm.every((v, i) => v === i)) return;
+                            setMemberOperators(
+                              memberName,
+                              perm.map((i) => cfg.operators[i]),
+                            );
+                          }}
+                          inputLabel={`${selectedVersionLabel ?? '版本'} · ${memberName}`}
+                          outputLabel="评估结果"
+                        />
+                      }
+                      rightTitle="参数"
+                      right={
+                        <StepParamsForm
+                          op={activeOpOfMember}
+                          params={activeStepOfMember?.params ?? {}}
+                          onChange={(p) =>
+                            setMemberOperators(
+                              memberName,
+                              cfg.operators.map((op, i) =>
+                                i === idx ? { ...op, params: p } : op,
+                              ),
+                            )
+                          }
+                        />
+                      }
+                      leftCollapsed={libCollapsed}
+                      rightCollapsed={paramsCollapsed}
+                      onLeftCollapsedChange={setLibCollapsed}
+                      onRightCollapsedChange={setParamsCollapsed}
+                    />
                   </PipelineDndArea>
 
                   <YamlPreviewCard
@@ -495,6 +519,10 @@ const QualityEditor: React.FC = () => {
                       setMemberActiveIdx((prev) => ({
                         ...prev,
                         [memberName]: 0,
+                      }));
+                      setMemberHasOrphan((prev) => ({
+                        ...prev,
+                        [memberName]: false,
                       }));
                     }}
                   />

@@ -57,14 +57,17 @@ const OperatorItem: React.FC<{
 
 /** 左栏:检索/场景,点 + 添加算子到流水线。默认展示全量算子目录,不按业务桶或
  *  可运行状态过滤(各任务均可自由选用任意算子)。
- *  传 ``bucket``(cleansing/distillation/make/augment/trainset)时隐藏自由「场景」下拉;
+ *  传 ``bucket``(cleansing/distillation/make/augment/trainset)或 ``hideScenario`` 时
+ *  隐藏自由「场景」下拉(任务已限定算子集,无需再按场景浏览);
  *  ``restrictToBucket`` 为真时进一步只拉该 bucket 的算子(数据合成:只列生成类算子)。 */
 const OperatorLibrary: React.FC<{
   onAdd: (name: string) => void;
   category?: string;
   bucket?: string;
   restrictToBucket?: boolean;
-}> = ({ onAdd, category, bucket, restrictToBucket }) => {
+  /** 隐藏自由「场景」下拉(任务已限定算子集、无需按场景浏览时用) */
+  hideScenario?: boolean;
+}> = ({ onAdd, category, bucket, restrictToBucket, hideScenario }) => {
   const [scenarios, setScenarios] = useState<Record<string, number>>({});
   const [scenario, setScenario] = useState<string>();
   const [keyword, setKeyword] = useState<string>();
@@ -105,7 +108,7 @@ const OperatorLibrary: React.FC<{
           placeholder="搜索算子"
           onSearch={(v) => setKeyword(v || undefined)}
         />
-        {!bucket && (
+        {!bucket && !hideScenario && (
           <Select
             allowClear
             placeholder="全部场景"

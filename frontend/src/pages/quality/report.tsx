@@ -1,3 +1,4 @@
+import { ClearOutlined } from '@ant-design/icons';
 import type { ProColumns } from '@ant-design/pro-components';
 import {
   PageContainer,
@@ -7,6 +8,7 @@ import {
 import { history, useLocation } from '@umijs/max';
 import {
   Badge,
+  Button,
   Card,
   Empty,
   Space,
@@ -293,6 +295,7 @@ const QualityReport: React.FC = () => {
   const [activeMember, setActiveMember] = useState<string>();
 
   const resultVersionId = job?.output?.versionId ?? job?.input?.versionId;
+  const datasetId = job?.input?.datasetId;
 
   useEffect(() => {
     if (!jobId) {
@@ -350,6 +353,26 @@ const QualityReport: React.FC = () => {
       header={{
         title: job.name,
         onBack: () => history.push('/assessment/quality'),
+        extra:
+          datasetId && resultVersionId
+            ? [
+                <Tooltip
+                  key="clean"
+                  title="带入本数据集与版本前往数据清洗:按指标阈值过滤低质数据并输出新版本"
+                >
+                  <Button
+                    icon={<ClearOutlined />}
+                    onClick={() =>
+                      history.push(
+                        `/governance/cleaning/editor?datasetId=${datasetId}&versionId=${resultVersionId}`,
+                      )
+                    }
+                  >
+                    清洗低质数据
+                  </Button>
+                </Tooltip>,
+              ]
+            : undefined,
       }}
     >
       <Card size="small" style={{ marginBottom: 12 }}>
