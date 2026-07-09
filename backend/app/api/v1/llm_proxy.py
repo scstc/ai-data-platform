@@ -11,23 +11,39 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.llm_config import get_active_llm_config, record_usage
+from app.core.db import get_session
+from app.models.job import Job
+from app.services.llm_config import record_usage, resolve_llm_config
 
 router = APIRouter(tags=["llm-proxy"])
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 # LLM 生成调用可能很慢(长文本/大批次),超时给足;连接失败快速失败
 _TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 
 
 @router.post("/llm-proxy/{job_id}/chat/completions")
-async def proxy_chat_completions(job_id: str, request: Request) -> Response:
-    """转发 chat/completions 到生效 LLM 端点并记录用量。"""
-    cfg = get_active_llm_config()
+async def proxy_chat_completions(
+    job_id: str, request: Request, session: SessionDep
+) -> Response:
+    """转发 chat/completions 到生效 LLM 端点并记录用量。
+
+    转发目标按 job.spec["llm_snapshot"] 解析(resolve_llm_config):有快照则
+    锁定该任务执行时固化的 base_url,真正做到"复现即回原端点";job 不存在 /
+    spec 无该键(老任务、未走 job_id 的路径)时快照为 None,等价现取活跃配置,
+    行为不变。
+    """
+    job = await session.get(Job, job_id)
+    snapshot = (job.spec or {}).get("llm_snapshot") if job is not None else None
+    cfg = resolve_llm_config(snapshot)
     base = (cfg.base_url or "https://api.openai.com/v1").rstrip("/")
     body = await request.body()
     headers = {"Content-Type": "application/json"}

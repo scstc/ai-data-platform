@@ -72,11 +72,13 @@ async def run_judge(
     job: Job,
     version: DatasetVersion,
     config: dict[str, Any],
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> Job:
     """对待评版本逐行裁判 → 写 eval_results + 回写 job.eval_report。
 
     待评版本须每行含 completion 字段(模型回答);全行缺失 → JudgeError(Fail loud,
     不静默落全 unscored)。裁判 provider 失败 → 该批 unscored + warnings(降级不 500)。
+    llm_snapshot(可复现凭证):透传给 get_ai_provider,None 时行为不变。
     """
     prompt_f = config.get("prompt_field", "prompt")
     ref_f = config.get("reference_field", "response")
@@ -113,7 +115,7 @@ async def run_judge(
     # use_llm=False → 强制启发式;否则按活跃 LLM 配置(get_ai_provider 无 LLM 时
     # 本就返回 HeuristicProvider,OpenAICompatProvider 调用失败也会自回退启发式)。
     if use_llm:
-        provider = get_ai_provider(settings)
+        provider = get_ai_provider(settings, llm_snapshot)
         from app.services.ai import HeuristicProvider as _Heur
 
         if isinstance(provider, _Heur):

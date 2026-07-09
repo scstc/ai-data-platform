@@ -24,16 +24,20 @@ __all__ = [
 ]
 
 
-def get_ai_provider(settings: Any) -> AIProvider:  # noqa: ARG001 — settings 保留兼容签名
+def get_ai_provider(
+    settings: Any,  # noqa: ARG001 — settings 保留兼容签名
+    llm_snapshot: dict[str, str | None] | None = None,
+) -> AIProvider:
     """根据活跃 LLM 配置选择 AI 提供者。
 
-    从 get_active_llm_config() 读取（DB 激活优先，回退 env），
-    base_url + api_key 均非空时启用 LLM（失败自动回退启发式），
+    从 resolve_llm_config(llm_snapshot) 读取（快照非空时锁定 model/base_url，
+    api_key 恒现取；快照为空则完全等价 get_active_llm_config()：DB 激活优先，
+    回退 env），base_url + api_key 均非空时启用 LLM（失败自动回退启发式），
     否则使用启发式提供者。
     """
-    from app.services.llm_config import get_active_llm_config  # 延迟导入避免循环
+    from app.services.llm_config import resolve_llm_config  # 延迟导入避免循环
 
-    cfg = get_active_llm_config()
+    cfg = resolve_llm_config(llm_snapshot)
     if cfg.base_url and cfg.api_key:
         return OpenAICompatProvider(
             base_url=cfg.base_url,

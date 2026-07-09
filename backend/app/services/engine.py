@@ -42,7 +42,7 @@ from app.services.landing import (
     normalize_to_records,
     parquet_bytes_to_records,
 )
-from app.services.llm_config import get_active_llm_config
+from app.services.llm_config import resolve_llm_config
 
 # 多 job 并发上限
 _semaphore = asyncio.Semaphore(settings.engine_concurrency)
@@ -52,13 +52,17 @@ _semaphore = asyncio.Semaphore(settings.engine_concurrency)
 _running_procs: dict[str, asyncio.subprocess.Process] = {}
 
 
-def _subprocess_env(job_id: str | None = None) -> dict[str, str]:
+def _subprocess_env(
+    job_id: str | None = None, llm_snapshot: dict[str, str | None] | None = None
+) -> dict[str, str]:
     """dj-process 子进程环境。
 
     - 平台配了 LLM 时注入 OPENAI_*——needs_api 算子经 DJ 的 openai 客户端从
       环境变量读取凭证(pydantic 只把 .env 读进 settings,不写 os.environ,
       故不显式注入子进程就拿不到)。带 job_id 时 OPENAI_BASE_URL 指到本服务
       /api/v1/llm-proxy/{job_id}(转发到真实端点并记算子/任务级用量)。
+    - llm_snapshot(可复现凭证):非空时按快照锁定 model/base_url(api_key 恒
+      现取,见 resolve_llm_config);None 时完全等价现取(默认行为不变)。
     - 自定义算子目录挂进 PYTHONPATH——HF datasets 多进程 map 的 worker 反序列化
       算子实例时按模块名 re-import;DJ 的 load_custom_operators 只把动态模块注册进
       主进程 sys.modules,spawn 平台(Windows/macOS)的 worker 找不到模块即猝死
@@ -73,7 +77,7 @@ def _subprocess_env(job_id: str | None = None) -> dict[str, str]:
         env["PYTHONPATH"] = (
             f"{custom_dir}{os.pathsep}{existing}" if existing else str(custom_dir)
         )
-    cfg = get_active_llm_config()
+    cfg = resolve_llm_config(llm_snapshot)
     if cfg.api_key:
         env["OPENAI_API_KEY"] = cfg.api_key
         if job_id:
@@ -173,6 +177,7 @@ def build_config(
     executor_type: str | None = None,
     ray_address: str | None = None,
     media_keys: dict[str, str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """把算子编排序列化为 data-juicer 合法配置(dict)。
 
@@ -180,7 +185,8 @@ def build_config(
 
     配了 LLM 时,为带 ``api_model`` 参数的算子(needs_api)注入平台配置的模型名
     ——DJ 该参数默认写死 ``gpt-4o``,不覆盖会向自定义端点请求不存在的模型而失败;
-    用户在表单里显式填了 ``api_model`` 则尊重用户值。
+    用户在表单里显式填了 ``api_model`` 则尊重用户值。llm_snapshot(可复现凭证):
+    非空时注入的模型名取自快照(锁定复现口径);None 时完全等价现取。
 
     text_key / text_keys:数据主文本字段名。DJ 默认 text_key='text',数据无 text
     字段时(如新闻用 title)必须显式指定,否则 load_dataset 报 'no key [text]'。
@@ -194,7 +200,7 @@ def build_config(
     注意:**绝不注入 export_stats**——它不是 DJ 的 jsonargparse 配置键(只是 Exporter
     构造参数,default 模式恒 True),写进 YAML 会被当未知参数拒绝致 dj-process 崩溃。
     """
-    cfg = get_active_llm_config()
+    cfg = resolve_llm_config(llm_snapshot)
     process: list[dict[str, Any]] = []
     for op in operators:
         params = dict(op.get("params") or {})
@@ -297,7 +303,11 @@ def config_yaml_for_display(yaml_text: str) -> str:
 
 
 async def _run_dj(
-    yaml_path: Path, *, job_id: str | None = None, cwd: Path | None = None
+    yaml_path: Path,
+    *,
+    job_id: str | None = None,
+    cwd: Path | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[int, str]:
     """异步起 dj-process 子进程,返回 (退出码, 合并日志)。
 
@@ -305,6 +315,7 @@ async def _run_dj(
     超过 settings.engine_job_timeout 秒(>0 时)则杀进程并抛 EngineError。
     cwd:子进程工作目录。DJ 对 dataset_path/export_path 做 os.path.abspath
     (按进程 cwd 解析),YAML 里写相对路径时必须固定 cwd(staging 目录)。
+    llm_snapshot:透传给 _subprocess_env,None 时行为不变(现取活跃配置)。
     """
     proc = await asyncio.create_subprocess_exec(
         settings.dj_process_bin,
@@ -316,7 +327,7 @@ async def _run_dj(
         # 自成进程组:停止/超时时可整组杀,连带 dj fork 出的子孙(uv/pip 等)
         start_new_session=True,
         # 配了 LLM 时把 OPENAI_* 注入,供 needs_api 算子的 openai 客户端读取
-        env=_subprocess_env(job_id),
+        env=_subprocess_env(job_id, llm_snapshot),
     )
     if job_id is not None:
         _running_procs[job_id] = proc
@@ -427,6 +438,10 @@ async def filter_records(
     dj-process 跑算子 → 读回存活记录。无算子或无记录则原样返回。
     全程在临时目录内完成,不建 DatasetVersion、不写 DB。dj-process 失败抛
     EngineError(由连接器转 IngestError,诚实失败不伪成功)。
+
+    已知缺口(fail-loud 记录,非静默):此路径不带 job_id,不走 build_config/
+    _run_dj 的 llm_snapshot 快照机制,也不经 /llm-proxy/{job_id} 计量——采集期
+    内联过滤若用到 needs_api 算子,其 LLM 调用不计量、不可复现锁定端点。
     """
     if not operators or not records:
         return records, ""
@@ -737,6 +752,7 @@ async def run_process_job(
     media_keys: dict[str, str] | None = None,
     target_members: list[str] | None = None,
     member_configs: list[dict[str, Any]] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """对输入版本的指定成员跑算子流水线,产出新版本(staging 两阶段执行)。
 
@@ -757,6 +773,7 @@ async def run_process_job(
     无成员表记录的版本(construct/push 等路径产出)合成单一伪成员 'data' 走同一
     流程,产出版本自此拥有真实成员行。
     并发信号量由调用方(job_runner)持有,此处不获取(asyncio.Semaphore 非重入)。
+    llm_snapshot(可复现凭证):透传给 build_config/_run_dj,None 时行为不变。
     返回 (新版本, 生成的 yaml 文本, 运行日志路径)。失败抛 EngineError。
     """
     # manifest 媒体集不落 dataset_version_tables(见 landing.land_media_manifest),
@@ -779,6 +796,7 @@ async def run_process_job(
             text_keys=text_keys,
             use_ray=use_ray,
             media_keys=media_keys,
+            llm_snapshot=llm_snapshot,
         )
 
     # 1. 查询输入版本的成员;无成员(早于回填迁移 / construct·push 等路径产出)
@@ -868,6 +886,7 @@ async def run_process_job(
                 text_keys=member_text_keys,
                 executor_type="ray" if use_ray else None,
                 media_keys=None,
+                llm_snapshot=llm_snapshot,
             )
             yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
             yaml_path.write_text(yaml_content, encoding="utf-8")
@@ -875,7 +894,9 @@ async def run_process_job(
 
             # 信号量由 job_runner 持有;子进程以 job_id 注册,POST /jobs/{id}/stop
             # 的 terminate_job(job_id) 才能命中(成员串行执行,同刻至多一个进程)
-            code, log = await _run_dj(yaml_path, job_id=job_id, cwd=staging)
+            code, log = await _run_dj(
+                yaml_path, job_id=job_id, cwd=staging, llm_snapshot=llm_snapshot
+            )
 
             operator_names = [op["name"] for op in member_operators]
             all_logs.append(
@@ -1028,12 +1049,14 @@ async def _run_manifest_job(
     text_keys: list[str] | None = None,
     use_ray: bool = False,
     media_keys: dict[str, str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """manifest(媒体)版本加工:整版本单成员,物化清单+媒体 → DJ → 产物回传 MinIO。
 
     媒体文件与清单必须同目录(DJ rel2abs 以 jsonl 所在目录为锚),由
     materialized_version 的临时目录保证;产出经 persist_manifest_output 自包含化。
     非 manifest 版本一律走 run_process_job 的 staging 成员级流程,不再进此函数。
+    llm_snapshot(可复现凭证):透传给 build_config/_run_dj,None 时行为不变。
     """
     dataset_id = input_version.dataset_id
     max_vno = await session.scalar(
@@ -1064,12 +1087,13 @@ async def _run_manifest_job(
             text_keys=text_keys,
             executor_type="ray" if use_ray else None,
             media_keys=media_keys,
+            llm_snapshot=llm_snapshot,
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
 
         # 并发信号量由调用方(job_runner)持有;此处只负责跑子进程(可被 terminate_job 停止)
-        code, log = await _run_dj(yaml_path, job_id=job_id)
+        code, log = await _run_dj(yaml_path, job_id=job_id, llm_snapshot=llm_snapshot)
 
         # 产物里的媒体引用指向物化临时目录(用完即清),趁临时文件还在,
         # 把媒体回传平台 MinIO、清单改写为对象引用 → 产物仍是自包含的 manifest 版本。

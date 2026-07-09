@@ -46,6 +46,36 @@ def get_active_llm_config() -> ResolvedLLMConfig:
     )
 
 
+def snapshot_active_llm_config() -> dict[str, str | None] | None:
+    """把当前活跃 LLM 配置的 model/base_url 固化成快照(供 Job.spec 落库)。
+
+    刻意不含 api_key——快照要随 Job.spec 落 JSONB 明文存库,泄漏凭据不可接受;
+    key 恒在使用时从当前活跃配置现取(见 resolve_llm_config)。无激活配置
+    (``_active`` 缓存为空,纯 env 回退)时返回 None——没有真正配置过 LLM 就
+    不锁定一个无意义的快照,交由 resolve_llm_config(None) 走现取语义。
+    """
+    if _active is None:
+        return None
+    return {"model": _active.model, "base_url": _active.base_url}
+
+
+def resolve_llm_config(snapshot: dict[str, str | None] | None) -> ResolvedLLMConfig:
+    """按快照解析出执行期实际使用的 LLM 配置。
+
+    snapshot 为 None:完全等价 get_active_llm_config()(老任务 / 未采集快照场景,
+    零行为变化)。snapshot 非 None:model/base_url 取快照值(锁定复现口径),
+    api_key 恒从当前活跃配置现取(密钥永不落 spec,轮换后旧任务重跑仍能用新 key)。
+    """
+    if snapshot is None:
+        return get_active_llm_config()
+    current = get_active_llm_config()
+    return ResolvedLLMConfig(
+        base_url=snapshot.get("base_url"),
+        api_key=current.api_key,
+        model=snapshot.get("model") or current.model,
+    )
+
+
 def set_active_cache(cfg: ResolvedLLMConfig | None) -> None:
     """写入活跃缓存（激活 / 停用时调用）。"""
     global _active

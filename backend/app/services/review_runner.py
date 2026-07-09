@@ -161,18 +161,20 @@ async def run_review(
     version: DatasetVersion,
     config: dict[str, Any],
     target_members: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> DatasetVersion:
     """对被审版本跑内容审核 → 写命中 + 产出打标/净化版本 + 回写报告。
 
     多表版本逐成员审核(target_members 圈定范围,缺省全部;未被审成员原样
     结转,产出版本保持完整成员集,与 quality/engine 的多成员语义一致);
     无成员的旧版本走单文件路径。
+    llm_snapshot(可复现凭证):透传给 get_ai_provider,None 时行为不变。
     成功返回产出版本;数据文件缺失/成员不存在抛 ReviewError(上层置 job failed)。
     """
     members = await _get_version_members(session, version.id)
     if not members:
         return await _run_review_legacy(
-            session, job=job, version=version, config=config
+            session, job=job, version=version, config=config, llm_snapshot=llm_snapshot
         )
 
     if target_members:
@@ -183,7 +185,7 @@ async def run_review(
         members_to_process = members
     audited_all = len(members_to_process) == len(members)
 
-    provider = get_ai_provider(settings)
+    provider = get_ai_provider(settings, llm_snapshot)
     dataset_id = version.dataset_id
     new_vno = await _next_version_no(session, dataset_id)
 
@@ -331,6 +333,7 @@ async def _run_review_legacy(
     job: Job,
     version: DatasetVersion,
     config: dict[str, Any],
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> DatasetVersion:
     """旧单文件版本路径:materialized_version + 本地 data.jsonl 产出(原逻辑)。
 
@@ -342,7 +345,7 @@ async def _run_review_legacy(
         if not src_path.exists():
             raise ReviewError(f"被审版本数据文件不存在:{version.storage_uri}")
         rows = _read_jsonl(src_path)
-    provider = get_ai_provider(settings)
+    provider = get_ai_provider(settings, llm_snapshot)
 
     findings, tagged_rows, report = await scan_version(
         rows, config, provider=provider

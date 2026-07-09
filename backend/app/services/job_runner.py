@@ -41,6 +41,7 @@ from app.services.engine import EngineError, run_process_job
 from app.services.export_delivery import ExportError, run_export_job
 from app.services.external_store import ExternalStoreError
 from app.services.judge_runner import JudgeError, run_judge
+from app.services.llm_config import snapshot_active_llm_config
 from app.services.make import run_make_job
 from app.services.quality import QualityError, run_quality_job
 from app.services.review_runner import ReviewError, run_review
@@ -248,7 +249,15 @@ async def _run_job(job_id: str) -> None:
                 job.dj_version = get_dj_version()
                 job.image_tag = settings.image_tag
                 job.executor_type = "ray" if _caps.ray else "single"
+                # 可复现凭证:LLM 端点/模型固化进 spec(判据用「键不存在」而非
+                # 值空——None 也是要锁定的语义,老任务重跑一次即回填)。
+                if "llm_snapshot" not in (job.spec or {}):
+                    job.spec = {
+                        **(job.spec or {}),
+                        "llm_snapshot": snapshot_active_llm_config(),
+                    }
                 await session.commit()
+                llm_snapshot = (job.spec or {}).get("llm_snapshot")
 
                 # 统一提取配置：优先 member_configs，回退到 operators+target_members
                 member_configs_arg: list[dict[str, Any]] | None = None
@@ -276,6 +285,7 @@ async def _run_job(job_id: str) -> None:
                         target_members=target_members_arg,
                         output_dataset_id=body.output_dataset_id,
                         text_keys=getattr(body, "text_keys", None),
+                        llm_snapshot=llm_snapshot,
                     )
                 elif job.type == "synthesis":
                     _v, yaml_text, log_path, _report = await run_make_job(
@@ -288,6 +298,7 @@ async def _run_job(job_id: str) -> None:
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                         text_keys=getattr(body, "text_keys", None),
+                        llm_snapshot=llm_snapshot,
                     )
                 elif job.type == "augmentation":
                     _v, yaml_text, log_path, _report = await run_augment_job(
@@ -300,6 +311,7 @@ async def _run_job(job_id: str) -> None:
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                         text_keys=getattr(body, "text_keys", None),
+                        llm_snapshot=llm_snapshot,
                     )
                 elif job.type == "trainset":
                     _v, yaml_text, log_path, _report = await run_trainset_job(
@@ -312,6 +324,7 @@ async def _run_job(job_id: str) -> None:
                         goal=body.goal,
                         output_dataset_id=body.output_dataset_id,
                         text_keys=getattr(body, "text_keys", None),
+                        llm_snapshot=llm_snapshot,
                     )
                 elif job.type == "quality":
                     _version, yaml_text, log_path = await run_quality_job(
@@ -322,6 +335,7 @@ async def _run_job(job_id: str) -> None:
                         member_configs=member_configs_arg,
                         target_members=target_members_arg,
                         text_keys=getattr(body, "text_keys", None),
+                        llm_snapshot=llm_snapshot,
                     )
                 elif job.type == "construct":
                     # 构造层:确定性列映射 → 训练 schema,无 operators
@@ -340,6 +354,7 @@ async def _run_job(job_id: str) -> None:
                         job=job,
                         version=input_version,
                         config=body.config.model_dump(),
+                        llm_snapshot=llm_snapshot,
                     )
                 elif job.type == "export":
                     # 交付:治理后版本 → 训练三件套落 S3(不产新版本)
@@ -357,6 +372,7 @@ async def _run_job(job_id: str) -> None:
                         version=input_version,
                         config=body.config.model_dump(by_alias=True),
                         target_members=target_members_arg,
+                        llm_snapshot=llm_snapshot,
                     )
                 else:  # process / clean
                     # process/clean 已支持 member_configs，使用统一提取的配置
@@ -374,6 +390,7 @@ async def _run_job(job_id: str) -> None:
                         },
                         target_members=target_members_arg,
                         member_configs=member_configs_arg,
+                        llm_snapshot=llm_snapshot,
                     )
             job.state = "success"
             job.progress = 100

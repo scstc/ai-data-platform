@@ -115,6 +115,7 @@ async def run_quality_job(
     member_configs: list[dict[str, Any]] | None = None,
     target_members: list[str] | None = None,
     text_keys: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """质量评估任务:对输入版本的指定成员运行质量评估算子,不产新版本,
     stats_uri 回写输入版本对应成员。
@@ -122,6 +123,9 @@ async def run_quality_job(
     operators: 统一应用到所有成员的算子列表（旧版兼容）
     member_configs: 新版成员独立配置，格式 [{member_name, operators, text_keys?}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
+    llm_snapshot(可复现凭证):透传给 build_config,None 时行为不变(dj-analyze
+    子进程本就不经 _subprocess_env 注入 LLM 环境,只影响 needs_api 算子的
+    api_model 参数注入)。
     返回 (输入版本, 生成的 yaml 文本, 运行日志路径)。失败抛 QualityError。
     """
     # 1. 查询版本成员
@@ -134,6 +138,7 @@ async def run_quality_job(
             job_id=job_id,
             input_version=input_version,
             operators=operators,
+            llm_snapshot=llm_snapshot,
         )
 
     # 2. 确定处理模式（复制 engine.py 的逻辑）
@@ -202,6 +207,7 @@ async def run_quality_job(
             operators=member_operators,
             text_key=detected_key,
             text_keys=member_text_keys,
+            llm_snapshot=llm_snapshot,
         )
         # 固定 work_dir + job_id：work_dir 已以 job_id 结尾,DJ 不再追加,
         # 分析产物稳定落在 member_work_dir/analysis/(与 stats_path 同级)。
@@ -253,6 +259,7 @@ async def _run_quality_job_legacy(
     input_version: DatasetVersion,
     operators: list[dict[str, Any]] | None = None,
     text_keys: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str]:
     """旧版单文件质量评估逻辑（无成员表的版本）。"""
     if not operators:
@@ -281,6 +288,7 @@ async def _run_quality_job_legacy(
             operators=operators,
             text_key=detected_key,
             text_keys=text_keys,
+            llm_snapshot=llm_snapshot,
         )
         cfg["work_dir"] = out_dir.as_posix()
         cfg["job_id"] = job_id

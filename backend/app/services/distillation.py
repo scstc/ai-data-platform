@@ -45,12 +45,14 @@ async def run_distillation_job(
     target_members: list[str] | None = None,
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
     """对输入版本跑蒸馏算子链 → 写回 dataset(output_dataset_id 或 input 同 dataset)新版本。
 
     operators: 统一应用到所有成员的算子列表（旧版兼容）
     member_configs: 新版成员独立配置，格式 [{member_name, operators, text_keys?}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
+    llm_snapshot(可复现凭证):透传给 build_config/_run_dj,None 时行为不变。
     返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
     """
     dataset_id = output_dataset_id or input_version.dataset_id
@@ -72,6 +74,7 @@ async def run_distillation_job(
             operators=operators,
             output_dataset_id=output_dataset_id,
             text_keys=text_keys,
+            llm_snapshot=llm_snapshot,
         )
 
     # 蒸馏不支持 manifest 输入
@@ -167,6 +170,7 @@ async def run_distillation_job(
             operators=member_operators,
             text_key=detected_key,
             text_keys=member_text_keys,
+            llm_snapshot=llm_snapshot,
         )
         yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_content, encoding="utf-8")
@@ -184,7 +188,11 @@ async def run_distillation_job(
         total_input_count += member_input_count
 
         # 运行 dj-process
-        code, log = await _run_dj(yaml_path, job_id=f"{job_id}-{member.table_name}")
+        code, log = await _run_dj(
+            yaml_path,
+            job_id=f"{job_id}-{member.table_name}",
+            llm_snapshot=llm_snapshot,
+        )
 
         operator_names = [op["name"] for op in member_operators]
         all_logs.append(
@@ -316,6 +324,7 @@ async def _run_distillation_job_legacy(
     operators: list[dict[str, Any]] | None = None,
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str, DistillationReport]:
     """旧版单文件蒸馏逻辑（无成员表的版本）。"""
     if not operators:
@@ -351,6 +360,7 @@ async def _run_distillation_job_legacy(
             operators=operators,
             text_key=detected_key,
             text_keys=text_keys,
+            llm_snapshot=llm_snapshot,
         )
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
@@ -358,7 +368,7 @@ async def _run_distillation_job_legacy(
         input_count = sum(
             1 for line in Path(input_path).open(encoding="utf-8") if line.strip()
         )
-        code, log = await _run_dj(yaml_path, job_id=job_id)
+        code, log = await _run_dj(yaml_path, job_id=job_id, llm_snapshot=llm_snapshot)
     log_path.write_text(log, encoding="utf-8")
 
     if code != 0 or not out_path.exists():

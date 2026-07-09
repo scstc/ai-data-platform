@@ -43,12 +43,14 @@ async def run_trainset_job(
     goal: TrainsetGoal,
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str, TrainsetReport]:
     """对输入版本跑数据合成算子链 → 写回 dataset 新版本。
 
     member_configs: 新版成员独立配置，格式 [{member_name, operators}, ...]
     target_members: 要处理的成员名列表；None=处理所有成员
     goal: 全局生成目标参数（不按成员区分）
+    llm_snapshot(可复现凭证):透传给 build_config/_run_dj,None 时行为不变。
     产物 origin='synthetic',返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
     """
     dataset_id = output_dataset_id or input_version.dataset_id
@@ -71,6 +73,7 @@ async def run_trainset_job(
             goal=goal,
             output_dataset_id=output_dataset_id,
             text_keys=text_keys,
+            llm_snapshot=llm_snapshot,
         )
 
     # 2. 确定处理模式
@@ -144,6 +147,7 @@ async def run_trainset_job(
             input_path=str(input_path),
             output_path=str(output_path),
             operators=member_operators,
+            llm_snapshot=llm_snapshot,
         )
         yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_content, encoding="utf-8")
@@ -161,7 +165,11 @@ async def run_trainset_job(
         total_input_count += member_input_count
 
         # 运行 dj-process
-        code, log = await _run_dj(yaml_path, job_id=f"{job_id}-{member.table_name}")
+        code, log = await _run_dj(
+            yaml_path,
+            job_id=f"{job_id}-{member.table_name}",
+            llm_snapshot=llm_snapshot,
+        )
 
         operator_names = [op["name"] for op in member_operators]
         all_logs.append(
@@ -294,6 +302,7 @@ async def _run_trainset_job_legacy(
     goal: TrainsetGoal,
     output_dataset_id: str | None = None,
     text_keys: list[str] | None = None,
+    llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str, TrainsetReport]:
     """旧版单文件生成逻辑（无成员表的版本）。"""
     if not operators:
