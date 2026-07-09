@@ -1,9 +1,12 @@
-// 数据血缘:数据集版本管理(左)+ 血缘关系图(右,数据源→湖快照→版本↔任务全链路 DAG)。
-// 血缘端点 GET /api/v1/datasets/{id}/lineage 返回 nodes+edges;用 ReactFlow(@xyflow/react)
-// 渲染 + dagre 算上→下树形布局(rankdir=TB),节点复用 antd 卡片,自带平移/缩放/自适应。
-// 节点四层:datasource(数据源)→ lake_snapshot(湖快照)→ version(数据集版本)↔ job(任务);
-// 支持 ?datasetId= 直达(数据集详情/数据湖详情"查看血缘"入口跳转)。
-// 多表版本:version 节点展示成员表清单及各自湖溯源;job 节点按成员分组展示算子链。
+// 数据血缘:全景森林视图(治理整改 P2)。默认不强制先选数据集——进页即渲染全局
+// 血缘森林(数据源→湖快照→数据集版本→加工任务),顶部按 湖/类型/时间 过滤;
+// 点任意节点卡右上角「聚焦」小图标,换成以该节点为根的下钻视图(returns 全景入口)。
+// 渲染沿用原实现:ReactFlow(@xyflow/react)+ dagre 布局(rankdir=TB),节点复用
+// antd 卡片,自带平移/缩放/自适应。节点五类:datasource/lake_snapshot/version/job
+// (全景森林覆盖)+ member(仅版本卡"N 成员" Tag 本地展开产生,不在全景播种范围)。
+// 数据集聚焦(?datasetId= 或顶部「跳转到数据集」)走独立的 GET /datasets/{id}/lineage
+// (多版本 DAG),其余聚焦(source/lake_snapshot/dataset_version/job/member)走
+// entity-agnostic 的 GET /lineage?kind=。
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useSearchParams } from '@umijs/max';
 import {
@@ -18,25 +21,30 @@ import {
   ReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import { AimOutlined } from '@ant-design/icons';
 import dagre from '@dagrejs/dagre';
 import {
+  Alert,
+  Button,
   Card,
-  Col,
+  DatePicker,
   Empty,
-  Row,
+  Select,
   Space,
   Spin,
   Tag,
   Tooltip,
   Typography,
 } from 'antd';
+import type { Dayjs } from 'dayjs';
 import { useEffect, useMemo, useState } from 'react';
 import {
   getDataset,
   getDatasetLineage,
-  listDatasets,
+  getLineageByAnchor,
+  getPanoramaLineage,
+  listDataLakes,
 } from '@/services/data-platform';
-import { formatDateTime } from '@/utils/format';
 import DatasetPicker from './components/DatasetPicker';
 import { JobOps } from './components/OperatorChips';
 
@@ -68,6 +76,11 @@ const KIND_META: Record<string, { label: string; color: string }> = {
   job: { label: '加工任务', color: '#fa8c16' },
   member: { label: '成员', color: '#9254de' },
 };
+
+// 全景过滤栏「类型」多选项:member 仅本地展开产生,全景播种不覆盖,不作为过滤项。
+const KIND_FILTER_OPTIONS = Object.entries(KIND_META)
+  .filter(([k]) => k !== 'member')
+  .map(([value, m]) => ({ value, label: m.label }));
 
 // 湖/源层边的中文标签(input/output 版本↔任务边保持无标签,与旧版一致)
 const EDGE_LABEL: Record<string, string> = {
@@ -104,10 +117,44 @@ const scanTag = (v?: string) =>
       ? { c: 'red', t: '安全未过' }
       : { c: 'default', t: '未扫描' };
 
+/** 节点卡右上角「聚焦」小图标:点任意节点下钻的统一入口,stopPropagation 避免
+ *  与卡片体既有的跳转导航(版本→数据集详情、快照→湖详情)冲突。 */
+const FocusButton: React.FC<{ onFocus?: () => void }> = ({ onFocus }) => {
+  if (!onFocus) return null;
+  return (
+    <Tooltip title="聚焦此节点(下钻查看以它为根的血缘)">
+      <Button
+        type="text"
+        size="small"
+        icon={<AimOutlined style={{ fontSize: 12 }} />}
+        onClick={(e) => {
+          e.stopPropagation();
+          onFocus();
+        }}
+        style={{
+          position: 'absolute',
+          top: 2,
+          right: 2,
+          width: 20,
+          height: 20,
+          minWidth: 20,
+          padding: 0,
+          lineHeight: '20px',
+          zIndex: 1,
+        }}
+      />
+    </Tooltip>
+  );
+};
+
 /** 数据源节点卡(链路最上游:外部数据源连接) */
-const DatasourceNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
+const DatasourceNode: React.FC<{
+  n: DataPlatform.LineageNode;
+  onFocus?: () => void;
+}> = ({ n, onFocus }) => (
   <div
     style={{
+      position: 'relative',
       height: '100%',
       padding: 10,
       borderRadius: 8,
@@ -121,6 +168,7 @@ const DatasourceNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
       overflow: 'hidden',
     }}
   >
+    <FocusButton onFocus={onFocus} />
     <Tag color="blue" style={{ margin: 0, width: 'fit-content' }}>
       数据源
     </Tag>
@@ -137,10 +185,14 @@ const DatasourceNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
 );
 
 /** 湖快照节点卡(湖对象@第 n 版 + 溯源摘要);点击跳数据湖详情 */
-const SnapshotNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
+const SnapshotNode: React.FC<{
+  n: DataPlatform.LineageNode;
+  onFocus?: () => void;
+}> = ({ n, onFocus }) => (
   <div
     onClick={() => n.lakeId && history.push(`/data-lakes/${n.lakeId}`)}
     style={{
+      position: 'relative',
       height: '100%',
       padding: 10,
       borderRadius: 8,
@@ -154,6 +206,7 @@ const SnapshotNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
       overflow: 'hidden',
     }}
   >
+    <FocusButton onFocus={onFocus} />
     <Tooltip title={`${n.name ?? ''}(湖 ${n.lakeName ?? n.lakeId ?? '-'})`}>
       <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
         {n.name}
@@ -183,11 +236,15 @@ const SnapshotNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
 );
 
 /** 任务节点卡(虚线框,与版本卡区分) */
-const JobNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
+const JobNode: React.FC<{
+  n: DataPlatform.LineageNode;
+  onFocus?: () => void;
+}> = ({ n, onFocus }) => {
   const st = STATE_TEXT[n.state ?? ''] ?? { t: n.state ?? '-', c: 'default' };
   return (
     <div
       style={{
+        position: 'relative',
         height: '100%',
         padding: 10,
         borderRadius: 8,
@@ -201,6 +258,7 @@ const JobNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => {
         overflow: 'hidden',
       }}
     >
+      <FocusButton onFocus={onFocus} />
       <Tag color="purple" style={{ margin: 0, width: 'fit-content' }}>
         {JOB_TYPE_LABEL[n.jobType ?? ''] ?? n.jobType ?? '任务'}
       </Tag>
@@ -223,7 +281,8 @@ const VersionNode: React.FC<{
   n: DataPlatform.LineageNode;
   expanded?: boolean;
   onToggleMembers?: () => void;
-}> = ({ n, expanded, onToggleMembers }) => {
+  onFocus?: () => void;
+}> = ({ n, expanded, onToggleMembers, onFocus }) => {
   const sc = scanTag(n.scanVerdict);
   return (
     <div
@@ -231,6 +290,7 @@ const VersionNode: React.FC<{
         n.datasetId && history.push(`/datasets/${n.datasetId}?version=${n.id}`)
       }
       style={{
+        position: 'relative',
         height: '100%',
         padding: 10,
         borderRadius: 8,
@@ -249,6 +309,7 @@ const VersionNode: React.FC<{
         overflow: 'hidden',
       }}
     >
+      <FocusButton onFocus={onFocus} />
       <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
         {n.isOriginal ? '🌱 ' : ''}
         {n.datasetName}
@@ -321,9 +382,13 @@ const VersionNode: React.FC<{
 };
 
 /** 成员节点卡(版本内某个表/文件的一等节点,由版本卡"N 成员" Tag 展开产生) */
-const MemberNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
+const MemberNode: React.FC<{
+  n: DataPlatform.LineageNode;
+  onFocus?: () => void;
+}> = ({ n, onFocus }) => (
   <div
     style={{
+      position: 'relative',
       height: '100%',
       padding: 10,
       borderRadius: 8,
@@ -337,6 +402,7 @@ const MemberNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
       overflow: 'hidden',
     }}
   >
+    <FocusButton onFocus={onFocus} />
     <Tag color="purple" style={{ margin: 0, width: 'fit-content' }}>
       成员
     </Tag>
@@ -360,10 +426,11 @@ const MemberNode: React.FC<{ n: DataPlatform.LineageNode }> = ({ n }) => (
  *  没有 Handle ReactFlow 建不出边(error #008);隐藏(opacity:0)保持卡片整洁。 */
 const HANDLE_STYLE = { opacity: 0 } as const;
 // version 节点的 data 额外挂 expanded/onToggleMembers(见 LineageGraph 的 rfNodes 构造),
-// 驱动"N 成员" Tag 的展开/折叠交互。
+// 驱动"N 成员" Tag 的展开/折叠交互;所有节点类型均挂 onFocus,驱动右上角聚焦按钮。
 type VersionNodeData = DataPlatform.LineageNode & {
   expanded?: boolean;
   onToggleMembers?: () => void;
+  onFocus?: () => void;
 };
 const RFVersionNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
@@ -374,39 +441,52 @@ const RFVersionNode = ({ data }: NodeProps) => {
         n={d}
         expanded={d.expanded}
         onToggleMembers={d.onToggleMembers}
+        onFocus={d.onFocus}
       />
       <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
     </>
   );
 };
-const RFJobNode = ({ data }: NodeProps) => (
-  <>
-    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
-    <JobNode n={data as DataPlatform.LineageNode} />
-    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
-  </>
-);
-const RFSnapshotNode = ({ data }: NodeProps) => (
-  <>
-    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
-    <SnapshotNode n={data as DataPlatform.LineageNode} />
-    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
-  </>
-);
-const RFDatasourceNode = ({ data }: NodeProps) => (
-  <>
-    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
-    <DatasourceNode n={data as DataPlatform.LineageNode} />
-    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
-  </>
-);
-const RFMemberNode = ({ data }: NodeProps) => (
-  <>
-    <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
-    <MemberNode n={data as DataPlatform.LineageNode} />
-    <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
-  </>
-);
+const RFJobNode = ({ data }: NodeProps) => {
+  const d = data as VersionNodeData;
+  return (
+    <>
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <JobNode n={d} onFocus={d.onFocus} />
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+    </>
+  );
+};
+const RFSnapshotNode = ({ data }: NodeProps) => {
+  const d = data as VersionNodeData;
+  return (
+    <>
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <SnapshotNode n={d} onFocus={d.onFocus} />
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+    </>
+  );
+};
+const RFDatasourceNode = ({ data }: NodeProps) => {
+  const d = data as VersionNodeData;
+  return (
+    <>
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <DatasourceNode n={d} onFocus={d.onFocus} />
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+    </>
+  );
+};
+const RFMemberNode = ({ data }: NodeProps) => {
+  const d = data as VersionNodeData;
+  return (
+    <>
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <MemberNode n={d} onFocus={d.onFocus} />
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+    </>
+  );
+};
 
 /** 版本节点 id → 展开为 member 子节点后新增的节点/边(治理整改 P1-②阶段4):
  *  纯本地渲染,复用 version 节点已带的 members[] payload,不额外请求接口。
@@ -457,9 +537,10 @@ const expandMembers = (
 };
 
 /** 血缘图:ReactFlow + dagre(上→下树形布局 rankdir=TB),节点为 antd 卡片,自带平移/缩放/自适应 */
-const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
-  graph,
-}) => {
+const LineageGraph: React.FC<{
+  graph?: DataPlatform.LineageGraph;
+  onFocusNode?: (n: DataPlatform.LineageNode) => void;
+}> = ({ graph, onFocusNode }) => {
   const nodeTypes = useMemo(
     () => ({
       version: RFVersionNode,
@@ -487,7 +568,7 @@ const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
     [graph, expanded],
   );
   if (!graph || graph.nodes.length === 0 || !effectiveGraph) {
-    return <Empty description="无血缘数据（该数据集无版本或无加工任务）" />;
+    return <Empty description="无血缘数据（当前过滤范围内没有节点）" />;
   }
 
   // dagre 算上→下布局,产出 ReactFlow 节点(含 position)。dagre 的 x/y 是节点中心,
@@ -516,6 +597,9 @@ const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
     if (n.kind === 'version') {
       data.expanded = expanded.has(n.id);
       data.onToggleMembers = () => toggleMembers(n.id);
+    }
+    if (onFocusNode) {
+      data.onFocus = () => onFocusNode(n);
     }
     return {
       id: n.id,
@@ -557,178 +641,282 @@ const LineageGraph: React.FC<{ graph?: DataPlatform.LineageGraph }> = ({
   );
 };
 
-const Lineage: React.FC = () => {
-  // 支持 ?datasetId= 直达(数据集详情/数据湖详情"查看血缘"入口带参跳转)
-  const [searchParams] = useSearchParams();
-  const [datasetId, setDatasetId] = useState<string | undefined>(
-    () => searchParams.get('datasetId') ?? undefined,
-  );
-  const [detail, setDetail] = useState<DataPlatform.DatasetDetail>();
-  const [graph, setGraph] = useState<DataPlatform.LineageGraph>();
-  const [loading, setLoading] = useState(false);
+// 聚焦锚点:版本/任务/快照/数据源/成员用 entity-agnostic GET /lineage?kind=;
+// dataset 用专门的 GET /datasets/{id}/lineage(多版本 DAG,?datasetId= 直达入口
+// 与顶部「跳转到数据集」共用此分支,保留原有整数据集视角能力)。
+type FocusAnchor =
+  | { kind: 'dataset_version'; id: string }
+  | { kind: 'job'; id: string }
+  | { kind: 'lake_snapshot'; id: string }
+  | { kind: 'source'; id: string }
+  | { kind: 'member'; versionId: string; tableName: string }
+  | { kind: 'dataset'; id: string };
 
-  // 首次进入自动选第一个数据集(轻量拉一页 1 条,避免旧版一次拉 200 条);
-  // URL 已带 datasetId 时 cur 非空,不会被覆盖。
+/** 节点 → 聚焦下钻展示用的简短标签 */
+const nodeLabel = (n?: DataPlatform.LineageNode): string => {
+  if (!n) return '';
+  switch (n.kind) {
+    case 'version':
+      return `${n.datasetName ?? ''}${n.versionLabel ? ` · ${n.versionLabel}` : ''}`;
+    case 'job':
+      return n.name ?? '任务';
+    case 'lake_snapshot':
+      return `${n.name ?? '快照'}${n.versionNo != null ? ` @v${n.versionNo}` : ''}`;
+    case 'datasource':
+      return n.name ?? '数据源';
+    case 'member':
+      return n.tableName ?? '成员';
+    default:
+      return n.name ?? n.id;
+  }
+};
+
+const Lineage: React.FC = () => {
+  // ?datasetId=(数据集/数据湖详情"查看血缘"旧入口)直接进入数据集聚焦态;
+  // ?lakeId=(数据湖详情"查看血缘"新入口)预填全景态的湖过滤。
+  const [searchParams] = useSearchParams();
+  const [filterLakeId, setFilterLakeId] = useState<string | undefined>(
+    () => searchParams.get('lakeId') ?? undefined,
+  );
+  const [filterKinds, setFilterKinds] = useState<string[]>([]);
+  const [sinceDate, setSinceDate] = useState<Dayjs | null>(null);
+  const [focusAnchor, setFocusAnchor] = useState<FocusAnchor | undefined>(
+    () => {
+      const did = searchParams.get('datasetId');
+      return did ? { kind: 'dataset', id: did } : undefined;
+    },
+  );
+  const [focusLabel, setFocusLabel] = useState('');
+  const [panoramaGraph, setPanoramaGraph] =
+    useState<DataPlatform.LineageGraph>();
+  const [focusGraph, setFocusGraph] = useState<DataPlatform.LineageGraph>();
+  const [loading, setLoading] = useState(false);
+  const [lakeOptions, setLakeOptions] = useState<
+    { value: string; label: string }[]
+  >([]);
+
+  // 湖过滤下拉的选项:一次性拉够(治理场景湖数量可控,量级失控需改造为异步搜索,
+  // 暂未遇到不预先做)。
   useEffect(() => {
-    listDatasets({ current: 1, pageSize: 1 })
-      .then((res) => {
-        const first = res.data?.[0];
-        if (first) setDatasetId((cur) => cur ?? first.id);
-      })
+    listDataLakes({ pageSize: 200 })
+      .then((res) =>
+        setLakeOptions(
+          (res.data ?? []).map((l) => ({ value: l.id, label: l.name })),
+        ),
+      )
       .catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    if (!datasetId) return;
-    setLoading(true);
-    Promise.all([
-      getDataset(datasetId).catch(() => undefined),
-      getDatasetLineage(datasetId).catch(() => undefined),
-    ]).then(([d, g]) => {
-      setDetail(d?.data);
-      setGraph(g?.data);
-      setLoading(false);
-    });
-  }, [datasetId]);
+  const hasFocus = !!focusAnchor;
+  const sinceISO = sinceDate ? sinceDate.toISOString() : undefined;
 
-  // 版本管理卡要显示"经什么任务 + 算子":从血缘图的 job 节点按 id 取
-  const jobById = new Map<string, DataPlatform.LineageNode>(
-    (graph?.nodes ?? []).filter((n) => n.kind === 'job').map((n) => [n.id, n]),
-  );
+  // 全景态:按 湖/类型/时间 过滤拉一次;聚焦态下过滤栏禁用,不重复请求。
+  useEffect(() => {
+    if (hasFocus) return;
+    setLoading(true);
+    getPanoramaLineage({
+      lakeId: filterLakeId,
+      kinds: filterKinds.length ? filterKinds.join(',') : undefined,
+      since: sinceISO,
+    })
+      .then((res) => setPanoramaGraph(res.data))
+      .catch(() => setPanoramaGraph(undefined))
+      .finally(() => setLoading(false));
+  }, [hasFocus, filterLakeId, filterKinds, sinceISO]);
+
+  // 聚焦态:按 anchor 类型换对应的血缘查询。anchorKey 用值而非对象引用做依赖——
+  // 避免下方"取到真实名称后回填 focusLabel"触发的 setFocusAnchor 造成无限重取。
+  const anchorKey = !focusAnchor
+    ? undefined
+    : focusAnchor.kind === 'member'
+      ? `member:${focusAnchor.versionId}:${focusAnchor.tableName}`
+      : `${focusAnchor.kind}:${focusAnchor.id}`;
+
+  useEffect(() => {
+    if (!focusAnchor) {
+      setFocusGraph(undefined);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    const run = async () => {
+      if (focusAnchor.kind === 'dataset') {
+        const [d, g] = await Promise.all([
+          getDataset(focusAnchor.id).catch(() => undefined),
+          getDatasetLineage(focusAnchor.id).catch(() => undefined),
+        ]);
+        if (cancelled) return;
+        if (d?.data?.name) setFocusLabel(d.data.name);
+        setFocusGraph(g?.data);
+        return;
+      }
+      const params =
+        focusAnchor.kind === 'member'
+          ? {
+              kind: 'member' as const,
+              versionId: focusAnchor.versionId,
+              tableName: focusAnchor.tableName,
+            }
+          : focusAnchor.kind === 'job'
+            ? { kind: 'job' as const, jobId: focusAnchor.id }
+            : focusAnchor.kind === 'lake_snapshot'
+              ? { kind: 'lake_snapshot' as const, snapshotId: focusAnchor.id }
+              : focusAnchor.kind === 'source'
+                ? { kind: 'source' as const, sourceId: focusAnchor.id }
+                : {
+                    kind: 'dataset_version' as const,
+                    versionId: focusAnchor.id,
+                  };
+      const res = await getLineageByAnchor(params).catch(() => undefined);
+      if (cancelled) return;
+      setFocusGraph(res?.data);
+    };
+    run().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorKey]);
+
+  const focusOnNode = (n: DataPlatform.LineageNode) => {
+    setFocusLabel(nodeLabel(n));
+    if (n.kind === 'version') {
+      setFocusAnchor({ kind: 'dataset_version', id: n.id });
+    } else if (n.kind === 'job') {
+      setFocusAnchor({ kind: 'job', id: n.id });
+    } else if (n.kind === 'lake_snapshot') {
+      setFocusAnchor({ kind: 'lake_snapshot', id: n.id });
+    } else if (n.kind === 'datasource') {
+      setFocusAnchor({ kind: 'source', id: n.id });
+    } else if (n.kind === 'member' && n.versionId && n.tableName) {
+      setFocusAnchor({
+        kind: 'member',
+        versionId: n.versionId,
+        tableName: n.tableName,
+      });
+    }
+  };
 
   return (
-    <PageContainer
-      header={{ title: '数据血缘', breadcrumb: {} }}
-      content={
-        <Space size={8} align="center">
-          <Typography.Text type="secondary">数据集</Typography.Text>
-          <DatasetPicker value={datasetId} onChange={setDatasetId} />
+    <PageContainer header={{ title: '数据血缘', breadcrumb: {} }}>
+      <Card size="small" style={{ marginBottom: 12 }}>
+        <Space size={16} wrap>
+          <Space size={6}>
+            <Typography.Text type="secondary">数据湖</Typography.Text>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="全部"
+              style={{ width: 200 }}
+              options={lakeOptions}
+              value={filterLakeId}
+              onChange={setFilterLakeId}
+              disabled={hasFocus}
+            />
+          </Space>
+          <Space size={6}>
+            <Typography.Text type="secondary">类型</Typography.Text>
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder="全部"
+              style={{ minWidth: 260 }}
+              options={KIND_FILTER_OPTIONS}
+              value={filterKinds}
+              onChange={setFilterKinds}
+              disabled={hasFocus}
+            />
+          </Space>
+          <Space size={6}>
+            <Typography.Text type="secondary">起始时间</Typography.Text>
+            <DatePicker
+              showTime
+              placeholder="不限"
+              value={sinceDate}
+              onChange={setSinceDate}
+              disabled={hasFocus}
+            />
+          </Space>
+          <Space size={6}>
+            <Typography.Text type="secondary">跳转到数据集</Typography.Text>
+            <DatasetPicker
+              value={
+                focusAnchor?.kind === 'dataset' ? focusAnchor.id : undefined
+              }
+              onChange={(id) => {
+                setFocusLabel('');
+                setFocusAnchor({ kind: 'dataset', id });
+              }}
+            />
+          </Space>
+          {hasFocus && (
+            <Button onClick={() => setFocusAnchor(undefined)}>
+              ← 返回全景
+            </Button>
+          )}
         </Space>
-      }
-    >
-      <Row gutter={12}>
-        <Col xs={24} md={6}>
-          <Card
-            size="small"
-            title={`版本管理（${detail?.versions.length ?? 0}）`}
-            styles={{ body: { maxHeight: '70vh', overflow: 'auto' } }}
-          >
-            {(detail?.versions ?? []).map((v) => {
-              const sc = scanTag(v.scanVerdict);
-              const job = v.producedByJobId
-                ? jobById.get(v.producedByJobId)
-                : undefined;
-              return (
-                <div
-                  key={v.id}
-                  onClick={() =>
-                    history.push(`/datasets/${v.datasetId}?version=${v.id}`)
-                  }
+      </Card>
+
+      {hasFocus && (
+        <Typography.Text
+          type="secondary"
+          style={{ display: 'block', marginBottom: 12 }}
+        >
+          当前聚焦:{focusLabel || '加载中…'}
+        </Typography.Text>
+      )}
+
+      {!hasFocus && panoramaGraph?.truncated && (
+        <Alert
+          type="warning"
+          showIcon
+          closable
+          message={`血缘图过大已截断（共 ${
+            panoramaGraph.totalEstimated ?? '?'
+          } 节点），请用 湖/类型/时间 缩小范围`}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
+      <Card
+        size="small"
+        title={
+          hasFocus
+            ? '聚焦视图'
+            : '血缘全景森林（数据源 → 湖快照 → 数据集版本 → 加工任务）'
+        }
+        extra={
+          <Space size={8} wrap>
+            {Object.entries(KIND_META).map(([k, m]) => (
+              <Space key={k} size={4} align="center">
+                <span
                   style={{
-                    cursor: 'pointer',
-                    padding: '8px 10px',
-                    marginBottom: 8,
-                    borderRadius: 6,
-                    border: '1px solid var(--ant-color-border)',
-                    background:
-                      v.producedByJobId == null
-                        ? 'var(--ant-color-fill-quaternary)'
-                        : 'var(--ant-color-bg-container)',
+                    display: 'inline-block',
+                    width: 10,
+                    height: 10,
+                    borderRadius: 2,
+                    background: m.color,
                   }}
-                >
-                  <Typography.Text strong style={{ fontSize: 13 }}>
-                    {v.versionLabel}
-                  </Typography.Text>
-                  {v.producedByJobId == null && (
-                    <Tag color="green" style={{ marginInlineStart: 6 }}>
-                      原始
-                    </Tag>
-                  )}
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: 'var(--ant-color-text-secondary)',
-                    }}
-                  >
-                    {v.rows ?? '-'} 行 · {formatDateTime(v.createdAt)}
-                  </div>
-                  <Space size={4} wrap style={{ marginTop: 4 }}>
-                    {v.origin && v.origin !== 'managed' && (
-                      <Tag color="gold" style={{ margin: 0 }}>
-                        {v.origin}
-                      </Tag>
-                    )}
-                    <Tag color={sc.c as any} style={{ margin: 0 }}>
-                      {sc.t}
-                    </Tag>
-                    {v.publishStatus === 'published' && (
-                      <Tag color="blue" style={{ margin: 0 }}>
-                        已发布
-                      </Tag>
-                    )}
-                  </Space>
-                  {job && (
-                    <div
-                      style={{
-                        marginTop: 6,
-                        borderTop: '1px dashed var(--ant-color-border)',
-                        paddingTop: 6,
-                      }}
-                    >
-                      <Typography.Text
-                        type="secondary"
-                        style={{ fontSize: 11 }}
-                      >
-                        经{' '}
-                        {JOB_TYPE_LABEL[job.jobType ?? ''] ??
-                          job.jobType ??
-                          '任务'}
-                      </Typography.Text>
-                      <div style={{ marginTop: 4 }}>
-                        <JobOps n={job} />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {detail && detail.versions.length === 0 && (
-              <Empty description="无版本" />
-            )}
-          </Card>
-        </Col>
-        <Col xs={24} md={18}>
-          <Card
-            size="small"
-            title="血缘关系图（上 → 下：数据源 → 湖快照 → 版本 → 任务 → 产出版本）"
-            extra={
-              <Space size={8} wrap>
-                {Object.entries(KIND_META).map(([k, m]) => (
-                  <Space key={k} size={4} align="center">
-                    <span
-                      style={{
-                        display: 'inline-block',
-                        width: 10,
-                        height: 10,
-                        borderRadius: 2,
-                        background: m.color,
-                      }}
-                    />
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      {m.label}
-                    </Typography.Text>
-                  </Space>
-                ))}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {m.label}
+                </Typography.Text>
               </Space>
-            }
-            styles={{ body: { maxHeight: '70vh', overflow: 'auto' } }}
-          >
-            <Spin spinning={loading}>
-              <LineageGraph graph={graph} />
-            </Spin>
-          </Card>
-        </Col>
-      </Row>
+            ))}
+          </Space>
+        }
+        styles={{ body: { maxHeight: '74vh', overflow: 'auto' } }}
+      >
+        <Spin spinning={loading}>
+          <LineageGraph
+            graph={hasFocus ? focusGraph : panoramaGraph}
+            onFocusNode={focusOnNode}
+          />
+        </Spin>
+      </Card>
     </PageContainer>
   );
 };

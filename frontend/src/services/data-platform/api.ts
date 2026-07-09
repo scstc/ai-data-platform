@@ -787,19 +787,41 @@ export async function getDatasetLineage(
   );
 }
 
-/** 血缘图(实体无关 anchor):kind=job 取该任务节点 + 其完整输入链(不含下游消费者);
- * kind=member 取某个表成员节点 + 其上游湖快照/数据源链 GET /api/v1/lineage */
+/** 血缘图(实体无关 anchor,治理整改 P2 全景森林放开):kind=job 取该任务节点 + 其
+ * 完整输入链(不含下游消费者);kind=member 取某个表成员节点 + 其上游湖快照/数据源链;
+ * kind=source/lake_object/lake_snapshot/dataset_version 以对应节点为根做下钻聚焦
+ * GET /api/v1/lineage */
 export async function getLineageByAnchor(
   params: {
-    kind: 'job' | 'member';
+    kind: 'job' | 'member' | 'source' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
     jobId?: string;
     versionId?: string;
     tableName?: string;
+    sourceId?: string;
+    objectId?: string;
+    snapshotId?: string;
   },
   options?: { [key: string]: any },
 ) {
   return request<{ data: DataPlatform.LineageGraph; success: boolean }>(
     '/api/v1/lineage',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
+/** 全景森林血缘(治理整改 P2):不带 anchor,默认返回全局血缘森林(数据源→湖→集→任务),
+ * 数据血缘页默认展示态用此接口,不再强制先选数据集。`kinds` 逗号分隔节点类型白名单
+ * GET /api/v1/lineage/panorama */
+export async function getPanoramaLineage(
+  params?: {
+    lakeId?: string;
+    kinds?: string;
+    since?: string;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.LineageGraph; success: boolean }>(
+    '/api/v1/lineage/panorama',
     { method: 'GET', params, ...(options || {}) },
   );
 }

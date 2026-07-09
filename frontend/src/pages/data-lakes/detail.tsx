@@ -200,9 +200,12 @@ const DataLakeDetailPage: FC = () => {
       header={{
         title: meta.name,
         subTitle: <Tag color="blue">多源汇聚</Tag>,
-        // 湖对象可能被抽取到多个数据集,血缘页按数据集视角组织,故不带参跳转
+        // 血缘页默认全景森林 + 顶部湖过滤(治理整改 P2),带 lakeId 预填该过滤项
         extra: [
-          <Button key="lineage" onClick={() => history.push('/ops/lineage')}>
+          <Button
+            key="lineage"
+            onClick={() => history.push(`/ops/lineage?lakeId=${meta.id}`)}
+          >
             查看血缘
           </Button>,
           meta.myLevel === 'admin' ? (

@@ -1038,7 +1038,14 @@ declare namespace DataPlatform {
       | 'contains';
   };
 
-  type LineageGraph = { nodes: LineageNode[]; edges: LineageEdge[] };
+  type LineageGraph = {
+    nodes: LineageNode[];
+    edges: LineageEdge[];
+    /** 仅全景森林(GET /lineage/panorama)返回:节点数超内部上限被截断 */
+    truncated?: boolean;
+    /** 仅全景森林返回:截断前的真实节点总数 */
+    totalEstimated?: number;
+  };
 
   /** 外部 S3 桶内对象（列对象接口返回项，#18） */
   type S3Object = {
