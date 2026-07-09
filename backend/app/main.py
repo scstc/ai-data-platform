@@ -28,6 +28,7 @@ from app.api.v1 import (
     ingest_push,
     ingest_tasks,
     jobs,
+    lineage,
     llm_config,
     llm_proxy,
     make,
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(datasources.router, prefix="/api/v1")
     app.include_router(data_lakes.router, prefix="/api/v1")
     app.include_router(datasets.router, prefix="/api/v1")
+    app.include_router(lineage.router, prefix="/api/v1")
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(data_tasks.router, prefix="/api/v1")
     app.include_router(operators.router, prefix="/api/v1")

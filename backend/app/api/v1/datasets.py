@@ -10,10 +10,9 @@ import secrets
 import shutil
 import tempfile
 import zipfile
-from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import duckdb
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -27,14 +26,11 @@ from app.api.v1.categories import build_category_name_map
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.ids import uuid7_hex
-from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
 from app.models.dataset import Dataset
 from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
-from app.models.ingest_task import IngestTask
-from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.review_rule import ReviewRule
 from app.models.role import Role
@@ -93,6 +89,7 @@ from app.services.landing import (
     land_upload_raw,
     normalize_to_records,
 )
+from app.services.lineage_service import build_lineage
 from app.services.review import precheck_records, rules_to_config
 from app.services.semantic_registry import (
     SemanticValidationError,
@@ -784,13 +781,15 @@ async def upload_batch_as_dataset(
 @router.get("/datasets/{dataset_id}/lineage")
 async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
     """数据集血缘图(#11):以该数据集各版本为起点,BFS 上下游(可跨数据集)构建
-    版本↔任务 DAG,返回 nodes + edges 供前端分层渲染。深度上限防图过大。
+    版本↔任务 DAG,返回 nodes + edges 供前端分层渲染。
 
-    边:输入版本 --input--> 任务 --output--> 产出版本。
+    实现见 `lineage_service.build_lineage`(治理整改 P1-② 血缘服务化:原 BFS 主体
+    整体搬迁至此,本端点瘦身为 wrapper,响应形状与抽取前完全一致,回归见
+    `tests/test_lineage_lake.py`)。
     """
     starts = (
         await session.scalars(
-            select(DatasetVersion).where(DatasetVersion.dataset_id == dataset_id)
+            select(DatasetVersion.id).where(DatasetVersion.dataset_id == dataset_id)
         )
     ).all()
     if not starts:
@@ -798,436 +797,10 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             status_code=404,
             content={"success": False, "message": "数据集不存在或无版本"},
         )
-
-    MAX_DEPTH = 6
-    nodes: dict[str, dict[str, Any]] = {}
-    edges: list[dict[str, str]] = []
-    seen_edge: set[tuple[str, str]] = set()
-    seen_v: set[str] = set()
-    seen_j: set[str] = set()
-    ds_cache: dict[str, str] = {}
-
-    async def ds_name(did: str) -> str:
-        if did not in ds_cache:
-            d = await session.get(Dataset, did)
-            ds_cache[did] = d.name if d else did
-        return ds_cache[did]
-
-    def add_edge(a: str, b: str, kind: str) -> None:
-        if (a, b) not in seen_edge:
-            seen_edge.add((a, b))
-            edges.append({"from": a, "to": b, "kind": kind})
-
-    def job_node(job: Job) -> dict[str, Any]:
-        """任务节点:含其执行的算子链(name+params,从 job.spec 取)——供前端在版本/
-        任务卡上展示「经什么任务、跑了哪些算子及参数」。"""
-        spec = job.spec or {}
-        ops = [
-            {"name": o.get("name"), "params": o.get("params") or {}}
-            for o in (spec.get("operators") or [])
-            if isinstance(o, dict)
-        ]
-        # 成员级任务(member_configs):算子链嵌在各成员配置里,spec.operators 为空
-        # → 聚合各成员 operators(按算子名去重)展示,否则血缘图算子栏恒空。
-        if not ops and isinstance(spec.get("member_configs"), list):
-            seen_op: set[str] = set()
-            for mc in spec["member_configs"]:
-                if not isinstance(mc, dict):
-                    continue
-                for o in mc.get("operators") or []:
-                    if isinstance(o, dict) and o.get("name") not in seen_op:
-                        seen_op.add(o.get("name"))
-                        ops.append(
-                            {"name": o.get("name"), "params": o.get("params") or {}}
-                        )
-        # synthesis merge / construct 等:核心配置在 spec.goal → 伪算子("任务配置")。
-        if not ops and isinstance(spec.get("goal"), dict):
-            parts = {
-                k: v
-                for k, v in spec["goal"].items()
-                if isinstance(v, (str, int, float, bool))
-            }
-            if parts:
-                ops = [{"name": "任务配置", "params": parts}]
-        # review 等非算子任务:无 operators 但有 config → 把 config 原语字段作为
-        # 伪算子("审核配置")吐出,让版本卡能看到 LLM/PII/抽样等设置。
-        # 旧任务(spec 为空,早于 spec 存储特性)仍为空。
-        if not ops and isinstance(spec.get("config"), dict):
-            parts = {
-                k: v
-                for k, v in spec["config"].items()
-                if isinstance(v, (str, int, float, bool))
-            }
-            if parts:
-                ops = [{"name": "审核配置", "params": parts}]
-        # 成员级血缘:各成员算子链独立列出,不跨成员去重/合并(与上面
-        # operators 的压平兼容层不同),供前端展示"哪个成员经了哪些算子"。
-        member_ops: list[dict[str, Any]] = []
-        if isinstance(spec.get("member_configs"), list):
-            for mc in spec["member_configs"]:
-                if not isinstance(mc, dict):
-                    continue
-                mname = mc.get("member_name")
-                mops = [
-                    {"name": o.get("name"), "params": o.get("params") or {}}
-                    for o in (mc.get("operators") or [])
-                    if isinstance(o, dict)
-                ]
-                if mname and mops:
-                    member_ops.append({"memberName": mname, "operators": mops})
-        return {
-            "id": job.id,
-            "kind": "job",
-            "name": job.name,
-            "jobType": job.type,
-            "state": job.state,
-            "operators": ops,
-            "memberOperators": member_ops,
-            "createdAt": job.created_at.isoformat(),
-        }
-
-    # Job 是否消费了平台输入版本(JobInput 有无)的缓存;isOriginal 判据改造
-    # (治理整改 P0-②)——见下方 job_consumes_version 假设说明。
-    job_has_input: dict[str, bool] = {}
-    # vid → produced_by_job_id,供 root_vids 循环(§湖/源层回溯)判断该 job 是否
-    # extract 类型时改挂 extract 边,不必重新查一遍版本。
-    version_job_id: dict[str, str | None] = {}
-
-    async def job_consumes_version(jid: str) -> bool:
-        """产出版本的 Job 是否消费了平台输入版本(JobInput 有无)。
-
-        假设:JobInput 有无 ⇔ 是否消费了平台版本。据此,出湖抽取(extract,读湖
-        快照不写 JobInput)与从零合成(make/trainset 无输入版本)的产出 Job 都
-        判定"未消费" → 产出版本 isOriginal=True。旧判据是 produced_by_job_id
-        is None,新判据是其严格超集(旧判据为 True 时新判据必然也为 True),
-        存量血缘不回归。合成版本因此从旧 isOriginal=False 翻为 True 是预期变化
-        (在平台内确实是根);因其通常无 source_snapshot_id,下方 root_vids 循环
-        查不到 sids 会落 hosted_source 兜底(source_datasource_id 多为 None →
-        无边),不会误触发湖层展开。
-        """
-        if jid not in job_has_input:
-            exists = (
-                await session.execute(
-                    select(JobInput.job_id).where(JobInput.job_id == jid).limit(1)
-                )
-            ).first()
-            job_has_input[jid] = exists is not None
-        return job_has_input[jid]
-
-    dq: deque[tuple[str, int]] = deque((v.id, 0) for v in starts)
-    while dq:
-        vid, depth = dq.popleft()
-        if vid in seen_v:
-            continue
-        seen_v.add(vid)
-        version = await session.get(DatasetVersion, vid)
-        if version is None:
-            continue
-        jid = version.produced_by_job_id
-        version_job_id[vid] = jid
-        is_original = True if not jid else not await job_consumes_version(jid)
-        nodes[vid] = {
-            "id": vid,
-            "kind": "version",
-            "datasetId": version.dataset_id,
-            "datasetName": await ds_name(version.dataset_id),
-            "versionNo": version.version_no,
-            "versionLabel": format_version_label(
-                version.version_no, version.created_at
-            ),
-            "origin": version.origin,
-            "rows": version.rows,
-            "scanVerdict": version.scan_verdict,
-            "publishStatus": version.publish_status,
-            "isOriginal": is_original,
-            "isFocus": version.dataset_id == dataset_id,
-            "createdAt": version.created_at.isoformat(),
-        }
-        if depth >= MAX_DEPTH:
-            continue
-        # 上游:产出该版本的任务(及其输入版本)
-        if jid and jid not in seen_j:
-            seen_j.add(jid)
-            job = await session.get(Job, jid)
-            if job:
-                nodes[jid] = job_node(job)
-                add_edge(jid, vid, "output")
-                in_jis = (
-                    await session.scalars(
-                        select(JobInput).where(JobInput.job_id == jid)
-                    )
-                ).all()
-                for ji in in_jis:
-                    add_edge(ji.dataset_version_id, jid, "input")
-                    if ji.dataset_version_id not in seen_v:
-                        dq.append((ji.dataset_version_id, depth + 1))
-        # 下游:消费该版本的任务(及其产出版本)
-        down_jis = (
-            await session.scalars(
-                select(JobInput).where(JobInput.dataset_version_id == vid)
-            )
-        ).all()
-        for ji in down_jis:
-            jid2 = ji.job_id
-            add_edge(vid, jid2, "input")
-            if jid2 in seen_j:
-                continue
-            seen_j.add(jid2)
-            job2 = await session.get(Job, jid2)
-            if job2 is None:
-                continue
-            nodes[jid2] = job_node(job2)
-            out_vs = (
-                await session.scalars(
-                    select(DatasetVersion).where(
-                        DatasetVersion.produced_by_job_id == jid2
-                    )
-                )
-            ).all()
-            for ov in out_vs:
-                add_edge(jid2, ov.id, "output")
-                if ov.id not in seen_v:
-                    dq.append((ov.id, depth + 1))
-
-    # ---- 湖/源层回溯(治理整改):在版本↔任务图之上补齐上游两层 ----
-    # ① 根版本(produced_by_job_id 为空)经成员 source_snapshot_id 回溯湖快照
-    #    (extract 边);快照再经 merge_inputs(merge 边)与 datasource_id(ingest 边)
-    #    上溯。只对根版本回溯:加工产出版本的成员会结转 source_snapshot_id,
-    #    若也画边则每个下游版本都连快照,失真且成网。
-    # ② 采集任务节点(jobType=ingest)经 ingest_task 回指数据源(ingest 边),
-    #    覆盖绕湖直落的存量采集链路。
-    # ③ 兜底:根版本无湖快照但有 source_datasource_id(hosted/api 推送)→
-    #    数据源直连(hosted_source 边)。
-    MAX_LAKE_DEPTH = 4  # merge 链递归上限(merge_inputs 引用其它快照)
-    # 快照 → 已展开时的最小 ldepth。不能只记"访问过":同一快照被多个根版本经
-    # 不同长度的 merge 链摸到时,首次访问的深度会锁死其上溯预算,后来预算更
-    # 充裕(ldepth 更小)的路径会被去重短路,深链上游节点按遍历顺序非确定性丢失。
-    snap_depth: dict[str, int] = {}
-    lake_cache: dict[str, str] = {}
-    task_cache: dict[str, str | None] = {}
-
-    async def lake_name(lid: str) -> str:
-        if lid not in lake_cache:
-            lake = await session.get(DataLake, lid)
-            lake_cache[lid] = lake.name if lake else lid
-        return lake_cache[lid]
-
-    async def ingest_task_name(tid: str | None) -> str | None:
-        if not tid:
-            return None
-        if tid not in task_cache:
-            t = await session.get(IngestTask, tid)
-            task_cache[tid] = t.name if t else None
-        return task_cache[tid]
-
-    def source_summary(sm: dict | None) -> str | None:
-        """source_metadata 差异化溯源摘要:表名/对象键/HDFS 路径/原始文件名。"""
-        if not isinstance(sm, dict):
-            return None
-        if sm.get("db_table"):
-            return f"表 {sm['db_table']}"
-        if sm.get("obj_key"):
-            return f"对象 {sm['obj_key']}"
-        if sm.get("hdfs_path"):
-            return f"HDFS {sm['hdfs_path']}"
-        if sm.get("original_filename"):
-            return f"文件 {sm['original_filename']}"
-        return None
-
-    async def add_datasource_node(ds_id: str) -> bool:
-        if ds_id in nodes:
-            return True
-        ds = await session.get(DataSource, ds_id)
-        if ds is None:
-            return False
-        nodes[ds_id] = {
-            "id": ds_id,
-            "kind": "datasource",
-            "name": ds.name,
-            "sourceType": ds.type,
-            "dbKind": ds.db_kind,
-        }
-        return True
-
-    async def expand_snapshot(sid: str, ldepth: int) -> bool:
-        """确保湖快照节点入图(含其 merge/数据源上游);返回快照是否存在。
-
-        以更小 ldepth(更充裕预算)重入时重新展开 merge 上游,只补漏不重复
-        (节点/边分别经 nodes 覆盖与 seen_edge 去重);环经 snap_depth 单调
-        递减约束收敛(重入必须 ldepth 严格更小,环上至多重入 MAX_LAKE_DEPTH 次)。
-        """
-        prev = snap_depth.get(sid)
-        if prev is not None and prev <= ldepth:
-            return sid in nodes
-        snap_depth[sid] = ldepth
-        snap = await session.get(DataLakeSnapshot, sid)
-        if snap is None:
-            return False
-        obj = (
-            await session.get(DataLakeObject, snap.object_id)
-            if snap.object_id
-            else None
-        )
-        nodes[sid] = {
-            "id": sid,
-            "kind": "lake_snapshot",
-            "name": obj.display_name if obj else snap.source_version,
-            "lakeId": snap.lake_id,
-            "lakeName": await lake_name(snap.lake_id),
-            "objectId": snap.object_id,
-            "versionNo": snap.version_no,
-            "sourceVersion": snap.source_version,
-            "dataCategory": snap.data_category,
-            "storageFormat": snap.storage_format,
-            "uploadChannel": snap.upload_channel,
-            "rows": snap.rows,
-            "sourceSummary": source_summary(snap.source_metadata),
-            "ingestTaskName": await ingest_task_name(snap.ingest_task_id),
-            "createdAt": snap.created_at.isoformat(),
-        }
-        if ldepth < MAX_LAKE_DEPTH:
-            for mi in snap.merge_inputs or []:
-                msid = mi.get("snapshot_id") if isinstance(mi, dict) else None
-                if msid and await expand_snapshot(msid, ldepth + 1):
-                    add_edge(msid, sid, "merge")
-        # 入湖 Job 进图(治理整改 P1-①):快照带 job_id(经采集任务入湖)时插入
-        # job 节点,画 datasource→job→snapshot 两段 ingest 边;手动上传/无任务
-        # 上下文的快照 job_id 为空,保留原 datasource→snapshot 直连兜底。
-        job_linked = False
-        if snap.job_id:
-            if snap.job_id not in seen_j:
-                seen_j.add(snap.job_id)
-                ingest_job = await session.get(Job, snap.job_id)
-                if ingest_job:
-                    nodes[snap.job_id] = job_node(ingest_job)
-            if snap.job_id in nodes:
-                job_linked = True
-                if snap.datasource_id and await add_datasource_node(
-                    snap.datasource_id
-                ):
-                    add_edge(snap.datasource_id, snap.job_id, "ingest")
-                add_edge(snap.job_id, sid, "ingest")
-        if (
-            not job_linked
-            and snap.datasource_id
-            and await add_datasource_node(snap.datasource_id)
-        ):
-            add_edge(snap.datasource_id, sid, "ingest")
-        return True
-
-    root_vids = [
-        n["id"] for n in nodes.values() if n["kind"] == "version" and n["isOriginal"]
-    ]
-    for vid in root_vids:
-        sids = (
-            await session.scalars(
-                select(DatasetVersionTable.source_snapshot_id)
-                .where(
-                    DatasetVersionTable.dataset_version_id == vid,
-                    DatasetVersionTable.source_snapshot_id.is_not(None),
-                )
-                .distinct()
-            )
-        ).all()
-        # 若产出该 root 版本的 job 是出湖抽取(type=extract,P0-②新建),extract
-        # 边改挂 job 节点(snapshot→extractJob→version,job→version 的 output
-        # 边已由主 BFS 循环画出);否则维持存量语义 snapshot→version 字节级不变。
-        jid = version_job_id.get(vid)
-        job_entry = nodes.get(jid) if jid else None
-        extract_target = (
-            jid if job_entry and job_entry.get("jobType") == "extract" else vid
-        )
-        linked = False
-        for sid in sids:
-            if await expand_snapshot(sid, 0):
-                add_edge(sid, extract_target, "extract")
-                linked = True
-        if not linked:
-            version = await session.get(DatasetVersion, vid)
-            ds_id = version.source_datasource_id if version else None
-            if ds_id and await add_datasource_node(ds_id):
-                add_edge(ds_id, vid, "hosted_source")
-
-    for jn in [n for n in nodes.values() if n["kind"] == "job"]:
-        if jn.get("jobType") != "ingest":
-            continue
-        job = await session.get(Job, jn["id"])
-        if job is None or not job.ingest_task_id:
-            continue
-        task = await session.get(IngestTask, job.ingest_task_id)
-        if task and task.datasource_id and await add_datasource_node(
-            task.datasource_id
-        ):
-            add_edge(task.datasource_id, jn["id"], "ingest")
-
-    # ---- 版本节点挂载成员级血缘:哪个文件来自哪个湖快照/走哪条渠道 ----
-    # 批量取全部版本节点的表成员,避免逐版本查询加重本端点已有的 N+1。
-    version_ids = [n["id"] for n in nodes.values() if n["kind"] == "version"]
-    if version_ids:
-        members = (
-            await session.scalars(
-                select(DatasetVersionTable).where(
-                    DatasetVersionTable.dataset_version_id.in_(version_ids)
-                )
-            )
-        ).all()
-        snap_ids = {m.source_snapshot_id for m in members if m.source_snapshot_id}
-        snaps_by_id: dict[str, DataLakeSnapshot] = {}
-        objs_by_id: dict[str, DataLakeObject] = {}
-        if snap_ids:
-            snaps_by_id = {
-                s.id: s
-                for s in (
-                    await session.scalars(
-                        select(DataLakeSnapshot).where(
-                            DataLakeSnapshot.id.in_(snap_ids)
-                        )
-                    )
-                ).all()
-            }
-            obj_ids = {s.object_id for s in snaps_by_id.values() if s.object_id}
-            if obj_ids:
-                objs_by_id = {
-                    o.id: o
-                    for o in (
-                        await session.scalars(
-                            select(DataLakeObject).where(
-                                DataLakeObject.id.in_(obj_ids)
-                            )
-                        )
-                    ).all()
-                }
-
-        def snapshot_display_name(snap: DataLakeSnapshot) -> str | None:
-            obj = objs_by_id.get(snap.object_id) if snap.object_id else None
-            base = obj.display_name if obj else snap.source_version
-            return f"{base} @v{snap.version_no}" if snap.version_no else base
-
-        by_version: dict[str, list[DatasetVersionTable]] = {}
-        for m in members:
-            by_version.setdefault(m.dataset_version_id, []).append(m)
-        for vid, ms in by_version.items():
-            if vid not in nodes:
-                continue
-            nodes[vid]["members"] = [
-                {
-                    "tableName": m.table_name,
-                    "rows": m.rows,
-                    "sourceSnapshotId": m.source_snapshot_id,
-                    "sourceName": (
-                        snapshot_display_name(snaps_by_id[m.source_snapshot_id])
-                        if m.source_snapshot_id in snaps_by_id
-                        else None
-                    ),
-                    "sourceUploadChannel": m.source_upload_channel,
-                    "sourceKind": m.source_kind,
-                }
-                for m in sorted(ms, key=lambda x: x.table_name)
-            ]
-
-    return JSONResponse(
-        content={"data": {"nodes": list(nodes.values()), "edges": edges}, "success": True}
+    graph = await build_lineage(
+        session, list(starts), direction="both", focus_dataset_id=dataset_id
     )
+    return JSONResponse(content={"data": graph, "success": True})
 
 
 async def _members_of(

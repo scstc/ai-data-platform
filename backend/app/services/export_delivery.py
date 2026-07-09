@@ -10,17 +10,14 @@ import io
 import json
 import logging
 import time
-from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
-from app.models.job import Job
 from app.models.job_input import JobInput
 from app.schemas.export import ExportFileItem, ExportGoal, ExportReport
 from app.services.engine import _read_jsonl_head
@@ -36,10 +33,9 @@ from app.services.landing import (
     records_to_jsonl_bytes,
     records_to_parquet_bytes,
 )
+from app.services.lineage_service import build_lineage
 
 logger = logging.getLogger(__name__)
-
-_LINEAGE_MAX_DEPTH = 16
 
 
 class ExportError(RuntimeError):
@@ -130,54 +126,36 @@ async def collect_lineage(
 ) -> tuple[list[str], list[dict], set[str]]:
     """上游 BFS 收集血缘:返回 (来源行, 算子链, 上游来源格式集)。
 
-    沿 produced_by_job_id → Job(取 type + spec.operators)→ JobInput → 输入版本递归。
-    根版本(无 produced_by_job_id)取其 Dataset 的 source_kind/source_format 作来源行。
-    带 seen 去环 + MAX_DEPTH 防超深/环形血缘无限递归。
+    治理整改 P1-②:薄封装 `lineage_service.build_lineage`(direction="up" 只沿
+    produced_by_job_id → Job → JobInput → 输入版本上溯,不查下游消费者;
+    skip_lake_layer=True 避免导出接口引入湖层查询而变慢),不再自行维护第二套
+    BFS。根版本(isOriginal)的来源行取 build_lineage 已顺带补上的版本节点
+    sourceKind/sourceFormat(复用同一次 Dataset 查询,不为此另发查询)。
     """
+    graph = await build_lineage(
+        session, [version.id], direction="up", skip_lake_layer=True
+    )
     source_lines: list[str] = []
     operator_chain: list[dict] = []
     upstream_formats: set[str] = set()
-    seen: set[str] = set()
-    queue: deque[tuple[str, int]] = deque([(version.id, 0)])
-    while queue:
-        vid, depth = queue.popleft()
-        if vid in seen or depth > _LINEAGE_MAX_DEPTH:
-            continue
-        seen.add(vid)
-        dv = await session.get(DatasetVersion, vid)
-        if dv is None:
-            continue
-        if dv.produced_by_job_id:
-            job = await session.get(Job, dv.produced_by_job_id)
-            if job and job.spec:
-                for op in job.spec.get("operators") or []:
-                    operator_chain.append(
-                        {
-                            "jobType": job.type,
-                            "name": op.get("name"),
-                            "params": op.get("params"),
-                        }
-                    )
-            # 上溯该 job 的输入版本
-            in_ids = (
-                await session.scalars(
-                    select(JobInput.dataset_version_id).where(
-                        JobInput.job_id == dv.produced_by_job_id
-                    )
+    for node in graph["nodes"]:
+        if node["kind"] == "job":
+            for op in node["operators"]:
+                operator_chain.append(
+                    {
+                        "jobType": node["jobType"],
+                        "name": op.get("name"),
+                        "params": op.get("params"),
+                    }
                 )
-            ).all()
-            for in_id in in_ids:
-                queue.append((in_id, depth + 1))
-        else:
-            # 根版本:取数据集来源
-            ds = await session.get(Dataset, dv.dataset_id)
-            if ds:
-                if ds.source_format:
-                    upstream_formats.add(ds.source_format.lower())
-                source_lines.append(
-                    f"{ds.name} · 来源={ds.source_kind or '?'}"
-                    f"/{ds.source_format or '?'}"
-                )
+        elif node["kind"] == "version" and node["isOriginal"]:
+            fmt = node.get("sourceFormat")
+            if fmt:
+                upstream_formats.add(fmt.lower())
+            source_lines.append(
+                f"{node['datasetName']} · 来源={node.get('sourceKind') or '?'}"
+                f"/{fmt or '?'}"
+            )
     return source_lines, operator_chain, upstream_formats
 
 
