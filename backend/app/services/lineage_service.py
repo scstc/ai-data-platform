@@ -35,6 +35,7 @@ hosted_source / contains(member 挂载,expand_members=True 时)。
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -78,6 +79,81 @@ def source_anchor_id(source_id: str) -> str:
     尚无任何快照/托管版本,节点也仍会出现——孤立数据源同样需要在血缘图里
     "看得见"。`kind=source` 与 `build_panorama_lineage` 播种用。"""
     return f"{_SOURCE_ANCHOR_PREFIX}{source_id}"
+
+
+@dataclass
+class _LineagePreload:
+    """`build_lineage` 的可选批量预载缓存(性能整改:全景端点 N+1 消除)。
+
+    `build_panorama_lineage` 播种 ~200+ anchor 时,`build_lineage` 原逐节点
+    `session.get()`/内联 `select()` 会打成百上千次串行往返(远程 PG 下单趟
+    10-20ms 累计到秒级)。本类在调用前一次性 bulk `select` 拉全表建内存索引,
+    `build_lineage` 各处按需查表内存字典而非再次打库。
+
+    只有 `build_panorama_lineage` 构造并传入;其余三个调用方(`dataset_lineage`/
+    `GET /lineage` anchor 端点/`export_delivery.collect_lineage`)锚点规模小,
+    继续走不传 `preload`(为 None)的原逐项查询路径,行为**完全不变**。
+    """
+
+    versions: dict[str, DatasetVersion] = field(default_factory=dict)
+    jobs: dict[str, Job] = field(default_factory=dict)
+    datasets: dict[str, Dataset] = field(default_factory=dict)
+    lakes: dict[str, DataLake] = field(default_factory=dict)
+    snapshots: dict[str, DataLakeSnapshot] = field(default_factory=dict)
+    objects: dict[str, DataLakeObject] = field(default_factory=dict)
+    datasources: dict[str, DataSource] = field(default_factory=dict)
+    ingest_tasks: dict[str, IngestTask] = field(default_factory=dict)
+    # job_id → 该 job 消费的 JobInput 列表(对应原 `select(JobInput).where(job_id==)`)
+    job_inputs_by_job: dict[str, list[JobInput]] = field(default_factory=dict)
+    # dataset_version_id → 消费该版本的 JobInput 列表(对应原
+    # `select(JobInput).where(dataset_version_id==)`)
+    job_inputs_by_version: dict[str, list[JobInput]] = field(default_factory=dict)
+    # produced_by_job_id → 该 job 产出的版本列表(对应原
+    # `select(DatasetVersion).where(produced_by_job_id==)`)
+    versions_by_produced_job: dict[str, list[DatasetVersion]] = field(
+        default_factory=dict
+    )
+    # 至少有一条 JobInput 的 job_id 集合(job_consumes_version 判据)
+    job_ids_with_inputs: set[str] = field(default_factory=set)
+
+
+async def _load_panorama_preload(session: AsyncSession) -> _LineagePreload:
+    """一次性 bulk 拉取 `build_lineage` 全景遍历会用到的全表,建内存索引。
+
+    全表(非按 anchor 过滤)加载:`build_panorama_lineage` 本身就是"全局森林"
+    语义,anchor 已覆盖几乎全部版本/快照/数据源,按需过滤 IN 子句收益有限反而
+    多一趟查询规划;these 8 张表在治理场景下量级可控(百到千级)。
+    """
+    versions = (await session.scalars(select(DatasetVersion))).all()
+    jobs = (await session.scalars(select(Job))).all()
+    datasets = (await session.scalars(select(Dataset))).all()
+    lakes = (await session.scalars(select(DataLake))).all()
+    snapshots = (await session.scalars(select(DataLakeSnapshot))).all()
+    objects_ = (await session.scalars(select(DataLakeObject))).all()
+    datasources = (await session.scalars(select(DataSource))).all()
+    ingest_tasks = (await session.scalars(select(IngestTask))).all()
+    job_inputs = (await session.scalars(select(JobInput))).all()
+
+    preload = _LineagePreload(
+        versions={v.id: v for v in versions},
+        jobs={j.id: j for j in jobs},
+        datasets={d.id: d for d in datasets},
+        lakes={lk.id: lk for lk in lakes},
+        snapshots={s.id: s for s in snapshots},
+        objects={o.id: o for o in objects_},
+        datasources={d.id: d for d in datasources},
+        ingest_tasks={t.id: t for t in ingest_tasks},
+    )
+    for ji in job_inputs:
+        preload.job_inputs_by_job.setdefault(ji.job_id, []).append(ji)
+        preload.job_inputs_by_version.setdefault(ji.dataset_version_id, []).append(ji)
+        preload.job_ids_with_inputs.add(ji.job_id)
+    for v in versions:
+        if v.produced_by_job_id:
+            preload.versions_by_produced_job.setdefault(
+                v.produced_by_job_id, []
+            ).append(v)
+    return preload
 
 
 def describe_job(job: Job) -> dict[str, Any]:
@@ -169,6 +245,7 @@ async def build_lineage(
     expand_members: bool = False,
     skip_lake_layer: bool = False,
     focus_dataset_id: str | None = None,
+    preload: _LineagePreload | None = None,
 ) -> dict[str, Any]:
     """以 `anchors`(版本 id,或 `member_anchor_id()` 拼出的成员伪 id)为起点 BFS
     构建血缘图,返回 `{"nodes": [...], "edges": [...]}`。
@@ -190,6 +267,10 @@ async def build_lineage(
       多余的湖层查询。
     - `focus_dataset_id`:非空时,该数据集下的版本节点 `isFocus=True`(供前端高亮
       发起血缘查询的数据集自身)。
+    - `preload`:性能整改新增,`_LineagePreload`(见其 docstring)。非 None 时,
+      本函数内部所有单点 `session.get()`/过滤 `select()` 一律改查该内存索引,
+      不再逐项打库;为 None(默认)时行为与整改前完全一致。只有
+      `build_panorama_lineage` 传入,其余调用方不受影响。
     """
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, str]] = []
@@ -200,7 +281,11 @@ async def build_lineage(
 
     async def get_dataset(did: str) -> Dataset | None:
         if did not in ds_cache:
-            ds_cache[did] = await session.get(Dataset, did)
+            ds_cache[did] = (
+                preload.datasets.get(did)
+                if preload is not None
+                else await session.get(Dataset, did)
+            )
         return ds_cache[did]
 
     def add_edge(a: str, b: str, kind: str) -> None:
@@ -222,12 +307,15 @@ async def build_lineage(
 
     async def job_consumes_version(jid: str) -> bool:
         if jid not in job_has_input:
-            exists = (
-                await session.execute(
-                    select(JobInput.job_id).where(JobInput.job_id == jid).limit(1)
-                )
-            ).first()
-            job_has_input[jid] = exists is not None
+            if preload is not None:
+                job_has_input[jid] = jid in preload.job_ids_with_inputs
+            else:
+                exists = (
+                    await session.execute(
+                        select(JobInput.job_id).where(JobInput.job_id == jid).limit(1)
+                    )
+                ).first()
+                job_has_input[jid] = exists is not None
         return job_has_input[jid]
 
     # anchors 按前缀区分四种起点;成员/快照/数据源 anchor 都不进版本↔任务 BFS,
@@ -253,7 +341,11 @@ async def build_lineage(
         if vid in seen_v:
             continue
         seen_v.add(vid)
-        version = await session.get(DatasetVersion, vid)
+        version = (
+            preload.versions.get(vid)
+            if preload is not None
+            else await session.get(DatasetVersion, vid)
+        )
         if version is None:
             continue
         jid = version.produced_by_job_id
@@ -288,15 +380,23 @@ async def build_lineage(
         # 上方 direction 参数说明。
         if direction != "down" and jid and jid not in seen_j:
             seen_j.add(jid)
-            job = await session.get(Job, jid)
+            job = (
+                preload.jobs.get(jid)
+                if preload is not None
+                else await session.get(Job, jid)
+            )
             if job:
                 nodes[jid] = describe_job(job)
                 add_edge(jid, vid, "output")
                 in_jis = (
-                    await session.scalars(
-                        select(JobInput).where(JobInput.job_id == jid)
-                    )
-                ).all()
+                    preload.job_inputs_by_job.get(jid, [])
+                    if preload is not None
+                    else (
+                        await session.scalars(
+                            select(JobInput).where(JobInput.job_id == jid)
+                        )
+                    ).all()
+                )
                 for ji in in_jis:
                     add_edge(ji.dataset_version_id, jid, "input")
                     if ji.dataset_version_id not in seen_v:
@@ -306,27 +406,39 @@ async def build_lineage(
         if direction == "up":
             continue
         down_jis = (
-            await session.scalars(
-                select(JobInput).where(JobInput.dataset_version_id == vid)
-            )
-        ).all()
+            preload.job_inputs_by_version.get(vid, [])
+            if preload is not None
+            else (
+                await session.scalars(
+                    select(JobInput).where(JobInput.dataset_version_id == vid)
+                )
+            ).all()
+        )
         for ji in down_jis:
             jid2 = ji.job_id
             add_edge(vid, jid2, "input")
             if jid2 in seen_j:
                 continue
             seen_j.add(jid2)
-            job2 = await session.get(Job, jid2)
+            job2 = (
+                preload.jobs.get(jid2)
+                if preload is not None
+                else await session.get(Job, jid2)
+            )
             if job2 is None:
                 continue
             nodes[jid2] = describe_job(job2)
             out_vs = (
-                await session.scalars(
-                    select(DatasetVersion).where(
-                        DatasetVersion.produced_by_job_id == jid2
+                preload.versions_by_produced_job.get(jid2, [])
+                if preload is not None
+                else (
+                    await session.scalars(
+                        select(DatasetVersion).where(
+                            DatasetVersion.produced_by_job_id == jid2
+                        )
                     )
-                )
-            ).all()
+                ).all()
+            )
             for ov in out_vs:
                 add_edge(jid2, ov.id, "output")
                 if ov.id not in seen_v:
@@ -358,7 +470,11 @@ async def build_lineage(
 
     async def lake_name(lid: str) -> str:
         if lid not in lake_cache:
-            lake = await session.get(DataLake, lid)
+            lake = (
+                preload.lakes.get(lid)
+                if preload is not None
+                else await session.get(DataLake, lid)
+            )
             lake_cache[lid] = lake.name if lake else lid
         return lake_cache[lid]
 
@@ -366,7 +482,11 @@ async def build_lineage(
         if not tid:
             return None
         if tid not in task_cache:
-            t = await session.get(IngestTask, tid)
+            t = (
+                preload.ingest_tasks.get(tid)
+                if preload is not None
+                else await session.get(IngestTask, tid)
+            )
             task_cache[tid] = t.name if t else None
         return task_cache[tid]
 
@@ -387,7 +507,11 @@ async def build_lineage(
     async def add_datasource_node(ds_id: str) -> bool:
         if ds_id in nodes:
             return True
-        ds = await session.get(DataSource, ds_id)
+        ds = (
+            preload.datasources.get(ds_id)
+            if preload is not None
+            else await session.get(DataSource, ds_id)
+        )
         if ds is None:
             return False
         nodes[ds_id] = {
@@ -410,14 +534,20 @@ async def build_lineage(
         if prev is not None and prev <= ldepth:
             return sid in nodes
         snap_depth[sid] = ldepth
-        snap = await session.get(DataLakeSnapshot, sid)
+        snap = (
+            preload.snapshots.get(sid)
+            if preload is not None
+            else await session.get(DataLakeSnapshot, sid)
+        )
         if snap is None:
             return False
-        obj = (
-            await session.get(DataLakeObject, snap.object_id)
-            if snap.object_id
-            else None
-        )
+        obj = None
+        if snap.object_id:
+            obj = (
+                preload.objects.get(snap.object_id)
+                if preload is not None
+                else await session.get(DataLakeObject, snap.object_id)
+            )
         nodes[sid] = {
             "id": sid,
             "kind": "lake_snapshot",
@@ -447,7 +577,11 @@ async def build_lineage(
         if snap.job_id:
             if snap.job_id not in seen_j:
                 seen_j.add(snap.job_id)
-                ingest_job = await session.get(Job, snap.job_id)
+                ingest_job = (
+                    preload.jobs.get(snap.job_id)
+                    if preload is not None
+                    else await session.get(Job, snap.job_id)
+                )
                 if ingest_job:
                     nodes[snap.job_id] = describe_job(ingest_job)
             if snap.job_id in nodes:
@@ -587,7 +721,11 @@ async def build_lineage(
                 add_edge(sid, vid, "extract")
             linked = True
         if not linked:
-            version = await session.get(DatasetVersion, vid)
+            version = (
+                preload.versions.get(vid)
+                if preload is not None
+                else await session.get(DatasetVersion, vid)
+            )
             ds_id = version.source_datasource_id if version else None
             if ds_id and await add_datasource_node(ds_id):
                 add_edge(ds_id, vid, "hosted_source")
@@ -595,10 +733,18 @@ async def build_lineage(
     for jn in [n for n in nodes.values() if n["kind"] == "job"]:
         if jn.get("jobType") != "ingest":
             continue
-        job = await session.get(Job, jn["id"])
+        job = (
+            preload.jobs.get(jn["id"])
+            if preload is not None
+            else await session.get(Job, jn["id"])
+        )
         if job is None or not job.ingest_task_id:
             continue
-        task = await session.get(IngestTask, job.ingest_task_id)
+        task = (
+            preload.ingest_tasks.get(job.ingest_task_id)
+            if preload is not None
+            else await session.get(IngestTask, job.ingest_task_id)
+        )
         if task and task.datasource_id and await add_datasource_node(
             task.datasource_id
         ):
@@ -746,7 +892,12 @@ async def build_panorama_lineage(
         + [snapshot_anchor_id(sid) for sid in snapshot_ids]
         + [source_anchor_id(did) for did in source_ids]
     )
-    graph = await build_lineage(session, anchors, direction="both")
+    # 性能整改:全景播种 ~200+ anchor 会让 build_lineage 内部逐节点
+    # session.get()/内联 select() 打成百上千次串行往返(远程 PG 下秒级)——
+    # 先批量预载全表建内存索引,build_lineage 收到 preload 后改查内存,
+    # 消除 N+1(见 _LineagePreload docstring)。
+    preload = await _load_panorama_preload(session)
+    graph = await build_lineage(session, anchors, direction="both", preload=preload)
     nodes_by_id: dict[str, dict[str, Any]] = {n["id"]: n for n in graph["nodes"]}
     edges = graph["edges"]
 

@@ -911,10 +911,17 @@ const Lineage: React.FC = () => {
         styles={{ body: { maxHeight: '74vh', overflow: 'auto' } }}
       >
         <Spin spinning={loading}>
-          <LineageGraph
-            graph={hasFocus ? focusGraph : panoramaGraph}
-            onFocusNode={focusOnNode}
-          />
+          {(hasFocus ? focusGraph : panoramaGraph) ? (
+            <LineageGraph
+              graph={hasFocus ? focusGraph : panoramaGraph}
+              onFocusNode={focusOnNode}
+            />
+          ) : loading ? (
+            // 加载期只显 Spin 转圈,不渲染"无数据"空态(全景接口较慢,避免误导)
+            <div style={{ height: 420 }} />
+          ) : (
+            <Empty description="无血缘数据（当前过滤范围内没有节点）" />
+          )}
         </Spin>
       </Card>
     </PageContainer>
