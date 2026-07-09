@@ -10,8 +10,9 @@ dataset_version(P2,放开 anchor 让前端可从任意节点聚焦)。`GET /line
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -26,6 +27,7 @@ from app.models.datasource import DataSource
 from app.models.job import Job
 from app.models.job_input import JobInput
 from app.services.lineage_service import (
+    build_focus_lineage,
     build_lineage,
     build_panorama_lineage,
     describe_job,
@@ -267,4 +269,335 @@ async def lineage_panorama(
     graph = await build_panorama_lineage(
         session, lake_id=lake_id, kinds=kind_list, since=since_dt
     )
+    return JSONResponse(content={"data": graph, "success": True})
+
+
+# ---------------------------------------------------------------------------
+# 焦点探索(OpenMetadata 式,治理整改血缘追溯重构):`GET /lineage/focus` 以任意
+# 实体为中心双向展开有限跳数 +「+N」边界计数;`GET /lineage/neighbors` 单节点
+# 单方向展开一跳,供前端合并进已展示的焦点图。anchor 解析复用 `lineage_by_anchor`
+# 已验证的 6 类 kind 逻辑(不改动该函数本身,新写一份——见函数级 docstring)。
+# ---------------------------------------------------------------------------
+
+
+class _NotFound(Exception):
+    """焦点/邻居端点 404 情形的内部信号:`_resolve_focus_target` 与
+    `lineage_by_anchor` 一样按实体不存在返回 `{"success": False, "message": ...}`
+    (而非 FastAPI 默认的 `HTTPException` `{"detail": ...}` 形状),保持响应体
+    风格一致;用异常而非提前 return 是因为 `_resolve_focus_target` 要在多个
+    kind 分支里复用同一套 400/404 早退逻辑。"""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
+@dataclass
+class _FocusTarget:
+    """`_resolve_focus_target` 的解析结果:分别喂给 `build_focus_lineage` 的
+    up/down 两次 `build_lineage` 调用的 anchor 列表 + 焦点节点 id 集合(多数
+    kind 为单元素,kind=lake_object 是该对象下全部快照 id)。`extra_nodes`/
+    `extra_edges` 仅 kind=job 使用——其余 5 类 kind 的焦点节点本身经既有 anchor
+    机制(member/snapshot/source 伪 anchor 均不受 `direction`/`max_depth`
+    约束,version 锚点的节点在深度 0 时也总会被加入)总能在任意 up/down 深度下
+    出现,唯独 job 节点要靠 BFS 从其输出/输入版本"发现"、深度 0 时发现不了,
+    故手工补上,保证焦点节点在任意 up/down 组合(含 0)下都可见。
+    """
+
+    up_anchors: list[str]
+    down_anchors: list[str]
+    focus_ids: set[str]
+    extra_nodes: list[dict[str, Any]] = field(default_factory=list)
+    extra_edges: list[dict[str, str]] = field(default_factory=list)
+
+
+async def _resolve_focus_target(
+    session: AsyncSession,
+    kind: str,
+    *,
+    job_id: str | None,
+    version_id: str | None,
+    table_name: str | None,
+    source_id: str | None,
+    object_id: str | None,
+    snapshot_id: str | None,
+) -> _FocusTarget:
+    """按 `kind` 把请求参数解析成 `_FocusTarget`。缺参 `HTTPException(400)`、
+    实体不存在 `_NotFound`(由调用方转 404 JSON)。逻辑对齐
+    `lineage_by_anchor` 各分支已验证的 anchor 构造(source 走
+    `snapshot_merge_descendants` 摸 merge 链下游、lake_object/lake_snapshot
+    补下游消费版本等),仅将其拆成 up/down 两份而非单一 `direction`。"""
+    if kind == "job":
+        if not job_id:
+            raise HTTPException(400, "kind=job 需 jobId 参数")
+        job = await session.get(Job, job_id)
+        if job is None:
+            raise _NotFound("任务不存在")
+        out_vids = list(
+            (
+                await session.scalars(
+                    select(DatasetVersion.id).where(
+                        DatasetVersion.produced_by_job_id == job_id
+                    )
+                )
+            ).all()
+        )
+        extra_nodes = [describe_job(job)]
+        extra_edges: list[dict[str, str]] = []
+        if out_vids:
+            for vid in out_vids:
+                extra_edges.append({"from": job_id, "to": vid, "kind": "output"})
+            return _FocusTarget(
+                out_vids, out_vids, {job_id}, extra_nodes, extra_edges
+            )
+        in_vids = list(
+            (
+                await session.scalars(
+                    select(JobInput.dataset_version_id).where(
+                        JobInput.job_id == job_id
+                    )
+                )
+            ).all()
+        )
+        for vid in in_vids:
+            extra_edges.append({"from": vid, "to": job_id, "kind": "input"})
+        return _FocusTarget(in_vids, [], {job_id}, extra_nodes, extra_edges)
+
+    if kind == "member":
+        if not version_id or not table_name:
+            raise HTTPException(400, "kind=member 需 versionId + tableName 参数")
+        exists = (
+            await session.execute(
+                select(DatasetVersionTable.id).where(
+                    DatasetVersionTable.dataset_version_id == version_id,
+                    DatasetVersionTable.table_name == table_name,
+                )
+            )
+        ).first()
+        if exists is None:
+            raise _NotFound("成员不存在")
+        mid = member_anchor_id(version_id, table_name)
+        # 成员无下游(build_lineage 的 member_anchors 处理不产生出边,详见
+        # lineage_service docstring),down_anchors 留空。
+        return _FocusTarget([mid], [], {mid})
+
+    if kind == "source":
+        if not source_id:
+            raise HTTPException(400, "kind=source 需 sourceId 参数")
+        source = await session.get(DataSource, source_id)
+        if source is None:
+            raise _NotFound("数据源不存在")
+        direct_snap_ids = set(
+            (
+                await session.scalars(
+                    select(DataLakeSnapshot.id).where(
+                        DataLakeSnapshot.datasource_id == source_id
+                    )
+                )
+            ).all()
+        )
+        all_snap_ids = await snapshot_merge_descendants(session, direct_snap_ids)
+        extracted_vids = (
+            (
+                await session.scalars(
+                    select(DatasetVersionTable.dataset_version_id).where(
+                        DatasetVersionTable.source_snapshot_id.in_(all_snap_ids)
+                    )
+                )
+            ).all()
+            if all_snap_ids
+            else []
+        )
+        hosted_vids = (
+            await session.scalars(
+                select(DatasetVersion.id).where(
+                    DatasetVersion.source_datasource_id == source_id
+                )
+            )
+        ).all()
+        sid_anchor = source_anchor_id(source_id)
+        down_anchors = (
+            [sid_anchor]
+            + [snapshot_anchor_id(sid) for sid in all_snap_ids]
+            + list(dict.fromkeys([*extracted_vids, *hosted_vids]))
+        )
+        # 数据源是根,无上游;up_anchors 只放数据源伪 anchor 自身(source_anchors
+        # 处理不受 direction/max_depth 约束,始终只产出该节点自身)。focus_ids 用
+        # 实体真实 id(source_id)而非伪 anchor 字符串——add_datasource_node 落图
+        # 的节点 id 是裸 source_id,伪 anchor 只是 build_lineage 内部 anchor 列表
+        # 的前缀区分手段,从不出现在返回节点里。
+        return _FocusTarget([sid_anchor], down_anchors, {source_id})
+
+    if kind == "lake_object":
+        if not object_id:
+            raise HTTPException(400, "kind=lake_object 需 objectId 参数")
+        obj = await session.get(DataLakeObject, object_id)
+        if obj is None:
+            raise _NotFound("湖对象不存在")
+        snap_ids = list(
+            (
+                await session.scalars(
+                    select(DataLakeSnapshot.id).where(
+                        DataLakeSnapshot.object_id == object_id
+                    )
+                )
+            ).all()
+        )
+        downstream_vids = (
+            (
+                await session.scalars(
+                    select(DatasetVersionTable.dataset_version_id).where(
+                        DatasetVersionTable.source_snapshot_id.in_(snap_ids)
+                    )
+                )
+            ).all()
+            if snap_ids
+            else []
+        )
+        snap_anchors = [snapshot_anchor_id(sid) for sid in snap_ids]
+        down_anchors = snap_anchors + list(dict.fromkeys(downstream_vids))
+        # 无独立 "lake_object" 节点(build_lineage 从不产出该 kind),该对象下
+        # 全部快照节点一并标 isFocus。
+        return _FocusTarget(snap_anchors, down_anchors, set(snap_ids))
+
+    if kind == "lake_snapshot":
+        if not snapshot_id:
+            raise HTTPException(400, "kind=lake_snapshot 需 snapshotId 参数")
+        snap = await session.get(DataLakeSnapshot, snapshot_id)
+        if snap is None:
+            raise _NotFound("快照不存在")
+        downstream_vids = list(
+            (
+                await session.scalars(
+                    select(DatasetVersionTable.dataset_version_id).where(
+                        DatasetVersionTable.source_snapshot_id == snapshot_id
+                    )
+                )
+            ).all()
+        )
+        sid_anchor = snapshot_anchor_id(snapshot_id)
+        down_anchors = [sid_anchor] + downstream_vids
+        return _FocusTarget([sid_anchor], down_anchors, {snapshot_id})
+
+    if kind == "dataset_version":
+        if not version_id:
+            raise HTTPException(400, "kind=dataset_version 需 versionId 参数")
+        version = await session.get(DatasetVersion, version_id)
+        if version is None:
+            raise _NotFound("版本不存在")
+        return _FocusTarget([version_id], [version_id], {version_id})
+
+    raise HTTPException(400, f"不支持的 kind:{kind}")
+
+
+@router.get("/lineage/focus")
+async def lineage_focus(
+    session: SessionDep,
+    kind: str,
+    job_id: Annotated[str | None, Query(alias="jobId")] = None,
+    version_id: Annotated[str | None, Query(alias="versionId")] = None,
+    table_name: Annotated[str | None, Query(alias="tableName")] = None,
+    source_id: Annotated[str | None, Query(alias="sourceId")] = None,
+    object_id: Annotated[str | None, Query(alias="objectId")] = None,
+    snapshot_id: Annotated[str | None, Query(alias="snapshotId")] = None,
+    up: Annotated[int, Query(ge=0, le=3)] = 2,
+    down: Annotated[int, Query(ge=0, le=3)] = 2,
+    members: Annotated[bool, Query()] = False,
+) -> JSONResponse:
+    """焦点探索(OpenMetadata 式):以任意实体(6 类 kind,与 `GET /lineage` 一致)
+    为中心,上/下游各展开 `up`/`down` 跳(默认 2,上限 3)后合并去重。焦点节点
+    (kind=lake_object 时为该对象下全部快照节点)标 `isFocus=True`;每个入图
+    节点再挂整数 `moreUp`/`moreDown`——它在完整血缘森林里还有多少条本图未覆盖
+    的直接上/下游邻居(0=无更多),供前端渲染"+N"展开按钮。`members=true` 时
+    额外展开成员一等节点(透传 `build_lineage` 的 `expand_members`)。
+    """
+    try:
+        target = await _resolve_focus_target(
+            session,
+            kind,
+            job_id=job_id,
+            version_id=version_id,
+            table_name=table_name,
+            source_id=source_id,
+            object_id=object_id,
+            snapshot_id=snapshot_id,
+        )
+    except _NotFound as exc:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": exc.message}
+        )
+
+    graph = await build_focus_lineage(
+        session,
+        up_anchors=target.up_anchors,
+        down_anchors=target.down_anchors,
+        focus_ids=target.focus_ids,
+        up_depth=up,
+        down_depth=down,
+        expand_members=members,
+        extra_nodes=target.extra_nodes,
+        extra_edges=target.extra_edges,
+    )
+    return JSONResponse(content={"data": graph, "success": True})
+
+
+@router.get("/lineage/neighbors")
+async def lineage_neighbors(
+    session: SessionDep,
+    kind: str,
+    direction: str,
+    job_id: Annotated[str | None, Query(alias="jobId")] = None,
+    version_id: Annotated[str | None, Query(alias="versionId")] = None,
+    table_name: Annotated[str | None, Query(alias="tableName")] = None,
+    source_id: Annotated[str | None, Query(alias="sourceId")] = None,
+    object_id: Annotated[str | None, Query(alias="objectId")] = None,
+    snapshot_id: Annotated[str | None, Query(alias="snapshotId")] = None,
+    members: Annotated[bool, Query()] = False,
+) -> JSONResponse:
+    """单节点邻居增量:只返回该实体紧邻一层的上游(`direction=up`)或下游
+    (`direction=down`)节点 + 边(各自带 `moreUp`/`moreDown`),供前端点某节点的
+    "+N" 按钮后合并进已展示的焦点图,不必重新拉整个焦点图。anchor 解析与
+    `GET /lineage/focus` 共用 `_resolve_focus_target`。
+    """
+    if direction not in ("up", "down"):
+        raise HTTPException(400, "direction 需为 up 或 down")
+    try:
+        target = await _resolve_focus_target(
+            session,
+            kind,
+            job_id=job_id,
+            version_id=version_id,
+            table_name=table_name,
+            source_id=source_id,
+            object_id=object_id,
+            snapshot_id=snapshot_id,
+        )
+    except _NotFound as exc:
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": exc.message}
+        )
+
+    if direction == "up":
+        graph = await build_focus_lineage(
+            session,
+            up_anchors=target.up_anchors,
+            down_anchors=[],
+            focus_ids=target.focus_ids,
+            up_depth=1,
+            down_depth=0,
+            expand_members=members,
+            extra_nodes=target.extra_nodes,
+            extra_edges=target.extra_edges,
+        )
+    else:
+        graph = await build_focus_lineage(
+            session,
+            up_anchors=[],
+            down_anchors=target.down_anchors,
+            focus_ids=target.focus_ids,
+            up_depth=0,
+            down_depth=1,
+            expand_members=members,
+            extra_nodes=target.extra_nodes,
+            extra_edges=target.extra_edges,
+        )
     return JSONResponse(content={"data": graph, "success": True})

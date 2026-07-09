@@ -115,6 +115,26 @@ class _LineagePreload:
     )
     # 至少有一条 JobInput 的 job_id 集合(job_consumes_version 判据)
     job_ids_with_inputs: set[str] = field(default_factory=set)
+    # ---- 焦点探索(邻居计数)专用索引:仅 `_load_focus_preload` 填充,`build_lineage`
+    # 本身不读这些;`build_panorama_lineage` 的 preload 留空(不影响其行为)。----
+    # dataset_version_id → 该版本的表成员列表
+    tables_by_version: dict[str, list[DatasetVersionTable]] = field(
+        default_factory=dict
+    )
+    # source_snapshot_id → 引用该快照的表成员列表(快照下游"被谁抽取")
+    tables_by_snapshot: dict[str, list[DatasetVersionTable]] = field(
+        default_factory=dict
+    )
+    # datasource_id → 该源产出的快照 id 列表
+    snapshots_by_datasource: dict[str, list[str]] = field(default_factory=dict)
+    # object_id → 该湖对象名下快照 id 列表
+    snapshots_by_object: dict[str, list[str]] = field(default_factory=dict)
+    # 入湖 job_id → 该 job 产出的快照 id 列表(snap.job_id)
+    snapshots_by_job: dict[str, list[str]] = field(default_factory=dict)
+    # snapshot_id → 以它为 merge 输入的下游快照 id 列表(merge_inputs 反向索引)
+    merge_children: dict[str, list[str]] = field(default_factory=dict)
+    # datasource_id → 托管直连该源的版本 id 列表(source_datasource_id)
+    versions_by_hosted_source: dict[str, list[str]] = field(default_factory=dict)
 
 
 async def _load_panorama_preload(session: AsyncSession) -> _LineagePreload:
@@ -153,6 +173,40 @@ async def _load_panorama_preload(session: AsyncSession) -> _LineagePreload:
             preload.versions_by_produced_job.setdefault(
                 v.produced_by_job_id, []
             ).append(v)
+    return preload
+
+
+async def _load_focus_preload(session: AsyncSession) -> _LineagePreload:
+    """焦点探索(邻居计数)专用预载:在 `_load_panorama_preload` 全表基础上,额外
+    建 `_LineagePreload` 焦点专用的 6 张索引(见其字段 docstring)。焦点/单节点
+    邻居端点单次返回的子图虽小,但"某节点在完整森林里还有多少个未展开的邻居"
+    这个问题(`moreUp`/`moreDown`)本身需要全表视角才能回答——不能只按已入图的
+    那几个 id 做 IN 查询,故复用 `_load_panorama_preload` 的全表加载再叠加索引,
+    不重复一遍表扫描。"""
+    preload = await _load_panorama_preload(session)
+    tables = (await session.scalars(select(DatasetVersionTable))).all()
+    for t in tables:
+        preload.tables_by_version.setdefault(t.dataset_version_id, []).append(t)
+        if t.source_snapshot_id:
+            preload.tables_by_snapshot.setdefault(t.source_snapshot_id, []).append(t)
+    for sid, snap in preload.snapshots.items():
+        if snap.datasource_id:
+            preload.snapshots_by_datasource.setdefault(
+                snap.datasource_id, []
+            ).append(sid)
+        if snap.object_id:
+            preload.snapshots_by_object.setdefault(snap.object_id, []).append(sid)
+        if snap.job_id:
+            preload.snapshots_by_job.setdefault(snap.job_id, []).append(sid)
+        for mi in snap.merge_inputs or []:
+            parent_sid = mi.get("snapshot_id") if isinstance(mi, dict) else None
+            if parent_sid:
+                preload.merge_children.setdefault(parent_sid, []).append(sid)
+    for vid, v in preload.versions.items():
+        if v.source_datasource_id:
+            preload.versions_by_hosted_source.setdefault(
+                v.source_datasource_id, []
+            ).append(vid)
     return preload
 
 
@@ -784,6 +838,201 @@ async def build_lineage(
                 )
                 nodes[mid] = member_node(vid, m, source_name)
                 add_edge(vid, mid, "contains")
+
+    return {"nodes": list(nodes.values()), "edges": edges}
+
+
+def _is_original_version(preload: _LineagePreload, vid: str) -> bool:
+    """`build_lineage` 内 `is_original` 判据(见其局部变量注释)的无 session 版本,
+    纯读 `preload` 内存索引——`_neighbor_ids` 判断"根版本是否该经湖/源层出边"
+    时复用同一判据,不重新发明。"""
+    v = preload.versions.get(vid)
+    if v is None:
+        return True
+    jid = v.produced_by_job_id
+    if not jid:
+        return True
+    return jid not in preload.job_ids_with_inputs
+
+
+def _neighbor_ids(
+    preload: _LineagePreload, node_id: str, kind: str
+) -> tuple[set[str], set[str]]:
+    """给定节点在**完整**血缘森林里的直接上/下游邻居 id 全集(与 `build_lineage`
+    实际画边的语义对齐,但不受其 `direction`/`max_depth` 约束、也不做深层递归——
+    只求一跳),供焦点探索的边界 `moreUp`/`moreDown` 计数与 `/lineage/neighbors`
+    单节点展开使用。全部基于 `preload`(`_load_focus_preload`)内存索引,不打库。
+    """
+    up: set[str] = set()
+    down: set[str] = set()
+    if kind == "version":
+        v = preload.versions.get(node_id)
+        if v is None:
+            return up, down
+        if v.produced_by_job_id:
+            up.add(v.produced_by_job_id)
+        for ji in preload.job_inputs_by_version.get(node_id, []):
+            down.add(ji.job_id)
+        # 非根版本(有产出任务且该任务消费了输入)不经湖/源层回溯,对齐
+        # build_lineage 的 root_vids 过滤(见其 docstring)。
+        if _is_original_version(preload, node_id):
+            producer = (
+                preload.jobs.get(v.produced_by_job_id)
+                if v.produced_by_job_id
+                else None
+            )
+            # extract 类产出任务:extract 边改挂到 job 节点(见 build_lineage
+            # root_vids 循环),不再算作 version 自身的上游邻居。
+            if not (producer is not None and producer.type == "extract"):
+                snap_ids = {
+                    m.source_snapshot_id
+                    for m in preload.tables_by_version.get(node_id, [])
+                    if m.source_snapshot_id
+                }
+                if snap_ids:
+                    up |= snap_ids
+                elif v.source_datasource_id:
+                    up.add(v.source_datasource_id)
+    elif kind == "job":
+        for ji in preload.job_inputs_by_job.get(node_id, []):
+            up.add(ji.dataset_version_id)
+        out_vs = preload.versions_by_produced_job.get(node_id, [])
+        for ov in out_vs:
+            down.add(ov.id)
+        job = preload.jobs.get(node_id)
+        if job is not None:
+            # datasource→job 的 ingest 边只在该 job 产出的快照自身带 datasource_id
+            # 时才画(expand_snapshot 按 snap.datasource_id,不按 job.ingest_task_id
+            # 回指)。故上游数据源须由快照派生;若改用 ingest_task_id,会把"快照无
+            # datasource_id、图中根本不与源相连"的采集任务也误算成有上游源邻居。
+            for sid in preload.snapshots_by_job.get(node_id, []):
+                snap = preload.snapshots.get(sid)
+                if snap is not None and snap.datasource_id:
+                    up.add(snap.datasource_id)
+            if job.type == "extract":
+                for ov in out_vs:
+                    if _is_original_version(preload, ov.id):
+                        for m in preload.tables_by_version.get(ov.id, []):
+                            if m.source_snapshot_id:
+                                up.add(m.source_snapshot_id)
+        down |= set(preload.snapshots_by_job.get(node_id, []))
+    elif kind == "lake_snapshot":
+        snap = preload.snapshots.get(node_id)
+        if snap is not None:
+            for mi in snap.merge_inputs or []:
+                psid = mi.get("snapshot_id") if isinstance(mi, dict) else None
+                if psid:
+                    up.add(psid)
+            if snap.job_id:
+                up.add(snap.job_id)
+            elif snap.datasource_id:
+                up.add(snap.datasource_id)
+        down |= set(preload.merge_children.get(node_id, []))
+        for m in preload.tables_by_snapshot.get(node_id, []):
+            down.add(m.dataset_version_id)
+    elif kind == "datasource":
+        # 下游邻居完全由"快照自身 datasource_id"驱动(expand_snapshot 据此画 ingest
+        # 边):快照有 job_id → 边落到入湖 job 节点、邻居是该 job;否则数据源直连
+        # 快照、邻居是快照。不能按 ingest_task 回指(ingest_jobs_by_datasource)算——
+        # 那批采集任务的快照多无 datasource_id、图中根本不与本源相连,计入会让
+        # moreDown 永久虚高、"+N"点开无物。
+        for sid in preload.snapshots_by_datasource.get(node_id, []):
+            snap = preload.snapshots.get(sid)
+            down.add(snap.job_id if snap is not None and snap.job_id else sid)
+        down |= set(preload.versions_by_hosted_source.get(node_id, []))
+    elif kind == "member":
+        vid, _, table_name = node_id[len(_MEMBER_ANCHOR_PREFIX) :].partition(":")
+        for m in preload.tables_by_version.get(vid, []):
+            if m.table_name == table_name and m.source_snapshot_id:
+                up.add(m.source_snapshot_id)
+    return up, down
+
+
+async def build_focus_lineage(
+    session: AsyncSession,
+    *,
+    up_anchors: list[str],
+    down_anchors: list[str],
+    focus_ids: set[str],
+    up_depth: int,
+    down_depth: int,
+    expand_members: bool = False,
+    extra_nodes: list[dict[str, Any]] | None = None,
+    extra_edges: list[dict[str, str]] | None = None,
+    preload: _LineagePreload | None = None,
+) -> dict[str, Any]:
+    """焦点探索(OpenMetadata 式):以 `up_anchors`/`down_anchors`(由调用方按
+    6 类 kind 各自解析,详见 `api/v1/lineage.py::_resolve_focus_target`)分别跑
+    `direction="up"`/`"down"` 的 `build_lineage`,结果去重合并;`focus_ids` 命中
+    的节点标 `isFocus=True`;每个入图节点再挂 `moreUp`/`moreDown`——它在完整血缘
+    森林里还有多少条本图未覆盖的直接上/下游邻居(`_neighbor_ids`,基于 `preload`
+    内存索引算,不逐节点打库),供前端渲染"+N"展开按钮。
+
+    `up_anchors`/`down_anchors` 任一为空列表时跳过对应方向的 `build_lineage`
+    调用(`/lineage/neighbors` 单方向展开用此省一次遍历)。
+
+    `extra_nodes`/`extra_edges`:少数 anchor 无法靠 `build_lineage` 的 BFS 摸到
+    焦点节点本身时(如 kind=job 且 up/down 深度为 0——BFS 只从版本出发,深度 0
+    不触发"发现产出任务"这一步)手工补的节点/边,原样并入结果图,保证焦点节点
+    在任意深度下都可见。
+    """
+    if preload is None:
+        preload = await _load_focus_preload(session)
+
+    graph_up = (
+        await build_lineage(
+            session,
+            up_anchors,
+            direction="up",
+            max_depth=up_depth,
+            expand_members=expand_members,
+            preload=preload,
+        )
+        if up_anchors
+        else {"nodes": [], "edges": []}
+    )
+    graph_down = (
+        await build_lineage(
+            session,
+            down_anchors,
+            direction="down",
+            max_depth=down_depth,
+            expand_members=expand_members,
+            preload=preload,
+        )
+        if down_anchors
+        else {"nodes": [], "edges": []}
+    )
+
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, str]] = []
+    seen_edge: set[tuple[str, str]] = set()
+
+    def merge_edge(e: dict[str, str]) -> None:
+        key = (e["from"], e["to"])
+        if key not in seen_edge:
+            seen_edge.add(key)
+            edges.append(e)
+
+    for g in (graph_up, graph_down):
+        for n in g["nodes"]:
+            nodes.setdefault(n["id"], n)
+        for e in g["edges"]:
+            merge_edge(e)
+    for n in extra_nodes or []:
+        nodes.setdefault(n["id"], n)
+    for e in extra_edges or []:
+        merge_edge(e)
+
+    for fid in focus_ids:
+        if fid in nodes:
+            nodes[fid]["isFocus"] = True
+
+    node_ids = set(nodes.keys())
+    for nid, n in nodes.items():
+        up_n, down_n = _neighbor_ids(preload, nid, n["kind"])
+        n["moreUp"] = len(up_n - node_ids)
+        n["moreDown"] = len(down_n - node_ids)
 
     return {"nodes": list(nodes.values()), "edges": edges}
 
