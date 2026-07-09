@@ -15,11 +15,27 @@ isOriginal 判据、出湖抽取 Job 节点、入湖 Job 进图、成员级 sour
 节点 kind:version / job / lake_snapshot / datasource / member(仅 expand_members=True
 或成员 anchor 时出现)。边 kind:input / output / extract / merge / ingest /
 hosted_source / contains(member 挂载,expand_members=True 时)。
+
+治理整改 P2(全景森林 + 放开 entity-agnostic anchor)新增两类伪 anchor,机制与
+既定的 `member:` 前缀一致(纯 str 列表里塞前缀区分,不扩形参):
+
+- `snapshot_anchor_id(sid)`:直接把该湖快照(及其自身 merge/ingest 上游)拉入图,
+  不经任何版本↔任务 BFS——`kind=lake_snapshot`/`kind=lake_object`、以及
+  `build_panorama_lineage` 播种"孤立/未被任何数据集抽取的快照"都靠它。
+- `source_anchor_id(sid)`:仅确保该数据源节点入图,不做自身遍历——孤立数据源
+  (从未产生快照、从未被托管直连)同样要"看得见"。
+
+`direction` 新增 `"down"` 取值:跳过"产出该版本的任务→其输入版本"这段上游
+挖掘(仍保留下游消费者查找)。`kind=source`/`kind=lake_snapshot`/`kind=lake_object`
+解析出的版本 anchor 用此值——这些版本的上游语境已经由 snapshot anchor 自身覆盖
+(`expand_snapshot` 内建的 merge 链回溯),再用 "both" 从版本侧整一遍 BFS 只会
+牵出无关的其它输入版本,污染视图。
 """
 
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -35,15 +51,33 @@ from app.models.job import Job
 from app.models.job_input import JobInput
 from app.schemas.common import format_version_label
 
-# member anchor 的伪 id 前缀:build_lineage 的 anchors 是纯 str 列表,版本/成员两种
-# 起点靠此前缀区分(不引入额外形参,匹配既定签名)。
+# member/snapshot/source anchor 的伪 id 前缀:build_lineage 的 anchors 是纯 str
+# 列表,四种起点(版本/成员/快照/数据源)靠前缀区分(不引入额外形参,匹配既定签名)。
 _MEMBER_ANCHOR_PREFIX = "member:"
+_SNAPSHOT_ANCHOR_PREFIX = "snapshot:"
+_SOURCE_ANCHOR_PREFIX = "source:"
 
 
 def member_anchor_id(version_id: str, table_name: str) -> str:
     """构造成员 anchor 的伪 id(`GET /lineage?kind=member` 用两个裸参数,不编码 id
     给调用方——本函数只在服务内部/测试里拼接,不对外暴露编码格式)。"""
     return f"{_MEMBER_ANCHOR_PREFIX}{version_id}:{table_name}"
+
+
+def snapshot_anchor_id(snapshot_id: str) -> str:
+    """构造湖快照 anchor 的伪 id:直接把该快照拉入图(经内部 `expand_snapshot`,
+    含其自身 merge/ingest 上游),不依赖任何版本↔任务 BFS 摸到它——否则孤立/未被
+    任何数据集抽取的快照永远进不了图。`kind=lake_snapshot`/`lake_object` 与
+    `build_panorama_lineage` 播种用。"""
+    return f"{_SNAPSHOT_ANCHOR_PREFIX}{snapshot_id}"
+
+
+def source_anchor_id(source_id: str) -> str:
+    """构造数据源 anchor 的伪 id:仅确保该数据源节点入图,不做自身的下游遍历
+    (下游靠调用方把可达的快照/版本 id 一并作为 anchor 传入)。这样即便数据源
+    尚无任何快照/托管版本,节点也仍会出现——孤立数据源同样需要在血缘图里
+    "看得见"。`kind=source` 与 `build_panorama_lineage` 播种用。"""
+    return f"{_SOURCE_ANCHOR_PREFIX}{source_id}"
 
 
 def describe_job(job: Job) -> dict[str, Any]:
@@ -141,7 +175,11 @@ async def build_lineage(
 
     - `direction`:"both"(默认,版本↔任务双向 BFS,dataset_lineage 用)/
       "up"(只沿"产出该版本的任务→其输入版本"上溯,不查"谁消费了该版本"——
-      job anchor 用此值排除下游消费者;export collect_lineage 同理)。
+      job anchor 用此值排除下游消费者;export collect_lineage 同理)/
+      "down"(反过来,跳过"产出该版本的任务→其输入版本"这段上游挖掘,只查
+      "谁消费了该版本"——kind=source/lake_snapshot/lake_object 解析出的版本
+      anchor 用此值,这些版本的上游语境已经由 snapshot anchor 自身覆盖,不需要
+      再从版本侧牵出无关输入)。
     - `max_depth`/`max_lake_depth`:版本↔任务 BFS / 湖 merge 链上溯深度上限。
     - `expand_members`:True 时额外为每个版本节点的表成员发 `member` 一等节点
       (id=`member_anchor_id(vid, table_name)`)+ `version→member`(contains)边;
@@ -192,14 +230,20 @@ async def build_lineage(
             job_has_input[jid] = exists is not None
         return job_has_input[jid]
 
-    # anchors 按前缀区分版本 / 成员两种起点;成员 anchor 不进版本↔任务 BFS,只在
-    # 下方湖/源层回溯里单独处理(只上溯湖/源层)。
+    # anchors 按前缀区分四种起点;成员/快照/数据源 anchor 都不进版本↔任务 BFS,
+    # 只在下方湖/源层回溯里单独处理。
     version_anchors: list[str] = []
     member_anchors: list[tuple[str, str]] = []
+    snapshot_anchors: list[str] = []
+    source_anchors: list[str] = []
     for a in anchors:
         if a.startswith(_MEMBER_ANCHOR_PREFIX):
             vid, _, table_name = a[len(_MEMBER_ANCHOR_PREFIX) :].partition(":")
             member_anchors.append((vid, table_name))
+        elif a.startswith(_SNAPSHOT_ANCHOR_PREFIX):
+            snapshot_anchors.append(a[len(_SNAPSHOT_ANCHOR_PREFIX) :])
+        elif a.startswith(_SOURCE_ANCHOR_PREFIX):
+            source_anchors.append(a[len(_SOURCE_ANCHOR_PREFIX) :])
         else:
             version_anchors.append(a)
 
@@ -240,8 +284,9 @@ async def build_lineage(
         }
         if depth >= max_depth:
             continue
-        # 上游:产出该版本的任务(及其输入版本)
-        if jid and jid not in seen_j:
+        # 上游:产出该版本的任务(及其输入版本)。direction="down" 时跳过——见
+        # 上方 direction 参数说明。
+        if direction != "down" and jid and jid not in seen_j:
             seen_j.add(jid)
             job = await session.get(Job, jid)
             if job:
@@ -287,7 +332,12 @@ async def build_lineage(
                 if ov.id not in seen_v:
                     dq.append((ov.id, depth + 1))
 
-    if skip_lake_layer and not member_anchors:
+    if (
+        skip_lake_layer
+        and not member_anchors
+        and not snapshot_anchors
+        and not source_anchors
+    ):
         return {"nodes": list(nodes.values()), "edges": edges}
 
     # ---- 湖/源层回溯(治理整改):在版本↔任务图之上补齐上游两层 ----
@@ -429,6 +479,14 @@ async def build_lineage(
             "sourceUploadChannel": m.source_upload_channel,
             "sourceKind": m.source_kind,
         }
+
+    # ---- 快照 / 数据源 anchor:直接入图,不经版本↔任务 BFS(全景森林播种 +
+    # kind=lake_snapshot/lake_object/source 用,详见 snapshot_anchor_id/
+    # source_anchor_id docstring)----
+    for sid in snapshot_anchors:
+        await expand_snapshot(sid, 0)
+    for src_id in source_anchors:
+        await add_datasource_node(src_id)
 
     # ---- 成员 anchor(kind=member):只上溯湖/源层,不做版本↔任务 BFS ----
     for vid, table_name in member_anchors:
@@ -582,3 +640,164 @@ async def build_lineage(
                 add_edge(vid, mid, "contains")
 
     return {"nodes": list(nodes.values()), "edges": edges}
+
+
+async def snapshot_merge_descendants(
+    session: AsyncSession, seed_ids: set[str], *, max_hops: int = 4
+) -> set[str]:
+    """种子快照 id 集合沿 `merge_inputs` 正向(下游)扩展 `max_hops` 跳,返回并集
+    (含种子自身)。
+
+    `kind=source` anchor 用:数据源直连的快照(`datasource_id=该源`)可能只是某条
+    merge 链的上游一环,真正被数据集抽取(`DatasetVersionTable.source_snapshot_id`
+    引用)的是下游合并出的快照——不正向走一遍 merge 链就摸不到它,"该源流向哪个
+    数据集"这条链路会断在湖层。
+
+    实现:一次性取全表 `(id, merge_inputs)`,内存建反向索引(谁的 merge_inputs
+    指向该 snapshot_id)后做层级 BFS——换掉否则要么写递归 SQL、要么逐层 N+1
+    查询。快照量级可控(治理场景下万级以内)时这笔全表扫描代价可接受;量级失控
+    需改造为递归 CTE(暂未遇到,不预先做)。
+    """
+    rows = (
+        await session.execute(
+            select(DataLakeSnapshot.id, DataLakeSnapshot.merge_inputs)
+        )
+    ).all()
+    children: dict[str, list[str]] = {}
+    for sid, merge_inputs in rows:
+        for mi in merge_inputs or []:
+            parent_sid = mi.get("snapshot_id") if isinstance(mi, dict) else None
+            if parent_sid:
+                children.setdefault(parent_sid, []).append(sid)
+
+    result = set(seed_ids)
+    frontier = set(seed_ids)
+    for _ in range(max_hops):
+        nxt = {c for sid in frontier for c in children.get(sid, [])} - result
+        if not nxt:
+            break
+        result |= nxt
+        frontier = nxt
+    return result
+
+
+async def build_panorama_lineage(
+    session: AsyncSession,
+    *,
+    lake_id: str | None = None,
+    kinds: list[str] | None = None,
+    since: datetime | None = None,
+    max_nodes: int = 600,
+) -> dict[str, Any]:
+    """全景森林血缘(治理整改 P2):默认展示全局血缘森林(数据源→湖→集→任务),
+    数据血缘页不再强制从某个数据集入口发起查询,而是先看全局森林再点节点聚焦。
+
+    播种(seed)策略——全部 `DatasetVersion.id`(常规版本↔任务 BFS 起点)+ 全部
+    `DataLakeSnapshot.id`(经 `snapshot_anchor_id` 直接入图)+ 全部 `DataSource.id`
+    (经 `source_anchor_id` 直接入图)。三类缺一都会漏掉"零度节点"——BFS 只能从
+    已连通的锚点摸到邻居,摸不到没有任何边指向/指出的孤立节点:
+    - 只播种版本:未被任何数据集抽取的湖快照、从未产生快照/托管版本的数据源都
+      不可达,森林里会凭空少一截。
+    - 只播种"每个湖对象的 latest 快照":会漏掉"某历史快照是当前某条 merge 链
+      的中间节点,但其 latest 后继未必属于同一条链"的场景(`expand_snapshot` 的
+      merge 上游语义允许任意版本互相引用,不能假设只有 latest 有意义);且治理
+      审计要看完整轨迹而非只看最新状态。故本函数全量播种全部快照版本,不裁剪
+      到 latest(如未来性能压力大到必须裁剪,需另行评估,不在本次范围内静默做)。
+
+    过滤(在收尾阶段做,不在播种阶段做——播种要拿到完整森林,过滤只裁剪展示;
+    过滤后统一裁剪悬空边,任何一端被过滤掉的边一并丢弃,不留半条边):
+    - `lake_id`:先在**完整**森林上,从该湖的快照节点出发沿 `edges`(from→to)
+      做一次前向可达性 BFS,只留快照节点自身 + 可达的下游节点(集/任务等)——
+      必须在完整图上算可达性,否则会被后续 kinds/since 过滤提前切断路径,漏掉
+      本该可达的下游。
+    - `kinds`:节点类型白名单,直接按 `node["kind"]` 过滤(在 lake_id 可达性算完
+      之后应用,不影响可达性判定)。
+    - `since`:节点 `createdAt` 早于该时间的丢弃;`datasource` 节点没有
+      `createdAt`(它是长期存在的实体,不是一次性事件),不受 since 过滤。
+
+    超量保护(fail-loud,不悄悄丢数据):过滤后的最终节点数超过 `max_nodes` 时
+    按稳定顺序(播种查询按 id 排序,结果可复现)截断到 `max_nodes`,返回
+    `truncated=True` + `totalEstimated`(截断前的真实节点数),由前端提示用户
+    缩小过滤范围——不是让血缘图无声不全。
+
+    返回 `{"nodes": [...], "edges": [...], "truncated": bool, "totalEstimated": int}`
+    (比 `build_lineage` 多出 `truncated`/`totalEstimated` 两键)。
+    """
+    version_ids = list(
+        (
+            await session.scalars(
+                select(DatasetVersion.id).order_by(DatasetVersion.id)
+            )
+        ).all()
+    )
+    snapshot_ids = list(
+        (
+            await session.scalars(
+                select(DataLakeSnapshot.id).order_by(DataLakeSnapshot.id)
+            )
+        ).all()
+    )
+    source_ids = list(
+        (await session.scalars(select(DataSource.id).order_by(DataSource.id))).all()
+    )
+
+    anchors = (
+        version_ids
+        + [snapshot_anchor_id(sid) for sid in snapshot_ids]
+        + [source_anchor_id(did) for did in source_ids]
+    )
+    graph = await build_lineage(session, anchors, direction="both")
+    nodes_by_id: dict[str, dict[str, Any]] = {n["id"]: n for n in graph["nodes"]}
+    edges = graph["edges"]
+
+    if lake_id is not None:
+        lake_snapshot_ids = {
+            nid
+            for nid, n in nodes_by_id.items()
+            if n["kind"] == "lake_snapshot" and n.get("lakeId") == lake_id
+        }
+        adj: dict[str, list[str]] = {}
+        for e in edges:
+            adj.setdefault(e["from"], []).append(e["to"])
+        keep = set(lake_snapshot_ids)
+        frontier: deque[str] = deque(lake_snapshot_ids)
+        while frontier:
+            cur = frontier.popleft()
+            for nxt in adj.get(cur, []):
+                if nxt not in keep:
+                    keep.add(nxt)
+                    frontier.append(nxt)
+        nodes_by_id = {nid: n for nid, n in nodes_by_id.items() if nid in keep}
+
+    if kinds is not None:
+        kind_set = set(kinds)
+        nodes_by_id = {
+            nid: n for nid, n in nodes_by_id.items() if n["kind"] in kind_set
+        }
+
+    if since is not None:
+
+        def _keep_by_time(n: dict[str, Any]) -> bool:
+            created = n.get("createdAt")
+            if created is None:
+                return True
+            return datetime.fromisoformat(created) >= since
+
+        nodes_by_id = {nid: n for nid, n in nodes_by_id.items() if _keep_by_time(n)}
+
+    edges = [e for e in edges if e["from"] in nodes_by_id and e["to"] in nodes_by_id]
+
+    nodes_list = list(nodes_by_id.values())
+    total = len(nodes_list)
+    truncated = total > max_nodes
+    if truncated:
+        nodes_list = nodes_list[:max_nodes]
+        kept_ids = {n["id"] for n in nodes_list}
+        edges = [e for e in edges if e["from"] in kept_ids and e["to"] in kept_ids]
+
+    return {
+        "nodes": nodes_list,
+        "edges": edges,
+        "truncated": truncated,
+        "totalEstimated": total,
+    }
