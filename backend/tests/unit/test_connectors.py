@@ -586,6 +586,7 @@ async def test_doris_run_ingest_landing_kwargs_match_signature(monkeypatch):
         train_type=None,
         schema_variant=None,
         note=None,
+        source_kind=None,
     ):
         captured.update(
             dataset_id=dataset_id,
@@ -595,6 +596,7 @@ async def test_doris_run_ingest_landing_kwargs_match_signature(monkeypatch):
             produced_by_job_id=produced_by_job_id,
             storage_format=storage_format,
             note=note,
+            source_kind=source_kind,
         )
         return ("VERSION", "MEMBER")
 
@@ -621,3 +623,5 @@ async def test_doris_run_ingest_landing_kwargs_match_signature(monkeypatch):
     assert captured["produced_by_job_id"] == "job-9"
     # 来源 URI 信息保留在 note(原 source_uri 的去处)
     assert "doris://" in (captured["note"] or "")
+    # 来源分类(治理整改 P1-①):遗留直采统一标 db_ingest
+    assert captured["source_kind"] == "db_ingest"

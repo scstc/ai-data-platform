@@ -743,6 +743,7 @@ async def upload_batch_as_dataset(
                     f"单一格式批量上传:{len(files)} 个文件"
                     f"(原件存 {orig_prefix})"
                 ),
+                source_kind="upload",
             )
         dataset = await session.get(Dataset, dataset_id)
     except (ValueError, UnsupportedFormatError, ParseError) as exc:
@@ -885,6 +886,34 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             "createdAt": job.created_at.isoformat(),
         }
 
+    # Job 是否消费了平台输入版本(JobInput 有无)的缓存;isOriginal 判据改造
+    # (治理整改 P0-②)——见下方 job_consumes_version 假设说明。
+    job_has_input: dict[str, bool] = {}
+    # vid → produced_by_job_id,供 root_vids 循环(§湖/源层回溯)判断该 job 是否
+    # extract 类型时改挂 extract 边,不必重新查一遍版本。
+    version_job_id: dict[str, str | None] = {}
+
+    async def job_consumes_version(jid: str) -> bool:
+        """产出版本的 Job 是否消费了平台输入版本(JobInput 有无)。
+
+        假设:JobInput 有无 ⇔ 是否消费了平台版本。据此,出湖抽取(extract,读湖
+        快照不写 JobInput)与从零合成(make/trainset 无输入版本)的产出 Job 都
+        判定"未消费" → 产出版本 isOriginal=True。旧判据是 produced_by_job_id
+        is None,新判据是其严格超集(旧判据为 True 时新判据必然也为 True),
+        存量血缘不回归。合成版本因此从旧 isOriginal=False 翻为 True 是预期变化
+        (在平台内确实是根);因其通常无 source_snapshot_id,下方 root_vids 循环
+        查不到 sids 会落 hosted_source 兜底(source_datasource_id 多为 None →
+        无边),不会误触发湖层展开。
+        """
+        if jid not in job_has_input:
+            exists = (
+                await session.execute(
+                    select(JobInput.job_id).where(JobInput.job_id == jid).limit(1)
+                )
+            ).first()
+            job_has_input[jid] = exists is not None
+        return job_has_input[jid]
+
     dq: deque[tuple[str, int]] = deque((v.id, 0) for v in starts)
     while dq:
         vid, depth = dq.popleft()
@@ -894,6 +923,9 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
         version = await session.get(DatasetVersion, vid)
         if version is None:
             continue
+        jid = version.produced_by_job_id
+        version_job_id[vid] = jid
+        is_original = True if not jid else not await job_consumes_version(jid)
         nodes[vid] = {
             "id": vid,
             "kind": "version",
@@ -907,14 +939,13 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
             "rows": version.rows,
             "scanVerdict": version.scan_verdict,
             "publishStatus": version.publish_status,
-            "isOriginal": version.produced_by_job_id is None,
+            "isOriginal": is_original,
             "isFocus": version.dataset_id == dataset_id,
             "createdAt": version.created_at.isoformat(),
         }
         if depth >= MAX_DEPTH:
             continue
         # 上游:产出该版本的任务(及其输入版本)
-        jid = version.produced_by_job_id
         if jid and jid not in seen_j:
             seen_j.add(jid)
             job = await session.get(Job, jid)
@@ -1059,7 +1090,28 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
                 msid = mi.get("snapshot_id") if isinstance(mi, dict) else None
                 if msid and await expand_snapshot(msid, ldepth + 1):
                     add_edge(msid, sid, "merge")
-        if snap.datasource_id and await add_datasource_node(snap.datasource_id):
+        # 入湖 Job 进图(治理整改 P1-①):快照带 job_id(经采集任务入湖)时插入
+        # job 节点,画 datasource→job→snapshot 两段 ingest 边;手动上传/无任务
+        # 上下文的快照 job_id 为空,保留原 datasource→snapshot 直连兜底。
+        job_linked = False
+        if snap.job_id:
+            if snap.job_id not in seen_j:
+                seen_j.add(snap.job_id)
+                ingest_job = await session.get(Job, snap.job_id)
+                if ingest_job:
+                    nodes[snap.job_id] = job_node(ingest_job)
+            if snap.job_id in nodes:
+                job_linked = True
+                if snap.datasource_id and await add_datasource_node(
+                    snap.datasource_id
+                ):
+                    add_edge(snap.datasource_id, snap.job_id, "ingest")
+                add_edge(snap.job_id, sid, "ingest")
+        if (
+            not job_linked
+            and snap.datasource_id
+            and await add_datasource_node(snap.datasource_id)
+        ):
             add_edge(snap.datasource_id, sid, "ingest")
         return True
 
@@ -1077,10 +1129,18 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
                 .distinct()
             )
         ).all()
+        # 若产出该 root 版本的 job 是出湖抽取(type=extract,P0-②新建),extract
+        # 边改挂 job 节点(snapshot→extractJob→version,job→version 的 output
+        # 边已由主 BFS 循环画出);否则维持存量语义 snapshot→version 字节级不变。
+        jid = version_job_id.get(vid)
+        job_entry = nodes.get(jid) if jid else None
+        extract_target = (
+            jid if job_entry and job_entry.get("jobType") == "extract" else vid
+        )
         linked = False
         for sid in sids:
             if await expand_snapshot(sid, 0):
-                add_edge(sid, vid, "extract")
+                add_edge(sid, extract_target, "extract")
                 linked = True
         if not linked:
             version = await session.get(DatasetVersion, vid)
@@ -1160,6 +1220,7 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
                         else None
                     ),
                     "sourceUploadChannel": m.source_upload_channel,
+                    "sourceKind": m.source_kind,
                 }
                 for m in sorted(ms, key=lambda x: x.table_name)
             ]

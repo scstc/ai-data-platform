@@ -106,3 +106,9 @@ class DatasetVersion(Base):
     # text/alpaca/messages/preference/prompt_only/eval。
     # 供下游构造层/训练侧校验字段结构。
     schema_variant: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 湖快照溯源集合(可溯源可复现整改 P1-①):媒体 manifest 整版本形态抽取自哪些
+    # 湖快照(去重列表),land_media_manifest 新建时写定、续写 draft 时并集更新。
+    # 表成员形态版本走 DatasetVersionTable.source_snapshot_id(逐成员),此列为空。
+    source_snapshot_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB, nullable=True
+    )

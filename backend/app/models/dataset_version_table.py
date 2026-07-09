@@ -59,6 +59,10 @@ class DatasetVersionTable(Base):
     # 该成员的来源渠道,抽取时从 data_lake_snapshots.upload_channel 带过来;
     # 非湖抽取来源为空。
     source_upload_channel: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 来源分类(可溯源可复现整改 P1-①):upload(本地直传) | db_ingest(遗留直采) |
+    # lake(湖抽取)。由调用方显式传,不做内部推断(见 landing.add_table_member);
+    # 存量成员为空。
+    source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

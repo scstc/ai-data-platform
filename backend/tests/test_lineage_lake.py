@@ -9,6 +9,7 @@ GET /api/v1/datasets/{id}/lineage 在版本↔任务图之上补齐上游:
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
 from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
 from app.models.dataset import Dataset
@@ -140,6 +141,10 @@ async def test_lineage_extends_to_lake_and_datasource(client, session_factory):
     assert edges[("snap-lin-merged", "dsv-lin001")] == "extract"
     assert edges[("snap-lin-src", "snap-lin-merged")] == "merge"
     assert edges[("ds-lin001", "snap-lin-src")] == "ingest"
+
+    # 存量手插版本(produced_by_job_id=None)不回归:isOriginal 判据改造
+    # (P0-②)后仍为 True(旧判据本就是 True,新判据是其超集)。
+    assert nodes["dsv-lin001"]["isOriginal"] is True
 
 
 async def test_lineage_hosted_source_fallback(client, session_factory):
@@ -469,3 +474,355 @@ async def test_lineage_member_level_operators_and_sources(client, session_factor
     assert members_by_table["users"]["sourceSnapshotId"] == "snap-lin006"
     assert members_by_table["users"]["sourceName"] == "users @v3"
     assert members_by_table["orders"]["sourceSnapshotId"] is None
+
+    # 真加工链(job-lin006 有 JobInput 消费 dsv-lin006v1)→ 产出版本 isOriginal=False
+    # (P0-②判据改造:JobInput 有无区分"消费平台版本" vs "从零产出/湖抽取")。
+    assert nodes["dsv-lin006v2"]["isOriginal"] is False
+
+
+# ---------------------------------------------------------------------------
+# 出湖抽取补建 Job(P0-②)+ 入湖 Job 进图 / 成员来源分类(P1-①)
+# ---------------------------------------------------------------------------
+
+
+async def test_lineage_extract_creates_job_node_isoriginal_and_no_direct_edge(
+    client, session_factory, monkeypatch
+):
+    """真实走 extract_to_new_dataset(只 mock 湖字节读取这一层外部 I/O 边界):
+    产出版本 produced_by_job_id 非空、Job type=extract/state=success;
+    血缘图含 {snapshot→extractJob→version} 两段边,无直连 {snapshot→version};
+    产出版本 isOriginal=True(extract Job 不写 JobInput)。"""
+    from app.services import lake_extract
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                DataLake(id="lake-lin010", name="抽取湖"),
+                DataLakeObject(
+                    id="lobj-lin010",
+                    lake_id="lake-lin010",
+                    identity_key="db:products",
+                    display_name="products",
+                    data_category="database",
+                ),
+                DataLakeSnapshot(
+                    id="snap-lin010",
+                    lake_id="lake-lin010",
+                    source_version="source_v20260707_01_pg",
+                    storage_uri="s3://lake/products_v1.parquet",
+                    storage_format="parquet",
+                    data_category="database",
+                    upload_channel="database",
+                    object_id="lobj-lin010",
+                    version_no=1,
+                    rows=1,
+                ),
+            ]
+        )
+        await session.commit()
+
+        async def fake_extract(
+            sess, lake_id, source_version, *, inject_lineage=True, doc_options=None
+        ):
+            return [{"id": 1, "name": "widget"}]
+
+        monkeypatch.setattr(
+            lake_extract, "extract_from_lake_snapshot", fake_extract
+        )
+
+        dataset = await lake_extract.extract_to_new_dataset(
+            session,
+            lake_id="lake-lin010",
+            snapshot_ids=["snap-lin010"],
+            dataset_name="抽取产出数据集",
+        )
+
+    resp = await client.get(f"/api/v1/datasets/{dataset.id}/lineage")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    edges = {(e["from"], e["to"]): e["kind"] for e in data["edges"]}
+
+    version_nodes = [n for n in data["nodes"] if n["kind"] == "version"]
+    assert len(version_nodes) == 1
+    vnode = version_nodes[0]
+    assert vnode["isOriginal"] is True
+
+    job_nodes = [n for n in data["nodes"] if n["kind"] == "job"]
+    assert len(job_nodes) == 1
+    assert job_nodes[0]["jobType"] == "extract"
+    jid = job_nodes[0]["id"]
+
+    assert edges[("snap-lin010", jid)] == "extract"
+    assert edges[(jid, vnode["id"])] == "output"
+    assert ("snap-lin010", vnode["id"]) not in edges
+
+    async with session_factory() as session:
+        ver = await session.get(DatasetVersion, vnode["id"])
+        assert ver is not None
+        assert ver.produced_by_job_id == jid
+        job = await session.get(Job, jid)
+        assert job is not None
+        assert job.type == "extract"
+        assert job.state == "success"
+        assert job.finished_at is not None
+
+
+async def test_lineage_extract_failure_marks_job_failed_and_reraises(
+    session_factory, monkeypatch
+):
+    """抽取中途异常(mock 快照读取失败):补建的 Job 回写 failed+error+finished_at,
+    异常仍原样抛出(路由层 400 行为不变,见 data_lakes.py::extract_to_dataset)。"""
+    from app.services import lake_extract
+    from app.services.external_store import ExternalStoreError
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                DataLake(id="lake-lin011", name="失败湖"),
+                Dataset(id="dset-lin011", name="抽取失败目标数据集"),
+                DataLakeSnapshot(
+                    id="snap-lin011",
+                    lake_id="lake-lin011",
+                    source_version="source_v20260708_01_pg",
+                    storage_uri="s3://lake/broken.parquet",
+                    storage_format="parquet",
+                    data_category="database",
+                    upload_channel="database",
+                ),
+            ]
+        )
+        await session.commit()
+
+        async def fake_extract_boom(*args, **kwargs):
+            raise ExternalStoreError("模拟快照下载失败")
+
+        monkeypatch.setattr(
+            lake_extract, "extract_from_lake_snapshot", fake_extract_boom
+        )
+
+        with pytest.raises(ExternalStoreError, match="模拟快照下载失败"):
+            await lake_extract.extract_to_new_dataset(
+                session,
+                lake_id="lake-lin011",
+                snapshot_ids=["snap-lin011"],
+                dataset_id="dset-lin011",
+            )
+
+    async with session_factory() as session:
+        jobs = (
+            await session.execute(
+                select(Job)
+                .where(Job.type == "extract")
+                .order_by(Job.created_at.desc())
+            )
+        ).scalars().all()
+        assert jobs
+        job = jobs[0]
+        assert job.state == "failed"
+        assert job.error is not None and "模拟快照下载失败" in job.error
+        assert job.finished_at is not None
+
+
+async def test_lineage_ingest_job_id_links_datasource_job_snapshot_and_dedups(
+    client, session_factory
+):
+    """P1-①:快照带 job_id(经采集任务入湖)→ 血缘图插入 job 节点,画
+    datasource→job→snapshot 两段 ingest 边,不再直连 datasource→snapshot;
+    两个快照共享同一 job_id 时 job 节点只出现一次(节点字典天然去重)。
+    成员级血缘同时透出新列 sourceKind。"""
+    async with session_factory() as session:
+        session.add_all(
+            [
+                DataSource(
+                    id="ds-lin012",
+                    name="日志库",
+                    type="database",
+                    db_kind="mysql",
+                    status="connected",
+                    config={},
+                ),
+                IngestTask(
+                    id="task-lin012",
+                    name="日志采集",
+                    datasource_id="ds-lin012",
+                    datasource_name="日志库",
+                    schedule={"mode": "once"},
+                    status="success",
+                    logs=[],
+                ),
+                Job(
+                    id="job-lin012",
+                    name="日志采集 #1",
+                    type="ingest",
+                    ingest_task_id="task-lin012",
+                    state="success",
+                ),
+                DataLake(id="lake-lin012", name="日志湖"),
+                DataLakeObject(
+                    id="lobj-lin012a",
+                    lake_id="lake-lin012",
+                    identity_key="db:logs",
+                    display_name="logs",
+                    data_category="database",
+                ),
+                DataLakeObject(
+                    id="lobj-lin012b",
+                    lake_id="lake-lin012",
+                    identity_key="db:events",
+                    display_name="events",
+                    data_category="database",
+                ),
+                # 两个快照共享同一采集 job_id(同一次采集入湖多张表)
+                DataLakeSnapshot(
+                    id="snap-lin012a",
+                    lake_id="lake-lin012",
+                    source_version="source_v20260709_01_mysql",
+                    storage_uri="s3://lake/logs_v1.parquet",
+                    storage_format="parquet",
+                    data_category="database",
+                    upload_channel="database",
+                    datasource_id="ds-lin012",
+                    ingest_task_id="task-lin012",
+                    job_id="job-lin012",
+                    object_id="lobj-lin012a",
+                    version_no=1,
+                    rows=20,
+                ),
+                DataLakeSnapshot(
+                    id="snap-lin012b",
+                    lake_id="lake-lin012",
+                    source_version="source_v20260709_02_mysql",
+                    storage_uri="s3://lake/events_v1.parquet",
+                    storage_format="parquet",
+                    data_category="database",
+                    upload_channel="database",
+                    datasource_id="ds-lin012",
+                    ingest_task_id="task-lin012",
+                    job_id="job-lin012",
+                    object_id="lobj-lin012b",
+                    version_no=1,
+                    rows=30,
+                ),
+                Dataset(id="dset-lin012", name="日志数据集"),
+                DatasetVersion(
+                    id="dsv-lin012",
+                    dataset_id="dset-lin012",
+                    version_no=1,
+                    storage_uri="s3://uploads/dset-lin012/v1/data.jsonl",
+                ),
+                DatasetVersionTable(
+                    id="dvt-lin012a",
+                    dataset_version_id="dsv-lin012",
+                    table_name="logs",
+                    storage_uri="s3://uploads/dset-lin012/v1/logs.jsonl",
+                    format="jsonl",
+                    source_snapshot_id="snap-lin012a",
+                    source_kind="lake",
+                ),
+                DatasetVersionTable(
+                    id="dvt-lin012b",
+                    dataset_version_id="dsv-lin012",
+                    table_name="events",
+                    storage_uri="s3://uploads/dset-lin012/v1/events.jsonl",
+                    format="jsonl",
+                    source_snapshot_id="snap-lin012b",
+                    source_kind="lake",
+                ),
+            ]
+        )
+        await session.commit()
+
+    resp = await client.get("/api/v1/datasets/dset-lin012/lineage")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    nodes = {n["id"]: n for n in data["nodes"]}
+    edges = {(e["from"], e["to"]): e["kind"] for e in data["edges"]}
+
+    assert nodes["job-lin012"]["kind"] == "job"
+    # job 节点只有一份(两快照共享 job_id,节点字典天然去重,不是"两条边"意义上
+    # 的去重——这里断言的是同一 id 只入图一次)
+    assert sum(1 for n in data["nodes"] if n["id"] == "job-lin012") == 1
+    assert edges[("ds-lin012", "job-lin012")] == "ingest"
+    assert edges[("job-lin012", "snap-lin012a")] == "ingest"
+    assert edges[("job-lin012", "snap-lin012b")] == "ingest"
+    assert ("ds-lin012", "snap-lin012a") not in edges
+    assert ("ds-lin012", "snap-lin012b") not in edges
+
+    # 成员级血缘透出 sourceKind(纯读新列)
+    members_by_table = {m["tableName"]: m for m in nodes["dsv-lin012"]["members"]}
+    assert members_by_table["logs"]["sourceKind"] == "lake"
+    assert members_by_table["events"]["sourceKind"] == "lake"
+
+
+async def test_add_table_member_persists_source_kind(session_factory):
+    """source_kind 由调用方显式传,不做内部推断;新建成员写入 + 同名覆盖跟随新值
+    (P1-①,landing.add_table_member,与既有 source_snapshot_id 同语义)。"""
+    from app.services.landing import add_table_member
+
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-lin013", name="来源分类测试集"))
+        await session.commit()
+
+        _, member = await add_table_member(
+            session,
+            "dset-lin013",
+            [{"a": 1}],
+            table_name="t",
+            source_kind="upload",
+        )
+        assert member.source_kind == "upload"
+
+        _, member2 = await add_table_member(
+            session,
+            "dset-lin013",
+            [{"a": 2}],
+            table_name="t",
+            source_kind="db_ingest",
+        )
+        assert member2.source_kind == "db_ingest"
+
+
+async def test_land_media_manifest_source_snapshot_ids_union_and_direct_none(
+    session_factory,
+):
+    """source_snapshot_ids:新建版本直接赋值,续写 draft 并集更新;直传路径
+    (`POST /datasets/upload-media`)不传该参数,默认为 None(P1-①修正B)。"""
+    from app.services.landing import land_media_manifest
+
+    async with session_factory() as session:
+        session.add(Dataset(id="dset-lin014", name="媒体溯源测试集"))
+        await session.commit()
+
+        v1 = await land_media_manifest(
+            session,
+            "dset-lin014",
+            files=[("a.png", b"fakepngbytes")],
+            data_type="image",
+            produced_by_job_id="job-fakelin014",
+            source_snapshot_ids=["snap-x", "snap-y"],
+        )
+        assert v1.produced_by_job_id == "job-fakelin014"
+        assert v1.source_snapshot_ids == ["snap-x", "snap-y"]
+
+        # 续写同一 draft:来源快照并集更新(不定格在第一次)
+        v2 = await land_media_manifest(
+            session,
+            "dset-lin014",
+            files=[("b.png", b"more-bytes")],
+            data_type="image",
+            source_snapshot_ids=["snap-y", "snap-z"],
+        )
+        assert v2.id == v1.id
+        assert v2.source_snapshot_ids == ["snap-x", "snap-y", "snap-z"]
+
+        # 直传路径(POST /datasets/upload-media)不传 → 默认 None
+        session.add(Dataset(id="dset-lin015", name="直传媒体测试集"))
+        await session.commit()
+        v3 = await land_media_manifest(
+            session,
+            "dset-lin015",
+            files=[("c.png", b"direct-upload-bytes")],
+            data_type="image",
+        )
+        assert v3.source_snapshot_ids is None
+        assert v3.produced_by_job_id is None

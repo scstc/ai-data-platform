@@ -221,6 +221,7 @@ async def run_pg_ingest(
                         note=f"采集落地:{task.name}(来源 {datasource.name})",
                         produced_by_job_id=job_id,
                         storage_format="jsonl",
+                        source_kind="db_ingest",
                     )
 
                 # C5 评审 Finding 1 修复:水位推进改为每表成功落地**之后**

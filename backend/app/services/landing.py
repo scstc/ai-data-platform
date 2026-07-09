@@ -868,6 +868,7 @@ async def add_table_member(
     note: str | None = None,
     source_snapshot_id: str | None = None,
     source_upload_channel: str | None = None,
+    source_kind: str | None = None,
 ) -> tuple[DatasetVersion, DatasetVersionTable]:
     """把一张表的记录落成当前 draft 版本的一个成员(同名覆盖)。
 
@@ -964,6 +965,7 @@ async def add_table_member(
         # 同名覆盖即内容替换,血缘跟随新内容(非湖来源覆盖时置空,不残留旧血缘)
         existing.source_snapshot_id = source_snapshot_id
         existing.source_upload_channel = source_upload_channel
+        existing.source_kind = source_kind
         member = existing
     else:
         member = DatasetVersionTable(
@@ -978,6 +980,7 @@ async def add_table_member(
             schema_variant=eff_variant,
             source_snapshot_id=source_snapshot_id,
             source_upload_channel=source_upload_channel,
+            source_kind=source_kind,
         )
         session.add(member)
 
@@ -1256,6 +1259,7 @@ async def land_upload(
             source_format=source_format.lower(),
             strict_semantic=strict_semantic,
             note=f"本地上传落地:{filename}",
+            source_kind="upload",
         )
         dataset = await session.get(Dataset, dataset_id)
         return dataset, version
@@ -1347,6 +1351,8 @@ async def land_media_manifest(
     *,
     files: list[tuple[str, bytes]],
     data_type: str,
+    produced_by_job_id: str | None = None,
+    source_snapshot_ids: list[str] | None = None,
 ) -> DatasetVersion:
     """一批媒体字节(单模态)→ manifest jsonl 版本(一文件一行,DJ 可读契约)。
 
@@ -1354,6 +1360,10 @@ async def land_media_manifest(
     复用该数据集最新 draft 版本(有则续写 manifest 追加行,无则新建);manifest 是
     整版本形态(非表成员)。`files` 为 ``(filename, content)``,仅支持单模态
     (image/audio/video,一个数据集一种模态,见 `_DATA_TYPE_TO_MEDIA_FIELD`)。
+    `produced_by_job_id`/`source_snapshot_ids` 仅湖抽取传(见 lake_extract.py),
+    直传路径(`POST /datasets/upload-media`)不传,默认 None=直传。
+    `source_snapshot_ids` 新建版本直接赋值,续写 draft 时并集更新(同一 draft
+    陆续从不同快照抽取媒体时,来源集合要累加,而不是定格在第一次)。
 
     Raises:
         LandingError: data_type 不支持 / 空文件列表 / 超出接入上限 / 单文件或总体积超限
@@ -1512,12 +1522,23 @@ async def land_media_manifest(
             modalities=media_modalities,
             publish_status="draft",
             note=f"媒体批量接入:{len(files)} 个文件",
+            produced_by_job_id=produced_by_job_id,
+            source_snapshot_ids=sorted(set(source_snapshot_ids))
+            if source_snapshot_ids
+            else None,
         )
         session.add(version)
     else:
         version.storage_uri = f"s3://{bucket}/{manifest_key}"
         version.rows = len(manifest_rows)
         version.size = (version.size or 0) + total_size
+        if produced_by_job_id and version.produced_by_job_id is None:
+            version.produced_by_job_id = produced_by_job_id
+        if source_snapshot_ids:
+            existing_sids = set(version.source_snapshot_ids or [])
+            version.source_snapshot_ids = sorted(
+                existing_sids | set(source_snapshot_ids)
+            )
         if media_modalities:
             version.modalities = media_modalities
     await session.commit()

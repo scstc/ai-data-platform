@@ -380,6 +380,7 @@ class HdfsConnector:
                     source_format=ext,
                     note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
                     produced_by_job_id=job_id,
+                    source_kind="db_ingest",
                 )
 
             # C5 评审 Finding 1 修复:水位推进改为每路径成功落地**之后**

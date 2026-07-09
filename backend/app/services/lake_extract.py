@@ -13,6 +13,9 @@ import asyncio
 import io
 import logging
 import re
+import secrets
+from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Any
 
 import pyarrow.parquet as pq
@@ -22,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.data_lake import DataLakeSnapshot
 from app.models.dataset import Dataset
+from app.models.job import Job
 from app.services.data_lake import get_snapshot_by_version
 from app.services.external_store import ExternalStoreError, client_for, parse_s3_uri
 from app.services.landing import (
@@ -35,6 +39,14 @@ from app.services.landing import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _new_job_id() -> str:
+    return f"job-{secrets.token_hex(3)}"
+
+
+def _now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 # 元数据统一嵌套在记录的 "meta" 键下(DJ 标准格式,如 Arxiv 数据集的
 # {"text": ..., "meta": {"src": ..., "date": ..., "version": ...}}),由
@@ -347,6 +359,7 @@ async def extract_and_land_from_lake(
         storage_format="jsonl",
         source_snapshot_id=snapshot.id,
         source_upload_channel=snapshot.upload_channel,
+        source_kind="lake",
     )
 
     return version, member
@@ -440,87 +453,135 @@ async def extract_to_new_dataset(
             creator=creator,
         )
 
-    # 二进制快照(图片/音频/视频)按模态分组,各自落一个 manifest 版本(DJ 可读
-    # 契约,见 landing.land_media_manifest);前置解析(OCR/ASR/关键帧,见
-    # docs/数据治理.md §2.2)尚未实现,manifest 里的 text 先是占位 token。
-    binary_snapshots = [s for s in snapshots if s.storage_format in BINARY_FORMATS]
-    other_snapshots = [s for s in snapshots if s.storage_format not in BINARY_FORMATS]
+    # 补建 Job(可溯源可复现整改 P0-②):抽取此前静默无痕,产出版本 isOriginal
+    # 判据(datasets.py::dataset_lineage)与血缘 extract 边据此挂上 job 节点。
+    # 不写 JobInput——抽取不消费平台版本,读的是湖快照,语义上仍是 root。
+    job = Job(
+        id=_new_job_id(),
+        name=f"湖抽取:{lake.name} → {dataset.name}",
+        type="extract",
+        state="running",
+        started_at=_now(),
+        created_by=creator,
+        spec={
+            "snapshot_ids": snapshot_ids,
+            "field_mapping": field_mapping,
+            "doc_segment": asdict(doc_segment) if doc_segment else None,
+            "dataset_id": dataset.id,
+            "dataset_name": dataset.name,
+        },
+    )
+    db.add(job)
+    await db.commit()
 
-    by_kind: dict[str, list[DataLakeSnapshot]] = {}
-    for snapshot in binary_snapshots:
-        by_kind.setdefault(media_kind(snapshot.storage_format), []).append(snapshot)
-
-    for kind, group in by_kind.items():
-        items = [
-            (
-                _lake_file_name(snapshot),
-                await _download_snapshot_bytes(snapshot),
-            )
-            for snapshot in group
+    try:
+        # 二进制快照(图片/音频/视频)按模态分组,各自落一个 manifest 版本(DJ 可读
+        # 契约,见 landing.land_media_manifest);前置解析(OCR/ASR/关键帧,见
+        # docs/数据治理.md §2.2)尚未实现,manifest 里的 text 先是占位 token。
+        binary_snapshots = [
+            s for s in snapshots if s.storage_format in BINARY_FORMATS
         ]
-        try:
-            await land_media_manifest(db, dataset.id, files=items, data_type=kind)
-        except LandingError as exc:
-            # 本函数对外只承诺 ExternalStoreError(见函数 docstring),统一转换
-            raise ExternalStoreError(str(exc)) from exc
+        other_snapshots = [
+            s for s in snapshots if s.storage_format not in BINARY_FORMATS
+        ]
 
-    # 其余(数据库/文本/文档)逐快照抽取并落表成员;成员名取数据湖原始文件名
-    # (_lake_file_name → _safe_table_name 去扩展名/非法字符)。原文件名可能重复
-    # (如同一文件多次入湖得到不同 source_version),而 table_name 版本内必须唯一
-    # (add_table_member 同名会覆盖),故追加 _2/_3… 后缀去重,避免静默丢数据。
-    from app.services.landing import _safe_table_name
-
-    used_names: set[str] = set()
-    for snapshot in other_snapshots:
-        records = await extract_from_lake_snapshot(
-            db,
-            lake_id,
-            snapshot.source_version,
-            inject_lineage=True,
-            doc_options=doc_segment,
-        )
-
-        # 应用字段映射(表格类快照:database/tabular + 该快照配置了映射时执行)
-        # tabular 包含 csv/tsv/xlsx/xls/jsonl 等结构化文件
-        raw_mapping = field_mapping.get(snapshot.id) if field_mapping else None
-        # 旧格式单模板字符串 → {"text": 模板};过滤空字段名/空模板行
-        if isinstance(raw_mapping, str):
-            raw_mapping = {"text": raw_mapping}
-        mapping = {
-            field.strip(): tpl
-            for field, tpl in (raw_mapping or {}).items()
-            if field.strip() and tpl and tpl.strip()
-        }
-        if mapping and snapshot.data_category in ("database", "tabular"):
-            if "meta" in mapping:
-                raise ExternalStoreError(
-                    "字段映射输出字段不能叫 meta(保留给血缘元数据)"
-                )
-            _logger.info(
-                "[字段映射] snapshot=%s 应用映射,裁列为 %s + 血缘字段",
-                snapshot.id,
-                sorted(mapping),
+        by_kind: dict[str, list[DataLakeSnapshot]] = {}
+        for snapshot in binary_snapshots:
+            by_kind.setdefault(media_kind(snapshot.storage_format), []).append(
+                snapshot
             )
-            records = _apply_field_mapping_transform(records, mapping)
 
-        base = _safe_table_name(_lake_file_name(snapshot))
-        table_name = base
-        seq = 2
-        while table_name in used_names:
-            table_name = f"{base}_{seq}"
-            seq += 1
-        used_names.add(table_name)
-        await add_table_member(
-            db,
-            dataset.id,
-            records,
-            table_name=table_name,
-            semantic_type=semantic_type,
-            source_format=snapshot.storage_format,
-            note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",
-            storage_format="jsonl",
-            source_snapshot_id=snapshot.id,
-            source_upload_channel=snapshot.upload_channel,
-        )
+        for kind, group in by_kind.items():
+            items = [
+                (
+                    _lake_file_name(snapshot),
+                    await _download_snapshot_bytes(snapshot),
+                )
+                for snapshot in group
+            ]
+            try:
+                await land_media_manifest(
+                    db,
+                    dataset.id,
+                    files=items,
+                    data_type=kind,
+                    produced_by_job_id=job.id,
+                    source_snapshot_ids=[s.id for s in group],
+                )
+            except LandingError as exc:
+                # 本函数对外只承诺 ExternalStoreError(见函数 docstring),统一转换
+                raise ExternalStoreError(str(exc)) from exc
+
+        # 其余(数据库/文本/文档)逐快照抽取并落表成员;成员名取数据湖原始文件名
+        # (_lake_file_name → _safe_table_name 去扩展名/非法字符)。原文件名可能重复
+        # (如同一文件多次入湖得到不同 source_version),而 table_name 版本内必须唯一
+        # (add_table_member 同名会覆盖),故追加 _2/_3… 后缀去重,避免静默丢数据。
+        from app.services.landing import _safe_table_name
+
+        used_names: set[str] = set()
+        for snapshot in other_snapshots:
+            records = await extract_from_lake_snapshot(
+                db,
+                lake_id,
+                snapshot.source_version,
+                inject_lineage=True,
+                doc_options=doc_segment,
+            )
+
+            # 应用字段映射(表格类快照:database/tabular + 该快照配置了映射时执行)
+            # tabular 包含 csv/tsv/xlsx/xls/jsonl 等结构化文件
+            raw_mapping = field_mapping.get(snapshot.id) if field_mapping else None
+            # 旧格式单模板字符串 → {"text": 模板};过滤空字段名/空模板行
+            if isinstance(raw_mapping, str):
+                raw_mapping = {"text": raw_mapping}
+            mapping = {
+                field.strip(): tpl
+                for field, tpl in (raw_mapping or {}).items()
+                if field.strip() and tpl and tpl.strip()
+            }
+            if mapping and snapshot.data_category in ("database", "tabular"):
+                if "meta" in mapping:
+                    raise ExternalStoreError(
+                        "字段映射输出字段不能叫 meta(保留给血缘元数据)"
+                    )
+                _logger.info(
+                    "[字段映射] snapshot=%s 应用映射,裁列为 %s + 血缘字段",
+                    snapshot.id,
+                    sorted(mapping),
+                )
+                records = _apply_field_mapping_transform(records, mapping)
+
+            base = _safe_table_name(_lake_file_name(snapshot))
+            table_name = base
+            seq = 2
+            while table_name in used_names:
+                table_name = f"{base}_{seq}"
+                seq += 1
+            used_names.add(table_name)
+            await add_table_member(
+                db,
+                dataset.id,
+                records,
+                table_name=table_name,
+                semantic_type=semantic_type,
+                source_format=snapshot.storage_format,
+                note=f"从湖 {lake.name} 快照 {snapshot.source_version} 抽取",
+                storage_format="jsonl",
+                source_snapshot_id=snapshot.id,
+                source_upload_channel=snapshot.upload_channel,
+                produced_by_job_id=job.id,
+                source_kind="lake",
+            )
+    except Exception as exc:
+        job.state = "failed"
+        job.error = str(exc)
+        job.finished_at = _now()
+        await db.commit()
+        raise
+
+    job.state = "success"
+    job.progress = 100
+    job.finished_at = _now()
+    await db.commit()
 
     return dataset

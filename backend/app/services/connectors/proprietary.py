@@ -85,6 +85,7 @@ async def _land_rows(
         note=note,
         produced_by_job_id=job_id,
         storage_format="jsonl",
+        source_kind="db_ingest",
     )
     return version
 
