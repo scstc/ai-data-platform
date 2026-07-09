@@ -422,8 +422,8 @@ const MemberNode: React.FC<{
   </div>
 );
 
-/** 自定义 ReactFlow 节点:复用 antd 版本/任务卡片 + 隐藏 Handle(顶 target/底 source)
- *  没有 Handle ReactFlow 建不出边(error #008);隐藏(opacity:0)保持卡片整洁。 */
+/** 自定义 ReactFlow 节点:复用 antd 版本/任务卡片 + 隐藏 Handle(左 target/右 source,
+ *  配合 LR 左→右布局)。没有 Handle ReactFlow 建不出边(error #008);隐藏(opacity:0)保持卡片整洁。 */
 const HANDLE_STYLE = { opacity: 0 } as const;
 // version 节点的 data 额外挂 expanded/onToggleMembers(见 LineageGraph 的 rfNodes 构造),
 // 驱动"N 成员" Tag 的展开/折叠交互;所有节点类型均挂 onFocus,驱动右上角聚焦按钮。
@@ -436,14 +436,14 @@ const RFVersionNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
   return (
     <>
-      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <VersionNode
         n={d}
         expanded={d.expanded}
         onToggleMembers={d.onToggleMembers}
         onFocus={d.onFocus}
       />
-      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
     </>
   );
 };
@@ -451,9 +451,9 @@ const RFJobNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
   return (
     <>
-      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <JobNode n={d} onFocus={d.onFocus} />
-      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
     </>
   );
 };
@@ -461,9 +461,9 @@ const RFSnapshotNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
   return (
     <>
-      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <SnapshotNode n={d} onFocus={d.onFocus} />
-      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
     </>
   );
 };
@@ -471,9 +471,9 @@ const RFDatasourceNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
   return (
     <>
-      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <DatasourceNode n={d} onFocus={d.onFocus} />
-      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
     </>
   );
 };
@@ -481,9 +481,9 @@ const RFMemberNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
   return (
     <>
-      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <MemberNode n={d} onFocus={d.onFocus} />
-      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
     </>
   );
 };
@@ -571,14 +571,16 @@ const LineageGraph: React.FC<{
     return <Empty description="无血缘数据（当前过滤范围内没有节点）" />;
   }
 
-  // dagre 算上→下布局,产出 ReactFlow 节点(含 position)。dagre 的 x/y 是节点中心,
+  // dagre 算左→右布局,产出 ReactFlow 节点(含 position)。dagre 的 x/y 是节点中心,
   // ReactFlow 要左上角,故各减半尺寸。
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(() => ({}));
   g.setGraph({
-    rankdir: 'TB',
-    nodesep: 32,
-    ranksep: 72,
+    // 左→右流向(数据源在左,下游往右):每条血缘链横向展开、多棵树纵向堆叠。
+    rankdir: 'LR',
+    // LR 下 nodesep=同层节点纵向间距、ranksep=层间横向间距(卡片较宽,层间给足)。
+    nodesep: 24,
+    ranksep: 96,
     marginx: 16,
     marginy: 16,
   });
