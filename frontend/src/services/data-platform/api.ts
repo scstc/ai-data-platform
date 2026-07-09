@@ -826,6 +826,54 @@ export async function getPanoramaLineage(
   );
 }
 
+/** 焦点探索血缘(OpenMetadata 式,血缘追溯重构):以任意实体(6 类 kind)为焦点,
+ * 上/下游各展开 up/down 跳(默认 2,上限 3)。焦点节点带 isFocus;每个节点带
+ * moreUp/moreDown——完整森林里未入本图的直接上/下游邻居数,驱动"+N"展开按钮。
+ * GET /api/v1/lineage/focus */
+export async function getFocusLineage(
+  params: {
+    kind: 'job' | 'member' | 'source' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
+    jobId?: string;
+    versionId?: string;
+    tableName?: string;
+    sourceId?: string;
+    objectId?: string;
+    snapshotId?: string;
+    up?: number;
+    down?: number;
+    members?: boolean;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.LineageGraph; success: boolean }>(
+    '/api/v1/lineage/focus',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
+/** 单节点邻居增量(焦点探索"+N"展开):只返回该实体紧邻一层的上游(direction=up)
+ * 或下游(direction=down)节点 + 边,供前端合并进已展示的焦点图,不必重拉整图。
+ * GET /api/v1/lineage/neighbors */
+export async function getFocusNeighbors(
+  params: {
+    kind: 'job' | 'member' | 'source' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
+    direction: 'up' | 'down';
+    jobId?: string;
+    versionId?: string;
+    tableName?: string;
+    sourceId?: string;
+    objectId?: string;
+    snapshotId?: string;
+    members?: boolean;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: DataPlatform.LineageGraph; success: boolean }>(
+    '/api/v1/lineage/neighbors',
+    { method: 'GET', params, ...(options || {}) },
+  );
+}
+
 /** 更新数据集元数据 PATCH /api/v1/datasets/{id} */
 export async function updateDataset(id: string, body: DataPlatform.DatasetUpdate) {
   return request<{ data: DataPlatform.DatasetDetail; success: boolean }>(

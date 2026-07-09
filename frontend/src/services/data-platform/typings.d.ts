@@ -972,8 +972,11 @@ declare namespace DataPlatform {
     publishStatus?: string;
     /** 原始接入(无产出任务) */
     isOriginal?: boolean;
-    /** 属于当前选中数据集(前端高亮) */
+    /** 焦点节点(焦点探索 GET /lineage/focus 的中心实体);全景页复用作选中数据集高亮 */
     isFocus?: boolean;
+    /** 焦点探索:完整血缘森林里未入本图的直接上/下游邻居数,驱动节点"+N"展开按钮 */
+    moreUp?: number;
+    moreDown?: number;
     /** 数据集声明的来源(治理整改 P1-②) */
     sourceKind?: string | null;
     sourceFormat?: string | null;
