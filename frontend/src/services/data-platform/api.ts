@@ -832,13 +832,14 @@ export async function getPanoramaLineage(
  * GET /api/v1/lineage/focus */
 export async function getFocusLineage(
   params: {
-    kind: 'job' | 'member' | 'source' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
+    kind: 'job' | 'member' | 'source' | 'lake' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
     jobId?: string;
     versionId?: string;
     tableName?: string;
     sourceId?: string;
     objectId?: string;
     snapshotId?: string;
+    lakeId?: string;
     up?: number;
     down?: number;
     members?: boolean;
@@ -856,7 +857,7 @@ export async function getFocusLineage(
  * GET /api/v1/lineage/neighbors */
 export async function getFocusNeighbors(
   params: {
-    kind: 'job' | 'member' | 'source' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
+    kind: 'job' | 'member' | 'source' | 'lake' | 'lake_object' | 'lake_snapshot' | 'dataset_version';
     direction: 'up' | 'down';
     jobId?: string;
     versionId?: string;
@@ -864,6 +865,7 @@ export async function getFocusNeighbors(
     sourceId?: string;
     objectId?: string;
     snapshotId?: string;
+    lakeId?: string;
     members?: boolean;
   },
   options?: { [key: string]: any },

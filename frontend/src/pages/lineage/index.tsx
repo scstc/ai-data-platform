@@ -1,13 +1,16 @@
-// 数据血缘:OpenMetadata 式焦点探索页(血缘追溯重构)。默认空态,顶部选定"焦点类型
-// (数据集版本/数据源/加工任务)+ 焦点实体"后,以该实体为中心向上/下游各展开若干跳
-// (深度可调 0~3),用 GET /lineage/focus 拉取子图;子图未覆盖的直接邻居数(moreUp/
-// moreDown)驱动节点卡「+N」按钮,点击调 GET /lineage/neighbors 增量合并进当前图,
-// 不整图重拉。点节点右上角「聚焦」小图标可换焦点(重新整图请求);点边弹出 Drawer
-// 看边详情,关联加工任务的边内嵌 AssetManifest(算子链/参数/LLM 快照)。成员图层
-// Switch 控制是否把版本内的表/文件展开为一等 member 节点(后端驱动,非本地展开)。
-// 渲染沿用原实现:ReactFlow(@xyflow/react)+ dagre 布局(rankdir=LR),节点复用
-// antd 卡片,自带平移/缩放/自适应。支持 ?versionId=/?sourceId=/?snapshotId=/
-// ?jobId=/?datasetId= 深链直达聚焦态(datasetId 解析该数据集最新版本)。
+// 数据血缘:两种视图模式(顶部 Segmented 切换),默认「焦点探索」。
+// ①「焦点探索」(OpenMetadata 式):顶部选定"焦点类型(数据集版本/数据源/加工任务/
+//   数据湖)+ 焦点实体"后,以该实体为中心向上/下游各展开若干跳(深度可调 0~3),用
+//   GET /lineage/focus 拉取子图;子图未覆盖的直接邻居数(moreUp/moreDown)驱动节点卡
+//   「+N」按钮,点击调 GET /lineage/neighbors 增量合并进当前图,不整图重拉。点节点右上
+//   角「聚焦」小图标可换焦点(重新整图请求);点边弹出 Drawer 看边详情,关联加工任务的
+//   边内嵌 AssetManifest(算子链/参数/LLM 快照)。成员图层 Switch 控制是否把版本内的表/
+//   文件展开为一等 member 节点(后端驱动)。数据湖焦点=该湖全部快照及下游数据集。
+// ②「全景概览」:GET /lineage/panorama 全局血缘森林,按 湖/类型 过滤;点任意节点
+//   切回焦点模式并以该节点为中心。
+// 渲染:ReactFlow(@xyflow/react)+ dagre 布局(rankdir=LR),节点复用 antd 卡片,自带
+// 平移/缩放/自适应。深链 ?versionId=/?sourceId=/?snapshotId=/?jobId=/?lakeId=/?datasetId=
+// 直达焦点态(lakeId→数据湖焦点、datasetId→该集最新版本)。
 import { PageContainer } from '@ant-design/pro-components';
 import { history, useSearchParams } from '@umijs/max';
 import {
@@ -25,11 +28,13 @@ import '@xyflow/react/dist/style.css';
 import { AimOutlined } from '@ant-design/icons';
 import dagre from '@dagrejs/dagre';
 import {
+  Alert,
   Button,
   Card,
   Drawer,
   Empty,
   InputNumber,
+  Segmented,
   Select,
   Space,
   Spin,
@@ -44,6 +49,8 @@ import {
   getDatasetLineage,
   getFocusLineage,
   getFocusNeighbors,
+  getPanoramaLineage,
+  listDataLakes,
   listDataSources,
   listJobs,
 } from '@/services/data-platform';
@@ -78,6 +85,11 @@ const KIND_META: Record<string, { label: string; color: string }> = {
   job: { label: '加工任务', color: '#fa8c16' },
   member: { label: '成员', color: '#9254de' },
 };
+
+// 全景概览过滤栏「类型」多选项:member 仅焦点成员图层产生,全景播种不覆盖,不作过滤项。
+const KIND_FILTER_OPTIONS = Object.entries(KIND_META)
+  .filter(([k]) => k !== 'member')
+  .map(([value, m]) => ({ value, label: m.label }));
 
 // 湖/源层边的中文标签(input/output 版本↔任务边保持无标签,与旧版一致)
 const EDGE_LABEL: Record<string, string> = {
@@ -665,6 +677,7 @@ type FocusParams =
   | { kind: 'dataset_version'; versionId: string }
   | { kind: 'job'; jobId: string }
   | { kind: 'source'; sourceId: string }
+  | { kind: 'lake'; lakeId: string }
   | { kind: 'lake_snapshot'; snapshotId: string }
   | { kind: 'member'; versionId: string; tableName: string };
 
@@ -772,25 +785,27 @@ const NodeSummary: React.FC<{ n?: DataPlatform.LineageNode }> = ({ n }) => {
   );
 };
 
-const FOCUS_TYPE_OPTIONS: {
-  value: 'dataset_version' | 'source' | 'job';
-  label: string;
-}[] = [
+type FocusType = 'dataset_version' | 'source' | 'job' | 'lake';
+
+const FOCUS_TYPE_OPTIONS: { value: FocusType; label: string }[] = [
   { value: 'dataset_version', label: '数据集版本' },
   { value: 'source', label: '数据源' },
   { value: 'job', label: '加工任务' },
+  { value: 'lake', label: '数据湖' },
 ];
 
 const Lineage: React.FC = () => {
   const [searchParams] = useSearchParams();
 
+  // 视图模式:focus=OpenMetadata 式焦点探索(默认);panorama=全景概览森林。
+  const [mode, setMode] = useState<'focus' | 'panorama'>('focus');
+
   // 焦点类型(顶部 Select,驱动下方「焦点实体」控件切换):数据集版本默认,深链带
-  // sourceId/jobId 时预选对应类型。
-  const [focusType, setFocusType] = useState<
-    'dataset_version' | 'source' | 'job'
-  >(() => {
+  // sourceId/jobId/lakeId 时预选对应类型。
+  const [focusType, setFocusType] = useState<FocusType>(() => {
     if (searchParams.get('sourceId')) return 'source';
     if (searchParams.get('jobId')) return 'job';
+    if (searchParams.get('lakeId')) return 'lake';
     return 'dataset_version';
   });
   const [selectedSourceId, setSelectedSourceId] = useState<string | undefined>(
@@ -799,10 +814,21 @@ const Lineage: React.FC = () => {
   const [selectedJobId, setSelectedJobId] = useState<string | undefined>(
     () => searchParams.get('jobId') ?? undefined,
   );
+  const [selectedLakeId, setSelectedLakeId] = useState<string | undefined>(
+    () => searchParams.get('lakeId') ?? undefined,
+  );
   // 数据集版本走 DatasetPicker 选数据集,onChange 后异步解析该集最新版本(见下方 effect)
   const [selectedDatasetId, setSelectedDatasetId] = useState<
     string | undefined
   >(() => searchParams.get('datasetId') ?? undefined);
+  // 湖下拉选项(数据湖焦点类型 + 全景湖过滤共用);全景过滤态
+  const [lakeOptions, setLakeOptions] = useState<
+    { value: string; label: string }[]
+  >([]);
+  const [filterLakeId, setFilterLakeId] = useState<string>();
+  const [filterKinds, setFilterKinds] = useState<string[]>([]);
+  const [panoramaGraph, setPanoramaGraph] =
+    useState<DataPlatform.LineageGraph>();
   const [sourceOptions, setSourceOptions] = useState<
     { value: string; label: string }[]
   >([]);
@@ -821,10 +847,13 @@ const Lineage: React.FC = () => {
     const sourceId = searchParams.get('sourceId');
     const snapshotId = searchParams.get('snapshotId');
     const jobId = searchParams.get('jobId');
+    const lakeId = searchParams.get('lakeId');
     if (versionId) return { kind: 'dataset_version', versionId };
     if (sourceId) return { kind: 'source', sourceId };
     if (snapshotId) return { kind: 'lake_snapshot', snapshotId };
     if (jobId) return { kind: 'job', jobId };
+    // ?lakeId=(数据湖详情「查看血缘」入口):聚焦整个数据湖(其全部快照+下游)
+    if (lakeId) return { kind: 'lake', lakeId };
     return undefined;
   });
   const [focusLabel, setFocusLabel] = useState('');
@@ -846,6 +875,13 @@ const Lineage: React.FC = () => {
       .then((res) =>
         setJobOptions(
           (res.data ?? []).map((j) => ({ value: j.id, label: j.name })),
+        ),
+      )
+      .catch(() => undefined);
+    listDataLakes({ pageSize: 200 })
+      .then((res) =>
+        setLakeOptions(
+          (res.data ?? []).map((l) => ({ value: l.id, label: l.name })),
         ),
       )
       .catch(() => undefined);
@@ -886,7 +922,9 @@ const Lineage: React.FC = () => {
           ? `job:${focus.jobId}`
           : focus.kind === 'source'
             ? `source:${focus.sourceId}`
-            : `lake_snapshot:${focus.snapshotId}`;
+            : focus.kind === 'lake'
+              ? `lake:${focus.lakeId}`
+              : `lake_snapshot:${focus.snapshotId}`;
 
   useEffect(() => {
     if (!focus) {
@@ -914,11 +952,37 @@ const Lineage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusKey, up, down, members]);
 
-  // 再聚焦(节点右上角「聚焦」按钮):换焦点中心,触发上方 effect 整图重拉——
-  // 天然清空「+N」展开态(旧图被新焦点图整体替换)。
+  // 全景概览态:按 湖/类型 过滤拉一次(仅 panorama 模式请求)。
+  useEffect(() => {
+    if (mode !== 'panorama') return;
+    let cancelled = false;
+    setLoading(true);
+    getPanoramaLineage({
+      lakeId: filterLakeId,
+      kinds: filterKinds.length ? filterKinds.join(',') : undefined,
+    })
+      .then((res) => {
+        if (!cancelled) setPanoramaGraph(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setPanoramaGraph(undefined);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, filterLakeId, filterKinds]);
+
+  // 再聚焦(节点右上角「聚焦」按钮 / 全景态点节点):换焦点中心并切回焦点模式,
+  // 触发焦点 effect 整图重拉——天然清空「+N」展开态(旧图被新焦点图整体替换)。
   const focusOnNode = (n: DataPlatform.LineageNode) => {
     const p = nodeToFocusParams(n);
-    if (p) setFocus(p);
+    if (p) {
+      setFocus(p);
+      setMode('focus');
+    }
   };
 
   // 「+N」增量展开:只拉该节点单方向一层邻居,合并进当前图(不整图重拉)
@@ -949,89 +1013,146 @@ const Lineage: React.FC = () => {
     <PageContainer header={{ title: '数据血缘', breadcrumb: {} }}>
       <Card size="small" style={{ marginBottom: 12 }}>
         <Space size={16} wrap>
-          <Space size={6}>
-            <Typography.Text type="secondary">焦点类型</Typography.Text>
-            <Select
-              style={{ width: 140 }}
-              options={FOCUS_TYPE_OPTIONS}
-              value={focusType}
-              onChange={(v: 'dataset_version' | 'source' | 'job') => {
-                setFocusType(v);
-                setFocus(undefined);
-                setFocusLabel('');
-                setSelectedSourceId(undefined);
-                setSelectedJobId(undefined);
-                setSelectedDatasetId(undefined);
-              }}
-            />
-          </Space>
-          <Space size={6}>
-            <Typography.Text type="secondary">焦点实体</Typography.Text>
-            {focusType === 'source' && (
-              <Select
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                placeholder="选择数据源"
-                style={{ width: 260 }}
-                options={sourceOptions}
-                value={selectedSourceId}
-                onChange={(v: string | undefined) => {
-                  setSelectedSourceId(v);
-                  setFocus(v ? { kind: 'source', sourceId: v } : undefined);
-                }}
-              />
-            )}
-            {focusType === 'job' && (
-              <Select
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                placeholder="选择加工任务"
-                style={{ width: 260 }}
-                options={jobOptions}
-                value={selectedJobId}
-                onChange={(v: string | undefined) => {
-                  setSelectedJobId(v);
-                  setFocus(v ? { kind: 'job', jobId: v } : undefined);
-                }}
-              />
-            )}
-            {focusType === 'dataset_version' && (
-              <DatasetPicker
-                value={selectedDatasetId}
-                onChange={setSelectedDatasetId}
-              />
-            )}
-          </Space>
-          <Space size={6}>
-            <Typography.Text type="secondary">上游深度</Typography.Text>
-            <InputNumber
-              min={0}
-              max={3}
-              value={up}
-              onChange={(v) => setUp(typeof v === 'number' ? v : 2)}
-              style={{ width: 64 }}
-            />
-          </Space>
-          <Space size={6}>
-            <Typography.Text type="secondary">下游深度</Typography.Text>
-            <InputNumber
-              min={0}
-              max={3}
-              value={down}
-              onChange={(v) => setDown(typeof v === 'number' ? v : 2)}
-              style={{ width: 64 }}
-            />
-          </Space>
-          <Space size={6}>
-            <Typography.Text type="secondary">成员图层</Typography.Text>
-            <Switch checked={members} onChange={setMembers} />
-          </Space>
+          <Segmented
+            options={[
+              { label: '焦点探索', value: 'focus' },
+              { label: '全景概览', value: 'panorama' },
+            ]}
+            value={mode}
+            onChange={(v) => setMode(v as 'focus' | 'panorama')}
+          />
+          {mode === 'focus' && (
+            <>
+              <Space size={6}>
+                <Typography.Text type="secondary">焦点类型</Typography.Text>
+                <Select
+                  style={{ width: 140 }}
+                  options={FOCUS_TYPE_OPTIONS}
+                  value={focusType}
+                  onChange={(v: FocusType) => {
+                    setFocusType(v);
+                    setFocus(undefined);
+                    setFocusLabel('');
+                    setSelectedSourceId(undefined);
+                    setSelectedJobId(undefined);
+                    setSelectedLakeId(undefined);
+                    setSelectedDatasetId(undefined);
+                  }}
+                />
+              </Space>
+              <Space size={6}>
+                <Typography.Text type="secondary">焦点实体</Typography.Text>
+                {focusType === 'source' && (
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="选择数据源"
+                    style={{ width: 260 }}
+                    options={sourceOptions}
+                    value={selectedSourceId}
+                    onChange={(v: string | undefined) => {
+                      setSelectedSourceId(v);
+                      setFocus(v ? { kind: 'source', sourceId: v } : undefined);
+                    }}
+                  />
+                )}
+                {focusType === 'job' && (
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="选择加工任务"
+                    style={{ width: 260 }}
+                    options={jobOptions}
+                    value={selectedJobId}
+                    onChange={(v: string | undefined) => {
+                      setSelectedJobId(v);
+                      setFocus(v ? { kind: 'job', jobId: v } : undefined);
+                    }}
+                  />
+                )}
+                {focusType === 'lake' && (
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="选择数据湖"
+                    style={{ width: 260 }}
+                    options={lakeOptions}
+                    value={selectedLakeId}
+                    onChange={(v: string | undefined) => {
+                      setSelectedLakeId(v);
+                      setFocus(v ? { kind: 'lake', lakeId: v } : undefined);
+                    }}
+                  />
+                )}
+                {focusType === 'dataset_version' && (
+                  <DatasetPicker
+                    value={selectedDatasetId}
+                    onChange={setSelectedDatasetId}
+                  />
+                )}
+              </Space>
+              <Space size={6}>
+                <Typography.Text type="secondary">上游深度</Typography.Text>
+                <InputNumber
+                  min={0}
+                  max={3}
+                  value={up}
+                  onChange={(v) => setUp(typeof v === 'number' ? v : 2)}
+                  style={{ width: 64 }}
+                />
+              </Space>
+              <Space size={6}>
+                <Typography.Text type="secondary">下游深度</Typography.Text>
+                <InputNumber
+                  min={0}
+                  max={3}
+                  value={down}
+                  onChange={(v) => setDown(typeof v === 'number' ? v : 2)}
+                  style={{ width: 64 }}
+                />
+              </Space>
+              <Space size={6}>
+                <Typography.Text type="secondary">成员图层</Typography.Text>
+                <Switch checked={members} onChange={setMembers} />
+              </Space>
+            </>
+          )}
+          {mode === 'panorama' && (
+            <>
+              <Space size={6}>
+                <Typography.Text type="secondary">数据湖</Typography.Text>
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="全部"
+                  style={{ width: 200 }}
+                  options={lakeOptions}
+                  value={filterLakeId}
+                  onChange={setFilterLakeId}
+                />
+              </Space>
+              <Space size={6}>
+                <Typography.Text type="secondary">类型</Typography.Text>
+                <Select
+                  mode="multiple"
+                  allowClear
+                  placeholder="全部"
+                  style={{ minWidth: 260 }}
+                  options={KIND_FILTER_OPTIONS}
+                  value={filterKinds}
+                  onChange={setFilterKinds}
+                />
+              </Space>
+            </>
+          )}
         </Space>
       </Card>
 
-      {focus && (
+      {mode === 'focus' && focus && (
         <Typography.Text
           type="secondary"
           style={{ display: 'block', marginBottom: 12 }}
@@ -1040,9 +1161,25 @@ const Lineage: React.FC = () => {
         </Typography.Text>
       )}
 
+      {mode === 'panorama' && panoramaGraph?.truncated && (
+        <Alert
+          type="warning"
+          showIcon
+          closable
+          message={`血缘图过大已截断（共 ${
+            panoramaGraph.totalEstimated ?? '?'
+          } 节点），请用 湖/类型 缩小范围`}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
       <Card
         size="small"
-        title="焦点血缘"
+        title={
+          mode === 'panorama'
+            ? '血缘全景森林（数据源 → 湖快照 → 数据集版本 → 加工任务）'
+            : '焦点血缘'
+        }
         extra={
           <Space size={8} wrap>
             {Object.entries(KIND_META).map(([k, m]) => (
@@ -1066,7 +1203,16 @@ const Lineage: React.FC = () => {
         styles={{ body: { maxHeight: '74vh', overflow: 'auto' } }}
       >
         <Spin spinning={loading}>
-          {!focus ? (
+          {mode === 'panorama' ? (
+            panoramaGraph && panoramaGraph.nodes.length > 0 ? (
+              // 全景态:点任意节点 → focusOnNode 切回焦点模式并以该节点为中心
+              <LineageGraph graph={panoramaGraph} onFocusNode={focusOnNode} />
+            ) : loading ? (
+              <div style={{ height: 420 }} />
+            ) : (
+              <Empty description="无血缘数据（当前过滤范围内没有节点）" />
+            )
+          ) : !focus ? (
             <Empty description="请选择焦点实体开始探索血缘" />
           ) : graph ? (
             <LineageGraph
