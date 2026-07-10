@@ -1313,6 +1313,10 @@ declare namespace DataPlatform {
     method: string;
     path: string;
     target?: string;
+    /** 被操作对象的名称快照（后端按资源类型反查；解析不到为空） */
+    targetName?: string;
+    /** 客户端 IP */
+    ip?: string;
     statusCode: number;
     createdAt: string;
   };

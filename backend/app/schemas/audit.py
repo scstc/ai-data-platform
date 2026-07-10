@@ -14,5 +14,7 @@ class AuditLogRead(CamelModel):
     method: str
     path: str
     target: str | None = None
+    target_name: str | None = None
+    ip: str | None = None
     status_code: int
     created_at: UtcDateTime

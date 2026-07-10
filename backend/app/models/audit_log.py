@@ -28,6 +28,10 @@ class AuditLog(Base):
     path: Mapped[str] = mapped_column(String, nullable=False)
     # 目标资源标识(路径末段,形如 id 时),可空
     target: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 目标对象名称快照(中间件按资源类型反查;解析不到为空)
+    target_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 客户端 IP(X-Forwarded-For 首跳,无代理时取对端地址)
+    ip: Mapped[str | None] = mapped_column(String, nullable=True)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False, index=True
