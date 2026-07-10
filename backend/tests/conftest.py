@@ -115,19 +115,27 @@ async def client(session_factory, seed_users) -> AsyncGenerator[AsyncClient, Non
 
 
 @pytest.fixture(autouse=True)
-def _job_runner_test_db(session_factory, monkeypatch) -> None:
-    """加工任务后台执行用独立会话(默认连业务库);测试里改指测试库,保证隔离。
+def _bind_test_session_factory(session_factory, monkeypatch) -> None:
+    """把所有绕过 get_session 依赖、直接用 async_session_factory 自建会话的
+    模块统一指向测试库,防止测试数据/审计日志漏写进业务库。
 
-    job_runner._run_job 用 async_session_factory() 自建会话(请求会话已关闭),不走
-    get_session 覆盖,故须单独把该工厂指向测试库;并按每用例的新事件循环重建并发
-    信号量,避免 asyncio 原语「bound to a different event loop」。
+    - get_session 覆盖只对请求内依赖注入生效;审计中间件(core.audit)、
+      加工任务后台执行(job_runner)、数据集过期扫描(dataset_lifecycle)等
+      都在模块顶层 import 了工厂,须逐模块 patch。
+    - core.db 本体也要 patch,兜住惰性导入方(如 llm_config.record_usage
+      在函数内 from app.core.db import ...,调用时取到的即是补丁值)。
+    - 另按每用例的新事件循环重建并发信号量,避免 asyncio 原语
+      「bound to a different event loop」。
     """
     import asyncio
 
+    from app.core import audit as core_audit
+    from app.core import db as core_db
     from app.core.config import settings
-    from app.services import engine, job_runner
+    from app.services import dataset_lifecycle, engine, job_runner
 
-    monkeypatch.setattr(job_runner, "async_session_factory", session_factory)
+    for mod in (core_db, core_audit, dataset_lifecycle, job_runner):
+        monkeypatch.setattr(mod, "async_session_factory", session_factory)
     monkeypatch.setattr(
         engine, "_semaphore", asyncio.Semaphore(settings.engine_concurrency)
     )
