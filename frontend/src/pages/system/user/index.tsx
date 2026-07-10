@@ -88,15 +88,11 @@ const UserPage: FC = () => {
       try {
         const r = await listRoles({ current: 1, pageSize: 200 });
         const roles = r.data ?? [];
-        setRoleOptions(
-          roles.map((x) => ({ label: x.name, value: x.id })),
-        );
+        setRoleOptions(roles.map((x) => ({ label: x.name, value: x.id })));
         setRoleKeyMap(
           Object.fromEntries(roles.map((x) => [x.roleKey, x.name])),
         );
-        setRoleKeyToId(
-          Object.fromEntries(roles.map((x) => [x.roleKey, x.id])),
-        );
+        setRoleKeyToId(Object.fromEntries(roles.map((x) => [x.roleKey, x.id])));
       } catch {
         /* ignore */
       }
@@ -117,12 +113,8 @@ const UserPage: FC = () => {
       try {
         const r = await listRoles({ current: 1, pageSize: 200 });
         const roles = r.data ?? [];
-        setRoleOptions(
-          roles.map((x) => ({ label: x.name, value: x.id })),
-        );
-        setRoleKeyToId(
-          Object.fromEntries(roles.map((x) => [x.roleKey, x.id])),
-        );
+        setRoleOptions(roles.map((x) => ({ label: x.name, value: x.id })));
+        setRoleKeyToId(Object.fromEntries(roles.map((x) => [x.roleKey, x.id])));
       } catch {
         /* ignore */
       }
@@ -317,7 +309,10 @@ const UserPage: FC = () => {
             ? {
                 displayName: editTarget.displayName,
                 deptId: editTarget.deptId,
-                roleIds: editTarget.roles?.map((roleKey) => roleKeyToId[roleKey]).filter(Boolean) ?? [],
+                roleIds:
+                  editTarget.roles
+                    ?.map((roleKey) => roleKeyToId[roleKey])
+                    .filter(Boolean) ?? [],
                 disabled: editTarget.disabled,
               }
             : {}

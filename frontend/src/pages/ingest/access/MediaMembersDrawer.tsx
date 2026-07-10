@@ -79,7 +79,9 @@ const MemberView: React.FC<{
 
   let body: React.ReactNode;
   if (failed) {
-    body = <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="加载失败" />;
+    body = (
+      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="加载失败" />
+    );
   } else if (!url) {
     body = <Spin />;
   } else if (IMAGE.has(fmt)) {
@@ -94,7 +96,9 @@ const MemberView: React.FC<{
     );
   } else if (VIDEO.has(fmt)) {
     // biome-ignore lint/a11y/useMediaCaption: 用户上传的原始媒体,无字幕轨
-    body = <video src={url} controls style={media} onError={() => setFailed(true)} />;
+    body = (
+      <video src={url} controls style={media} onError={() => setFailed(true)} />
+    );
   } else if (AUDIO.has(fmt)) {
     body = (
       // biome-ignore lint/a11y/useMediaCaption: 用户上传的原始媒体,无字幕轨
