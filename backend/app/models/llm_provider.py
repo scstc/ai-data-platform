@@ -17,14 +17,14 @@ def _new_llm_provider_id() -> str:
 
 
 class LlmProvider(Base):
-    """LLM 提供商配置：deepseek / glm / minimax / openai / custom。"""
+    """LLM 提供商配置：deepseek / glm / minimax / openai / siliconflow / custom。"""
 
     __tablename__ = "llm_providers"
 
     # 主键形如 "llm-" + 6 位 hex
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    # 提供商品牌：deepseek | glm | minimax | openai | custom
+    # 提供商品牌：deepseek | glm | minimax | openai | siliconflow | custom
     provider: Mapped[str] = mapped_column(String, nullable=False)
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     api_key: Mapped[str] = mapped_column(String, nullable=False)

@@ -2242,6 +2242,28 @@ export async function listProviderModels(providerId: string) {
   );
 }
 
+/** 系统模型设置：读取全部能力位 GET /api/v1/llm-system-models */
+export async function listLlmSystemModels() {
+  return request<{
+    data: DataPlatform.LlmSystemModelItem[];
+    success: boolean;
+  }>('/api/v1/llm-system-models');
+}
+
+/** 系统模型设置：保存(覆盖写提交的能力位) PUT /api/v1/llm-system-models */
+export async function updateLlmSystemModels(
+  items: DataPlatform.LlmSystemModelItem[],
+) {
+  return request<{
+    data: DataPlatform.LlmSystemModelItem[];
+    success: boolean;
+  }>('/api/v1/llm-system-models', {
+    method: 'PUT',
+    data: { items },
+    skipErrorHandler: true,
+  });
+}
+
 /** 拉取供应商模型清单(调供应商 /models)并入库 POST /api/v1/llm-providers/{id}/fetch-models */
 export async function fetchProviderModels(providerId: string) {
   return request<{

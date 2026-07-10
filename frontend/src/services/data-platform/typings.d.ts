@@ -1478,7 +1478,7 @@ declare namespace DataPlatform {
     id: string;
     name: string;
     /** 供应商类型 */
-    provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
+    provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'siliconflow' | 'custom';
     baseUrl: string;
     model: string;
     /** 掩码后的 API Key，如 "sk-1…abcd" 或 "未配置" */
@@ -1490,15 +1490,16 @@ declare namespace DataPlatform {
 
   interface LlmProviderCreate {
     name: string;
-    provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
+    provider: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'siliconflow' | 'custom';
     baseUrl: string;
     apiKey: string;
-    model: string;
+    /** 可空：模型经「显示模型」拉取 / 系统模型设置指定 */
+    model?: string;
   }
 
   interface LlmProviderUpdate {
     name?: string;
-    provider?: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'custom';
+    provider?: 'deepseek' | 'glm' | 'minimax' | 'openai' | 'siliconflow' | 'custom';
     baseUrl?: string;
     /** 留空则不修改 */
     apiKey?: string;
@@ -1509,7 +1510,8 @@ declare namespace DataPlatform {
   interface LlmProviderTest {
     baseUrl: string;
     apiKey: string;
-    model: string;
+    /** 为空时后端探测 GET /models */
+    model?: string;
   }
 
   interface LlmTestResult {
@@ -1527,6 +1529,14 @@ declare namespace DataPlatform {
     /** 来源:fetched=接口拉取 / manual=手动添加 */
     source: 'fetched' | 'manual';
     createdAt: string;
+  }
+
+  /** 系统模型设置里一个能力位的配置；providerId/model 为 null 表示未设置 */
+  interface LlmSystemModelItem {
+    /** chat=系统推理 / embedding / rerank / speech2text / tts */
+    capability: 'chat' | 'embedding' | 'rerank' | 'speech2text' | 'tts';
+    providerId: string | null;
+    model: string | null;
   }
 
   /** 「获取模型」拉取结果 */

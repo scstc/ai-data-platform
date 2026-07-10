@@ -17,6 +17,7 @@ from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.llm_model import LlmModel
 from app.models.llm_provider import LlmProvider
+from app.models.llm_system_model import LlmSystemModel
 from app.models.llm_usage import LlmUsage
 from app.models.menu import Menu
 from app.models.notification import Notification
@@ -49,6 +50,7 @@ __all__ = [
     "JobInput",
     "LlmModel",
     "LlmProvider",
+    "LlmSystemModel",
     "LlmUsage",
     "Menu",
     "Notification",

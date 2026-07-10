@@ -25,6 +25,7 @@ from app.core.db import get_session
 from app.models.job import Job
 from app.models.llm_model import LlmModel, _new_llm_model_id
 from app.models.llm_provider import LlmProvider, _new_llm_provider_id
+from app.models.llm_system_model import CAPABILITIES, LlmSystemModel
 from app.models.llm_usage import LlmUsage
 from app.schemas.common import CamelModel, UtcDateTime
 from app.services.llm_config import refresh_cache
@@ -51,13 +52,13 @@ class LlmProviderRead(CamelModel):
 
 
 class LlmProviderCreate(CamelModel):
-    """新建 LLM 提供商入参。"""
+    """新建 LLM 提供商入参。model 可空：经「显示模型」拉取/系统模型设置指定。"""
 
     name: str
     provider: str
     base_url: str
     api_key: str
-    model: str
+    model: str = ""
 
 
 class LlmProviderUpdate(CamelModel):
@@ -71,11 +72,28 @@ class LlmProviderUpdate(CamelModel):
 
 
 class LlmProviderTest(CamelModel):
-    """无落库的连通性测试入参（用对话框里正在输入的配置，保存前校验）。"""
+    """无落库的连通性测试入参（用对话框里正在输入的配置，保存前校验）。
+
+    model 为空时探测 GET /models（新建弹窗已不含模型字段）。
+    """
 
     base_url: str
     api_key: str
-    model: str
+    model: str = ""
+
+
+class LlmSystemModelItem(CamelModel):
+    """一个能力位的系统默认模型；provider_id/model 为 None 表示未设置。"""
+
+    capability: str
+    provider_id: str | None = None
+    model: str | None = None
+
+
+class LlmSystemModelsUpdate(CamelModel):
+    """「系统模型设置」保存入参：提交的能力位覆盖写，provider_id 空 = 清除。"""
+
+    items: list[LlmSystemModelItem]
 
 
 class LlmModelRead(CamelModel):
@@ -191,6 +209,8 @@ async def _list_models_payload(
 async def _probe_chat(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     """向 {base_url}/chat/completions 发一条最小请求，验证连通性与凭证（timeout=15s）。
 
+    model 为空时改为 GET {base_url}/models 探测（新建供应商可不填模型，
+    模型经「显示模型」拉取 / 系统模型设置指定）。
     返回 {success, latencyMs, message, model}；任何异常都转成 success=False
     并带上错误信息，绝不抛出（由调用方包成统一响应）。
     """
@@ -199,31 +219,54 @@ async def _probe_chat(base_url: str, api_key: str, model: str) -> dict[str, Any]
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload: dict[str, Any] = {
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 5,
-        "temperature": 0,
-    }
     t0 = time.monotonic()
+
+    def _elapsed() -> int:
+        return int((time.monotonic() - t0) * 1000)
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"{base}/chat/completions", json=payload, headers=headers
-            )
+            if model:
+                payload: dict[str, Any] = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 5,
+                    "temperature": 0,
+                }
+                resp = await client.post(
+                    f"{base}/chat/completions", json=payload, headers=headers
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return {
+                    "success": True,
+                    "latencyMs": _elapsed(),
+                    "message": "连接成功",
+                    "model": data.get("model", model),
+                }
+            resp = await client.get(f"{base}/models", headers=headers)
+            if resp.status_code in (404, 405):
+                return {
+                    "success": False,
+                    "latencyMs": _elapsed(),
+                    "message": "该供应商无 /models 接口;请保存后在"
+                    "「显示模型」中手动添加模型,再对模型测试",
+                    "model": model,
+                }
             resp.raise_for_status()
-            data = resp.json()
+            count = len(_extract_model_ids(resp.json()))
         return {
             "success": True,
-            "latencyMs": int((time.monotonic() - t0) * 1000),
-            "message": "连接成功",
-            "model": data.get("model", model),
+            "latencyMs": _elapsed(),
+            "message": f"连接成功,发现 {count} 个可用模型",
+            "model": model,
         }
     except Exception as exc:  # noqa: BLE001 — 网络/凭证错误均转为 success=False
         return {
             "success": False,
-            "latencyMs": int((time.monotonic() - t0) * 1000),
-            "message": str(exc),
+            "latencyMs": _elapsed(),
+            # ConnectError/Timeout 的 str() 可能为空,兜底给出异常类名
+            "message": str(exc) or type(exc).__name__,
             "model": model,
         }
 
@@ -451,9 +494,12 @@ async def delete_llm_provider(
     row = await session.get(LlmProvider, provider_id)
     if row is None:
         return _not_found()
-    # 应用层级联：先清理名下模型（无 DB 外键）
+    # 应用层级联：先清理名下模型与系统模型能力位引用（无 DB 外键）
     await session.execute(
         delete(LlmModel).where(LlmModel.provider_id == provider_id)
+    )
+    await session.execute(
+        delete(LlmSystemModel).where(LlmSystemModel.provider_id == provider_id)
     )
     await session.delete(row)
     await session.commit()
@@ -491,6 +537,111 @@ async def activate_llm_provider(
             "success": True,
         }
     )
+
+
+# ---- 系统模型设置（按能力位） --------------------------------------------
+
+
+async def _system_models_payload(session: AsyncSession) -> list[dict[str, Any]]:
+    """全部能力位的当前配置；chat 位未显式设置时回退展示当前激活供应商。"""
+    rows = {
+        r.capability: r
+        for r in (await session.scalars(select(LlmSystemModel))).all()
+    }
+    items: list[LlmSystemModelItem] = []
+    for cap in CAPABILITIES:
+        row = rows.get(cap)
+        if row is None and cap == "chat":
+            active = (
+                await session.scalars(
+                    select(LlmProvider)
+                    .where(LlmProvider.is_active.is_(True))
+                    .limit(1)
+                )
+            ).first()
+            if active is not None:
+                items.append(
+                    LlmSystemModelItem(
+                        capability=cap,
+                        provider_id=active.id,
+                        model=active.model,
+                    )
+                )
+                continue
+        items.append(
+            LlmSystemModelItem(
+                capability=cap,
+                provider_id=row.provider_id if row else None,
+                model=row.model if row else None,
+            )
+        )
+    return [i.model_dump(by_alias=True) for i in items]
+
+
+@router.get("/llm-system-models")
+async def list_llm_system_models(session: SessionDep) -> JSONResponse:
+    """系统模型设置：返回全部能力位（chat/embedding/rerank/speech2text/tts）。"""
+    data = await _system_models_payload(session)
+    return JSONResponse(content={"data": data, "success": True})
+
+
+@router.put("/llm-system-models", dependencies=[Depends(require_admin)])
+async def update_llm_system_models(
+    body: LlmSystemModelsUpdate, session: SessionDep
+) -> JSONResponse:
+    """保存系统模型设置：覆盖写提交的能力位，provider_id/model 空 = 清除。
+
+    chat 位联动既有激活语义：激活对应供应商、写 provider.model 并刷新缓存，
+    运行时消费方（AI 助手 / needs_api 算子）继续走 is_active，无需感知本表。
+    """
+    for item in body.items:
+        if item.capability not in CAPABILITIES:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "success": False,
+                    "message": f"未知能力位: {item.capability}",
+                },
+            )
+    chat_changed = False
+    for item in body.items:
+        row = await session.get(LlmSystemModel, item.capability)
+        if not item.provider_id or not item.model:
+            # 清除该能力位
+            if row is not None:
+                await session.delete(row)
+            if item.capability == "chat":
+                await session.execute(update(LlmProvider).values(is_active=False))
+                chat_changed = True
+            continue
+        provider = await session.get(LlmProvider, item.provider_id)
+        if provider is None:
+            return _not_found(f"提供商不存在: {item.provider_id}")
+        if row is None:
+            session.add(
+                LlmSystemModel(
+                    capability=item.capability,
+                    provider_id=item.provider_id,
+                    model=item.model,
+                )
+            )
+        else:
+            row.provider_id = item.provider_id
+            row.model = item.model
+        if item.capability == "chat":
+            await session.execute(
+                update(LlmProvider)
+                .where(LlmProvider.id != item.provider_id)
+                .values(is_active=False)
+            )
+            provider.is_active = True
+            provider.model = item.model
+            chat_changed = True
+    await session.commit()
+    if chat_changed:
+        await refresh_cache(session)
+    data = await _system_models_payload(session)
+    return JSONResponse(content={"data": data, "success": True})
 
 
 @router.post("/llm-providers/test", dependencies=[Depends(require_admin)])

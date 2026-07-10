@@ -1,33 +1,38 @@
-import type { ProColumns } from '@ant-design/pro-components';
+import {
+  DownOutlined,
+  RightOutlined,
+  SettingOutlined,
+} from '@ant-design/icons';
 import {
   ModalForm,
   PageContainer,
   ProFormSelect,
   ProFormText,
-  ProTable,
 } from '@ant-design/pro-components';
 import { useAccess } from '@umijs/max';
 import {
   Alert,
   AutoComplete,
+  Avatar,
   Badge,
   Button,
-  Drawer,
+  Empty,
   Form,
   Input,
+  Modal,
   message,
   Popconfirm,
   Select,
   Space,
+  Spin,
   Statistic,
   Table,
   Tag,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
-  activateLlmProvider,
   addProviderModel,
   createLlmProvider,
   deleteLlmProvider,
@@ -35,31 +40,25 @@ import {
   fetchProviderModels,
   getLlmUsage,
   listLlmProviders,
+  listLlmSystemModels,
   listProviderModels,
   revealLlmProviderKey,
   selectProviderModel,
   testLlmProvider,
   testLlmProviderConfig,
   updateLlmProvider,
+  updateLlmSystemModels,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
 
-/** 供应商类型 → 默认 baseUrl + model */
-const PRESETS: Record<
-  DataPlatform.LlmProvider['provider'],
-  { baseUrl: string; model: string }
-> = {
-  deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
-  glm: {
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    model: 'glm-4-flash',
-  },
-  minimax: {
-    baseUrl: 'https://api.minimaxi.com/v1',
-    model: 'MiniMax-Text-01',
-  },
-  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  custom: { baseUrl: '', model: '' },
+/** 供应商类型 → 默认 baseUrl（模型不在弹窗指定,经「显示模型」拉取/系统模型设置选定） */
+const PRESET_BASE_URLS: Record<DataPlatform.LlmProvider['provider'], string> = {
+  deepseek: 'https://api.deepseek.com',
+  glm: 'https://open.bigmodel.cn/api/paas/v4',
+  minimax: 'https://api.minimaxi.com/v1',
+  openai: 'https://api.openai.com/v1',
+  siliconflow: 'https://api.siliconflow.cn/v1',
+  custom: '',
 };
 
 const PROVIDER_COLORS: Record<DataPlatform.LlmProvider['provider'], string> = {
@@ -67,6 +66,7 @@ const PROVIDER_COLORS: Record<DataPlatform.LlmProvider['provider'], string> = {
   glm: 'purple',
   minimax: 'cyan',
   openai: 'green',
+  siliconflow: 'orange',
   custom: 'default',
 };
 
@@ -75,6 +75,7 @@ const PROVIDER_LABELS: Record<DataPlatform.LlmProvider['provider'], string> = {
   glm: 'GLM',
   minimax: 'MiniMax',
   openai: 'OpenAI',
+  siliconflow: 'SiliconFlow',
   custom: '自定义',
 };
 
@@ -92,7 +93,47 @@ const PRESET_MODELS: Record<DataPlatform.LlmProvider['provider'], string[]> = {
   glm: ['glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4-plus', 'glm-4-flash'],
   minimax: ['MiniMax-M2', 'MiniMax-Text-01', 'abab6.5s-chat'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'o3-mini', 'gpt-4.1', 'gpt-4.1-mini'],
+  siliconflow: [],
   custom: [],
+};
+
+/** 品牌头像底色（卡片左侧圆标，无官方 logo 用品牌首字母代替） */
+const AVATAR_BG: Record<DataPlatform.LlmProvider['provider'], string> = {
+  deepseek: '#4D6BFE',
+  glm: '#722ED1',
+  minimax: '#13C2C2',
+  openai: '#10A37F',
+  siliconflow: '#7C3AED',
+  custom: '#8C8C8C',
+};
+
+/** 能力位展示顺序与文案（对齐 Dify「系统模型设置」） */
+const CAPABILITY_ORDER = [
+  'chat',
+  'embedding',
+  'rerank',
+  'speech2text',
+  'tts',
+] as const;
+
+const CAPABILITY_LABELS: Record<
+  DataPlatform.LlmSystemModelItem['capability'],
+  string
+> = {
+  chat: '系统推理模型',
+  embedding: 'Embedding 模型',
+  rerank: 'Rerank 模型',
+  speech2text: '语音转文本模型',
+  tts: '文本转语音模型',
+};
+
+/** 卡片上能力 tag 的短文案（该供应商被哪些能力位引用） */
+const CAPABILITY_TAGS: Record<string, string> = {
+  chat: 'LLM',
+  embedding: 'TEXT EMBEDDING',
+  rerank: 'RERANK',
+  speech2text: 'SPEECH2TEXT',
+  tts: 'TTS',
 };
 
 const SOURCE_META: Record<
@@ -297,15 +338,13 @@ const UsagePanel: React.FC = () => {
   );
 };
 
-// ─── 模型管理抽屉（主从式详情） ───────────────────────────────────────────────
+// ─── 卡片内嵌模型管理面板（Dify「显示模型」展开区） ───────────────────────────
 
-const ModelsDrawer: React.FC<{
-  provider: DataPlatform.LlmProvider | null;
-  open: boolean;
-  onClose: () => void;
-  /** 当前模型变更后通知主表刷新 */
+const ModelsPanel: React.FC<{
+  provider: DataPlatform.LlmProvider;
+  /** 当前模型变更后通知主列表刷新 */
   onProviderChanged: () => void;
-}> = ({ provider, open, onClose, onProviderChanged }) => {
+}> = ({ provider, onProviderChanged }) => {
   const [models, setModels] = useState<DataPlatform.LlmModel[]>([]);
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
@@ -323,16 +362,14 @@ const ModelsDrawer: React.FC<{
   }, []);
 
   useEffect(() => {
-    if (open && provider) {
-      setCurrentModel(provider.model);
-      setNewModel('');
-      loadModels(provider.id);
-    }
-  }, [open, provider, loadModels]);
+    setCurrentModel(provider.model);
+    setNewModel('');
+    loadModels(provider.id);
+  }, [provider, loadModels]);
 
-  const presetOptions = provider
-    ? PRESET_MODELS[provider.provider].map((m) => ({ value: m }))
-    : [];
+  const presetOptions = PRESET_MODELS[provider.provider].map((m) => ({
+    value: m,
+  }));
 
   const handleFetch = async () => {
     if (!provider) return;
@@ -444,48 +481,199 @@ const ModelsDrawer: React.FC<{
   ];
 
   return (
-    <Drawer
-      title={provider ? `管理模型 · ${provider.name}` : '管理模型'}
-      size="large"
+    <div
+      style={{
+        padding: '12px 20px 16px',
+        borderTop: '1px solid var(--ant-color-border-secondary)',
+      }}
+    >
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Button
+          size="small"
+          type="primary"
+          loading={fetching}
+          onClick={handleFetch}
+        >
+          获取模型
+        </Button>
+        <AutoComplete
+          value={newModel}
+          options={presetOptions}
+          size="small"
+          style={{ width: 260 }}
+          placeholder="手动输入或选择模型名"
+          onChange={(v) => setNewModel(v)}
+        />
+        <Button size="small" onClick={handleAdd} disabled={!newModel.trim()}>
+          添加
+        </Button>
+        <span style={{ color: 'var(--ant-color-text-tertiary)', fontSize: 12 }}>
+          「获取模型」调用供应商 /models 接口在线拉取;不支持的供应商(如
+          GLM)可手动添加
+        </span>
+      </Space>
+      <Table<DataPlatform.LlmModel>
+        size="small"
+        rowKey="id"
+        loading={loading}
+        dataSource={models}
+        columns={cols}
+        pagination={false}
+      />
+    </div>
+  );
+};
+
+// ─── 系统模型设置弹窗（按能力位选默认模型，Dify 风格） ─────────────────────────
+
+/** capability 值编码为 "providerId|||model"（model 名可含任意字符,分隔符取不常见序列） */
+const SEP = '|||';
+
+const SystemModelsModal: React.FC<{
+  open: boolean;
+  providers: DataPlatform.LlmProvider[];
+  onClose: () => void;
+  /** 保存成功后由父级刷新列表并关闭 */
+  onSaved: () => void;
+}> = ({ open, providers, onClose, onSaved }) => {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [values, setValues] = useState<Record<string, string | undefined>>({});
+  const [providerModels, setProviderModels] = useState<
+    Record<string, string[]>
+  >({});
+
+  useEffect(() => {
+    if (!open) return;
+    (async () => {
+      setLoading(true);
+      try {
+        const sysRes = await listLlmSystemModels();
+        const modelRes = await Promise.all(
+          providers.map((p) => listProviderModels(p.id).catch(() => null)),
+        );
+        const pm: Record<string, string[]> = {};
+        providers.forEach((p, i) => {
+          const res = modelRes[i];
+          const list = res?.success ? res.data.map((m) => m.model) : [];
+          // 当前生效模型可能不在清单里,始终可选
+          if (p.model && !list.includes(p.model)) list.unshift(p.model);
+          pm[p.id] = list;
+        });
+        const next: Record<string, string | undefined> = {};
+        if (sysRes.success) {
+          for (const it of sysRes.data) {
+            if (it.providerId && it.model) {
+              next[it.capability] = `${it.providerId}${SEP}${it.model}`;
+              // 已保存的选择也可能不在清单里,补进选项避免显示原始编码值
+              const list = pm[it.providerId];
+              if (list && !list.includes(it.model)) list.unshift(it.model);
+            } else {
+              next[it.capability] = undefined;
+            }
+          }
+        }
+        setProviderModels(pm);
+        setValues(next);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [open, providers]);
+
+  const groupedOptions = providers
+    .map((p) => ({
+      label: `${p.name}（${PROVIDER_LABELS[p.provider]}）`,
+      options: (providerModels[p.id] ?? []).map((m) => ({
+        label: m,
+        value: `${p.id}${SEP}${m}`,
+      })),
+    }))
+    .filter((g) => g.options.length > 0);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const items = CAPABILITY_ORDER.map((cap) => {
+        const v = values[cap];
+        if (!v) return { capability: cap, providerId: null, model: null };
+        const idx = v.indexOf(SEP);
+        return {
+          capability: cap,
+          providerId: v.slice(0, idx),
+          model: v.slice(idx + SEP.length),
+        };
+      }) as DataPlatform.LlmSystemModelItem[];
+      const res = await updateLlmSystemModels(items);
+      if (res.success) {
+        message.success('系统模型设置已保存');
+        onSaved();
+      }
+    } catch (e: any) {
+      message.error(e?.message ?? '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="系统模型设置"
       open={open}
-      onClose={onClose}
+      onCancel={onClose}
+      onOk={handleSave}
+      okText="保存"
+      cancelText="取消"
+      confirmLoading={saving}
       destroyOnHidden
     >
-      {provider && (
-        <>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message={`当前生效模型:${currentModel || '(未设置)'}`}
-            description="「获取模型」调用供应商接口拉取清单;部分供应商(如 GLM)无该接口,可用下方预置候选手动添加。"
-          />
-          <Space style={{ marginBottom: 16 }} wrap>
-            <Button type="primary" loading={fetching} onClick={handleFetch}>
-              获取模型
-            </Button>
-            <AutoComplete
-              value={newModel}
-              options={presetOptions}
-              style={{ width: 240 }}
-              placeholder="手动输入或选择模型名"
-              onChange={(v) => setNewModel(v)}
-            />
-            <Button onClick={handleAdd} disabled={!newModel.trim()}>
-              添加
-            </Button>
-          </Space>
-          <Table<DataPlatform.LlmModel>
-            size="small"
-            rowKey="id"
-            loading={loading}
-            dataSource={models}
-            columns={cols}
-            pagination={false}
-          />
-        </>
-      )}
-    </Drawer>
+      <Spin spinning={loading}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
+            padding: '8px 0',
+          }}
+        >
+          {CAPABILITY_ORDER.map((cap) => (
+            <div key={cap}>
+              <div style={{ marginBottom: 6, fontWeight: 500 }}>
+                {CAPABILITY_LABELS[cap]}
+                {cap === 'chat' && (
+                  <span
+                    style={{
+                      marginLeft: 8,
+                      fontWeight: 400,
+                      fontSize: 12,
+                      color: 'var(--ant-color-text-tertiary)',
+                    }}
+                  >
+                    即激活供应商,供 AI 助手 / needs_api 算子使用
+                  </span>
+                )}
+              </div>
+              <Select
+                style={{ width: '100%' }}
+                showSearch
+                allowClear
+                placeholder="选择模型"
+                value={values[cap]}
+                options={groupedOptions}
+                optionFilterProp="label"
+                onChange={(v) => setValues((prev) => ({ ...prev, [cap]: v }))}
+              />
+            </div>
+          ))}
+          <div
+            style={{ fontSize: 12, color: 'var(--ant-color-text-tertiary)' }}
+          >
+            Embedding / Rerank / 语音能力位当前仅保存配置,供后续 RAG
+            等场景使用;候选来自各供应商「显示模型」里的清单。
+          </div>
+        </div>
+      </Spin>
+    </Modal>
   );
 };
 
@@ -500,16 +688,14 @@ const LlmSettings: React.FC = () => {
   const [dialogTestResult, setDialogTestResult] =
     useState<DataPlatform.LlmTestResult | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [activatingId, setActivatingId] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [managing, setManaging] = useState<DataPlatform.LlmProvider | null>(
-    null,
-  );
+  // Dify 风格卡片列表：展开的供应商 / 搜索关键字 / 系统模型设置
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [keyword, setKeyword] = useState('');
+  const [systemModels, setSystemModels] = useState<
+    DataPlatform.LlmSystemModelItem[]
+  >([]);
+  const [systemOpen, setSystemOpen] = useState(false);
   const [form] = Form.useForm();
-  const watchedProvider = Form.useWatch('provider', form) as
-    | DataPlatform.LlmProvider['provider']
-    | undefined;
-  const actionRef = useRef(null);
   const access = useAccess();
   const canAdd = access.hasPerm('ops:llm:add');
   const canEdit = access.hasPerm('ops:llm:edit');
@@ -528,9 +714,23 @@ const LlmSettings: React.FC = () => {
     }
   }, []);
 
-  useEffect(() => {
+  const loadSystemModels = useCallback(async () => {
+    try {
+      const res = await listLlmSystemModels();
+      if (res.success) setSystemModels(res.data);
+    } catch {
+      // 忽略:仅影响卡片上的能力位标签展示
+    }
+  }, []);
+
+  const loadAll = useCallback(() => {
     loadProviders();
-  }, [loadProviders]);
+    loadSystemModels();
+  }, [loadProviders, loadSystemModels]);
+
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
 
   const openCreate = () => {
     setEditing(null);
@@ -545,7 +745,6 @@ const LlmSettings: React.FC = () => {
       name: record.name,
       provider: record.provider,
       baseUrl: record.baseUrl,
-      model: record.model,
       apiKey: '',
     });
     setDialogTestResult(null);
@@ -560,8 +759,7 @@ const LlmSettings: React.FC = () => {
   };
 
   const handleProviderChange = (val: DataPlatform.LlmProvider['provider']) => {
-    const preset = PRESETS[val];
-    form.setFieldsValue({ baseUrl: preset.baseUrl, model: preset.model });
+    form.setFieldsValue({ baseUrl: PRESET_BASE_URLS[val] });
   };
 
   const handleSubmit = async (values: DataPlatform.LlmProviderCreate) => {
@@ -581,7 +779,7 @@ const LlmSettings: React.FC = () => {
         message.success('创建成功');
       }
       setModalOpen(false);
-      loadProviders();
+      loadAll();
     } catch (e: any) {
       message.error(e?.message ?? '操作失败');
     }
@@ -591,43 +789,25 @@ const LlmSettings: React.FC = () => {
     try {
       await deleteLlmProvider(id);
       message.success('已删除');
-      loadProviders();
+      if (expandedId === id) setExpandedId(null);
+      loadAll();
     } catch {
       message.error('删除失败');
     }
   };
 
-  const handleActivate = async (id: string) => {
-    setActivatingId(id);
-    try {
-      await activateLlmProvider(id);
-      message.success('已激活');
-      loadProviders();
-    } catch (e: any) {
-      message.error(e?.message ?? '激活失败');
-    } finally {
-      setActivatingId(null);
-    }
-  };
-
-  const openManage = (record: DataPlatform.LlmProvider) => {
-    setManaging(record);
-    setDrawerOpen(true);
-  };
-
   /** 对话框内测试：用当前表单值校验连通性（保存前）。
    * 编辑态且 API Key 留空时改用已保存密钥测已存供应商。 */
   const handleDialogTest = async () => {
-    const fields = editing?.id
-      ? ['baseUrl', 'model']
-      : ['baseUrl', 'model', 'apiKey'];
+    const fields = editing?.id ? ['baseUrl'] : ['baseUrl', 'apiKey'];
     try {
       await form.validateFields(fields);
     } catch {
       return; // 必填项未填，表单已就地提示
     }
     const baseUrl = (form.getFieldValue('baseUrl') as string).trim();
-    const model = (form.getFieldValue('model') as string).trim();
+    // 无模型字段:编辑态沿用已保存的当前模型做 chat 探测,新建为空走 /models 探测
+    const model = editing?.model ?? '';
     const apiKey = ((form.getFieldValue('apiKey') as string) ?? '').trim();
     setDialogTesting(true);
     setDialogTestResult(null);
@@ -667,108 +847,27 @@ const LlmSettings: React.FC = () => {
     }
   };
 
-  const columns: ProColumns<DataPlatform.LlmProvider>[] = [
-    {
-      title: '名称',
-      dataIndex: 'name',
-      ellipsis: true,
-    },
-    {
-      title: '供应商',
-      dataIndex: 'provider',
-      width: 110,
-      render: (_, r) => (
-        <Tag color={PROVIDER_COLORS[r.provider]}>
-          {PROVIDER_LABELS[r.provider]}
-        </Tag>
-      ),
-    },
-    {
-      title: 'Base URL',
-      dataIndex: 'baseUrl',
-      ellipsis: true,
-    },
-    {
-      title: '模型',
-      dataIndex: 'model',
-      ellipsis: true,
-    },
-    {
-      title: 'API Key',
-      dataIndex: 'apiKeyMasked',
-      width: 160,
-      ellipsis: true,
-    },
-    {
-      title: '状态',
-      dataIndex: 'isActive',
-      width: 100,
-      render: (_, r) =>
-        r.isActive ? (
-          <Badge status="success" text="已激活" />
-        ) : (
-          <Badge status="default" text="未激活" />
-        ),
-    },
-    {
-      title: '更新时间',
-      dataIndex: 'updatedAt',
-      width: 180,
-      render: (_, r) => formatDateTime(r.updatedAt),
-    },
-    {
-      title: '操作',
-      key: 'actions',
-      width: 360,
-      render: (_, r) => (
-        <Space size="small">
-          {canTest && (
-            <Button
-              type="link"
-              size="small"
-              loading={testingId === r.id}
-              onClick={() => handleTest(r.id)}
-            >
-              测试
-            </Button>
-          )}
-          {canManageModel && (
-            <Button type="link" size="small" onClick={() => openManage(r)}>
-              管理模型
-            </Button>
-          )}
-          {canActivate && (
-            <Button
-              type="link"
-              size="small"
-              disabled={r.isActive}
-              loading={activatingId === r.id}
-              onClick={() => handleActivate(r.id)}
-            >
-              激活
-            </Button>
-          )}
-          {canEdit && (
-            <Button type="link" size="small" onClick={() => openEdit(r)}>
-              编辑
-            </Button>
-          )}
-          {canRemove && (
-            <Popconfirm
-              title="确定删除该供应商配置？"
-              onConfirm={() => handleDelete(r.id)}
-              okText="删除"
-              cancelText="取消"
-            >
-              <Button type="link" size="small" danger>
-                删除
-              </Button>
-            </Popconfirm>
-          )}
-        </Space>
-      ),
-    },
-  ];
+  // 各供应商被哪些能力位引用（卡片能力 tag）；chat 位供应商即「系统推理模型」
+  const providerCaps: Record<string, string[]> = {};
+  for (const it of systemModels) {
+    if (it.providerId) {
+      providerCaps[it.providerId] = [
+        ...(providerCaps[it.providerId] ?? []),
+        it.capability,
+      ];
+    }
+  }
+  const chatItem = systemModels.find((i) => i.capability === 'chat');
+
+  const kw = keyword.trim().toLowerCase();
+  const filtered = providers.filter(
+    (p) =>
+      !kw ||
+      p.name.toLowerCase().includes(kw) ||
+      PROVIDER_LABELS[p.provider].toLowerCase().includes(kw) ||
+      p.baseUrl.toLowerCase().includes(kw) ||
+      p.model.toLowerCase().includes(kw),
+  );
 
   return (
     <PageContainer>
@@ -776,28 +875,175 @@ const LlmSettings: React.FC = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="仅管理员可见。已激活的配置将被 AI 助手 / needs_api 算子使用。"
+        message="仅管理员可见。「系统模型设置」中的系统推理模型将被 AI 助手 / needs_api 算子使用。"
       />
 
-      <ProTable<DataPlatform.LlmProvider>
-        actionRef={actionRef}
-        headerTitle="LLM 供应商"
-        rowKey="id"
-        search={false}
-        loading={listLoading}
-        dataSource={providers}
-        columns={columns}
-        options={{ reload: () => loadProviders() }}
-        toolBarRender={() =>
-          canAdd
-            ? [
-                <Button key="create" type="primary" onClick={openCreate}>
-                  新建供应商
-                </Button>,
-              ]
-            : []
-        }
-      />
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          marginBottom: 16,
+        }}
+      >
+        <span style={{ fontSize: 16, fontWeight: 600 }}>模型列表</span>
+        <span style={{ color: 'var(--ant-color-text-tertiary)' }}>
+          {providers.length} 个供应商
+        </span>
+        <div style={{ flex: 1 }} />
+        <Input.Search
+          allowClear
+          placeholder="搜索供应商 / 模型"
+          style={{ width: 240 }}
+          onChange={(e) => setKeyword(e.target.value)}
+          onSearch={setKeyword}
+        />
+        {canActivate && (
+          <Button
+            icon={<SettingOutlined />}
+            onClick={() => setSystemOpen(true)}
+          >
+            系统模型设置
+          </Button>
+        )}
+        {canAdd && (
+          <Button type="primary" onClick={openCreate}>
+            新建供应商
+          </Button>
+        )}
+      </div>
+
+      <Spin spinning={listLoading}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            marginBottom: 8,
+          }}
+        >
+          {filtered.map((p) => {
+            const caps = providerCaps[p.id] ?? [];
+            const expanded = expandedId === p.id;
+            return (
+              <div
+                key={p.id}
+                style={{
+                  border: '1px solid var(--ant-color-border)',
+                  borderRadius: 12,
+                  background: 'var(--ant-color-bg-container)',
+                }}
+              >
+                <div style={{ padding: '16px 20px' }}>
+                  <div
+                    style={{ display: 'flex', alignItems: 'center', gap: 12 }}
+                  >
+                    <Avatar
+                      shape="square"
+                      size={40}
+                      style={{
+                        background: AVATAR_BG[p.provider],
+                        fontWeight: 600,
+                        borderRadius: 10,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {PROVIDER_LABELS[p.provider][0]}
+                    </Avatar>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Space size={8} wrap>
+                        <span style={{ fontWeight: 600, fontSize: 15 }}>
+                          {p.name}
+                        </span>
+                        <Tag color={PROVIDER_COLORS[p.provider]}>
+                          {PROVIDER_LABELS[p.provider]}
+                        </Tag>
+                        {chatItem?.providerId === p.id && (
+                          <Tag color="success">系统推理模型</Tag>
+                        )}
+                        {caps.map((c) => (
+                          <Tag
+                            key={c}
+                            style={{
+                              color: 'var(--ant-color-text-secondary)',
+                              fontSize: 11,
+                            }}
+                          >
+                            {CAPABILITY_TAGS[c]}
+                          </Tag>
+                        ))}
+                      </Space>
+                      <div
+                        style={{
+                          marginTop: 4,
+                          color: 'var(--ant-color-text-tertiary)',
+                          fontSize: 12,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {p.baseUrl} · API Key {p.apiKeyMasked} · 当前模型{' '}
+                        {p.model || '(未设置)'} · 更新于{' '}
+                        {formatDateTime(p.updatedAt)}
+                      </div>
+                    </div>
+                    <Space size="small">
+                      {canTest && (
+                        <Button
+                          size="small"
+                          loading={testingId === p.id}
+                          onClick={() => handleTest(p.id)}
+                        >
+                          测试
+                        </Button>
+                      )}
+                      {canEdit && (
+                        <Button size="small" onClick={() => openEdit(p)}>
+                          设置
+                        </Button>
+                      )}
+                      {canRemove && (
+                        <Popconfirm
+                          title="确定删除该供应商配置？"
+                          onConfirm={() => handleDelete(p.id)}
+                          okText="删除"
+                          cancelText="取消"
+                        >
+                          <Button size="small" danger>
+                            删除
+                          </Button>
+                        </Popconfirm>
+                      )}
+                    </Space>
+                  </div>
+                  {canManageModel && (
+                    <Button
+                      type="link"
+                      size="small"
+                      style={{ padding: 0, marginTop: 8 }}
+                      onClick={() => setExpandedId(expanded ? null : p.id)}
+                    >
+                      {expanded ? <DownOutlined /> : <RightOutlined />}
+                      显示模型
+                    </Button>
+                  )}
+                </div>
+                {canManageModel && expanded && (
+                  <ModelsPanel provider={p} onProviderChanged={loadAll} />
+                )}
+              </div>
+            );
+          })}
+          {!filtered.length && !listLoading && (
+            <Empty
+              description={
+                kw ? '没有匹配的供应商' : '暂无供应商,点右上「新建供应商」接入'
+              }
+            />
+          )}
+        </div>
+      </Spin>
 
       <div style={{ marginTop: 24 }}>
         <div
@@ -843,6 +1089,7 @@ const LlmSettings: React.FC = () => {
             { label: 'GLM', value: 'glm' },
             { label: 'MiniMax', value: 'minimax' },
             { label: 'OpenAI', value: 'openai' },
+            { label: 'SiliconFlow', value: 'siliconflow' },
             { label: '自定义', value: 'custom' },
           ]}
           fieldProps={{ onChange: handleProviderChange }}
@@ -853,19 +1100,6 @@ const LlmSettings: React.FC = () => {
           placeholder="https://api.example.com/v1"
           rules={[{ required: true, message: '请输入 Base URL' }]}
         />
-        <Form.Item
-          name="model"
-          label="模型"
-          rules={[{ required: true, message: '请输入模型名称' }]}
-        >
-          <AutoComplete
-            options={(watchedProvider
-              ? PRESET_MODELS[watchedProvider]
-              : []
-            ).map((m) => ({ value: m }))}
-            placeholder="选择或输入模型名;保存后可在「管理模型」拉取完整列表"
-          />
-        </Form.Item>
         <Form.Item
           name="apiKey"
           label="API Key"
@@ -898,7 +1132,7 @@ const LlmSettings: React.FC = () => {
               showIcon
               message={
                 dialogTestResult.success
-                  ? `连接成功 · ${dialogTestResult.model} · ${dialogTestResult.latencyMs} ms`
+                  ? `${dialogTestResult.message} · ${dialogTestResult.latencyMs} ms`
                   : `连接失败：${dialogTestResult.message}`
               }
             />
@@ -911,15 +1145,18 @@ const LlmSettings: React.FC = () => {
             marginTop: -8,
           }}
         >
-          已激活的配置将被 AI 助手 / needs_api 算子使用
+          在「系统模型设置」选为系统推理模型后,将被 AI 助手 / needs_api 算子使用
         </div>
       </ModalForm>
 
-      <ModelsDrawer
-        provider={managing}
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        onProviderChanged={loadProviders}
+      <SystemModelsModal
+        open={systemOpen}
+        providers={providers}
+        onClose={() => setSystemOpen(false)}
+        onSaved={() => {
+          setSystemOpen(false);
+          loadAll();
+        }}
       />
     </PageContainer>
   );
