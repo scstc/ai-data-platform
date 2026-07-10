@@ -246,32 +246,34 @@ const DataLakeDetailPage: FC = () => {
           title="文件列表"
           tooltip="文件 = 一张表/一个对象的稳定身份,按身份键判重;同一文件多次采集追加新版本"
           extra={
-            <Space>
-              <Button
-                disabled={!mergeableSelected}
-                onClick={() => setMergeOpen(true)}
-              >
-                数据合并({selectedObjects.length})
-              </Button>
-              <Button
-                type="primary"
-                disabled={selectedObjects.length === 0}
-                onClick={() =>
-                  setExtractItems(
-                    selectedObjects
-                      .filter((o) => !!o.latestSnapshotId)
-                      .map((o) => ({
-                        snapshotId: o.latestSnapshotId as string,
-                        displayName: o.displayName,
-                        dataCategory: o.dataCategory,
-                        storageFormat: o.storageFormat,
-                      })),
-                  )
-                }
-              >
-                抽取生成数据集({selectedObjects.length})
-              </Button>
-            </Space>
+            (meta.myLevel === 'edit' || meta.myLevel === 'admin') && (
+              <Space>
+                <Button
+                  disabled={!mergeableSelected}
+                  onClick={() => setMergeOpen(true)}
+                >
+                  数据合并({selectedObjects.length})
+                </Button>
+                <Button
+                  type="primary"
+                  disabled={selectedObjects.length === 0}
+                  onClick={() =>
+                    setExtractItems(
+                      selectedObjects
+                        .filter((o) => !!o.latestSnapshotId)
+                        .map((o) => ({
+                          snapshotId: o.latestSnapshotId as string,
+                          displayName: o.displayName,
+                          dataCategory: o.dataCategory,
+                          storageFormat: o.storageFormat,
+                        })),
+                    )
+                  }
+                >
+                  抽取生成数据集({selectedObjects.length})
+                </Button>
+              </Space>
+            )
           }
         >
           <ProTable<DataPlatform.DataLakeObject>

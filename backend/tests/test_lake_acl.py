@@ -239,6 +239,47 @@ async def test_api_acl_share_flow(client, session_factory, seed_rbac) -> None:
     assert any(d["id"] == "lake-mgr" for d in lst1.json()["data"])
 
 
+async def test_api_extract_to_dataset_gated(client, session_factory, seed_rbac) -> None:
+    """抽取生成数据集:需源湖 edit 及以上;view/无授权 403,升到 edit 后放行(ACL 门控先于业务校验)。"""
+    from app.services.auth import sign_token
+
+    await _make_lakes(session_factory)
+    body = {"snapshotIds": ["snap-not-exist"], "datasetName": "extracted"}
+
+    # 无授权 → 403
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    denied = await client.post(
+        "/api/v1/data-lakes/lake-mgr/extract-to-dataset", json=body
+    )
+    assert denied.status_code == 403, denied.text
+
+    # owner 授 view → 抽取仍 403(view 只读,不能加工)
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    grant = await client.post(
+        "/api/v1/data-lakes/lake-mgr/acl",
+        json={"subjectType": "user", "subjectId": "u-staff", "level": "view"},
+    )
+    assert grant.status_code == 200, grant.text
+    acl_id = grant.json()["data"]["id"]
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    still_denied = await client.post(
+        "/api/v1/data-lakes/lake-mgr/extract-to-dataset", json=body
+    )
+    assert still_denied.status_code == 403, still_denied.text
+
+    # 升到 edit → 通过 ACL 门控(快照不存在走业务层错误,不是 403 权限错误)
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    upd = await client.put(
+        f"/api/v1/data-lakes/lake-mgr/acl/{acl_id}", json={"level": "edit"}
+    )
+    assert upd.status_code == 200, upd.text
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    passed = await client.post(
+        "/api/v1/data-lakes/lake-mgr/extract-to-dataset", json=body
+    )
+    assert passed.status_code != 403, passed.text
+
+
 async def test_api_acl_candidates_and_level_update(
     client, session_factory, seed_rbac
 ) -> None:
