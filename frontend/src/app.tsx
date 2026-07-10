@@ -127,15 +127,9 @@ export const layout: RunTimeLayoutConfig = ({
     },
     menuItemRender: (item, dom) => {
       if (item.path) {
-        // 算子市场:置顶 + 琥珀色特殊标注,突出显示(图标与文字一并变色)
-        const highlighted = item.path === '/operators';
         return (
           <Link to={item.path} prefetch>
-            {highlighted ? (
-              <span style={{ color: '#fa8c16', fontWeight: 600 }}>{dom}</span>
-            ) : (
-              dom
-            )}
+            {dom}
           </Link>
         );
       }
