@@ -163,7 +163,8 @@ def catalog_meta() -> dict[str, Any]:
         "by_scenario": by_scenario,
         "recommend": recommend_count,
     }
-# 由 data-juicer 全量算子业务归类生成(primary/secondary=蒸馏 且为 filter/dedup/selector、非多模态)。
+# 由 data-juicer 全量算子业务归类生成
+# (primary/secondary=蒸馏 且为 filter/dedup/selector、非多模态)。
 # 含 LLM/GPU 评分类 filter——运行时按算力门 gating(UI「只看可运行」隐藏不可用项)。
 # 归类见 docs/ 算子业务归纳;平台侧硬编码,data-juicer 仓无 PR。
 DISTILLATION_OPS: frozenset[str] = frozenset(
@@ -216,8 +217,10 @@ def is_distillation_operator(name: str) -> bool:
     return name in DISTILLATION_OPS
 
 
-# 清洗桶:规则类 mapper(字符/格式/繁简/标点/空白/HTML/链接/版权/页眉/参考文献/脱敏 等),1→1 去噪规范化。
-# 由 data-juicer 全量算子业务归类生成(primary/secondary=清洗 的 mapper);另保留 2 个清洗场景常用 filter。
+# 清洗桶:规则类 mapper(字符/格式/繁简/标点/空白/HTML/链接/
+# 版权/页眉/参考文献/脱敏 等),1→1 去噪规范化。
+# 由 data-juicer 全量算子业务归类生成(primary/secondary=清洗 的 mapper);
+# 另保留 2 个清洗场景常用 filter。
 # 归类见 docs/ 算子业务归纳;平台侧硬编码,data-juicer 仓无 PR。
 CLEANSING_OPS: frozenset[str] = frozenset(
     {
@@ -255,8 +258,10 @@ CLEANSING_OPS: frozenset[str] = frozenset(
 
 # 合成 / 增强桶:LLM-based mapper(需求 #8:LLM 造数据 + 改写 + 区分原始/合成)。
 # 由 data-juicer 全量算子业务归类生成(make/augment 桶的 mapper)。多数依赖 LLM,
-# 未配 OPENAI_API_KEY 时按 needs_api 拦截。合成(make)=造新数据(1→N);增强(augment)=改写已有(1→1)。
-# optimize_prompt / pair_preference 双用,同时在两桶。归类见 docs/;平台侧硬编码,DJ 仓无 PR。
+# 未配 OPENAI_API_KEY 时按 needs_api 拦截。合成(make)=造新数据(1→N);
+# 增强(augment)=改写已有(1→1)。
+# optimize_prompt / pair_preference 双用,同时在两桶。归类见 docs/;
+# 平台侧硬编码,DJ 仓无 PR。
 MAKE_OPS: frozenset[str] = frozenset(
     {
         "generate_qa_from_examples_mapper",  # Self-Instruct:从种子示例生成新 QA
@@ -296,6 +301,73 @@ TRAINSET_OPS: frozenset[str] = frozenset(
 )
 
 
+# 质量评估桶:全量 filter 类算子(质量评估只跑 dj-analyze,统计类指标只对 filter 生效)。
+# 由 catalog 中 category=='filter' 的全量算子固化,DJ 新增 filter 时需同步追加;
+# 可由 scripts/build_operator_catalog.py 重生成后核对。LLM/GPU/媒体类 filter
+# 仍走运行时算力门 gating,不在此处单独硬编码。
+QUALITY_OPS: frozenset[str] = frozenset(
+    {
+        "alphanumeric_filter",
+        "audio_duration_filter",
+        "audio_nmf_snr_filter",
+        "audio_size_filter",
+        "average_line_length_filter",
+        "character_repetition_filter",
+        "flagged_words_filter",
+        "general_field_filter",
+        "image_aesthetics_filter",
+        "image_aspect_ratio_filter",
+        "image_face_count_filter",
+        "image_face_ratio_filter",
+        "image_nsfw_filter",
+        "image_pair_similarity_filter",
+        "image_shape_filter",
+        "image_size_filter",
+        "image_subplot_filter",
+        "image_text_matching_filter",
+        "image_text_similarity_filter",
+        "image_watermark_filter",
+        "in_context_influence_filter",
+        "instruction_following_difficulty_filter",
+        "language_id_score_filter",
+        "llm_analysis_filter",
+        "llm_condition_filter",
+        "llm_difficulty_score_filter",
+        "llm_perplexity_filter",
+        "llm_quality_score_filter",
+        "llm_task_relevance_filter",
+        "maximum_line_length_filter",
+        "perplexity_filter",
+        "phrase_grounding_recall_filter",
+        "special_characters_filter",
+        "specified_field_filter",
+        "specified_numeric_field_filter",
+        "stopwords_filter",
+        "suffix_filter",
+        "text_action_filter",
+        "text_embd_similarity_filter",
+        "text_entity_dependency_filter",
+        "text_length_filter",
+        "text_pair_similarity_filter",
+        "token_num_filter",
+        "video_aesthetics_filter",
+        "video_aspect_ratio_filter",
+        "video_duration_filter",
+        "video_frames_text_similarity_filter",
+        "video_motion_score_filter",
+        "video_motion_score_ptlflow_filter",
+        "video_motion_score_raft_filter",
+        "video_nsfw_filter",
+        "video_ocr_area_ratio_filter",
+        "video_resolution_filter",
+        "video_tagging_from_frames_filter",
+        "video_watermark_filter",
+        "word_repetition_filter",
+        "words_num_filter",
+    }
+)
+
+
 def is_make_operator(name: str) -> bool:
     return name in MAKE_OPS
 
@@ -309,19 +381,47 @@ def is_trainset_operator(name: str) -> bool:
 
 
 # 业务桶 → 白名单集合:供算子库按任务类型过滤(清洗/蒸馏/合成/增强各自只展示对应算子)。
-# 成员可重叠(如 pair_preference / optimize_prompt 同属 make+augment),按集合成员判定而非单值归属。
+# 成员可重叠(如 pair_preference / optimize_prompt 同属 make+augment),
+# 按集合成员判定而非单值归属。
 _BUCKET_SETS: dict[str, frozenset[str]] = {
     "cleansing": CLEANSING_OPS,
     "distillation": DISTILLATION_OPS,
     "make": MAKE_OPS,
     "augment": AUGMENT_OPS,
     "trainset": TRAINSET_OPS,
+    "quality": QUALITY_OPS,
 }
+
+
+# 业务桶的中文展示名(给算子市场 / 编辑器算子库当搜索别名用)。
+# 同一算子可属多桶(例如 language_id_score_filter 同时在 cleansing/distillation),最终
+# 搜索 hay 里会把命中的桶别名全部塞进去,搜「评估/质量评估」就能找到 quality 桶、
+# 搜「蒸馏」就能找到 distillation 桶。改这里不动白名单,只影响搜索可命中词。
+_BUCKET_LABELS: dict[str, str] = {
+    "cleansing": "数据清洗",
+    "distillation": "数据蒸馏",
+    "make": "数据合成",
+    "augment": "数据增强",
+    "trainset": "训练集生成",
+    "quality": "质量评估",
+}
+
+
+def _bucket_labels_for(name: str) -> str:
+    """返回该算子所在所有业务桶的中文名(以空格连接),无桶归属则返回空串。
+
+    用于把"业务桶的中文叫法"作为额外搜索词挂到 hay stack,让用户在算子库里搜
+    「评估/质量评估」就能找到 quality 桶的 filter 算子,搜「蒸馏」找到 distillation 桶。
+    """
+    return " ".join(
+        _BUCKET_LABELS[b] for b, s in _BUCKET_SETS.items() if name in s
+    )
 
 _MAXSIZE = 9223372036854775807  # sys.maxsize:DJ 用作"无上限"的默认,表单里清空
 
 
-# 蒸馏桶:filter + deduplicator + selector。蒸馏 = 过滤 + 去重 + 选择,把数据集减量成高质量子集。
+# 蒸馏桶:filter + deduplicator + selector。蒸馏 = 过滤 + 去重 + 选择,
+# 把数据集减量成高质量子集。
 # 出参 camelCase 化(与平台其余 API 一致;只浅改顶层键,不动嵌套数据键)
 # ---------------------------------------------------------------------------
 _OP_KEY_MAP = {
@@ -352,7 +452,8 @@ _META_KEY_MAP = {
 # 详情页展示用补充字段:
 # - usageMode 使用方式:data-juicer 算子均为离线批处理,固定"离线"(随接口下发,非 DB 列)
 # - tags 标签:由 scenarioGroup + 类别派生(我们无语义标签源,best-effort;随接口下发)
-# - effectDemo 效果展示:处理前/后样例,存 DB effect_demo 列(LLM 批量生成);无则为空,前端隐藏该块
+# - effectDemo 效果展示:处理前/后样例,存 DB effect_demo 列(LLM 批量生成);
+#   无则为空,前端隐藏该块
 _CATEGORY_LABEL = {
     "mapper": "数据编辑",
     "filter": "规则过滤",
@@ -383,8 +484,8 @@ def to_api(op: dict[str, Any]) -> dict[str, Any]:
 
     scenarioGroup 保留 data-juicer 原生中文场景(如 质量过滤 / 文本清洗 / 去重),
     供算子市场左侧场景菜单分组——不再覆盖为业务桶英文键。业务桶(cleansing/
-    distillation/make/augment)归属由独立 ``bucket`` 查询参数 + ``_BUCKET_SETS``
-    表达,与场景维度解耦。
+    distillation/make/augment/trainset/quality)归属由独立 ``bucket`` 查询参数 +
+    ``_BUCKET_SETS`` 表达,与场景维度解耦。
     """
     out = {_OP_KEY_MAP.get(k, k): v for k, v in op.items() if k != "source_object_key"}
     # 参数内层键 camelCase:desc_zh(全量中文翻译,快照富化)→ descZh
@@ -627,8 +728,9 @@ def query_catalog(
 ) -> dict[str, Any]:
     """按多维条件过滤算子目录,返回分页数据 + 总数。
 
-    ``bucket``:业务桶(cleansing/distillation/make/augment),供任务编辑器只展示对应算子;
-    按白名单集合成员判定(见 ``_BUCKET_SETS``),未知桶名退化为不限制。
+    ``bucket``:业务桶(cleansing/distillation/make/augment/trainset/quality),
+    供任务编辑器只展示对应算子;按白名单集合成员判定(见 ``_BUCKET_SETS``),
+    未知桶名退化为不限制。
     ``include_hidden``:纳入已隐藏算子(市场管理视图用);默认只出可见算子。
     """
     ops = all_operators() if include_hidden else visible_operators()
@@ -656,12 +758,17 @@ def query_catalog(
         # Runnable 过滤
         if runnable and effective_runnable(op, caps, media_ok=True) != runnable:
             continue
-        # 关键字搜索
+        # 关键字搜索:hay = 英文名 + 中文标签 + 中文摘要 + 场景分组 + 业务桶别名
+        # 加 scenarioGroup 是为了支持"质量过滤/视频处理"这类 DJ 原生场景词;
+        # 加业务桶中文名是为了支持"评估/蒸馏/清洗"这类平台业务叫法(同一算子可
+        # 属多桶 → 多别名一并塞进去,大小写无关)。别名来源见 _BUCKET_LABELS。
         if kw:
             hay = (
                 op["name"]
                 + (op.get("summary_zh") or "")
                 + (op.get("zh_label") or "")
+                + (op.get("scenario_group") or "")
+                + _bucket_labels_for(op["name"])
             ).lower()
             if kw not in hay:
                 continue

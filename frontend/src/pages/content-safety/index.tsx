@@ -270,8 +270,10 @@ const ContentSafety: React.FC = () => {
   const [sampleLimit, setSampleLimit] = useState<number>(500);
   // 「全部」:不限样本量,扫描全部行(送大上限 SCAN_ALL_LIMIT)
   const [scanAll, setScanAll] = useState(false);
-  // 处置方式固定为 delete:命中行直接删除,产出净化版 + 被删行存档
-  const action: DataPlatform.ReviewAction = 'delete';
+  // 处置方式:命中行直接删除,产出净化版 + 被删行存档 (默认选中)
+  const [actions, setActions] = useState<DataPlatform.ReviewAction[]>([
+    'delete',
+  ]);
   // 多表版本:参与审核的成员表(默认全选)
   const [targetMembers, setTargetMembers] = useState<string[]>([]);
   // 规则库:启用中的条目 + 本次任务勾选(默认全选启用项)
@@ -385,7 +387,7 @@ const ContentSafety: React.FC = () => {
           categories,
           customWords,
           customRegex: cleanedRegex,
-          action,
+          action: actions[0] || 'delete',
           useLlm,
           usePii,
           useFlaggedWords,
@@ -587,11 +589,12 @@ const ContentSafety: React.FC = () => {
             <Title level={5} style={{ marginTop: 16 }}>
               命中处置
             </Title>
-            <Radio.Group
-              value={action}
+            <Checkbox.Group
               options={[
                 { label: '删除(产出净化版,被删行存档留痕)', value: 'delete' },
               ]}
+              value={actions}
+              onChange={(v) => setActions(v as DataPlatform.ReviewAction[])}
             />
 
             <Title level={5} style={{ marginTop: 16 }}>

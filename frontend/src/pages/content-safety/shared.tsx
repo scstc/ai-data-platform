@@ -135,7 +135,7 @@ export const FindingsTable: React.FC<{ jobId: string; member?: string }> = ({
       options={false}
       search={{ labelWidth: 'auto' }}
       columns={columns}
-      pagination={{ pageSize: 10 }}
+      pagination={{ pageSize: 20 }}
       request={async (params) => {
         const res = await listReviewFindings(jobId, {
           current: params.current,

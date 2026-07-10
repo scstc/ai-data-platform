@@ -35,7 +35,7 @@ export const TableView: React.FC<DataViewProps> = ({ preview }) => {
       rowKey={(_, i) => String(i)}
       size="small"
       scroll={{ x: 'max-content' }}
-      pagination={{ pageSize: 10 }}
+      pagination={{ pageSize: 20 }}
       dataSource={preview.data}
       columns={columns}
     />

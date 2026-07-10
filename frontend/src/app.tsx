@@ -15,7 +15,6 @@ import {
   ErrorBoundary,
   ExpiryReminder,
   Footer,
-  LangDropdown,
   NotificationBell,
   OfflineBanner,
   THEME_STORAGE_KEY,
@@ -128,30 +127,19 @@ export const layout: RunTimeLayoutConfig = ({
     },
     menuItemRender: (item, dom) => {
       if (item.path) {
-        // 算子市场:置顶 + 琥珀色特殊标注,突出显示(图标与文字一并变色)
-        const highlighted = item.path === '/operators';
         return (
           <Link to={item.path} prefetch>
-            {highlighted ? (
-              <span style={{ color: '#fa8c16', fontWeight: 600 }}>{dom}</span>
-            ) : (
-              dom
-            )}
+            {dom}
           </Link>
         );
       }
       return dom;
     },
     actionsRender: () => {
-      // `locale: false` opts out of the language switcher. ProLayout's own
-      // `locale` prop is a locale string, so narrow to the boolean toggle here.
-      const localeEnabled =
-        (initialState?.settings as { locale?: boolean })?.locale !== false;
       return [
         <NotificationBell key="notifications" />,
         <ThemeSwitch key="theme" />,
-        localeEnabled && <LangDropdown key="lang" />,
-      ].filter(Boolean);
+      ];
     },
     avatarProps: {
       src: initialState?.currentUser?.avatar,

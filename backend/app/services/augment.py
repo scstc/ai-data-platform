@@ -12,15 +12,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
+from app.models.job import Job
 from app.models.job_input import JobInput
 from app.schemas.augment import AugmentGoal, AugmentReport
-from app.services.external_store import upload_file_to_datasets
 from app.services.engine import (
     EngineError,
     _new_version_id,
@@ -30,6 +30,46 @@ from app.services.engine import (
     detect_text_key,
     materialized_version,
 )
+from app.services.external_store import upload_file_to_datasets
+
+
+async def _persist_augment_report(
+    session: AsyncSession, job_id: str, report: AugmentReport
+) -> None:
+    """把报告快照写进 jobs.eval_report(治理整改:报告跨机器可读,不依赖本地磁盘)。
+
+    与 review_runner 写 jobs.review_report 同模式——存 DB 而非 file,
+    避免报告被清理 / 跨机器执行后无法读取。
+    """
+    await session.execute(
+        update(Job)
+        .where(Job.id == job_id)
+        .values(eval_report=report.model_dump(mode="json"))
+    )
+    await session.commit()
+
+
+def _expand_input_jsonl(src: Path, dst: Path, n: int) -> int:
+    """把 src 的 records 复制 n 倍写到 dst,返回新行数(治理整改:目标总量扩增)。
+
+    augment 的算子默认 1→1(LLM 改写);为了让单次任务产出 N 倍数据,把
+    输入样本复制 N 份,让 DJ 的 mapper 对每份独立调一次 LLM,从而产出
+    N 种不同变体(配合 temperature>=0.5 + 不同 seed)。n<=1 时等同复制原文件。
+    """
+    if n < 1:
+        raise EngineError(f"target_per_sample 必须 >= 1,实得 {n}")
+    src_text = src.read_text(encoding="utf-8")
+    # 单行写法:每条原始样本成为 N 个相邻副本(LLM 对每个副本独立生成)
+    if not src_text.strip():
+        dst.write_text(src_text, encoding="utf-8")
+        return 0
+    if n == 1:
+        if src != dst:
+            dst.write_text(src_text, encoding="utf-8")
+        return src_text.count("\n") + (0 if src_text.endswith("\n") else 1)
+    expanded = src_text * n
+    dst.write_text(expanded, encoding="utf-8")
+    return expanded.count("\n")
 
 
 async def run_augment_job(
@@ -72,6 +112,7 @@ async def run_augment_job(
             operators=operators,
             goal=goal,
             output_dataset_id=output_dataset_id,
+            text_keys=text_keys,
             llm_snapshot=llm_snapshot,
         )
 
@@ -133,6 +174,16 @@ async def run_augment_job(
         # 物化成员文件
         input_path = await _materialize_member(session, member)
 
+        # 目标总量扩增:把成员样本复制 target_per_sample 份,
+        # 让单算子(如 calibrate_qa_mapper)对每份独立调一次 LLM
+        n = goal.target_per_sample or 1
+        if n > 1:
+            expanded_path = out_dir / f"{member.table_name}_expanded.jsonl"
+            _expand_input_jsonl(Path(input_path), expanded_path, n)
+            dj_input_path = expanded_path
+        else:
+            dj_input_path = Path(input_path)
+
         # 输出路径
         out_format = member.format if member.format in ("parquet", "jsonl") else "jsonl"
         output_path = _get_member_output_path(
@@ -143,7 +194,7 @@ async def run_augment_job(
         # 构建 DJ 配置（增强用 dj-process）
         cfg = build_config(
             project_name=f"{job_id}-{member.table_name}",
-            input_path=str(input_path),
+            input_path=str(dj_input_path),
             output_path=str(output_path),
             operators=member_operators,
             llm_snapshot=llm_snapshot,
@@ -153,14 +204,16 @@ async def run_augment_job(
 
         all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
 
-        # 计数输入行
-        if input_path.suffix == ".jsonl":
+        # 计数输入行(扩增后的实际行数)
+        if dj_input_path.suffix == ".jsonl":
             member_input_count = sum(
-                1 for line in input_path.open(encoding="utf-8") if line.strip()
+                1 for line in dj_input_path.open(encoding="utf-8") if line.strip()
             )
         else:
             # parquet
-            member_input_count = len(parquet_bytes_to_records(input_path.read_bytes()))
+            member_input_count = len(
+                parquet_bytes_to_records(dj_input_path.read_bytes())
+            )
         total_input_count += member_input_count
 
         # 运行 dj-process
@@ -293,6 +346,8 @@ async def run_augment_job(
         json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    # 同步落 DB(report.json 本地副本留作审计;跨机器读取靠 DB)
+    await _persist_augment_report(session, job_id, report)
 
     return version, combined_yaml, str(log_path), report
 
@@ -305,6 +360,7 @@ async def _run_augment_job_legacy(
     operators: list[dict[str, Any]] | None = None,
     goal: AugmentGoal,
     output_dataset_id: str | None = None,
+    text_keys: list[str] | None = None,
     llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str, AugmentReport]:
     """旧版单文件增强逻辑（无成员表的版本）。"""
@@ -333,13 +389,22 @@ async def _run_augment_job_legacy(
     operator_chain = [op["name"] for op in operators]
 
     async with materialized_version(input_version, session) as input_path:
+        # 目标总量扩增:同 run_augment_job,单文件版做同样处理
+        n = goal.target_per_sample or 1
+        if n > 1:
+            expanded_path = out_dir / "expanded_input.jsonl"
+            _expand_input_jsonl(Path(input_path), expanded_path, n)
+            dj_input_path = expanded_path
+        else:
+            dj_input_path = Path(input_path)
+
         # text_keys 用户显式指定优先;留空则按字段名优先级自动探测主文本字段
         detected_key = None if text_keys else detect_text_key(
-            _read_head_records(Path(input_path), 50)
+            _read_head_records(dj_input_path, 50)
         )
         cfg = build_config(
             project_name=job_id,
-            input_path=str(input_path),
+            input_path=str(dj_input_path),
             output_path=str(out_path),
             operators=operators,
             text_key=detected_key,
@@ -349,7 +414,9 @@ async def _run_augment_job_legacy(
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
 
-        input_count = sum(1 for line in Path(input_path).open(encoding="utf-8") if line.strip())
+        input_count = sum(
+            1 for line in dj_input_path.open(encoding="utf-8") if line.strip()
+        )
         code, log = await _run_dj(yaml_path, job_id=job_id, llm_snapshot=llm_snapshot)
     log_path.write_text(log, encoding="utf-8")
 
@@ -404,5 +471,7 @@ async def _run_augment_job_legacy(
         json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    # 同步落 DB(report.json 本地副本留作审计;跨机器读取靠 DB)
+    await _persist_augment_report(session, job_id, report)
     return version, yaml_text, str(log_path), report
 
