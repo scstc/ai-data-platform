@@ -252,7 +252,7 @@ const StatsTab: React.FC<{ versionId: string; member?: string }> = ({
       options={false}
       columns={columns}
       scroll={{ x: 'max-content' }}
-      pagination={{ pageSize: 10 }}
+      pagination={{ pageSize: 20 }}
       request={async (params) => {
         try {
           const res = await getVersionStats(versionId, {

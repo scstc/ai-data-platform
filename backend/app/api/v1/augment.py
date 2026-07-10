@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_perm
 from app.api.v1.jobs import (
+    BatchDeleteRequest,
     SessionDep,
     _binary_block,
     _build_input,
@@ -28,7 +29,6 @@ from app.api.v1.jobs import (
     _new_job_id,
     _now,
     _reset_for_edit_rerun,
-    BatchDeleteRequest,
 )
 from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
@@ -290,14 +290,39 @@ async def batch_delete_augment_jobs(
     return JSONResponse(content={"data": {"deleted": deleted}, "success": True})
 
 
+def _to_camel(d: dict[str, Any]) -> dict[str, Any]:
+    """snake_case 字段名 → camelCase(老报告兼容性)。"""
+    import re
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        ck = re.sub(r"_([a-z])", lambda m: m.group(1).upper(), k)
+        out[ck] = v
+    return out
+
+
 @router.get("/augmentation/jobs/{job_id}/report")
 async def get_augment_report(job_id: str, session: SessionDep) -> JSONResponse:
-    """读 report.json 拿增强报告(输入/输出条数/扩增比/warnings)。"""
+    """拿增强报告(输入/输出条数/扩增比/warnings)。
+
+    读取顺序:1) DB jobs.eval_report(主存,跨机器可读)
+            2) 本地 report.json(兜底,兼容升级前的历史任务)
+            3) 都没有 → 404
+
+    返回 camelCase 字段(与前端约定一致):即便老报告以 snake_case 写入 DB,
+    读取时也规范化到 camelCase。
+    """
     job = await session.get(Job, job_id)
     if job is None or job.type != _AUGMENT_TYPE:
         return JSONResponse(
             status_code=404, content={"success": False, "message": "增强任务不存在"}
         )
+
+    # 1) 主存:DB eval_report
+    if job.eval_report:
+        return JSONResponse(
+            content={"data": _to_camel(job.eval_report), "success": True}
+        )
+
     stmt = (
         select(DatasetVersion)
         .where(DatasetVersion.produced_by_job_id == job_id)
@@ -315,17 +340,40 @@ async def get_augment_report(job_id: str, session: SessionDep) -> JSONResponse:
             operator_chain=[o["name"] for o in spec.get("operators", [])],
             warnings=["任务尚未完成"] if job.state != "success" else [],
         )
-        return JSONResponse(content={"data": empty.model_dump(mode="json"), "success": True})
-    out_dir = Path(settings.datasets_dir) / version.dataset_id / f"v{version.version_no}"
+        # by_alias=True:AugmentReport 继承 CamelModel,默认 model_dump 输出 snake_case;
+        # 显式 by_alias 才能输出 camelCase,与前端约定一致。
+        return JSONResponse(
+            content={
+                "data": empty.model_dump(mode="json", by_alias=True),
+                "success": True,
+            }
+        )
+
+    # 2) 兜底:本地 report.json(老任务升级前跑的,DB 没存)
+    out_dir = (
+        Path(settings.datasets_dir)
+        / version.dataset_id
+        / f"v{version.version_no}"
+    )
     report_path = out_dir / "report.json"
-    if not report_path.exists():
-        return JSONResponse(
-            status_code=404, content={"success": False, "message": "报告文件不存在"}
-        )
-    try:
-        raw: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return JSONResponse(
-            status_code=500, content={"success": False, "message": f"报告解析失败:{exc}"}
-        )
-    return JSONResponse(content={"data": raw, "success": True})
+    if report_path.exists():
+        try:
+            raw: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
+            return JSONResponse(content={"data": _to_camel(raw), "success": True})
+        except (OSError, json.JSONDecodeError) as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": f"报告解析失败:{exc}"},
+            )
+
+    # 3) 都没有——常见于跨机器查看老任务
+    return JSONResponse(
+        status_code=404,
+        content={
+            "success": False,
+            "message": (
+                "报告不可用:数据库与本地缓存均无此任务的报告"
+                "(老任务在执行机器本地清理后即失效,可重新运行)"
+            ),
+        },
+    )

@@ -140,7 +140,7 @@ const VersionHistoryDrawer: FC<VersionHistoryDrawerProps> = ({
             rowKey="id"
             search={false}
             options={false}
-            pagination={{ pageSize: 10 }}
+            pagination={{ pageSize: 20 }}
             request={async (params) => {
               const res = await listObjectVersions(object.id, {
                 page: params.current,

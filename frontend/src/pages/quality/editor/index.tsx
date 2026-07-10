@@ -430,6 +430,7 @@ const QualityEditor: React.FC = () => {
                         >
                           <OperatorLibrary
                             category="filter"
+                            bucket="quality"
                             onAdd={appendOperator}
                           />
                         </Card>

@@ -266,6 +266,8 @@ async def _run_job(job_id: str) -> None:
                         operators_arg = [o.model_dump() for o in operators]
                     target_members_arg = getattr(body, "target_members", None)
 
+                # 仅 type=augmentation 会被赋值,其他 type 保持 None
+                augment_report = None
                 if job.type == "distillation":
                     _v, yaml_text, log_path, _report = await run_distillation_job(
                         session,
@@ -290,7 +292,7 @@ async def _run_job(job_id: str) -> None:
                         text_keys=getattr(body, "text_keys", None),
                     )
                 elif job.type == "augmentation":
-                    _v, yaml_text, log_path, _report = await run_augment_job(
+                    _v, yaml_text, log_path, augment_report = await run_augment_job(
                         session,
                         job_id=job_id,
                         input_version=input_version,
@@ -382,6 +384,19 @@ async def _run_job(job_id: str) -> None:
                 job.config_yaml = engine.config_yaml_for_display(yaml_text)
             if log_path is not None:
                 job.logs_uri = log_path
+            # 增强类任务空产物兜底:执行引擎不抛错但产出 0 行 = LLM 全失败,
+            # 不能算成功,否则下游会拿到空版本当正常数据用
+            if job.type == "augmentation" and augment_report is not None:
+                if augment_report.output_count == 0:
+                    job.state = "failed"
+                    job.error = (
+                        "增强产出为 0 行,"
+                        + (
+                            "; ".join(augment_report.warnings)
+                            if augment_report.warnings
+                            else "可能 LLM 调用失败或 prompt 不匹配"
+                        )
+                    )
         except _Paused:
             job.state = "paused"
         except _Cancelled:
