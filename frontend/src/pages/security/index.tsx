@@ -108,6 +108,31 @@ const actionLabel = (action: string): string => {
   return resourceZh && verbZh ? `${verbZh}${resourceZh}` : action;
 };
 
+/**
+ * 动作搜索输入 → 后端动作码查询串（后端对动作码 ilike 模糊匹配）。
+ * 表格展示的是中文，用户自然输中文，这里做反向翻译：
+ * - 整句「删除标签」→ "tag.delete"（精确码）
+ * - 只输动词「删除」→ "delete"（匹配所有删除类动作）
+ * - 只输资源「标签」→ "tag."（匹配该资源的所有动作）
+ * - 都不匹配则原样透传（支持直接输动作码）
+ */
+const actionQueryOf = (input: string): string => {
+  const t = input.trim();
+  if (!t) return t;
+  for (const [resourceKey, resourceZh] of Object.entries(RESOURCE_ZH)) {
+    for (const [verbKey, verbZh] of Object.entries(VERB_ZH)) {
+      if (`${verbZh}${resourceZh}` === t) return `${resourceKey}.${verbKey}`;
+    }
+  }
+  for (const [verbKey, verbZh] of Object.entries(VERB_ZH)) {
+    if (verbZh === t) return verbKey;
+  }
+  for (const [resourceKey, resourceZh] of Object.entries(RESOURCE_ZH)) {
+    if (resourceZh === t) return `${resourceKey}.`;
+  }
+  return t;
+};
+
 /** HTTP 状态码配色：2xx 成功 / 4xx 客户端错误（含 403 越权拦截）/ 5xx 服务端错误 */
 const statusColor = (code: number) => {
   if (code >= 500) return 'error';
@@ -145,6 +170,7 @@ const Security: React.FC = () => {
       title: '动作',
       dataIndex: 'action',
       width: 150,
+      fieldProps: { placeholder: '如：删除标签 / 删除 / tag.delete' },
       render: (_, r) => (
         <Tooltip title={r.action}>
           <Tag>{actionLabel(r.action)}</Tag>
@@ -214,7 +240,7 @@ const Security: React.FC = () => {
             current: params.current,
             pageSize: params.pageSize,
             username: params.username || undefined,
-            action: params.action || undefined,
+            action: params.action ? actionQueryOf(params.action) : undefined,
             method: params.method || undefined,
             // dateRange 给的是纯日期:起取当日 0 点、止取当日 23:59:59,
             // 否则会漏掉当天的记录(与数据集列表一致)
