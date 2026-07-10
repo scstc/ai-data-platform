@@ -136,6 +136,74 @@ class TestHtmlStrip:
         assert records == [{"text": "中文段落"}]
 
 
+class TestLegacyDocAntiwordGarbling:
+    """antiword 只有西欧码表,遇中文等 CJK 字符会原样吐字面 "?" 且 returncode=0
+    (伪装成功);必须按问号占比识别并拒绝,否则中文 .doc 会被静默存成乱码
+    (生产复现:银行业务文本.doc 抽取后 text 字段变成 "REV00001 ????(1?) [??]")。
+    """
+
+    GARBLED = (
+        "REV00001  ????(1?)  [??]\r\n"
+        "??:???? | ??:?? | ??:2024-01-21 23:46:52\r\n"
+        "????????(1?),???????????,????"
+    )
+
+    @staticmethod
+    def _which_antiword_only(name: str) -> str | None:
+        return "/usr/bin/antiword" if name == "antiword" else None
+
+    def test_is_garbled_detects_high_question_mark_ratio(self):
+        from app.services.landing import _is_garbled_antiword_output
+
+        assert _is_garbled_antiword_output(self.GARBLED) is True
+
+    def test_is_garbled_false_for_normal_english_text(self):
+        from app.services.landing import _is_garbled_antiword_output
+
+        normal = "Is this correct? What about that? A normal paragraph."
+        assert _is_garbled_antiword_output(normal) is False
+
+    def test_is_garbled_false_for_empty(self):
+        from app.services.landing import _is_garbled_antiword_output
+
+        assert _is_garbled_antiword_output("") is False
+
+    def test_legacy_doc_rejects_garbled_antiword_and_raises_without_soffice(
+        self, monkeypatch
+    ):
+        """antiword 吐乱码时不采信;soffice 也不可用 → 明确抛 ParseError,
+        不能静默把乱码当成功结果返回。"""
+        import pytest
+
+        from app.services import landing
+
+        monkeypatch.setattr("shutil.which", self._which_antiword_only)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **k: type(
+                "R", (), {"returncode": 0, "stdout": self.GARBLED.encode()}
+            )(),
+        )
+
+        with pytest.raises(landing.ParseError):
+            landing._convert_legacy_doc_to_text(b"fake doc bytes")
+
+    def test_legacy_doc_accepts_clean_antiword_output(self, monkeypatch):
+        """antiword 输出正常(问号占比低)时按原逻辑直接采信,不影响既有英文 .doc 行为。"""
+        from app.services import landing
+
+        clean = "Quarterly report. Revenue is up. Is this final? Yes."
+        monkeypatch.setattr("shutil.which", self._which_antiword_only)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **k: type(
+                "R", (), {"returncode": 0, "stdout": clean.encode()}
+            )(),
+        )
+
+        assert landing._convert_legacy_doc_to_text(b"fake doc bytes") == clean
+
+
 class TestSchemaValidation:
     def test_overlap_must_be_less_than_max_length(self):
         import pytest

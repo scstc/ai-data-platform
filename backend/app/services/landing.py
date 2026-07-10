@@ -302,11 +302,25 @@ def _xls_to_records(content: bytes) -> list[dict]:
     return records
 
 
+def _is_garbled_antiword_output(text: str) -> bool:
+    """antiword 只有西欧单字节码表,不认识中文等 CJK 字符时会原样吐出字面 "?"。
+
+    真实文本里问号占比极低(<1%),antiword 吞掉 CJK 后问号占比会飙到 50%+,
+    以此区分"正常解析出的英文疑问句"和"CJK 被替换成问号"。
+    """
+    stripped = "".join(text.split())
+    if not stripped:
+        return False
+    return stripped.count("?") / len(stripped) > 0.05
+
+
 def _convert_legacy_doc_to_text(content: bytes) -> str:
     """老 .doc(二进制)→ 纯文本:antiword 优先(快、原生 Word);soffice headless 兜底。
 
     antiword 0.37 对部分现代生成的 .doc 报 `text stream too small to handle`,此时
     退到 LibreOffice headless 转 .docx 后用 mammoth 解(.docx → markdown)。
+    antiword 只支持西欧码表,遇到中文等 CJK 字符会把整段替换成字面 "?"(不报错、
+    不空输出,伪装成功),因此额外做乱码检测,命中则视为失败并落到 soffice 兜底。
     antiword / soffice 都不可用时抛 ParseError(让上层正常报错,绝不静默成功)。
     """
     import os
@@ -328,7 +342,9 @@ def _convert_legacy_doc_to_text(content: bytes) -> str:
                     check=False,
                 )
                 if out.returncode == 0 and out.stdout:
-                    return out.stdout.decode("utf-8", errors="replace")
+                    decoded = out.stdout.decode("utf-8", errors="replace")
+                    if not _is_garbled_antiword_output(decoded):
+                        return decoded
             finally:
                 os.unlink(tmp)
         except Exception:  # noqa: BLE001
