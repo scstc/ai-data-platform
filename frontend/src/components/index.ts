@@ -6,7 +6,7 @@
  * 布局组件
  */
 import Footer from './Footer';
-import { LangDropdown, THEME_STORAGE_KEY, ThemeSwitch } from './RightContent';
+import { THEME_STORAGE_KEY, ThemeSwitch } from './RightContent';
 import { AvatarDropdown } from './RightContent/AvatarDropdown';
 
 /**
@@ -26,4 +26,4 @@ export { default as StandardFormRow } from './StandardFormRow';
 export { default as TagSelect } from './TagSelect';
 export { default as VersionFilePreview } from './VersionFilePreview';
 
-export { AvatarDropdown, Footer, LangDropdown, THEME_STORAGE_KEY, ThemeSwitch };
+export { AvatarDropdown, Footer, THEME_STORAGE_KEY, ThemeSwitch };

@@ -15,7 +15,6 @@ import {
   ErrorBoundary,
   ExpiryReminder,
   Footer,
-  LangDropdown,
   NotificationBell,
   OfflineBanner,
   THEME_STORAGE_KEY,
@@ -143,15 +142,10 @@ export const layout: RunTimeLayoutConfig = ({
       return dom;
     },
     actionsRender: () => {
-      // `locale: false` opts out of the language switcher. ProLayout's own
-      // `locale` prop is a locale string, so narrow to the boolean toggle here.
-      const localeEnabled =
-        (initialState?.settings as { locale?: boolean })?.locale !== false;
       return [
         <NotificationBell key="notifications" />,
         <ThemeSwitch key="theme" />,
-        localeEnabled && <LangDropdown key="lang" />,
-      ].filter(Boolean);
+      ];
     },
     avatarProps: {
       src: initialState?.currentUser?.avatar,
