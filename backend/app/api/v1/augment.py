@@ -17,9 +17,10 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin, require_perm
+from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.jobs import (
     SessionDep,
+    _acl_job_filter,
     _binary_block,
     _build_input,
     _build_output,
@@ -34,10 +35,11 @@ from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.user import User
 from app.schemas.augment import AugmentJobCreate, AugmentReport
 from app.schemas.common import PageResponse
 from app.schemas.job import JobRead
-from app.services import job_runner
+from app.services import dataset_acl, job_runner
 from app.services import operator_catalog as oc
 from app.services.llm_config import get_active_llm_config
 
@@ -62,7 +64,10 @@ def _augment_operator_block(operators: list) -> str | None:
 
 
 async def _start_augment(
-    session: AsyncSession, body: AugmentJobCreate, job: Job | None = None
+    session: AsyncSession,
+    body: AugmentJobCreate,
+    job: Job | None = None,
+    user: User | None = None,
 ) -> JSONResponse:
     """增强版 _start_job:校验 → 建任务 → spawn 后台 → 立即返回 pending。
 
@@ -93,6 +98,14 @@ async def _start_augment(
         return JSONResponse(
             status_code=404, content={"success": False, "message": "数据集版本不存在"}
         )
+    # 数据集 ACL:加工消费该数据集,要求 edit 及以上(view 只能查看数据)
+    if not await dataset_acl.can_access(
+        session, user, input_version.dataset_id, "edit"
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法发起加工"},
+        )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
 
@@ -103,7 +116,7 @@ async def _start_augment(
             type=_AUGMENT_TYPE,
             state="pending",
             progress=0,
-            created_by="admin",
+            created_by=user.username if user else "admin",
             spec=body.model_dump(mode="json"),
             pipeline_id=body.pipeline_id,
         )
@@ -118,12 +131,14 @@ async def _start_augment(
     return JSONResponse(content=_item(job))
 
 
-@router.post("/augmentation/jobs", dependencies=[Depends(require_admin)])
+@router.post("/augmentation/jobs")
 async def create_augment_job(
-    body: AugmentJobCreate, session: SessionDep
+    body: AugmentJobCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
-    """新建数据增强任务并异步执行。"""
-    return await _start_augment(session, body)
+    """新建数据增强任务并异步执行。需登录 + 输入数据集 ACL ≥ edit。"""
+    return await _start_augment(session, body, user=user)
 
 
 @router.get(
@@ -136,13 +151,20 @@ async def list_augment_jobs(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出增强任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
+    """分页列出增强任务;可按 datasetId 过滤(输入或产物版本属于该数据集)。
+
+    非超管只看到自己创建的 + 授权数据集上的任务。
+    """
     count_stmt = select(func.count()).select_from(Job).where(Job.type == _AUGMENT_TYPE)
     list_stmt = select(Job).where(Job.type == _AUGMENT_TYPE)
     if dataset_id:
         count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
         list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
+    if (acl_cond := await _acl_job_filter(session, user)) is not None:
+        count_stmt = count_stmt.where(acl_cond)
+        list_stmt = list_stmt.where(acl_cond)
     total = await session.scalar(count_stmt) or 0
     rows = (
         await session.scalars(
@@ -174,11 +196,12 @@ async def get_augment_job(job_id: str, session: SessionDep) -> JSONResponse:
     return JSONResponse(content=_item(job, output, input_))
 
 
-@router.put(
-    "/augmentation/jobs/{job_id}", dependencies=[Depends(require_admin)]
-)
+@router.put("/augmentation/jobs/{job_id}")
 async def update_augment_job(
-    job_id: str, body: AugmentJobCreate, session: SessionDep
+    job_id: str,
+    body: AugmentJobCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
     """编辑增强任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
 
@@ -194,13 +217,15 @@ async def update_augment_job(
             status_code=409,
             content={"success": False, "message": "任务运行中,请先停止再编辑"},
         )
-    return await _start_augment(session, body, job=job)
+    return await _start_augment(session, body, job=job, user=user)
 
 
-@router.post(
-    "/augmentation/jobs/{job_id}/rerun", dependencies=[Depends(require_admin)]
-)
-async def rerun_augment_job(job_id: str, session: SessionDep) -> JSONResponse:
+@router.post("/augmentation/jobs/{job_id}/rerun")
+async def rerun_augment_job(
+    job_id: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
     """用原 spec 重跑。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _AUGMENT_TYPE:
@@ -217,7 +242,7 @@ async def rerun_augment_job(job_id: str, session: SessionDep) -> JSONResponse:
         return JSONResponse(
             status_code=400, content={"success": False, "message": "任务配置已损坏,无法重跑"}
         )
-    return await _start_augment(session, spec)
+    return await _start_augment(session, spec, user=user)
 
 
 @router.post(

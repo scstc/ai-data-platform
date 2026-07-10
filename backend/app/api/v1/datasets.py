@@ -779,7 +779,11 @@ async def upload_batch_as_dataset(
 
 
 @router.get("/datasets/{dataset_id}/lineage")
-async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
+async def dataset_lineage(
+    dataset_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
     """数据集血缘图(#11):以该数据集各版本为起点,BFS 上下游(可跨数据集)构建
     版本↔任务 DAG,返回 nodes + edges 供前端分层渲染。
 
@@ -787,6 +791,10 @@ async def dataset_lineage(dataset_id: str, session: SessionDep) -> JSONResponse:
     整体搬迁至此,本端点瘦身为 wrapper,响应形状与抽取前完全一致,回归见
     `tests/test_lineage_lake.py`)。
     """
+    if not await dataset_acl.can_access(session, user, dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
+        )
     starts = (
         await session.scalars(
             select(DatasetVersion.id).where(DatasetVersion.dataset_id == dataset_id)
@@ -905,7 +913,9 @@ async def _members_of(
 
 @router.get("/dataset-versions/{version_id}/members")
 async def list_version_members(
-    version_id: str, session: SessionDep
+    version_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """列出版本的成员文件:manifest 版本从 __member 取;其余版本回退为单一成员。"""
     version = await session.get(DatasetVersion, version_id)
@@ -913,6 +923,10 @@ async def list_version_members(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
     try:
         members = await _members_of(version, session)
@@ -1103,6 +1117,7 @@ async def get_member_url(
     version_id: str,
     session: SessionDep,
     key: Annotated[str, Query()],
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """生成成员对象的预签名 URL(供浏览器直连预览 图/音/视频/文本)。"""
     version = await session.get(DatasetVersion, version_id)
@@ -1110,6 +1125,10 @@ async def get_member_url(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
     # 解析该版本自身对象的桶/键(manifest→数据集桶 adp-datasets;单文件 hosted→其源桶;
     # managed 本地版本无 s3 位置)。
@@ -1155,6 +1174,7 @@ async def add_dataset_members(
     dataset_id: str,
     files: MediaFilesDep,
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """向 manifest 媒体集追加成员(原地编辑:写对象 + 追加清单行 + 更新版本计数)。"""
     dataset = await session.get(Dataset, dataset_id)
@@ -1163,6 +1183,10 @@ async def add_dataset_members(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集不存在或不是可编辑的媒体集"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集编辑权限"}
         )
     field = _MEDIA_FIELD.get(dataset.data_type or "")
     token = _MEDIA_TOKEN.get(dataset.data_type or "")
@@ -1282,6 +1306,7 @@ async def delete_dataset_member(
     dataset_id: str,
     session: SessionDep,
     key: Annotated[str, Query()],
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """从 manifest 媒体集移除一个成员(删对象 + 去清单行 + 更新版本计数)。"""
     version = await _manifest_version_of(session, dataset_id)
@@ -1289,6 +1314,10 @@ async def delete_dataset_member(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集不存在或不是可编辑的媒体集"},
+        )
+    if not await dataset_acl.can_access(session, user, dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集编辑权限"}
         )
     if not key.startswith(f"{dataset_id}/"):
         return JSONResponse(
@@ -1938,6 +1967,7 @@ async def preview_version(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     key: str | None = Query(None, description="指定则预览该原件(单文件,列纯净)"),
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """预览某版本的数据(读 jsonl,分页返回若干行 + 列名 + 总行数)。
 
@@ -1949,6 +1979,10 @@ async def preview_version(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
 
     # manifest(媒体集):返回成员清单表(name/format/size),不走 normalize_to_records。
@@ -2212,6 +2246,7 @@ async def query_version(
     version_id: str,
     payload: dict,
     session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """对某版本数据跑 DuckDB 只读 SQL,返回 {columns,data,total,success,message?}(形状同 preview)。
 
@@ -2225,6 +2260,10 @@ async def query_version(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
     if version.format == MANIFEST_FORMAT:
         return JSONResponse(
@@ -2842,10 +2881,14 @@ async def update_dataset_version(
     session: SessionDep,
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
-    """更新版本元数据(训练用途/说明/schema变体)。需登录,无需 admin。"""
+    """更新版本元数据(训练用途/说明/schema变体)。需登录,数据集 ACL ≥ edit。"""
     version = await session.get(DatasetVersion, version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="Version not found")
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集编辑权限"}
+        )
     if payload.train_type is not None:
         version.train_type = payload.train_type or None
     if payload.note is not None:
@@ -2871,6 +2914,10 @@ async def delete_dataset_version(
     version = await session.get(DatasetVersion, version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="Version not found")
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集编辑权限"}
+        )
     if version.publish_status != "draft":
         return JSONResponse(
             status_code=400,
@@ -2891,7 +2938,9 @@ async def delete_dataset_version(
 
 @router.get("/dataset-versions/{version_id}/download", response_model=None)
 async def download_version(
-    version_id: str, session: SessionDep
+    version_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse | FileResponse:
     """导出/下载一个版本的数据(任意版本均可,不再设发布门控)。
 
@@ -2902,6 +2951,10 @@ async def download_version(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
     try:
         members = await _members_of(version, session)
@@ -2959,7 +3012,10 @@ async def download_version(
 
 @router.post("/dataset-versions/{version_id}/export-s3", response_model=None)
 async def export_version_to_s3(
-    version_id: str, body: ExportS3Request, session: SessionDep
+    version_id: str,
+    body: ExportS3Request,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """导出一个版本到外部 S3 数据源(下载/导出至 S3,download 的对偶,任意版本均可)。
 
@@ -2972,6 +3028,11 @@ async def export_version_to_s3(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法导出到 S3"},
         )
     if not body.bucket:
         return JSONResponse(

@@ -14,9 +14,10 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
-from app.api.deps import require_admin, require_perm
+from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.jobs import (
     SessionDep,
+    _acl_job_filter,
     _binary_block,
     _build_input,
     _build_output,
@@ -27,10 +28,11 @@ from app.api.v1.jobs import (
 from app.models.dataset_version import DatasetVersion
 from app.models.eval_result import EvalResult
 from app.models.job import Job
+from app.models.user import User
 from app.schemas.common import PageResponse
 from app.schemas.eval import EvalResultRead, JudgeJobCreate
 from app.schemas.job import JobRead
-from app.services import job_runner
+from app.services import dataset_acl, job_runner
 from app.services.eval_dataset import EvalValidationError, land_eval_dataset
 from app.services.landing import LandingError, UnsupportedFormatError
 from app.services.semantic_registry import SemanticValidationError
@@ -91,15 +93,29 @@ async def upload_eval_dataset(
     )
 
 
-@router.post("/eval/judge/jobs", dependencies=[Depends(require_admin)])
+@router.post("/eval/judge/jobs")
 async def create_judge_job(
-    body: JudgeJobCreate, session: SessionDep
+    body: JudgeJobCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
-    """对一个版本起裁判任务(对比 reference 与 completion 打分)。"""
+    """对一个版本起裁判任务(对比 reference 与 completion 打分)。
+
+    需登录 + 输入数据集 ACL ≥ edit(超管/owner 隐式满足)。
+    """
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:
         return JSONResponse(
             status_code=404, content={"success": False, "message": "数据集版本不存在"}
+        )
+
+    # 数据集 ACL:评估消费该数据集,要求 edit 及以上(view 只能查看数据)
+    if not await dataset_acl.can_access(
+        session, user, input_version.dataset_id, "edit"
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法发起评估"},
         )
     if (blocked := _binary_block(input_version)) is not None:
         return blocked
@@ -109,7 +125,7 @@ async def create_judge_job(
         type=_JUDGE_TYPE,
         state="pending",
         progress=0,
-        created_by="admin",
+        created_by=user.username if user else "admin",
         spec=body.model_dump(mode="json"),
     )
     session.add(job)
@@ -129,13 +145,20 @@ async def list_judge_jobs(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出裁判任务。"""
+    """分页列出裁判任务。
+
+    非超管只看到自己创建的 + 授权数据集上的任务。
+    """
     count_stmt = select(func.count()).select_from(Job).where(Job.type == _JUDGE_TYPE)
     list_stmt = select(Job).where(Job.type == _JUDGE_TYPE)
     if dataset_id:
         count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
         list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
+    if (acl_cond := await _acl_job_filter(session, user)) is not None:
+        count_stmt = count_stmt.where(acl_cond)
+        list_stmt = list_stmt.where(acl_cond)
     total = await session.scalar(count_stmt) or 0
     rows = (
         await session.scalars(

@@ -218,7 +218,11 @@ async def _resolve_pipeline(
 
 
 async def _execute_clean(
-    session: AsyncSession, pipeline: PipelineRead, name: str, dataset_version_id: str
+    session: AsyncSession,
+    pipeline: PipelineRead,
+    name: str,
+    dataset_version_id: str,
+    user: User | None = None,
 ) -> JSONResponse:
     """清洗场景:全部成员套用同一套算子(memberConfigs),对齐 _start_job 成员级模式。"""
     input_version = await session.get(DatasetVersion, dataset_version_id)
@@ -257,14 +261,20 @@ async def _execute_clean(
         operators=None if member_configs else operators,
         text_keys=None if member_configs else text_keys,
     )
-    return await _start_job(session, job_body)
+    return await _start_job(session, job_body, user=user)
 
 
-@router.post("/pipelines/{pipeline_id}/execute", dependencies=[Depends(require_admin)])
+@router.post("/pipelines/{pipeline_id}/execute")
 async def execute_pipeline(
-    pipeline_id: str, body: PipelineExecuteRequest, session: SessionDep
+    pipeline_id: str,
+    body: PipelineExecuteRequest,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
-    """一键执行:按流水线 scenario 分发到既有清洗/蒸馏/合成/增强执行入口。"""
+    """一键执行:按流水线 scenario 分发到既有清洗/蒸馏/合成/增强执行入口。
+
+    需登录;输入数据集 ACL ≥ edit 的校验在各 _start_* 内统一执行。
+    """
     pipeline = await _resolve_pipeline(session, pipeline_id)
     if pipeline is None:
         return JSONResponse(
@@ -273,7 +283,9 @@ async def execute_pipeline(
     name = body.name or f"{pipeline.name}-{_now():%Y%m%d%H%M%S}"
 
     if pipeline.scenario == "clean":
-        return await _execute_clean(session, pipeline, name, body.dataset_version_id)
+        return await _execute_clean(
+            session, pipeline, name, body.dataset_version_id, user=user
+        )
 
     if pipeline.scenario == "distillation":
         # 蒸馏没有任务级 goal:保留多少/按什么字段/去不去重完全由算子链自身参数
@@ -285,7 +297,7 @@ async def execute_pipeline(
             operators=pipeline.spec.operators,
             text_keys=pipeline.spec.text_keys,
         )
-        return await _start_distillation(session, distill_body)
+        return await _start_distillation(session, distill_body, user=user)
 
     # 合成/增强(LLM 场景):goal 缺失说明预置模板未定制,不猜默认值,提示用户先补全
     if pipeline.scenario not in ("synthesis", "augmentation"):
@@ -319,7 +331,7 @@ async def execute_pipeline(
             goal=make_goal,
             text_keys=text_keys,
         )
-        return await _start_make(session, make_body)
+        return await _start_make(session, make_body, user=user)
     try:
         augment_goal = AugmentGoal.model_validate(pipeline.spec.goal)
     except ValidationError:
@@ -335,4 +347,4 @@ async def execute_pipeline(
         goal=augment_goal,
         text_keys=text_keys,
     )
-    return await _start_augment(session, augment_body)
+    return await _start_augment(session, augment_body, user=user)

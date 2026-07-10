@@ -23,9 +23,10 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
-from app.api.deps import require_perm
+from app.api.deps import current_user, require_perm
 from app.api.v1.jobs import (
     SessionDep,
+    _acl_job_filter,
     _binary_block,
     _build_input,
     _build_output,
@@ -37,6 +38,7 @@ from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.review_finding import ReviewFinding
 from app.models.review_rule import ReviewRule
+from app.models.user import User
 from app.schemas.common import PageResponse
 from app.schemas.job import JobRead
 from app.schemas.review import (
@@ -48,7 +50,7 @@ from app.schemas.review import (
     RuleRegexSpec,
     RuleWordSpec,
 )
-from app.services import job_runner
+from app.services import dataset_acl, job_runner
 from app.services.review import rules_to_config
 
 router = APIRouter(tags=["content-safety"])
@@ -60,18 +62,30 @@ def _new_rule_id() -> str:
 
 @router.post("/content-safety/jobs")
 async def create_review_job(
-    body: ReviewJobCreate, session: SessionDep
+    body: ReviewJobCreate,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)],
 ) -> JSONResponse:
     """新建内容审核任务并后台异步执行:扫描版本 → 落命中 → 产出打标版本 → 回写报告。
 
     异步(同治理类任务):立即返回 pending,不阻塞请求;可经 /jobs/{id}/stop|pause|resume
-    统一管控。打标版本与报告在后台跑完后产出。
+    统一管控。打标版本与报告在后台跑完后产出。审核属分析类,保持匿名可用
+    (匿名对数据集 ACL 直接放行);登录用户则要求输入数据集 ACL ≥ edit。
     """
     input_version = await session.get(DatasetVersion, body.dataset_version_id)
     if input_version is None:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
+        )
+
+    # 数据集 ACL:加工消费该数据集,要求 edit 及以上(view 只能查看数据)
+    if not await dataset_acl.can_access(
+        session, user, input_version.dataset_id, "edit"
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法发起审核"},
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
@@ -96,7 +110,7 @@ async def create_review_job(
         type="review",
         state="pending",
         progress=0,
-        created_by="admin",
+        created_by=user.username if user else "admin",
         # 存原始执行规格,供 job_runner 后台重建 body(config)+ 供重跑/继续
         spec=body.model_dump(mode="json"),
     )
@@ -118,14 +132,19 @@ async def list_review_jobs(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> PageResponse[JobRead]:
     """分页列出 type=review 任务,按创建时间倒序(带输入/产物版本概要);
-    可按 datasetId 过滤(输入或产物版本属于该数据集)。"""
+    可按 datasetId 过滤(输入或产物版本属于该数据集)。
+    非超管只看到自己创建的 + 授权数据集上的任务。"""
     count_stmt = select(func.count()).select_from(Job).where(Job.type == "review")
     list_stmt = select(Job).where(Job.type == "review")
     if dataset_id:
         count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
         list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
+    if (acl_cond := await _acl_job_filter(session, user)) is not None:
+        count_stmt = count_stmt.where(acl_cond)
+        list_stmt = list_stmt.where(acl_cond)
     total = (await session.scalar(count_stmt)) or 0
     rows = (
         await session.scalars(

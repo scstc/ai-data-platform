@@ -347,12 +347,17 @@ async def test_manifest_job_allowed_with_multimodal(
 
 
 @pytest.mark.asyncio
-async def test_job_write_requires_admin(
+async def test_job_write_requires_login_and_acl(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
-    """加工写端点真后端门控:非 admin → 403、匿名 → 401(门控早于业务,无需种子数据)。"""
+    """加工写端点门控(ACL 化):登录但对输入数据集无 ACL → 403;匿名 → 401。
+
+    为什么:建任务已从"仅超管"放宽为"登录 + 数据集 ACL ≥ edit"——普通用户
+    能加工自己有 edit 授权的数据集,但对别人的私有集(本例 owner=admin)仍 403。
+    """
     from app.services.auth import sign_token
 
+    await _seed(session_factory)
     body = {
         "name": "x",
         "type": "clean",

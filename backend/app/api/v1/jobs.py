@@ -9,18 +9,19 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import current_user, require_admin, require_user
 from app.core.db import get_session
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse, format_version_label
 from app.schemas.job import JobCreate, JobRead, OperatorSpec
-from app.services import job_runner
+from app.services import dataset_acl, job_runner
 from app.services import operator_catalog as oc
 from app.services.capabilities import get_capabilities
 from app.services.engine import (
@@ -228,6 +229,34 @@ def _dataset_job_filter(dataset_id: str):
     return Job.id.in_(input_job_ids.union(output_job_ids))
 
 
+async def _acl_job_filter(session: AsyncSession, user: User | None):
+    """任务列表的数据集 ACL 可见性条件;超管/匿名返回 None(不过滤,沿用现状)。
+
+    非超管登录用户只看得到:我创建的任务 + 输入/产物版本落在「我可见数据集」
+    (owner/creator/ACL 授权,复用 visible_dataset_filter)上的任务。孤儿任务
+    (输入版本已删且非我建)一并收敛,防经任务列表泄露他人数据集元信息。
+    供 /jobs 与治理各任务列表共用。
+    """
+    if user is None or user.role == "admin":
+        return None
+    visible_ids = await dataset_acl.visible_dataset_filter(
+        select(Dataset.id), session, user
+    )
+    input_job_ids = (
+        select(JobInput.job_id)
+        .join(DatasetVersion, DatasetVersion.id == JobInput.dataset_version_id)
+        .where(DatasetVersion.dataset_id.in_(visible_ids))
+    )
+    output_job_ids = select(DatasetVersion.produced_by_job_id).where(
+        DatasetVersion.produced_by_job_id.is_not(None),
+        DatasetVersion.dataset_id.in_(visible_ids),
+    )
+    return or_(
+        Job.created_by == user.username,
+        Job.id.in_(input_job_ids.union(output_job_ids)),
+    )
+
+
 @router.get("/jobs", response_model=PageResponse[JobRead])
 async def list_jobs(
     session: SessionDep,
@@ -235,9 +264,11 @@ async def list_jobs(
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     type_: Annotated[str | None, Query(alias="type")] = None,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> PageResponse[JobRead]:
     """分页列出加工任务,按创建时间倒序;可按 type 过滤(如 type=quality)、
-    按 datasetId 过滤(输入或产物版本属于该数据集)。"""
+    按 datasetId 过滤(输入或产物版本属于该数据集)。
+    非超管只看到自己创建的 + 授权数据集上的任务(数据集 ACL 行级裁剪)。"""
     count_stmt = select(func.count()).select_from(Job)
     list_stmt = select(Job)
     if type_:
@@ -246,6 +277,9 @@ async def list_jobs(
     if dataset_id:
         count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
         list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
+    if (acl_cond := await _acl_job_filter(session, user)) is not None:
+        count_stmt = count_stmt.where(acl_cond)
+        list_stmt = list_stmt.where(acl_cond)
     total = await session.scalar(count_stmt) or 0
     rows = (
         await session.scalars(
@@ -286,7 +320,10 @@ async def _reset_for_edit_rerun(
 
 
 async def _start_job(
-    session: AsyncSession, body: JobCreate, job: Job | None = None
+    session: AsyncSession,
+    body: JobCreate,
+    job: Job | None = None,
+    user: User | None = None,
 ) -> JSONResponse:
     """校验 → 建任务(pending,存 spec 以备重跑)→ 起后台任务执行 → 立即返回(不等跑完)。
 
@@ -313,6 +350,15 @@ async def _start_job(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
+        )
+
+    # 数据集 ACL:加工消费该数据集,要求 edit 及以上(view 只能查看数据)
+    if not await dataset_acl.can_access(
+        session, user, input_version.dataset_id, "edit"
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法发起加工"},
         )
 
     # 校验 member_configs（如果提供）
@@ -427,7 +473,7 @@ async def _start_job(
             type=body.type,
             state="pending",
             progress=0,
-            created_by="admin",
+            created_by=user.username if user else "admin",
             # 存原始执行规格(算子 + 输出去向 + 输入版本),供 rerun 原样重跑
             spec=body.model_dump(mode="json"),
             pipeline_id=body.pipeline_id,
@@ -443,18 +489,26 @@ async def _start_job(
     return JSONResponse(content=_item(job))
 
 
-@router.post("/jobs", dependencies=[Depends(require_admin)])
-async def create_job(body: JobCreate, session: SessionDep) -> JSONResponse:
+@router.post("/jobs")
+async def create_job(
+    body: JobCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
     """新建加工任务并后台执行:对一个数据集版本跑算子流水线 → 产出新版本。
 
     立即返回 pending 任务(不阻塞到跑完);进度经轮询 GET 反映,可经 stop 端点停止。
+    需登录 + 输入数据集 ACL ≥ edit(超管/owner 隐式满足)。
     """
-    return await _start_job(session, body)
+    return await _start_job(session, body, user=user)
 
 
-@router.put("/jobs/{job_id}", dependencies=[Depends(require_admin)])
+@router.put("/jobs/{job_id}")
 async def update_job(
-    job_id: str, body: JobCreate, session: SessionDep
+    job_id: str,
+    body: JobCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
     """编辑任务:覆盖原任务配置并原地重跑(沿用任务 id,不新建记录)。
 
@@ -473,11 +527,15 @@ async def update_job(
             content={"success": False, "message": "任务运行中,请先停止再编辑"},
         )
     body.type = job.type
-    return await _start_job(session, body, job=job)
+    return await _start_job(session, body, job=job, user=user)
 
 
-@router.post("/jobs/{job_id}/rerun", dependencies=[Depends(require_admin)])
-async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
+@router.post("/jobs/{job_id}/rerun")
+async def rerun_job(
+    job_id: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
     """用原任务存下的配置(算子 + 输出去向)对原输入版本重跑一次 → 产出新版本。
 
     新建一条任务记录(不改动原记录),保留每次运行的血缘;早于本特性、无 spec
@@ -504,7 +562,7 @@ async def rerun_job(job_id: str, session: SessionDep) -> JSONResponse:
             status_code=400,
             content={"success": False, "message": "任务配置已损坏,无法重跑"},
         )
-    return await _start_job(session, spec)
+    return await _start_job(session, spec, user=user)
 
 
 @router.post("/jobs/{job_id}/stop", dependencies=[Depends(require_admin)])

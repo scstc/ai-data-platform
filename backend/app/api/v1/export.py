@@ -16,10 +16,11 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin, require_perm
+from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.jobs import (
     BatchDeleteRequest,
     SessionDep,
+    _acl_job_filter,
     _binary_block,
     _build_input,
     _build_output,
@@ -31,22 +32,34 @@ from app.api.v1.jobs import (
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
 from app.models.job_input import JobInput
+from app.models.user import User
 from app.schemas.common import PageResponse
 from app.schemas.export import ExportJobCreate, ExportReport
 from app.schemas.job import JobRead
-from app.services import job_runner
+from app.services import dataset_acl, job_runner
 
 router = APIRouter(tags=["export"])
 
 _EXPORT_TYPE = "export"
 
 
-async def _start_export(session: AsyncSession, body: ExportJobCreate) -> JSONResponse:
+async def _start_export(
+    session: AsyncSession,
+    body: ExportJobCreate,
+    user: User | None = None,
+) -> JSONResponse:
     """校验输入版本 → 建任务 → spawn → 立即返回 pending。"""
     version = await session.get(DatasetVersion, body.dataset_version_id)
     if version is None:
         return JSONResponse(
             status_code=404, content={"success": False, "message": "数据集版本不存在"}
+        )
+
+    # 数据集 ACL:交付消费该数据集,要求 edit 及以上(view 只能查看数据)
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法导出"},
         )
     if (blocked := _binary_block(version)) is not None:
         return blocked
@@ -64,7 +77,7 @@ async def _start_export(session: AsyncSession, body: ExportJobCreate) -> JSONRes
         type=_EXPORT_TYPE,
         state="pending",
         progress=0,
-        created_by="admin",
+        created_by=user.username if user else "admin",
         spec=body.model_dump(mode="json"),
     )
     session.add(job)
@@ -74,12 +87,17 @@ async def _start_export(session: AsyncSession, body: ExportJobCreate) -> JSONRes
     return JSONResponse(content=_item(job))
 
 
-@router.post("/export/jobs", dependencies=[Depends(require_admin)])
+@router.post("/export/jobs")
 async def create_export_job(
-    body: ExportJobCreate, session: SessionDep
+    body: ExportJobCreate,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
-    """新建交付任务并异步执行(治理后版本 → 训练三件套落 S3)。"""
-    return await _start_export(session, body)
+    """新建交付任务并异步执行(治理后版本 → 训练三件套落 S3)。
+
+    需登录 + 输入数据集 ACL ≥ edit(超管/owner 隐式满足)。
+    """
+    return await _start_export(session, body, user=user)
 
 
 @router.get(
@@ -92,13 +110,20 @@ async def list_export_jobs(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> PageResponse[JobRead]:
-    """分页列出交付任务。"""
+    """分页列出交付任务。
+
+    非超管只看到自己创建的 + 授权数据集上的任务。
+    """
     count_stmt = select(func.count()).select_from(Job).where(Job.type == _EXPORT_TYPE)
     list_stmt = select(Job).where(Job.type == _EXPORT_TYPE)
     if dataset_id:
         count_stmt = count_stmt.where(_dataset_job_filter(dataset_id))
         list_stmt = list_stmt.where(_dataset_job_filter(dataset_id))
+    if (acl_cond := await _acl_job_filter(session, user)) is not None:
+        count_stmt = count_stmt.where(acl_cond)
+        list_stmt = list_stmt.where(acl_cond)
     total = await session.scalar(count_stmt) or 0
     rows = (
         await session.scalars(
@@ -129,9 +154,13 @@ async def get_export_job(job_id: str, session: SessionDep) -> JSONResponse:
     return JSONResponse(content=_item(job, output, input_))
 
 
-@router.post("/export/jobs/{job_id}/rerun", dependencies=[Depends(require_admin)])
-async def rerun_export_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """用原 spec 重跑。"""
+@router.post("/export/jobs/{job_id}/rerun")
+async def rerun_export_job(
+    job_id: str,
+    session: SessionDep,
+    user: Annotated[User, Depends(require_user)],
+) -> JSONResponse:
+    """用原 spec 重跑。需登录 + 输入数据集 ACL ≥ edit。"""
     job = await session.get(Job, job_id)
     if job is None or job.type != _EXPORT_TYPE:
         return JSONResponse(
@@ -149,7 +178,7 @@ async def rerun_export_job(job_id: str, session: SessionDep) -> JSONResponse:
             status_code=400,
             content={"success": False, "message": "任务配置已损坏,无法重跑"},
         )
-    return await _start_export(session, spec)
+    return await _start_export(session, spec, user=user)
 
 
 @router.post("/export/jobs/{job_id}/stop", dependencies=[Depends(require_admin)])

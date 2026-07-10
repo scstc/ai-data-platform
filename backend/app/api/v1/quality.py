@@ -16,10 +16,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select
 
+from app.api.deps import current_user
 from app.api.v1.jobs import (
     SessionDep,
     _binary_block,
@@ -30,8 +31,9 @@ from app.core.config import settings
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
 from app.models.job import Job
+from app.models.user import User
 from app.schemas.job import OperatorSpec, QualityJobCreate
-from app.services import job_runner
+from app.services import dataset_acl, job_runner
 from app.services import operator_catalog as oc
 from app.services.llm_config import get_active_llm_config
 
@@ -67,7 +69,9 @@ def _validate_quality_operators(
 
 @router.post("/quality/jobs")
 async def create_quality_job(
-    body: QualityJobCreate, session: SessionDep
+    body: QualityJobCreate,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """新建质量评估任务并后台异步执行:对版本逐条算 filter stats,不产新版本。
 
@@ -97,6 +101,14 @@ async def create_quality_job(
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
+        )
+    # 数据集 ACL:质量评估会回写输入版本 stats,要求 edit 及以上
+    if not await dataset_acl.can_access(
+        session, user, input_version.dataset_id, "edit"
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法发起评估"},
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
@@ -168,7 +180,7 @@ async def create_quality_job(
         type="quality",
         state="pending",
         progress=0,
-        created_by="admin",
+        created_by=user.username if user else "admin",
         # 存原始执行规格,供 job_runner 后台重建 body + 供重跑/继续
         spec=body.model_dump(mode="json"),
     )
@@ -300,6 +312,7 @@ async def analysis_report(
     version_id: str,
     session: SessionDep,
     member: Annotated[str | None, Query()] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """dj-analyze 分析报告:overall.csv(跨算子聚合统计表)+ analysis/ 下 PNG 清单。
 
@@ -310,6 +323,10 @@ async def analysis_report(
     if isinstance(resolved, JSONResponse):
         return resolved
     version, member_row = resolved
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
+        )
     stats_uri = member_row.stats_uri if member_row is not None else version.stats_uri
     analysis = _analysis_dir(stats_uri)
     if analysis is None or not analysis.exists():
@@ -354,12 +371,17 @@ async def analysis_image(
     session: SessionDep,
     name: Annotated[str, Query()],
     member: Annotated[str | None, Query()] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse | FileResponse:
     """取 analysis/ 下某张 PNG(供前端 <img> 直接嵌入)。"""
     resolved = await _resolve_member(version_id, member, session)
     if isinstance(resolved, JSONResponse):
         return resolved
     version, member_row = resolved
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
+        )
     stats_uri = member_row.stats_uri if member_row is not None else version.stats_uri
     analysis = _analysis_dir(stats_uri)
     if analysis is None or not analysis.exists():
@@ -417,6 +439,7 @@ async def version_stats(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, alias="pageSize")] = 10,
     member: Annotated[str | None, Query()] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """逐条质量得分:stats jsonl 与数据文件按行号对齐,分页返回。
 
@@ -426,6 +449,10 @@ async def version_stats(
     if isinstance(found, JSONResponse):
         return found
     _version, stats_path, storage_path = found
+    if not await dataset_acl.can_access(session, user, _version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
+        )
 
     offset = (current - 1) * page_size
     # 文件扫描放线程池,避免阻塞事件循环
@@ -503,6 +530,7 @@ async def quality_report(
     version_id: str,
     session: SessionDep,
     member: Annotated[str | None, Query()] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """质量报告:对 stats jsonl 的数值型指标做分布聚合(列表/字符串跳过)。
 
@@ -512,6 +540,10 @@ async def quality_report(
     if isinstance(found, JSONResponse):
         return found
     _version, stats_path, _storage_path = found
+    if not await dataset_acl.can_access(session, user, _version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
+        )
 
     # 全量扫描 + 聚合放线程池,避免阻塞事件循环
     data = await asyncio.to_thread(_scan_report, stats_path)
@@ -519,7 +551,11 @@ async def quality_report(
 
 
 @router.get("/dataset-versions/{version_id}/quality-members")
-async def quality_members(version_id: str, session: SessionDep) -> JSONResponse:
+async def quality_members(
+    version_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
     """该版本各成员(表/文件)是否已做过质量评估,供前端渲染成员切换 Tab。
 
     无成员表记录(旧版单文件版本)时,合成单一元素("data",按版本级 stats_uri
@@ -530,6 +566,10 @@ async def quality_members(version_id: str, session: SessionDep) -> JSONResponse:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "view"):
+        return JSONResponse(
+            status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
     stmt = (
         select(DatasetVersionTable)

@@ -20,14 +20,16 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import Field
 from sqlalchemy import func, select, text
 
-from app.api.deps import require_perm
+from app.api.deps import current_user, require_perm
 from app.api.v1.jobs import (
     SessionDep,
+    _acl_job_filter,
     _build_input,
     _build_output,
     _dataset_job_filter,
 )
 from app.models.job import Job
+from app.models.user import User
 from app.schemas.common import CamelModel, PageResponse
 from app.schemas.job import JobRead
 
@@ -244,6 +246,7 @@ async def list_data_tasks(
     keyword: Annotated[str | None, Query()] = None,
     dataset_id: Annotated[str | None, Query(alias="datasetId")] = None,
     job_id: Annotated[str | None, Query(alias="jobId")] = None,
+    user: Annotated[User | None, Depends(current_user)] = None,
 ) -> PageResponse[JobRead]:
     """跨类型统一列出数据任务(治理+评估),按创建时间倒序,带输入/产出版本概要。
 
@@ -252,6 +255,7 @@ async def list_data_tasks(
     - keyword:任务名模糊匹配(name ilike)。
     - datasetId:按数据集过滤(输入或产物版本属于该数据集)。
     - jobId:任务ID模糊匹配(id ilike,可只输 "job-" 后的 hex 片段)。
+    - 非超管只看到自己创建的 + 授权数据集上的任务(数据集 ACL 行级裁剪)。
     """
     requested = {t.strip() for t in types.split(",") if t.strip()} if types else None
     sel_types = requested & set(_TASK_TYPES) if requested else set(_TASK_TYPES)
@@ -267,6 +271,8 @@ async def list_data_tasks(
         conds.append(_dataset_job_filter(dataset_id))
     if job_id and job_id.strip():
         conds.append(Job.id.ilike(f"%{job_id.strip()}%"))
+    if (acl_cond := await _acl_job_filter(session, user)) is not None:
+        conds.append(acl_cond)
 
     count_stmt = select(func.count()).select_from(Job).where(*conds)
     list_stmt = select(Job).where(*conds)
