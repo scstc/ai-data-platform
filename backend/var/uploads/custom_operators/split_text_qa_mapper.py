@@ -1,7 +1,9 @@
 """拆分 text 字段 → query/response 字段,供 calibrate_qa_mapper 等 SFT 标准算子使用。
 
 适用数据形态:源样本只有一个 text 字段,内容形如
-    用户提问:农业银行手机银行单日转账限额多少？,用户回答:农业银行手机银行默认...
+    用户问题：农业银行手机银行单日转账限额多少？, 银行回答：农业银行手机银行默认...
+
+标准格式: "用户问题：{问题}, 银行回答：{回答}"
 按 query_pattern + response_pattern 切出 query 与 response 两个标准字段。
 
 无需 LLM,纯文本正则切分,resource_class=cpu。
@@ -11,6 +13,11 @@ import re
 
 from data_juicer.ops.base_op import OPERATORS, Mapper
 
+# 标准格式正则: "用户问题：{}, 银行回答：{}"
+# 支持:
+#   - 中英文冒号: ：或 :
+#   - 中英文逗号分隔: ，或 ,
+#   - 任意数量的空格
 DEFAULT_QUERY_PATTERN = r"用户问题[:：]\s*"
 DEFAULT_RESPONSE_PATTERN = r"[,，]\s*银行回答[:：]\s*"
 
