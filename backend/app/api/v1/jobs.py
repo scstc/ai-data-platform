@@ -269,8 +269,11 @@ async def list_jobs(
     """分页列出加工任务,按创建时间倒序;可按 type 过滤(如 type=quality)、
     按 datasetId 过滤(输入或产物版本属于该数据集)。
     非超管只看到自己创建的 + 授权数据集上的任务(数据集 ACL 行级裁剪)。"""
-    count_stmt = select(func.count()).select_from(Job)
-    list_stmt = select(Job)
+    # 级联删除标记的任务(所属数据集过期进回收站)对所有人隐藏,恢复走回收站
+    count_stmt = (
+        select(func.count()).select_from(Job).where(Job.deleted_at.is_(None))
+    )
+    list_stmt = select(Job).where(Job.deleted_at.is_(None))
     if type_:
         count_stmt = count_stmt.where(Job.type == type_)
         list_stmt = list_stmt.where(Job.type == type_)
@@ -666,9 +669,9 @@ async def resume_job(job_id: str, session: SessionDep) -> JSONResponse:
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str, session: SessionDep) -> JSONResponse:
-    """加工任务详情(含产物版本与输入版本)。"""
+    """加工任务详情(含产物版本与输入版本)。级联删除标记的任务同 404。"""
     job = await session.get(Job, job_id)
-    if job is None:
+    if job is None or job.deleted_at is not None:
         return JSONResponse(
             status_code=404,
             content={"success": False, "message": "任务不存在"},

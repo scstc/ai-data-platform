@@ -51,7 +51,7 @@ from app.schemas.dataset import (
     PlatformHostRequest,
 )
 from app.schemas.dataset_acl import AclCreate, AclRead, AclUpdate
-from app.services import dataset_acl
+from app.services import dataset_acl, dataset_lifecycle
 from app.services.ai import get_ai_provider
 from app.services.engine import _semaphore
 from app.services.external_store import (
@@ -795,6 +795,13 @@ async def dataset_lineage(
         return JSONResponse(
             status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
+    # 已打删除标记(过期进回收站)的数据集血缘同 404,与详情口径一致
+    focus = await session.get(Dataset, dataset_id)
+    if focus is None or focus.deleted_at is not None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集不存在或无版本"},
+        )
     starts = (
         await session.scalars(
             select(DatasetVersion.id).where(DatasetVersion.dataset_id == dataset_id)
@@ -1464,7 +1471,10 @@ async def list_datasets(
 
     publishStatus=published 时只返回含已发布版本的数据集(算法工程师消费视图)。
     """
-    conds = []
+    # 过期惰性补打(仅本体,级联留给扫描)+ 已删标记一律不可见(恢复走回收站)
+    if await dataset_lifecycle.lazy_mark_expired(session):
+        await session.commit()
+    conds = [Dataset.deleted_at.is_(None)]
     if name:
         conds.append(Dataset.name.ilike(f"%{name}%"))
     if data_type:
@@ -1653,6 +1663,8 @@ async def list_expiring_datasets(
         await session.scalars(
             select(Dataset)
             .where(
+                # 已打删除标记的进回收站,不再出现在到期提醒里
+                Dataset.deleted_at.is_(None),
                 Dataset.valid_until.is_not(None),
                 Dataset.valid_until <= threshold,
                 or_(
@@ -1684,9 +1696,14 @@ async def get_dataset(
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """数据集详情:元信息 + 版本列表(按版本号升序)。登录用户受 ACL 约束,匿名放行。"""
+    # 过期惰性补打:已删标记(含刚过期)对普通接口一律 404,恢复走回收站
+    if await dataset_lifecycle.lazy_mark_expired(session):
+        await session.commit()
     dataset = await session.get(Dataset, dataset_id)
-    if dataset is None or not await dataset_acl.can_access(
-        session, user, dataset_id, "view"
+    if (
+        dataset is None
+        or dataset.deleted_at is not None
+        or not await dataset_acl.can_access(session, user, dataset_id, "view")
     ):
         return JSONResponse(
             status_code=404,

@@ -38,6 +38,7 @@ from app.api.v1 import (
     pipelines,
     profile,
     quality,
+    recycle_bin,
     tags,
     trainset,
     uploads,
@@ -98,6 +99,18 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:  # noqa: BLE001
         _logger.warning("启动时确保平台 MinIO 桶失败（已忽略）", exc_info=True)
 
+    # best-effort:过期数据集补扫打删除标记(#19 生命周期,不依赖调度器在线)
+    try:
+        from app.services import dataset_lifecycle
+
+        async with async_session_factory() as session:
+            marked = await dataset_lifecycle.mark_expired_datasets(session)
+            await session.commit()
+        if marked:
+            _logger.info("启动补扫:%d 个过期数据集打删除标记", marked)
+    except Exception:  # noqa: BLE001
+        _logger.warning("启动时过期数据集补扫失败（已忽略）", exc_info=True)
+
     # 调度器(切片 C):scheduler_enabled=False 时跳过;启动 / 对账失败仅告警,
     # 不阻断 app 启动——采集主流程不依赖调度器在线(可手工触发)。
     # 注册到 scheduler 模块的全局引用,供 routes best-effort upsert/remove。
@@ -108,6 +121,17 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             scheduler.start()
             async with async_session_factory() as session:
                 await scheduler_mod.reconcile(session, scheduler)
+            # 每日过期扫描(UTC 02:00);jobstore 持久化,replace_existing 幂等
+            from apscheduler.triggers.cron import CronTrigger
+
+            from app.services import dataset_lifecycle
+
+            scheduler.add_job(
+                dataset_lifecycle.run_expire_scan,
+                trigger=CronTrigger(hour=2, minute=0),
+                id=dataset_lifecycle.EXPIRE_JOB_ID,
+                replace_existing=True,
+            )
             _logger.info("调度器启动并对账完成")
         except Exception:  # noqa: BLE001
             _logger.warning(
@@ -170,6 +194,7 @@ def create_app() -> FastAPI:
     app.include_router(model_store.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
     app.include_router(profile.router, prefix="/api/v1")
+    app.include_router(recycle_bin.router, prefix="/api/v1")
     app.include_router(system_menus.router, prefix="/api/v1")
     app.include_router(system_roles.router, prefix="/api/v1")
     app.include_router(system_users.router, prefix="/api/v1")

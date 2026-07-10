@@ -67,3 +67,7 @@ class IngestTask(Base):
     # 增量水位快照(切片 C):{value, updatedAt},由运行期写入;
     # 空表示该任务尚未做过增量采集(首次按全量跑)。
     watermark: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # 级联删除标记:绑定的数据集(dataset_id)过期打标时一并隐藏;
+    # 归因列记录源数据集,恢复时只解除因它标记的
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    deleted_by_dataset_id: Mapped[str | None] = mapped_column(String, nullable=True)

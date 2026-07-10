@@ -116,7 +116,8 @@ async def _build_trend14d(session: SessionDep, now_utc: datetime) -> list[TrendP
     库内时间戳为 naive UTC,按 ``ts + interval '8 hours'`` 取北京日分桶,
     与列表 / UI 的北京时区展示对齐(否则傍晚的任务会被算到错误的日期)。
     """
-    base = Job.type.in_(_TASK_TYPES)
+    # 与列表同口径:级联删除标记的任务不计入
+    base = Job.type.in_(_TASK_TYPES) & Job.deleted_at.is_(None)
     bj_today = (now_utc + _BEIJING_OFFSET).date()
     days = [bj_today - timedelta(days=i) for i in range(_TREND_DAYS - 1, -1, -1)]
     # 窗口起点(UTC):最早北京日 00:00 - 8h
@@ -171,7 +172,8 @@ async def data_tasks_stats(session: SessionDep) -> DataTaskStats:
     范围与列表一致——仅受管的 8 类任务。均为廉价的 GROUP BY 聚合;随列表一同刷新
     (含运行时 3s 轮询)。若 jobs 表显著增大,建议给 created_at / finished_at 加索引。
     """
-    base = Job.type.in_(_TASK_TYPES)
+    # 与列表同口径:级联删除标记的任务不计入
+    base = Job.type.in_(_TASK_TYPES) & Job.deleted_at.is_(None)
     now_utc = datetime.now(UTC).replace(tzinfo=None)  # naive UTC,与库内列对齐
 
     state_rows = (
@@ -259,7 +261,9 @@ async def list_data_tasks(
     """
     requested = {t.strip() for t in types.split(",") if t.strip()} if types else None
     sel_types = requested & set(_TASK_TYPES) if requested else set(_TASK_TYPES)
-    conds = [Job.type.in_(sel_types)] if sel_types else []
+    # 级联删除标记的任务(所属数据集过期进回收站)对所有人隐藏
+    conds = [Job.deleted_at.is_(None)]
+    conds += [Job.type.in_(sel_types)] if sel_types else []
     if not sel_types:
         # 全是非法类型 → 返回空集(用永假条件),而非全表
         conds = [Job.id == ""]

@@ -80,3 +80,7 @@ class Job(Base):
     member_configs: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     # 治理工场:经流水线(pipelines.id)一键执行时回指来源;手工建任务为空
     pipeline_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # 级联删除标记:所属数据集过期打标时,输入或产出涉及它的 job 一并隐藏;
+    # 归因列记录源数据集,恢复时只解除因它标记的(共享任务不误恢复)
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    deleted_by_dataset_id: Mapped[str | None] = mapped_column(String, nullable=True)

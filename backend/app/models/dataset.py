@@ -65,6 +65,10 @@ class Dataset(Base):
     )
     # 所属部门(RBAC 数据权限快照,创建时取创建人部门);存量回填为根部门
     dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 删除标记(#19 生命周期):过期扫描打标,普通接口一律不可见;
+    # 恢复(清标+续期)仅超管经回收站。reason 目前仅 'expired'
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    deleted_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )

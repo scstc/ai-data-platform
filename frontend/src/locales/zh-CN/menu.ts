@@ -102,4 +102,5 @@ export default {
   'menu.system.systemDept': '部门管理',
   'menu.system.systemMenu': '菜单管理',
   'menu.system.systemPermission': '权限管理',
+  'menu.system.systemRecycleBin': '数据集回收站',
 };

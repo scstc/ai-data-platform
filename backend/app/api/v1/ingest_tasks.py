@@ -262,8 +262,13 @@ async def list_ingest_tasks(
     category_id: Annotated[str | None, Query(alias="categoryId")] = None,
 ) -> PageResponse[IngestTaskRead]:
     """分页列出采集任务，支持 name 模糊、status 精确、categoryId 精确筛选。"""
-    stmt = select(IngestTask)
-    count_stmt = select(func.count()).select_from(IngestTask)
+    # 级联删除标记的任务(绑定数据集过期进回收站)对所有人隐藏
+    stmt = select(IngestTask).where(IngestTask.deleted_at.is_(None))
+    count_stmt = (
+        select(func.count())
+        .select_from(IngestTask)
+        .where(IngestTask.deleted_at.is_(None))
+    )
     if name:
         stmt = stmt.where(IngestTask.name.ilike(f"%{name}%"))
         count_stmt = count_stmt.where(IngestTask.name.ilike(f"%{name}%"))
@@ -427,10 +432,12 @@ async def ingest_tasks_stats(session: SessionDep) -> IngestTaskStats:
     """
     now_utc = datetime.now(UTC).replace(tzinfo=None)  # naive UTC,与库内列对齐
 
-    # 1) 任务级:总任务 + 状态分桶
+    # 1) 任务级:总任务 + 状态分桶(与列表同口径:级联删除标记的不计入)
     state_rows = (
         await session.execute(
-            select(IngestTask.status, func.count()).group_by(IngestTask.status)
+            select(IngestTask.status, func.count())
+            .where(IngestTask.deleted_at.is_(None))
+            .group_by(IngestTask.status)
         )
     ).all()
     by_state = dict.fromkeys(_INGEST_STATES, 0)
@@ -445,6 +452,7 @@ async def ingest_tasks_stats(session: SessionDep) -> IngestTaskStats:
         await session.execute(
             select(DataSource.type, IngestTask.status, func.count())
             .join(IngestTask, IngestTask.datasource_id == DataSource.id)
+            .where(IngestTask.deleted_at.is_(None))
             .group_by(DataSource.type, IngestTask.status)
         )
     ).all()
@@ -628,7 +636,7 @@ async def get_ingest_task(
     """获取任务详情。状态如实反映运行结果(rerun 为同步执行,返回即终态),
     不再凭轮询伪造进度/成功——避免「任务成功却没有产出数据集」的假象。"""
     task = await session.get(IngestTask, task_id)
-    if task is None:
+    if task is None or task.deleted_at is not None:
         return _not_found()
 
     output = await _build_output(session, task.id)

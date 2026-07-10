@@ -409,6 +409,11 @@ export default [
         name: 'systemPermission',
         component: './system/permission',
       },
+      {
+        path: '/system/recycle-bin',
+        name: 'systemRecycleBin',
+        component: './system/recycle-bin',
+      },
     ],
   },
   {

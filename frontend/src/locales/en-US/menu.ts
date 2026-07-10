@@ -99,4 +99,5 @@ export default {
   'menu.system.systemDept': 'Departments',
   'menu.system.systemMenu': 'Menus',
   'menu.system.systemPermission': 'Permissions',
+  'menu.system.systemRecycleBin': 'Dataset Recycle Bin',
 };
