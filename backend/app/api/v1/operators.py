@@ -68,8 +68,10 @@ async def catalog_meta() -> JSONResponse:
     return JSONResponse(content={"data": oc.meta_api(), "success": True})
 
 
+# 同步 def:纯同步体(DB 查询 + 可能的冷能力探测),走线程池执行,
+# 不阻塞事件循环——否则冷探测(~2.5s)会拖住同页并发的其他请求。
 @router.get("/operators/catalog")
-async def catalog(
+def catalog(
     scenario: Annotated[str | None, Query()] = None,
     bucket: Annotated[str | None, Query()] = None,
     category: Annotated[str | None, Query()] = None,

@@ -76,6 +76,16 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             await model_store_svc.refresh_cache(session)
     except Exception:  # noqa: BLE001
         _logger.warning("启动时刷新模型仓库路径缓存失败（已忽略）", exc_info=True)
+    # best-effort:后台线程预热能力探测(DJ venv import torch 约 2.5s)。不预热则
+    # 首个 /operators/catalog 请求现场探测,工场/市场页首屏要等数秒。
+    try:
+        import threading
+
+        from app.services.capabilities import get_capabilities
+
+        threading.Thread(target=get_capabilities, daemon=True).start()
+    except Exception:  # noqa: BLE001
+        _logger.warning("启动时预热能力探测失败（已忽略）", exc_info=True)
     # best-effort:确保平台数据集桶 + 数据湖桶存在(未配置 MinIO 时静默跳过)
     try:
         from app.services.external_store import (
