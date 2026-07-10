@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import calendar
+from datetime import UTC, datetime
 
 from sqlalchemy import String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
+
+
+def _default_valid_until() -> datetime:
+    """新建数据集默认有效期:生成时间 + 1 个自然月(#19 生命周期)。
+
+    naive-UTC,与 job_runner/notifications 的 now 口径一致;
+    日期按目标月末夹紧(1/31 → 2/28)。注意 SQLAlchemy 的列默认在
+    flush 时值为 None 就生效——显式传 None 也会被填上,置空只能靠 UPDATE。
+    """
+    now = datetime.now(UTC).replace(tzinfo=None)
+    year = now.year + (1 if now.month == 12 else 0)
+    month = 1 if now.month == 12 else now.month + 1
+    day = min(now.day, calendar.monthrange(year, month)[1])
+    return now.replace(year=year, month=month, day=day)
 
 
 class Dataset(Base):
@@ -44,8 +59,10 @@ class Dataset(Base):
     creator: Mapped[str] = mapped_column(String, nullable=False, default="admin")
     # 最后变更人(#13,可变)
     last_modifier: Mapped[str | None] = mapped_column(String, nullable=True)
-    # 有效期(#19 生命周期):到期清理
-    valid_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    # 有效期(#19 生命周期):到期清理;创建默认 +1 自然月,可在详情页改/清空
+    valid_until: Mapped[datetime | None] = mapped_column(
+        nullable=True, default=_default_valid_until
+    )
     # 所属部门(RBAC 数据权限快照,创建时取创建人部门);存量回填为根部门
     dept_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

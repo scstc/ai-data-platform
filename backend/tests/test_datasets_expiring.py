@@ -18,9 +18,15 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _add(session_factory, **kw) -> None:
+    # 模型默认在 flush 时对 None 也生效,置空必须先落库再 UPDATE 回 NULL
+    force_null = "valid_until" in kw and kw["valid_until"] is None
     async with session_factory() as s:
-        s.add(Dataset(**kw))
+        ds = Dataset(**kw)
+        s.add(ds)
         await s.commit()
+        if force_null:
+            ds.valid_until = None
+            await s.commit()
 
 
 async def test_expiring_scopes_to_mine_and_orders(
@@ -73,6 +79,22 @@ async def test_expiring_scopes_to_mine_and_orders(
     assert by_id["dset-exp3"]["daysLeft"] == 3
     # validUntil 序列化为带 Z 的 UTC
     assert by_id["dset-exp3"]["validUntil"].endswith("Z")
+
+
+async def test_valid_until_defaults_to_one_month(session_factory) -> None:
+    """不传 valid_until 建数据集 → 默认生成时间 + 1 自然月(而非空)。
+
+    生命周期口径(#19):新集默认一个月有效期,避免到期提醒永远空转;
+    自然月加法按月末夹紧,间隔必在 28~31 天。
+    """
+    async with session_factory() as s:
+        ds = Dataset(id="dset-vu-dflt", name="vu-default", owner="admin")
+        s.add(ds)
+        await s.commit()
+        await s.refresh(ds)
+        assert ds.valid_until is not None
+        delta = ds.valid_until - datetime.now(UTC).replace(tzinfo=None)
+        assert 27 <= delta.days <= 31
 
 
 async def test_expiring_requires_login(client) -> None:

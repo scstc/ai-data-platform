@@ -201,6 +201,7 @@ const DatasetDetail: React.FC = () => {
   >({}); // { versionId: [tableName1, tableName2] }
   // 自动打标:AI 建议标签(undefined=弹框关闭)与勾选态
   const [autoTagLoading, setAutoTagLoading] = useState(false);
+  const [renewLoading, setRenewLoading] = useState(false);
   const [suggestedTags, setSuggestedTags] = useState<string[]>();
   const [checkedTags, setCheckedTags] = useState<string[]>([]);
 
@@ -306,6 +307,27 @@ const DatasetDetail: React.FC = () => {
     } catch (e: any) {
       const body = e?.response?.data ?? e?.data;
       message.error(body?.message ?? e?.message ?? '删除失败，请重试');
+    }
+  };
+
+  /** 续期:未过期在当前有效期上 +1 个月;已过期/为空则从今天起 +1 个月。 */
+  const handleRenew = async () => {
+    if (!detail) return;
+    setRenewLoading(true);
+    try {
+      const base =
+        detail.validUntil && dayjs(detail.validUntil).isAfter(dayjs())
+          ? dayjs(detail.validUntil)
+          : dayjs();
+      const res = await updateDataset(detail.id, {
+        validUntil: base.add(1, 'month').format('YYYY-MM-DD'),
+      });
+      message.success('已续期 1 个月');
+      setDetail(res.data);
+    } catch {
+      message.error('续期失败，请重试');
+    } finally {
+      setRenewLoading(false);
     }
   };
 
@@ -753,10 +775,24 @@ const DatasetDetail: React.FC = () => {
                 {
                   title: '有效期',
                   dataIndex: 'validUntil',
-                  render: (_, r) =>
-                    r.validUntil
-                      ? dayjs(r.validUntil).format('YYYY-MM-DD')
-                      : '-',
+                  render: (_, r) => (
+                    <Space size={4}>
+                      {r.validUntil
+                        ? dayjs(r.validUntil).format('YYYY-MM-DD')
+                        : '-'}
+                      {access.canAdmin && (
+                        <Button
+                          size="small"
+                          type="link"
+                          style={{ padding: 0, height: 'auto' }}
+                          loading={renewLoading}
+                          onClick={handleRenew}
+                        >
+                          续期
+                        </Button>
+                      )}
+                    </Space>
+                  ),
                 },
                 {
                   title: '标签',
