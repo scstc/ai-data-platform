@@ -114,6 +114,39 @@ class Settings(BaseSettings):
     # 调度器在线)。
     scheduler_enabled: bool = True
 
+    # 任务执行模式(路线 C:执行层拆分):
+    #   inline  —— 现行为:API 进程内 asyncio 协程执行(job_runner.spawn 起协程),
+    #              本地 dev / 现有测试零破坏,默认值。
+    #   worker  —— API 发起任务只置 pending + queued_at,不进程内起协程;由独立
+    #              worker 进程(python -m app.worker)用 SELECT ... FOR UPDATE
+    #              SKIP LOCKED 认领并执行,崩溃靠心跳超时回收重试。
+    job_execution_mode: str = "inline"
+    # worker 进程标识(认领时写入 jobs.claimed_by,便于排障)。空则用 hostname-pid。
+    worker_id: str = ""
+    # worker 并发执行的任务数;0 = 沿用 engine_concurrency(与单机引擎并发上限对齐)。
+    worker_concurrency: int = 0
+    # worker 空闲(无可认领任务)时的轮询间隔(秒)
+    worker_poll_interval: float = 2.0
+    # 运行中任务的心跳续跳间隔(秒);须显著小于 heartbeat_timeout。
+    worker_heartbeat_interval: float = 30.0
+    # 心跳超时阈值(秒):running 任务超过此时长未续跳视为 worker 僵死,进入回收。
+    worker_heartbeat_timeout: float = 120.0
+    # 心跳超时回收的扫描周期(秒)
+    worker_recovery_interval: float = 60.0
+    # 优雅停机:收到 SIGTERM 后等待在跑任务收尾的最长秒数;超时未收尾的任务
+    # 留给心跳回收(下次 worker 重新认领重试)。
+    worker_shutdown_grace: float = 30.0
+
+    @model_validator(mode="after")
+    def _validate_job_execution_mode(self) -> Settings:
+        """限定 job_execution_mode 取值,拼错时 fail-loud 而非静默按 inline 跑。"""
+        if self.job_execution_mode not in ("inline", "worker"):
+            raise ValueError(
+                "JOB_EXECUTION_MODE 只能是 'inline' 或 'worker',"
+                f"实际:{self.job_execution_mode!r}"
+            )
+        return self
+
     @model_validator(mode="after")
     def _derive_dj_analyze_bin(self) -> Settings:
         """dj_analyze_bin 未显式配置时,默认与 dj_process_bin 同目录。"""

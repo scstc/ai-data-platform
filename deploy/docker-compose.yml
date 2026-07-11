@@ -30,8 +30,12 @@ services:
       dockerfile: deploy/backend.Dockerfile
     image: adp-backend:latest
     container_name: adp-backend
-    environment:
+    # &backend_env:后端与 worker 共享同一套环境(worker 服务 <<: *backend_env 复用),
+    # 避免两处漂移。JOB_EXECUTION_MODE 一并注入两者(见路线 C 执行层拆分)。
+    environment: &backend_env
       DATABASE_URL: postgresql+asyncpg://${PG_USER:-adp}:${PG_PASSWORD:-adp_dev_pw}@postgres:5432/${PG_DB:-adp}
+      # 生产默认走独立 worker 进程执行任务(API 只入队);置 inline 可回退进程内执行。
+      JOB_EXECUTION_MODE: ${JOB_EXECUTION_MODE:-worker}
       UPLOAD_DIR: /data/uploads
       DATASETS_DIR: /data/datasets
       DJ_PROCESS_BIN: /opt/dj/.venv/bin/dj-process
@@ -50,6 +54,28 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - adp_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 任务执行 worker(路线 C):同后端镜像,不起 HTTP、不跑迁移(backend 负责),
+  # 只 python -m app.worker 认领 PG 队列执行。共享 adp_data 卷(引擎产物 /data)与
+  # 后端同套环境(<<: *backend_env,含 JOB_EXECUTION_MODE=worker)。DB/迁移未就绪时
+  # worker 认领会失败并自动重试,故仅依赖 postgres 健康即可。
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    image: adp-backend:latest
+    container_name: adp-worker
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *backend_env
+      # worker 并发执行的任务数;0 = 沿用 ENGINE_CONCURRENCY
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-0}
     volumes:
       - adp_data:/data
     depends_on:

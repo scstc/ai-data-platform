@@ -61,8 +61,13 @@ _logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """启动时：回收孤儿任务 + best-effort 刷新 LLM 配置缓存。"""
-    async with async_session_factory() as session:
-        await job_runner.reconcile_orphans(session)
+    # 孤儿回收仅在 inline 模式由 API 进程负责:该模式下 pending/running 任务都是
+    # 本进程协程,重启即中断,统一置 failed。worker 模式下任务由独立 worker 进程
+    # 执行,pending 须保留待 worker 认领、running 归 worker 心跳超时回收——API 进程
+    # 若在此把它们置 failed 会误杀队列,故整段跳过(含 staging 清理,那是 worker 的产物)。
+    if settings.job_execution_mode == "inline":
+        async with async_session_factory() as session:
+            await job_runner.reconcile_orphans(session)
     # best-effort：LLM 缓存刷新失败不阻断启动
     try:
         async with async_session_factory() as session:
