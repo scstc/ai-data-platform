@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Integer, String, Text, func
+from sqlalchemy import DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -84,3 +84,25 @@ class Job(Base):
     # 归因列记录源数据集,恢复时只解除因它标记的(共享任务不误恢复)
     deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
     deleted_by_dataset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # ── 任务队列可靠性(整改 P0,迁移 0069)──
+    # 已尝试次数 / 允许的最大尝试次数;runner 认领前校验 attempts < max_attempts
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default="3"
+    )
+    # worker 存活探测:认领时置当前时间,运行期定期续跳;长时间未续跳视为僵死
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 认领该 job 的 worker 标识;未认领为空
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 入队时间(区别于 created_at:排队等待时长 = claimed 时刻 - queued_at)
+    queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 任务依赖(预留,本迁移仅建列未消费):需等该 job 完成才可入队
+    depends_on_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 非致命告警列表(如降级/跳过某成员);语义 list[str],无告警为空
+    warnings: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)

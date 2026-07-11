@@ -23,6 +23,7 @@ from app.models.menu import Menu
 from app.models.notification import Notification
 from app.models.operator import Operator
 from app.models.pipeline import Pipeline
+from app.models.push_idempotency import PushIdempotency
 from app.models.rbac_links import RoleDept, RoleMenu, UserRole
 from app.models.review_finding import ReviewFinding
 from app.models.review_rule import ReviewRule
@@ -56,6 +57,7 @@ __all__ = [
     "Notification",
     "Operator",
     "Pipeline",
+    "PushIdempotency",
     "ReviewFinding",
     "ReviewRule",
     "Role",
@@ -64,4 +66,5 @@ __all__ = [
     "SystemSetting",
     "UploadRecord",
     "User",
+    "UserRole",
 ]
