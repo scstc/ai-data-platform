@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -256,6 +257,43 @@ async def test_create_quality_job_rejects_binary_version(
 
 
 @pytest.mark.asyncio
+async def test_create_quality_job_rejects_recycled_dataset(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """输入数据集已进回收站(软删)→ 404,堵「看不见但还在跑」:回收站数据集
+    在列表/详情已隐藏,建评估任务的入口不能绕过这层不可见性继续消费它。"""
+    async with session_factory() as session:
+        session.add(
+            Dataset(
+                id="dset-recycled-q",
+                name="回收站集",
+                deleted_at=datetime.now(UTC).replace(tzinfo=None),
+            )
+        )
+        session.add(
+            DatasetVersion(
+                id="dsv-recycled-q",
+                dataset_id="dset-recycled-q",
+                version_no=1,
+                storage_uri="/data/datasets/recycled.jsonl",
+                format="jsonl",
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/quality/jobs",
+        json={
+            "name": "质量评估",
+            "datasetVersionId": "dsv-recycled-q",
+            "operators": [{"name": "text_length_filter"}],
+        },
+    )
+    assert resp.status_code == 404
+    assert resp.json()["success"] is False
+
+
+@pytest.mark.asyncio
 async def test_create_quality_job_success_and_type_filter(
     client: AsyncClient,
     session_factory: async_sessionmaker,
@@ -269,7 +307,17 @@ async def test_create_quality_job_success_and_type_filter(
         session_factory, storage_uri=storage_uri, stats_uri=None
     )
 
-    async def fake_run_quality_job(session, *, job_id, input_version, operators, member_configs=None, target_members=None, text_keys=None, **kwargs):
+    async def fake_run_quality_job(
+        session,
+        *,
+        job_id,
+        input_version,
+        operators,
+        member_configs=None,
+        target_members=None,
+        text_keys=None,
+        **kwargs,
+    ):
         # 镜像真实实现的副作用:stats_uri 回写输入版本 + 记血缘边(不产新版本)
         assert operators == [
             {"name": "text_length_filter", "params": {"min_len": 5}}
@@ -364,7 +412,9 @@ async def test_create_quality_job_engine_failure(
         session_factory, storage_uri=storage_uri, stats_uri=None
     )
 
-    async def fake_fail(session, *, job_id, input_version, operators, text_keys=None, **kwargs):
+    async def fake_fail(
+        session, *, job_id, input_version, operators, text_keys=None, **kwargs
+    ):
         raise QualityError("dj-analyze 退出码 1")
 
     monkeypatch.setattr("app.services.job_runner.run_quality_job", fake_fail)

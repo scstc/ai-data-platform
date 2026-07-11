@@ -55,7 +55,7 @@ def _stub_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     """打桩 run_process_job:产出一条带 produced_by_job_id 的版本 + 一条血缘边。"""
 
     async def fake_run(
-        session, *, job_id, input_version, operators
+        session, *, job_id, input_version, operators, **kwargs
     ):
         version = DatasetVersion(
             id=f"dsv-out-{job_id}",
@@ -216,3 +216,58 @@ async def test_delete_running_job_409(
     # 仍在库里,未被删
     async with session_factory() as session:
         assert await session.get(Job, "job-running") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_pending_job_409(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """排队中(pending)的任务同样不可删 → 409,请先停止。
+
+    为什么:只挡 running 不够——后台协程可能在本次 GET 之后、级联删除执行
+    之前把这个排队中的任务捞起来跑(pending→running),届时 job_runner 仍持有
+    该 Job 行的引用去更新状态/写 job_inputs,而行已被删,造成 FK/UPDATE 撞空
+    的竞态。扩大状态守卫到 pending 才能在源头消除这条竞态。
+    """
+    async with session_factory() as session:
+        session.add(
+            Job(
+                id="job-pending-del",
+                name="排队中任务",
+                type="clean",
+                state="pending",
+                progress=0,
+            )
+        )
+        await session.commit()
+
+    resp = await client.delete("/api/v1/jobs/job-pending-del")
+    assert resp.status_code == 409
+    assert "排队中" in resp.json()["message"]
+    async with session_factory() as session:
+        assert await session.get(Job, "job-pending-del") is not None
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_skips_pending_too(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """批量删除同样跳过 pending(不止 running),不阻断整批其余可删项。"""
+    async with session_factory() as session:
+        session.add(
+            Job(id="job-ok2", name="ok2", type="clean", state="success", progress=100)
+        )
+        session.add(
+            Job(id="job-pend2", name="pend2", type="clean", state="pending", progress=0)
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/jobs/batch-delete", json={"ids": ["job-ok2", "job-pend2"]}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["deleted"] == 1
+
+    async with session_factory() as session:
+        assert await session.get(Job, "job-ok2") is None
+        assert await session.get(Job, "job-pend2") is not None

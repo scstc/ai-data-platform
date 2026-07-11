@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import secrets
 import shutil
 import signal
 import tempfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -43,6 +46,9 @@ from app.services.landing import (
     parquet_bytes_to_records,
 )
 from app.services.llm_config import resolve_llm_config
+from app.services.version_alloc import with_version_conflict_retry
+
+logger = logging.getLogger(__name__)
 
 # 多 job 并发上限
 _semaphore = asyncio.Semaphore(settings.engine_concurrency)
@@ -570,30 +576,45 @@ async def _get_version_members(
     return (await session.execute(stmt)).scalars().all()
 
 
-async def _materialize_member(
+@asynccontextmanager
+async def materialized_member(
     session: AsyncSession, member: DatasetVersionTable
-) -> Path:
-    """物化单个成员文件，返回本地路径。
+) -> AsyncIterator[Path]:
+    """物化单个成员文件的生命周期:yield 本地可读路径,退出时清理临时产物。
 
-    对于 s3:// URI，下载到临时文件；对于本地路径，直接返回。
+    对于 s3:// URI,下载到临时文件;对于本地路径(managed 存储),直接透传原路径
+    ——那是版本的真实数据文件,不是本函数创建的临时产物,绝不删除。
+
+    此前(_materialize_member)对 s3 成员用 NamedTemporaryFile(delete=False)
+    落地后从不清理,蒸馏/合成/评估/审核/增强/加工六类任务每跑一次遗留一份数据
+    副本,磁盘长期沉积;改为显式生命周期,调用方须 ``async with`` 使用,退出
+    (含异常路径)时统一 unlink。清理失败仅 log warning,不影响调用方已完成的
+    任务结果。
     """
     uri = member.storage_uri
-    if uri.startswith("s3://"):
-        bucket, key = parse_s3_uri(uri)
-        cfg = platform_config()
-        # 下载到临时文件
-        suffix = f".{member.format}"
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    if not uri.startswith("s3://"):
+        # 本地路径（managed 存储）：直接透传，不清理
+        yield Path(uri)
+        return
+    bucket, key = parse_s3_uri(uri)
+    cfg = platform_config()
+    # 下载到临时文件
+    suffix = f".{member.format}"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    path = Path(tmp.name)
+    try:
+        obj_data = await cached_bytes(cfg, bucket, key)
+        tmp.write(obj_data)
+        tmp.flush()
+    finally:
+        tmp.close()
+    try:
+        yield path
+    finally:
         try:
-            obj_data = await cached_bytes(cfg, bucket, key)
-            tmp.write(obj_data)
-            tmp.flush()
-            return Path(tmp.name)
-        finally:
-            tmp.close()
-    else:
-        # 本地路径（managed 存储）
-        return Path(uri)
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("清理物化成员临时文件失败 %s:%s", path, exc)
 
 
 def carry_over_members(
@@ -931,12 +952,6 @@ async def run_process_job(
         carried = carry_over_members(
             members, {m.table_name for m in members_to_process}
         )
-        max_vno = await session.scalar(
-            select(func.max(DatasetVersion.version_no)).where(
-                DatasetVersion.dataset_id == dataset_id
-            )
-        )
-        new_vno = (max_vno or 0) + 1
         total_rows = sum(p["rows"] for p in products) + sum(
             m["rows"] or 0 for m in carried
         )
@@ -944,25 +959,34 @@ async def run_process_job(
             m["size"] or 0 for m in carried
         )
         member_count = len(products) + len(carried)
-        version = DatasetVersion(
-            id=_new_version_id(),
-            dataset_id=dataset_id,
-            version_no=new_vno,
-            storage_uri=(
-                f"s3://{settings.storage_minio_datasets_bucket}"
-                f"/{dataset_id}/v{new_vno}/"
-            ),
-            format="multi" if member_count > 1 else products[0]["out_format"],
-            rows=total_rows,
-            size=total_size,
-            origin="managed",
-            produced_by_job_id=job_id,
-            note=f"加工产出(来自 v{input_version.version_no})",
+        out_format0 = products[0]["out_format"]
+
+        async def _build_version(version_no: int) -> DatasetVersion:
+            v = DatasetVersion(
+                id=_new_version_id(),
+                dataset_id=dataset_id,
+                version_no=version_no,
+                storage_uri=(
+                    f"s3://{settings.storage_minio_datasets_bucket}"
+                    f"/{dataset_id}/v{version_no}/"
+                ),
+                format="multi" if member_count > 1 else out_format0,
+                rows=total_rows,
+                size=total_size,
+                origin="managed",
+                produced_by_job_id=job_id,
+                note=f"加工产出(来自 v{input_version.version_no})",
+            )
+            session.add(v)
+            return v
+
+        # 算号 + flush 占版本号:并发同数据集任务在唯一约束上互斥,冲突时
+        # 自动重算重试(见 version_alloc),之后的对象上传才不会与他人混写
+        # 同一 v<n> 前缀
+        version = await with_version_conflict_retry(
+            session, dataset_id, _build_version
         )
-        # 先 flush 占版本号:并发同数据集任务在唯一约束上互斥,
-        # 之后的对象上传才不会与他人混写同一 v<n> 前缀
-        session.add(version)
-        await session.flush()
+        new_vno = version.version_no
         try:
             new_members_data: list[dict[str, Any]] = []
             for p in products:
@@ -1000,20 +1024,28 @@ async def run_process_job(
                 )
             session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
             await session.commit()
-        except BaseException:
+        except BaseException as exc:
             # 回滚未提交的版本/成员行(否则 job_runner 落 failed 态的 commit 会把
             # 半成品版本一并提交),并 best-effort 清掉本次已传到 v<n> 前缀的对象
             await session.rollback()
+            prefix = f"{dataset_id}/v{new_vno}/"
             try:
                 from app.services.external_store import remove_prefix
 
                 await remove_prefix(
                     platform_config(),
                     settings.storage_minio_datasets_bucket,
-                    f"{dataset_id}/v{new_vno}/",
+                    prefix,
                 )
-            except Exception:  # noqa: BLE001 清理失败不掩盖原始错误
-                pass
+            except Exception as cleanup_exc:  # noqa: BLE001 清理失败不掩盖原始错误,只附注
+                logger.error(
+                    "回滚后清理 MinIO 残留对象失败,残留前缀 %s:%s", prefix, cleanup_exc
+                )
+                note = f"(清理失败,残留前缀 {prefix})"
+                if exc.args:
+                    exc.args = (f"{exc.args[0]}{note}", *exc.args[1:])
+                else:
+                    exc.args = (note,)
             raise
         await session.refresh(version)
 

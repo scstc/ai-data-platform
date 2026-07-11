@@ -126,13 +126,19 @@ async def run_judge(
         provider = HeuristicProvider()
         warnings.append("未启用 LLM,裁判使用启发式相似度")
 
+    # llm_failed:裁判服务整体故障(区别于"真·未评分"——如 completion 缺失)。
+    # 故障条目独立标记 verdict=error,不与正常未评分混同;100% 故障时任务须
+    # 判 failed,不能悄悄冒充评估完成(见下方)。
+    llm_failed = False
     try:
         judgments = await provider.judge_answers(items)
-    except Exception as exc:  # noqa: BLE001 — 降级不 500
-        logger.warning("judge_answers 失败,全部置 unscored:%s", exc)
-        warnings.append(f"裁判调用失败,全部未评分:{exc}")
+    except Exception as exc:  # noqa: BLE001 — 异常本身降级,不让 500;整任务是否失败见下方
+        logger.warning("judge_answers 失败,全部置 error:%s", exc)
+        llm_failed = True
+        warnings.append(f"LLM 服务故障,{len(items)} 条未评分:{exc}")
         judgments = [
-            {"score": None, "verdict": "unscored", "reason": ""} for _ in items
+            {"score": None, "verdict": "error", "reason": f"LLM 服务故障:{exc}"}
+            for _ in items
         ]
 
     results_for_report: list[dict[str, Any]] = []
@@ -167,6 +173,12 @@ async def run_judge(
     report["passScore"] = pass_score
     job.eval_report = report
     session.add(JobInput(job_id=job.id, dataset_version_id=version.id))
+    if llm_failed and items:
+        # 裁判服务整体故障:逐条 EvalResult(verdict=error)已暂存,连同
+        # job.eval_report 一起交给调用方(job_runner)统一提交;这里只追加
+        # Job.warnings 并 fail loud——不能让 100% 未评分悄悄算成功
+        job.warnings = [*(job.warnings or []), f"LLM 服务故障,{len(items)} 条未评分"]
+        raise JudgeError(f"LLM 服务故障,{len(items)} 条未评分")
     await session.commit()
     await session.refresh(job)
     return job

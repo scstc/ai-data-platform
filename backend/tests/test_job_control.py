@@ -63,7 +63,7 @@ async def test_create_returns_pending_runs_in_background(
     await _seed(session_factory)
 
     async def fake_run(
-        session, *, job_id, input_version, operators
+        session, *, job_id, input_version, operators, **kwargs
     ):
         return None, "process: []", "/tmp/run.log"
 
@@ -99,7 +99,7 @@ async def test_stop_running_job_cancels(
     release = asyncio.Event()
 
     async def blocking_run(
-        session, *, job_id, input_version, operators
+        session, *, job_id, input_version, operators, **kwargs
     ):
         started.set()  # 已进入执行(running 已提交)
         await release.wait()  # 挂住,模拟子进程在跑
@@ -133,6 +133,59 @@ async def test_stop_running_job_cancels(
 
 
 @pytest.mark.asyncio
+async def test_stop_job_toctou_does_not_overwrite_finished_state(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOCTOU 防护:stop 拿到 job(running)之后、真正落地 cancelled 之前,若后台
+    协程已抢先把任务收敛为终态(如 success),不能无条件覆写——用条件 UPDATE
+    (CAS),丢竞态的一方回 409,绝不覆盖真实产出信息(state/progress)。"""
+    async with session_factory() as session:
+        session.add(
+            Job(id="job-race", name="竞态", type="clean", state="running", progress=50)
+        )
+        await session.commit()
+
+    def _finish_concurrently(job_id: str) -> bool:
+        # 模拟 stop 端点走到"杀子进程"这一步时(terminate_job 是**同步**调用,
+        # 见 jobs.py 的 `if not terminate_job(job_id)`),后台协程恰好完成并落地
+        # success——复现"另一条执行路径先一步改了这行"的竞态。terminate_job 同步,
+        # 故这里必须同步提交(用独立 psycopg2 连接,确保对随后的 CAS UPDATE 可见);
+        # 用 async session 会返回未 await 的协程,提交不生效,竞态无法复现。
+        import os
+
+        import psycopg2
+
+        url = os.environ.get(
+            "TEST_DATABASE_URL",
+            "postgresql+asyncpg://adp:adp_dev_pw@127.0.0.1:55433/adp_test",
+        )
+        conn = psycopg2.connect(url.replace("postgresql+asyncpg://", "postgresql://"))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET state='success', progress=100 WHERE id=%s",
+                    (job_id,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return False  # 仿 terminate_job:无子进程可杀(走 cancel_running_task 分支)
+
+    monkeypatch.setattr("app.api.v1.jobs.terminate_job", _finish_concurrently)
+
+    resp = await client.post("/api/v1/jobs/job-race/stop")
+    assert resp.status_code == 409, resp.text
+
+    async with session_factory() as session:
+        job = await session.get(Job, "job-race")
+        # 真实终态与产出信息未被覆盖为 cancelled
+        assert job.state == "success"
+        assert job.progress == 100
+
+
+@pytest.mark.asyncio
 async def test_stop_finished_job_409(
     client: AsyncClient, session_factory: async_sessionmaker
 ) -> None:
@@ -150,6 +203,126 @@ async def test_stop_finished_job_409(
 async def test_stop_unknown_job_404(client: AsyncClient) -> None:
     resp = await client.post("/api/v1/jobs/job-nope/stop")
     assert resp.status_code == 404
+
+
+def _spec_dict() -> dict:
+    return {
+        "name": "队列字段回归测试",
+        "type": "clean",
+        "dataset_version_id": VERSION_ID,
+        "operators": OPERATORS,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_job_resets_attempts_and_claim(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """继续(resume)复位为 pending 时必须清零 attempts/claimed_by/heartbeat_at/
+    queued_at:worker 模式下 claim_job 只认领 `attempts < max_attempts` 的
+    pending 任务。若该任务此前已被 worker 心跳超时反复重排耗尽 attempts(此处
+    直接构造耗尽态,模拟"暂停前已耗尽预算"这一edge)、复位时不清零,复位后
+    的 pending 任务会因 attempts>=max_attempts 永远无 worker 认领——且 worker
+    模式下 API 进程不再跑 reconcile_orphans 兜底,任务将静默永远卡在 pending。
+    """
+    await _seed(session_factory)
+
+    async def fake_run(session, *, job_id, input_version, operators, **kwargs):
+        return None, "process: []", "/tmp/run.log"
+
+    monkeypatch.setattr("app.services.job_runner.run_process_job", fake_run)
+
+    async with session_factory() as session:
+        session.add(
+            Job(
+                id="job-resume-attempts",
+                name="继续测试",
+                type="clean",
+                state="paused",
+                created_by="admin",
+                attempts=3,
+                max_attempts=3,
+                claimed_by="dead-worker",
+                spec=_spec_dict(),
+            )
+        )
+        await session.commit()
+
+    # worker 执行模式:spawn 只入队(_mark_queued)不进程内执行,复位后的任务保持
+    # pending 供 worker 认领——本测锁的正是 worker 认领语义(attempts 清零才可被认领);
+    # inline 默认模式下 spawn 立即起协程跑完,state 会竞速到 running 使断言飘。
+    monkeypatch.setattr(settings, "job_execution_mode", "worker")
+
+    resp = await client.post("/api/v1/jobs/job-resume-attempts/resume")
+    assert resp.status_code == 200, resp.text
+
+    async with session_factory() as session:
+        job = await session.get(Job, "job-resume-attempts")
+        assert job.state == "pending"
+        assert job.attempts == 0
+        assert job.claimed_by is None
+
+    await job_runner.drain()
+
+
+@pytest.mark.asyncio
+async def test_edit_job_resets_attempts_and_claim(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """编辑任务(PUT /jobs/{id},走 `_reset_for_edit_rerun`)同理必须清零
+    attempts/claimed_by/heartbeat_at/queued_at——否则一个此前耗尽 attempts 才
+    失败的任务,编辑后原地重跑同样会因 attempts>=max_attempts 永远无 worker
+    认领,静默卡死。"""
+    await _seed(session_factory)
+
+    async def fake_run(session, *, job_id, input_version, operators, **kwargs):
+        return None, "process: []", "/tmp/run.log"
+
+    monkeypatch.setattr("app.services.job_runner.run_process_job", fake_run)
+
+    async with session_factory() as session:
+        session.add(
+            Job(
+                id="job-edit-attempts",
+                name="编辑测试",
+                type="clean",
+                state="failed",
+                created_by="admin",
+                attempts=3,
+                max_attempts=3,
+                claimed_by="dead-worker",
+                error="worker 崩溃回收:心跳超时且已尝试 3/3 次",
+                spec=_spec_dict(),
+            )
+        )
+        await session.commit()
+
+    # worker 执行模式:同 resume,spawn 只入队不进程内执行,编辑重跑后任务保持 pending
+    # 供 worker 认领;inline 默认模式下会竞速到 running 使断言飘。
+    monkeypatch.setattr(settings, "job_execution_mode", "worker")
+
+    resp = await client.put(
+        "/api/v1/jobs/job-edit-attempts",
+        json={
+            "name": "编辑测试(改后)",
+            "type": "clean",
+            "datasetVersionId": VERSION_ID,
+            "operators": OPERATORS,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with session_factory() as session:
+        job = await session.get(Job, "job-edit-attempts")
+        assert job.state == "pending"
+        assert job.attempts == 0
+        assert job.claimed_by is None
+
+    await job_runner.drain()
 
 
 @pytest.mark.asyncio
@@ -325,7 +498,7 @@ async def test_manifest_job_allowed_with_multimodal(
         return True
 
     async def _fake_run(
-        session, *, job_id, input_version, operators
+        session, *, job_id, input_version, operators, **kwargs
     ):
         return None, "process: []", "/tmp/run.log"
 

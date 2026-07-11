@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
@@ -487,3 +489,76 @@ async def test_collect_lineage_skips_lake_layer(session_factory, monkeypatch):
     assert source_lines == ["跳过湖层测试集 · 来源=?/?"]
     assert operator_chain == []
     assert upstream_formats == set()
+
+
+async def test_deleted_dataset_and_job_marked_not_filtered(session_factory):
+    """回收站数据集 / 已软删任务在血缘图上不过滤掉,只打 deleted=true 标记(前端
+    据此置灰/加提示)——若硬过滤,下游还活着的节点连到它的边会悬空,出现
+    "血缘图上的节点可点却 404" 的矛盾;标记而不过滤才能让全链路真实可见。"""
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Dataset(
+                    id="dset-svc-del",
+                    name="回收站数据集",
+                    deleted_at=datetime.now(UTC).replace(tzinfo=None),
+                ),
+                DatasetVersion(
+                    id="dsv-svc-del-in",
+                    dataset_id="dset-svc-del",
+                    version_no=1,
+                    storage_uri="s3://uploads/dset-svc-del/v1/data.jsonl",
+                ),
+                Job(
+                    id="job-svc-del",
+                    name="已删任务",
+                    type="clean",
+                    state="success",
+                    deleted_at=datetime.now(UTC).replace(tzinfo=None),
+                ),
+                DatasetVersion(
+                    id="dsv-svc-del-out",
+                    dataset_id="dset-svc-del",
+                    version_no=2,
+                    storage_uri="s3://uploads/dset-svc-del/v2/data.jsonl",
+                    produced_by_job_id="job-svc-del",
+                ),
+            ]
+        )
+        await session.flush()
+        session.add(
+            JobInput(job_id="job-svc-del", dataset_version_id="dsv-svc-del-in")
+        )
+        await session.commit()
+
+        graph = await build_lineage(session, ["dsv-svc-del-in"], direction="both")
+
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    # 不过滤:输入版本 + 产出版本 + 任务均入图
+    assert {"dsv-svc-del-in", "dsv-svc-del-out", "job-svc-del"} <= nodes.keys()
+    # 只标记 deleted,不隐藏
+    assert nodes["dsv-svc-del-in"]["deleted"] is True
+    assert nodes["dsv-svc-del-out"]["deleted"] is True
+    assert nodes["job-svc-del"]["deleted"] is True
+
+
+async def test_active_dataset_and_job_not_marked_deleted(session_factory):
+    """未软删的数据集/任务 deleted=false(对偶用例,防止误把标记恒置 true)。"""
+    async with session_factory() as session:
+        session.add_all(
+            [
+                Dataset(id="dset-svc-alive", name="正常数据集"),
+                DatasetVersion(
+                    id="dsv-svc-alive",
+                    dataset_id="dset-svc-alive",
+                    version_no=1,
+                    storage_uri="s3://uploads/dset-svc-alive/v1/data.jsonl",
+                ),
+            ]
+        )
+        await session.commit()
+
+        graph = await build_lineage(session, ["dsv-svc-alive"], direction="both")
+
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    assert nodes["dsv-svc-alive"]["deleted"] is False

@@ -20,17 +20,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.jobs import (
+    BatchDeleteRequest,
     SessionDep,
     _acl_job_filter,
     _binary_block,
     _build_input,
     _build_output,
     _dataset_job_filter,
+    _deleted_dataset_block,
     _item,
     _new_job_id,
     _now,
     _reset_for_edit_rerun,
-    BatchDeleteRequest,
 )
 from app.models.dataset_version import DatasetVersion
 from app.models.job import Job
@@ -122,6 +123,12 @@ async def _start_make(
         return JSONResponse(
             status_code=404, content={"success": False, "message": "数据集版本不存在"}
         )
+    if (
+        blocked_resp := await _deleted_dataset_block(
+            session, input_version.dataset_id
+        )
+    ) is not None:
+        return blocked_resp
 
     # 数据集 ACL:加工消费该数据集,要求 edit 及以上(view 只能查看数据)
     if not await dataset_acl.can_access(
@@ -263,13 +270,15 @@ async def rerun_make_job(
         )
     if not job.spec:
         return JSONResponse(
-            status_code=400, content={"success": False, "message": "该任务无可重跑的配置"}
+            status_code=400,
+            content={"success": False, "message": "该任务无可重跑的配置"},
         )
     try:
         spec = MakeJobCreate.model_validate(job.spec)
     except ValidationError:
         return JSONResponse(
-            status_code=400, content={"success": False, "message": "任务配置已损坏,无法重跑"}
+            status_code=400,
+            content={"success": False, "message": "任务配置已损坏,无法重跑"},
         )
     return await _start_make(session, spec, user=user)
 
@@ -286,7 +295,8 @@ async def stop_make_job(job_id: str, session: SessionDep) -> JSONResponse:
         )
     if job.state not in ("pending", "running"):
         return JSONResponse(
-            status_code=409, content={"success": False, "message": "任务不在运行中,无法停止"}
+            status_code=409,
+            content={"success": False, "message": "任务不在运行中,无法停止"},
         )
     job_runner.request_cancel(job_id)
     from app.services.engine import terminate_job  # 局部 import 避免循环
@@ -319,7 +329,8 @@ async def delete_make_job(job_id: str, session: SessionDep) -> JSONResponse:
         )
     if job.state == "running":
         return JSONResponse(
-            status_code=409, content={"success": False, "message": "任务运行中,无法删除"}
+            status_code=409,
+            content={"success": False, "message": "任务运行中,无法删除"},
         )
     await _delete_make_cascade(session, job)
     await session.commit()

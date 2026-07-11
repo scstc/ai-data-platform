@@ -41,6 +41,9 @@ class FakeTask:
     progress: int = 0
     run_count: int = 0
     quality_policy: dict | None = None
+    # §4 整改后 _execute_ingest 读 task.lake_id 判定「入湖任务质量门跳过」;
+    # 数据集直采任务(本 fake 场景)lake_id=None,不触发跳过分支。
+    lake_id: str | None = None
 
 
 @dataclass

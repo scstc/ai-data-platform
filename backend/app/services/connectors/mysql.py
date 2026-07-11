@@ -49,6 +49,25 @@ _LIST_TABLES_SQL = (
 )
 
 
+# 单批游标拉取行数(§1 缺陷修复:fetchall 全量入内存 → fetchmany 分批循环)
+_FETCH_BATCH_SIZE = 5000
+
+
+async def _drain_cursor(cur, batch_size: int = _FETCH_BATCH_SIZE) -> list:  # noqa: ANN001
+    """按 ``fetchmany`` 分批把游标数据取尽,返回原始行列表(§1 缺陷修复)。
+
+    原实现 ``fetchall()`` 一次把整个结果集读入内存;改为 ``fetchmany(batch_size)``
+    循环累积,单次仅缓冲一批。对外仍返回完整行列表,落地行为零变化。
+    """
+    rows: list = []
+    while True:
+        batch = await cur.fetchmany(batch_size)
+        if not batch:
+            break
+        rows.extend(batch)
+    return rows
+
+
 def _import_asyncmy():  # noqa: ANN202
     """懒 import asyncmy;未装则抛 ConnectorNotReady。"""
     try:
@@ -97,7 +116,7 @@ async def fetch_records(datasource: Any, task: Any) -> list[dict[str, Any]]:
                 async with conn.cursor() as cur:
                     await cur.execute(query)
                     columns = [desc[0] for desc in cur.description]
-                    raw_rows = await cur.fetchall()
+                    raw_rows = await _drain_cursor(cur)
                 records = [
                     dict(zip(columns, row, strict=False)) for row in raw_rows
                 ]
@@ -156,7 +175,7 @@ class MysqlConnector:
             try:
                 async with conn.cursor() as cur:
                     await cur.execute(_LIST_TABLES_SQL)
-                    rows = await cur.fetchall()
+                    rows = await _drain_cursor(cur)
             finally:
                 conn.close()
         except ConnectorNotReady:
@@ -201,63 +220,75 @@ class MysqlConnector:
         queries = _build_queries(task.extract)
         cfg = datasource.config or {}
         version: DatasetVersion | None = None
+        # §7:多表采集中途失败时点名「已落成功的表 + 失败于哪张表」,让半成品 draft 可判断
+        landed: list[str] = []
 
         try:
             conn = await _connect(cfg)
             try:
                 for suffix, query in queries:
-                    async with conn.cursor() as cur:
-                        await cur.execute(query)
-                        columns = [desc[0] for desc in cur.description]
-                        raw_rows = await cur.fetchall()
-                    records = [
-                        dict(zip(columns, row, strict=False))
-                        for row in raw_rows
-                    ]
-                    # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
-                    records = await apply_filter_operators(task, records)
                     table_name = suffix or "data"
-                    if task.lake_id:
-                        # 治理改造:采集入湖归档(source_v 快照),数据集经
-                        # 「湖抽取」单独产生;不再直落数据集。
-                        from app.services.data_lake import (  # noqa: PLC0415
-                            ingest_to_lake_parquet,
-                        )
+                    try:
+                        async with conn.cursor() as cur:
+                            await cur.execute(query)
+                            columns = [desc[0] for desc in cur.description]
+                            raw_rows = await _drain_cursor(cur)
+                        records = [
+                            dict(zip(columns, row, strict=False))
+                            for row in raw_rows
+                        ]
+                        # 落地前算子过滤:extract.operators 配了则跑 DJ 流水线筛/清洗
+                        records = await apply_filter_operators(task, records)
+                        if task.lake_id:
+                            # 治理改造:采集入湖归档(source_v 快照),数据集经
+                            # 「湖抽取」单独产生;不再直落数据集。
+                            from app.services.data_lake import (  # noqa: PLC0415
+                                ingest_to_lake_parquet,
+                            )
 
-                        snapshot = await ingest_to_lake_parquet(
-                            session,
-                            lake_id=task.lake_id,
-                            data=records,
-                            source_type="mysql",
-                            source_metadata={
-                                "db_table": table_name,
-                                "db_engine": "mysql",
-                            },
-                            datasource_id=datasource.id,
-                            ingest_task_id=task.id,
-                            job_id=job_id,
-                        )
+                            snapshot = await ingest_to_lake_parquet(
+                                session,
+                                lake_id=task.lake_id,
+                                data=records,
+                                source_type="mysql",
+                                source_metadata={
+                                    "db_table": table_name,
+                                    "db_engine": "mysql",
+                                },
+                                datasource_id=datasource.id,
+                                ingest_task_id=task.id,
+                                job_id=job_id,
+                            )
+                            task.logs = [
+                                *task.logs,
+                                f"[INFO] 已入湖:{snapshot.source_version}"
+                                f"(表 {table_name},{len(records)} 行)",
+                            ]
+                        else:
+                            # 存量数据集任务:每表作成员落进 task.dataset_id 的
+                            # draft 版本;单查询无 suffix → 成员名 "data"。
+                            version, _member = await add_table_member(
+                                session,
+                                task.dataset_id,
+                                records,
+                                table_name=table_name,
+                                # 语义维度:结构化(§4.5)
+                                semantic_type="structured",
+                                source_format="db",
+                                note=f"采集落地:{task.name}(来源 {datasource.name})",
+                                produced_by_job_id=job_id,
+                                storage_format="jsonl",
+                                source_kind="db_ingest",
+                            )
+                    except Exception:
+                        already = "、".join(landed) if landed else "无"
                         task.logs = [
                             *task.logs,
-                            f"[INFO] 已入湖:{snapshot.source_version}"
-                            f"(表 {table_name},{len(records)} 行)",
+                            f"[ERROR] 多表采集在表「{table_name}」中断;"
+                            f"此前已成功落地:{already}",
                         ]
-                    else:
-                        # 存量数据集任务:每表作成员落进 task.dataset_id 的
-                        # draft 版本;单查询无 suffix → 成员名 "data"。
-                        version, _member = await add_table_member(
-                            session,
-                            task.dataset_id,
-                            records,
-                            table_name=table_name,
-                            # 语义维度:结构化(§4.5)
-                            semantic_type="structured",
-                            source_format="db",
-                            note=f"采集落地:{task.name}(来源 {datasource.name})",
-                            produced_by_job_id=job_id,
-                            storage_format="jsonl",
-                            source_kind="db_ingest",
-                        )
+                        raise
+                    landed.append(table_name)
             finally:
                 conn.close()
         except (ConnectorNotReady, IngestError):

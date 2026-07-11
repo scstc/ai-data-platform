@@ -7,18 +7,22 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import io
 import json
+import logging
 import re
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import openpyxl
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -29,6 +33,10 @@ from app.models.dataset_version_table import DatasetVersionTable
 
 # 注意:external_store 反向 import 本模块的 BINARY_FORMATS,故此处用函数内延迟
 # import(见 land_records / land_upload_raw),避免模块加载期循环导入。
+# IngestError(定义在 connectors.base)同理:import 该子模块会先跑
+# connectors/__init__.py,后者链式 import objectstore → external_store →
+# 本模块,模块加载期会死循环——故在 land_media_manifest 内延迟 import(只读复用,
+# 不改该模块)。
 from app.services.semantic_registry import (
     SemanticType,
     apply_semantic_spec,
@@ -38,6 +46,9 @@ from app.services.semantic_registry import (
     infer_semantic_from_data_type,
     infer_train_type,
 )
+from app.services.version_alloc import with_version_conflict_retry
+
+logger = logging.getLogger(__name__)
 
 # 文档类:用 markitdown 提取文本,按段落落地
 DOC_FORMATS = {"pdf", "doc", "docx", "ppt", "pptx", "html"}
@@ -186,21 +197,35 @@ def _markdown_to_plain_text(text: str) -> str:
     return out.strip()
 
 
-def _pdf_page_count(content: bytes) -> int:
-    """PDF 页数;取不到(损坏/无 pypdf)退化为 1(按总字符判定,绝不中断主流程)。"""
+def _pdf_page_count(content: bytes) -> int | None:
+    """PDF 页数;取不到(损坏/无 pypdf)→ None(绝不中断主流程,但也绝不假装
+    知道页数——见 `_detect_pdf_type` 对 None 的显式保守处理,避免"默认 1 页"
+    把多页文档的密度算法错误地按总字符数误判)。
+    """
     try:
         import io as _io
 
         from pypdf import PdfReader
 
         return len(PdfReader(_io.BytesIO(content)).pages)
-    except Exception:  # noqa: BLE001 取页数失败不应中断接入
-        return 1
+    except Exception as exc:  # noqa: BLE001 取页数失败不应中断接入,但要留痕
+        logger.warning("PDF 页数检测失败,按页数未知处理:%s", exc)
+        return None
 
 
-def _detect_pdf_type(text: str, page_count: int = 1) -> bool:
-    """判断 PDF 是否扫描型(需 OCR)。纯函数:每页平均非空白字符 < 阈值 → True。"""
+def _detect_pdf_type(text: str, page_count: int | None = 1) -> bool:
+    """判断 PDF 是否扫描型(需 OCR)。纯函数:
+
+    - page_count 已知:每页平均非空白字符 < 阈值 → True。
+    - page_count 未知(取页数失败,见 `_pdf_page_count`)→ 保守判定为疑似扫描,
+      触发下游 OCR 兜底(若已启用)。宁可多跑一趟 OCR、取更长结果,也不要在
+      无法核实密度分母时,把"页数不明"误判成"文本型"从而漏检真正的扫描件
+      (违背 D2 红线);OCR 未启用时该判定不影响现状(仍走既有提取文本)。
+    """
     chars = len("".join(text.split()))
+    if page_count is None:
+        logger.warning("PDF 页数未知,按疑似扫描型保守处理(可能触发 OCR 兜底)")
+        return True
     return (chars / max(page_count, 1)) < _SCANNED_CHAR_PER_PAGE
 
 
@@ -673,21 +698,38 @@ def normalize_to_records(
         raise ParseError(str(exc)) from exc
 
 
-def records_to_jsonl_bytes(records: list[dict]) -> bytes:
+def _json_encode_default(value: object) -> str:
+    """`records_to_jsonl_bytes` 的 json.dumps 兜底编码约定(非 JSON 原生类型)。
+
+    - bytes/bytearray → base64 字符串(避免被当 latin1 str 处理,损坏且不可逆)
+    - datetime.datetime / datetime.date → ISO 8601 字符串(``.isoformat()``)
+    - decimal.Decimal → str(保留精度,不经 float 有损转换)
+    - 其余一律 str(...) 兜底,保证个别未知类型字段不会中断整批落地。
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)
+
+
+def records_to_jsonl_bytes(records: Iterable[dict]) -> bytes:
     """把记录列表序列化为 jsonl 字节(每行一个 JSON 对象,UTF-8)。
 
-    与 land_records 的本地落地一致:ensure_ascii=False 保留中文,非 JSON 原生
-    类型(datetime/Decimal 等)经 default=str 兜底;嵌套对象(JSONB 列)按结构保留。
-    空记录 → 空字节。
+    与 land_records 的本地落地一致:ensure_ascii=False 保留中文;非 JSON 原生
+    类型经 `_json_encode_default` 编码(见其 docstring 的字段类型约定);嵌套
+    对象(JSONB 列)按结构保留。`records` 接受一次性迭代器(如生成器)——本函数
+    只单趟消费,不要求 `__len__`/多次迭代;迭代无输出(含空 list)→ 空字节。
     """
-    if not records:
+    lines = [
+        json.dumps(rec, ensure_ascii=False, default=_json_encode_default)
+        for rec in records
+    ]
+    if not lines:
         return b""
-    return (
-        "\n".join(
-            json.dumps(rec, ensure_ascii=False, default=str) for rec in records
-        )
-        + "\n"
-    ).encode("utf-8")
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 class ParquetCodecError(LandingError):
@@ -779,6 +821,11 @@ async def _target_draft_version(
     - 无版本 → 建 v1 draft。
     - 最新版本是 draft → 复用(在其内增/覆盖成员)。
     - 最新版本已 published → 建 v+1 draft,并**克隆**上一版成员(续接语义)。
+
+    建新 draft 的版本号经 `with_version_conflict_retry`(见 version_alloc.py)
+    分配:同一数据集并发落地(如两个任务同时对同一 dataset 产出新版本)时,
+    "查最大值 + 1" 本身不互斥,靠 `uq_dataset_version_no` 唯一约束兜底,撞车即
+    在 SAVEPOINT 内重算重试,不再让 IntegrityError 直接冒泡给上层。
     """
     latest = (
         await session.execute(
@@ -792,45 +839,47 @@ async def _target_draft_version(
     if latest is not None and latest.publish_status == "draft":
         return latest
 
-    next_no = (latest.version_no + 1) if latest is not None else 1
-    ver = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=next_no,
-        storage_uri=f"pending://{dataset_id}/v{next_no}/",
-        format="jsonl",
-        rows=0,
-        size=0,
-        origin="managed",
-        publish_status="draft",
-    )
-    session.add(ver)
-    await session.flush()
-    # published → 新 draft:克隆上一版成员(指向同一旧文件,不复制数据)
-    if latest is not None:
-        prev = (
-            await session.execute(
-                select(DatasetVersionTable).where(
-                    DatasetVersionTable.dataset_version_id == latest.id
+    async def _build(version_no: int) -> DatasetVersion:
+        ver = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=f"pending://{dataset_id}/v{version_no}/",
+            format="jsonl",
+            rows=0,
+            size=0,
+            origin="managed",
+            publish_status="draft",
+        )
+        session.add(ver)
+        # published → 新 draft:克隆上一版成员(指向同一旧文件,不复制数据)
+        if latest is not None:
+            prev = (
+                await session.execute(
+                    select(DatasetVersionTable).where(
+                        DatasetVersionTable.dataset_version_id == latest.id
+                    )
                 )
-            )
-        ).scalars().all()
-        for pm in prev:
-            session.add(
-                DatasetVersionTable(
-                    id=_new_member_id(),
-                    dataset_version_id=ver.id,
-                    table_name=pm.table_name,
-                    storage_uri=pm.storage_uri,
-                    format=pm.format,
-                    rows=pm.rows,
-                    size=pm.size,
-                    schema_snapshot=pm.schema_snapshot,
-                    schema_variant=pm.schema_variant,
-                    # 克隆成员指向同一旧文件,内容未变,湖血缘随行
-                    source_snapshot_id=pm.source_snapshot_id,
+            ).scalars().all()
+            for pm in prev:
+                session.add(
+                    DatasetVersionTable(
+                        id=_new_member_id(),
+                        dataset_version_id=ver.id,
+                        table_name=pm.table_name,
+                        storage_uri=pm.storage_uri,
+                        format=pm.format,
+                        rows=pm.rows,
+                        size=pm.size,
+                        schema_snapshot=pm.schema_snapshot,
+                        schema_variant=pm.schema_variant,
+                        # 克隆成员指向同一旧文件,内容未变,湖血缘随行
+                        source_snapshot_id=pm.source_snapshot_id,
+                    )
                 )
-            )
+        return ver
+
+    ver = await with_version_conflict_retry(session, dataset_id, _build)
     await session.commit()
     await session.refresh(ver)
     return ver
@@ -868,10 +917,33 @@ async def _recompute_version_rollup(
     await session.commit()
 
 
+async def _gc_uploaded_member(uri: str) -> None:
+    """DB 阶段失败时尽力回收已成功上传的成员对象(孤儿回收)。
+
+    对象已落 MinIO(拿到 `uri`)但后续 DB 写入/提交失败,不回收就是一个再无
+    任何行引用的孤儿对象——参考 `objectstore._gc_prefix` / `land_media_manifest`
+    内 `_gc` 的既有范式:best-effort,回收失败只记日志,绝不掩盖调用方原始异常
+    (调用方 except 块里回收后仍 `raise` 复用同一异常)。
+    """
+    from app.services.external_store import (
+        ExternalStoreError,
+        platform_config,
+        remove_object,
+    )
+
+    try:
+        bucket, key = uri.removeprefix("s3://").split("/", 1)
+        await remove_object(platform_config(), bucket, key)
+    except ExternalStoreError as exc:
+        logger.warning("孤儿对象回收失败,需人工清理:uri=%s err=%s", uri, exc)
+    except Exception as exc:  # noqa: BLE001 uri 解析等意外失败同样只记日志,不掩盖原始异常
+        logger.warning("孤儿对象回收失败,需人工清理:uri=%s err=%s", uri, exc)
+
+
 async def add_table_member(
     session: AsyncSession,
     dataset_id: str,
-    records: list[dict],
+    records: Iterable[dict],
     *,
     table_name: str,
     storage_format: str = "jsonl",
@@ -892,6 +964,10 @@ async def add_table_member(
     写成员文件(默认 jsonl;显式传 parquet 时编码失败回退 jsonl),upsert 成员行,
     刷新版本 rollup。
     首个成员定调版本级 train_type/schema_variant/semantic_type/modalities。
+
+    `records` 接受 Iterable[dict](含一次性生成器)——本函数要对同一批记录做
+    多趟处理(语义校验 → 质量统计 → 序列化编码 → 行数统计),生成器只能消费
+    一次,故在入口按需一次性物化;传 list 时该物化等价于原地拷贝,行为不变。
     """
     from app.services.external_store import (  # 延迟 import 避免循环
         ExternalStoreError,
@@ -899,6 +975,9 @@ async def add_table_member(
         upload_parquet_member,
     )
     from app.services.ingest_quality import compute_quality_stats, schema_snapshot
+
+    if not isinstance(records, list):
+        records = list(records)
 
     # 语义归一(与 land_records 同逻辑):显式传则归一+校验,否则按 data_type 推断
     explicit = coerce_semantic_type(semantic_type)
@@ -957,75 +1036,87 @@ async def add_table_member(
         fmt = "jsonl"
         size = len(blob)
 
-    stats = compute_quality_stats(records)
-    snap = schema_snapshot(stats)
-    eff_train = train_type or infer_train_type(effective_semantic)
-    eff_variant = schema_variant or default_schema_variant(eff_train)
+    try:
+        stats = compute_quality_stats(records)
+        snap = schema_snapshot(stats)
+        eff_train = train_type or infer_train_type(effective_semantic)
+        eff_variant = schema_variant or default_schema_variant(eff_train)
 
-    # upsert 成员(同名覆盖,靠 uq_dvt_version_table 保证版本内唯一)
-    existing = (
-        await session.execute(
-            select(DatasetVersionTable).where(
-                DatasetVersionTable.dataset_version_id == version.id,
-                DatasetVersionTable.table_name == table_name,
+        # upsert 成员(同名覆盖,靠 uq_dvt_version_table 保证版本内唯一)
+        existing = (
+            await session.execute(
+                select(DatasetVersionTable).where(
+                    DatasetVersionTable.dataset_version_id == version.id,
+                    DatasetVersionTable.table_name == table_name,
+                )
             )
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        existing.storage_uri = uri
-        existing.format = fmt
-        existing.rows = len(records)
-        existing.size = size
-        existing.schema_snapshot = snap
-        existing.schema_variant = eff_variant
-        # 同名覆盖即内容替换,血缘跟随新内容(非湖来源覆盖时置空,不残留旧血缘)
-        existing.source_snapshot_id = source_snapshot_id
-        existing.source_upload_channel = source_upload_channel
-        existing.source_kind = source_kind
-        member = existing
-    else:
-        member = DatasetVersionTable(
-            id=_new_member_id(),
-            dataset_version_id=version.id,
-            table_name=table_name,
-            storage_uri=uri,
-            format=fmt,
-            rows=len(records),
-            size=size,
-            schema_snapshot=snap,
-            schema_variant=eff_variant,
-            source_snapshot_id=source_snapshot_id,
-            source_upload_channel=source_upload_channel,
-            source_kind=source_kind,
-        )
-        session.add(member)
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.storage_uri = uri
+            existing.format = fmt
+            existing.rows = len(records)
+            existing.size = size
+            existing.schema_snapshot = snap
+            existing.schema_variant = eff_variant
+            # 同名覆盖即内容替换,血缘跟随新内容(非湖来源覆盖时置空,不残留旧血缘)
+            existing.source_snapshot_id = source_snapshot_id
+            existing.source_upload_channel = source_upload_channel
+            existing.source_kind = source_kind
+            # 旧质量报告是对被覆盖前内容跑的评估,内容已换 → 报告随之失效,
+            # 不清空会让质量报告与当前实际内容对不上(见 quality.py 的
+            # stats_uri 回写契约,报告路径与"当时评估的那份内容"一一对应)。
+            existing.stats_uri = None
+            member = existing
+        else:
+            member = DatasetVersionTable(
+                id=_new_member_id(),
+                dataset_version_id=version.id,
+                table_name=table_name,
+                storage_uri=uri,
+                format=fmt,
+                rows=len(records),
+                size=size,
+                schema_snapshot=snap,
+                schema_variant=eff_variant,
+                source_snapshot_id=source_snapshot_id,
+                source_upload_channel=source_upload_channel,
+                source_kind=source_kind,
+            )
+            session.add(member)
 
-    # 首个成员定调版本级元数据(版本不可变:仅在尚未写定时填)。
-    # source_kind/source_format 归数据集级(create_dataset 时写),不落版本。
-    if version.train_type is None:
-        version.train_type = eff_train
-        version.schema_variant = eff_variant
-    if version.semantic_type is None and effective_semantic is not None:
-        version.semantic_type = effective_semantic
-    if version_modalities is not None and version.modalities is None:
-        version.modalities = version_modalities
-    # 来源渠道:与 train_type/modalities(仅首次写定)不同,每次追加成员都并集更新
-    # ——同一 draft 陆续从不同渠道抽取时,来源列表要跟着累加,而不是定格在第一次。
-    if source_upload_channel:
-        channels = set(version.source_channels or [])
-        if source_upload_channel not in channels:
-            version.source_channels = sorted(channels | {source_upload_channel})
-    if produced_by_job_id and version.produced_by_job_id is None:
-        version.produced_by_job_id = produced_by_job_id
-    if note:
-        version.note = note
-    if version.quality_stats is None:
-        version.quality_stats = stats
-        version.schema_snapshot = snap
-    await session.commit()
-    await session.refresh(member)
-    await _recompute_version_rollup(session, version)
-    await session.refresh(version)
+        # 首个成员定调版本级元数据(版本不可变:仅在尚未写定时填)。
+        # source_kind/source_format 归数据集级(create_dataset 时写),不落版本。
+        if version.train_type is None:
+            version.train_type = eff_train
+            version.schema_variant = eff_variant
+        if version.semantic_type is None and effective_semantic is not None:
+            version.semantic_type = effective_semantic
+        if version_modalities is not None and version.modalities is None:
+            version.modalities = version_modalities
+        # 来源渠道:与 train_type/modalities(仅首次写定)不同,每次追加成员都并集更新
+        # ——同一 draft 陆续从不同渠道抽取时,来源列表要跟着累加,而不是定格在第一次。
+        if source_upload_channel:
+            channels = set(version.source_channels or [])
+            if source_upload_channel not in channels:
+                version.source_channels = sorted(channels | {source_upload_channel})
+        if produced_by_job_id and version.produced_by_job_id is None:
+            version.produced_by_job_id = produced_by_job_id
+        if note:
+            version.note = note
+        if version.quality_stats is None:
+            version.quality_stats = stats
+            version.schema_snapshot = snap
+        await session.commit()
+        await session.refresh(member)
+        await _recompute_version_rollup(session, version)
+        await session.refresh(version)
+    except Exception:  # noqa: BLE001 尽力回收已上传对象后原样重新抛出,见下方说明
+        # 对象已成功上传(拿到 uri)但本次 DB 阶段(统计/upsert/提交/rollup)失败:
+        # 不回收就是一个再无任何行引用的孤儿对象。回收失败只记日志,绝不吞掉
+        # 或替换掉这里的原始异常(尽力而为,不是承诺)。
+        await session.rollback()
+        await _gc_uploaded_member(uri)
+        raise
     return version, member
 
 
@@ -1387,6 +1478,7 @@ async def land_media_manifest(
             本次已写对象,不留孤儿)——与 LandingError 分开抛,便于调用方映射
             400(校验类)与 503(存储类)两种状态码
     """
+    from app.services.connectors.base import IngestError
     from app.services.external_store import (
         MAX_MANIFEST_MEMBERS,
         MAX_MATERIALIZE_BYTES,
@@ -1426,9 +1518,9 @@ async def land_media_manifest(
         version_no = version.version_no
         existing_manifest_rows: list[dict] = []
         if version.storage_uri:
+            _uri_parts = version.storage_uri.removeprefix("s3://").split("/", 1)
+            _m_bucket, _m_key = _uri_parts[0], _uri_parts[1]
             try:
-                _uri_parts = version.storage_uri.removeprefix("s3://").split("/", 1)
-                _m_bucket, _m_key = _uri_parts[0], _uri_parts[1]
                 _tmp = await download_to_temp(cfg, _m_bucket, _m_key)
                 existing_manifest_rows = [
                     json.loads(line)
@@ -1436,21 +1528,50 @@ async def land_media_manifest(
                     if line.strip()
                 ]
                 _tmp.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001 旧清单读取失败按空清单处理,不阻断本次接入
-                existing_manifest_rows = []
+            except Exception as exc:  # noqa: BLE001 fail-loud:见下方说明,绝不吞
+                # P0:续写是"旧清单 + 新增行 → 整体覆盖 manifest.jsonl",若这里
+                # 把读取失败悄悄当成空清单,新清单会覆盖旧对象,已入册的媒体成员
+                # 就静默消失(数据丢失且无痕迹)。必须中止本次续写,让调用方能看到
+                # 旧 manifest 具体读取失败的位置去排查/修复。
+                raise IngestError(
+                    f"续写 draft 版本失败:旧 manifest 读取失败"
+                    f"(s3://{_m_bucket}/{_m_key}):{exc}"
+                ) from exc
         start_idx = len(existing_manifest_rows)
     else:
-        max_no = (
-            await session.execute(
-                select(func.max(DatasetVersion.version_no)).where(
-                    DatasetVersion.dataset_id == dataset_id
-                )
+        # 无 draft 时的版本号分配经 with_version_conflict_retry(见
+        # version_alloc.py)兜底:先落一条 storage_uri=pending:// 的占位
+        # draft 并提交,拿到互斥分配后的真实 version_no 再计算 ver_prefix、
+        # 上传文件——避免两个并发请求各自"查最大值+1"算出同一个
+        # version_no,把文件都写进同一个 S3 前缀、且后续 flush 在
+        # uq_dataset_version_no 上撞车（未被 LandingError 包裹,直接 500)。
+        async def _build(version_no: int) -> DatasetVersion:
+            ver = DatasetVersion(
+                id=_new_version_id(),
+                dataset_id=dataset_id,
+                version_no=version_no,
+                storage_uri=f"pending://{dataset_id}/v{version_no}/",
+                format=MANIFEST_FORMAT,
+                rows=0,
+                size=0,
+                origin="managed",
+                source_datasource_id=None,
+                publish_status="draft",
+                note=f"媒体批量接入:{len(files)} 个文件",
+                produced_by_job_id=produced_by_job_id,
+                source_snapshot_ids=sorted(set(source_snapshot_ids))
+                if source_snapshot_ids
+                else None,
             )
-        ).scalar()
-        version_no = (max_no or 0) + 1
+            session.add(ver)
+            return ver
+
+        version = await with_version_conflict_retry(session, dataset_id, _build)
+        await session.commit()
+        await session.refresh(version)
+        version_no = version.version_no
         existing_manifest_rows = []
         start_idx = 0
-        version = None
 
     ver_prefix = f"{dataset_id}/v{version_no}/"
 

@@ -15,8 +15,9 @@
      写回 ``config["boundDatasetId"]``(ORM 脏检测,无需手动 UPDATE)。
    - 后续推送:``datasource.config["boundDatasetId"]`` 已有值 → 加载该 Dataset,产出
      新 DatasetVersion(version_no = 当前最大值 + 1),note = "api 推送 #N"。
-3. **幂等键(内存版)**:相同 ``idempotency_key`` 在 TTL 内重复调用返回首次版本 id 而
-   不重复落地。本期内存版 + 标注,生产化需 DB 持久去重(§11 后续增强)。
+3. **幂等键(DB 持久版)**:相同 ``idempotency_key`` 在有效期内重复调用返回首次版本
+   id 而不重复落地。落地记录写 ``push_idempotency`` 表(迁移 0069),与版本落地在
+   同一事务提交;过期行(``expires_at``)惰性清理后该 key 可被后续请求复用。
 4. **诚实失败**:落盘/commit 失败抛 LandingError;Session 回滚让调用方处理(不伪成功)。
 """
 
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import json
 import secrets
-import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,7 @@ from app.core.ids import uuid7_hex
 from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.datasource import DataSource
+from app.models.push_idempotency import PushIdempotency
 from app.services.connectors.base import ConnectorNotReady
 from app.services.landing import LandingError
 from app.services.semantic_registry import (
@@ -48,32 +50,59 @@ if TYPE_CHECKING:
     from app.models.ingest_task import IngestTask
 
 # ---------------------------------------------------------------------------
-# 内存幂等键缓存(TTL = 10 min)
-# 结构: {idempotency_key: (version_id, expire_ts)}
+# 幂等键持久去重(push_idempotency 表,迁移 0069;TTL = 10 min)
+# 进程内 dict 的旧实现有两个缺陷:多 worker 不共享、进程重启即失忆。改为 DB 表:
+# 命中未过期即幂等返回,过期行惰性删除后 key 可复用。
 # ---------------------------------------------------------------------------
 _IDEMPOTENCY_TTL = 600  # 秒
-_idempotency_cache: dict[str, tuple[str, float]] = {}
 
 
-def _check_idempotency(key: str | None) -> str | None:
-    """返回缓存的 version_id(幂等命中),或 None(需正常落地)。"""
+async def _check_idempotency(
+    session: AsyncSession, key: str | None
+) -> str | None:
+    """命中未过期的幂等记录 → 返回其 ``dataset_version_id``;否则 None。
+
+    过期记录惰性删除(flush 让本次请求可用同 key 重新落地并刷新记录)。
+    ``dataset_version_id`` 为空(仅登记未落版本)时返回 None,视作未命中。
+    """
     if not key:
         return None
-    cached = _idempotency_cache.get(key)
-    if cached is None:
+    row = await session.get(PushIdempotency, key)
+    if row is None:
         return None
-    version_id, expire_ts = cached
-    if time.monotonic() > expire_ts:
-        del _idempotency_cache[key]
+    if row.expires_at <= datetime.now(UTC):
+        # 过期:惰性清理,让本次请求正常重新落地并在末尾刷新记录
+        await session.delete(row)
+        await session.flush()
         return None
-    return version_id
+    return row.dataset_version_id
 
 
-def _set_idempotency(key: str | None, version_id: str) -> None:
-    """缓存幂等键 → version_id,过期后失效。"""
+async def _record_idempotency(
+    session: AsyncSession,
+    key: str | None,
+    *,
+    owner_id: str,
+    version_id: str,
+) -> None:
+    """登记幂等键 → 版本(随落地在同一事务提交,原子)。
+
+    ``push_idempotency.task_id`` 非空:推送入站无采集任务上下文,以推送数据源
+    id 作为 owner 填入(该列为普通字符串、无外键,语义即「哪个推送源的 key」)。
+    过期后由 ``_check_idempotency`` 惰性删除,同 key 可被后续请求复用。
+    """
     if not key:
         return
-    _idempotency_cache[key] = (version_id, time.monotonic() + _IDEMPOTENCY_TTL)
+    now = datetime.now(UTC)
+    session.add(
+        PushIdempotency(
+            key=key,
+            task_id=owner_id,
+            dataset_version_id=version_id,
+            created_at=now,
+            expires_at=now + timedelta(seconds=_IDEMPOTENCY_TTL),
+        )
+    )
 
 
 def _new_dataset_id() -> str:
@@ -121,9 +150,9 @@ async def land_push_records(
     LandingError
         落盘或 DB commit 失败(调用方转 500)。
     """
-    # --- 1. 幂等键前置检查 ---
+    # --- 1. 幂等键前置检查(DB 持久去重,迁移 0069) ---
     if idempotency_key:
-        cached_vid = _check_idempotency(idempotency_key)
+        cached_vid = await _check_idempotency(session, idempotency_key)
         if cached_vid is not None:
             # 幂等命中:加载并返回已有版本
             existing = await session.get(DatasetVersion, cached_vid)
@@ -222,6 +251,11 @@ async def land_push_records(
     )
     session.add(version)
 
+    # --- 6. 登记幂等键(随落地在同一事务提交,原子) ---
+    await _record_idempotency(
+        session, idempotency_key, owner_id=datasource.id, version_id=version.id
+    )
+
     try:
         await session.commit()
     except Exception as exc:  # noqa: BLE001
@@ -230,9 +264,6 @@ async def land_push_records(
 
     await session.refresh(dataset)
     await session.refresh(version)
-
-    # --- 6. 缓存幂等键 ---
-    _set_idempotency(idempotency_key, version.id)
 
     return version
 

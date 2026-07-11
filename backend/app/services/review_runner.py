@@ -22,10 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import shutil
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -37,13 +37,14 @@ from app.models.review_finding import ReviewFinding
 from app.services.ai import get_ai_provider
 from app.services.engine import (
     _get_version_members,
-    _materialize_member,
     _new_member_id,
     carry_over_members,
+    materialized_member,
 )
 from app.services.external_store import materialized_version, upload_jsonl_member
 from app.services.landing import parquet_bytes_to_records
 from app.services.review import scan_version
+from app.services.version_alloc import with_version_conflict_retry
 
 logger = logging.getLogger(__name__)
 
@@ -145,15 +146,6 @@ def _verdicts(
     return input_verdict, output_verdict
 
 
-async def _next_version_no(session: AsyncSession, dataset_id: str) -> int:
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    return (max_vno or 0) + 1
-
-
 async def run_review(
     session: AsyncSession,
     *,
@@ -187,7 +179,6 @@ async def run_review(
 
     provider = get_ai_provider(settings, llm_snapshot)
     dataset_id = version.dataset_id
-    new_vno = await _next_version_no(session, dataset_id)
 
     # 聚合报告
     total_rows = 0
@@ -200,19 +191,21 @@ async def run_review(
     by_table: dict[str, int] = {}
     warnings: list[str] = []
     deleted_rows = 0
-    removed_archives: dict[str, str] = {}
-    new_members_data: list[dict[str, Any]] = []
+    # 阶段一产出(扫描/净化在内存中完成,不占版本号、不传对象存储):
+    # [{member, data_bytes, removed_bytes|None}],阶段二占号后统一上传
+    products: list[dict[str, Any]] = []
 
     for member in members_to_process:
-        input_path = await _materialize_member(session, member)
-        if not input_path.exists():
-            raise ReviewError(
-                f"成员 {member.table_name} 数据文件不存在:{member.storage_uri}"
-            )
-        if member.format == "parquet":
-            rows = parquet_bytes_to_records(input_path.read_bytes())
-        else:
-            rows = _read_jsonl(input_path)
+        # 物化成员文件(async with 兜底:s3 来源的临时落地文件退出时自动清理)
+        async with materialized_member(session, member) as input_path:
+            if not input_path.exists():
+                raise ReviewError(
+                    f"成员 {member.table_name} 数据文件不存在:{member.storage_uri}"
+                )
+            if member.format == "parquet":
+                rows = parquet_bytes_to_records(input_path.read_bytes())
+            else:
+                rows = _read_jsonl(input_path)
 
         findings, tagged_rows, report = await scan_version(
             rows,
@@ -230,26 +223,16 @@ async def run_review(
         kept, removed = _split_flagged(tagged_rows)
         # safety 为嵌套结构,产出统一 jsonl(parquet 成员在此转为 jsonl)
         data_bytes = _jsonl_bytes(kept)
-        storage_uri = await upload_jsonl_member(
-            dataset_id, new_vno, member.table_name, data_bytes
-        )
+        removed_bytes = _jsonl_bytes(removed) if removed else None
         if removed:
-            removed_archives[member.table_name] = await upload_jsonl_member(
-                dataset_id,
-                new_vno,
-                f"{member.table_name}.removed",
-                _jsonl_bytes(removed),
-            )
             deleted_rows += len(removed)
 
-        new_members_data.append(
+        products.append(
             {
-                "table_name": member.table_name,
-                "storage_uri": storage_uri,
-                "format": "jsonl",
+                "member": member,
+                "data_bytes": data_bytes,
+                "removed_bytes": removed_bytes,
                 "rows": len(kept),
-                "size": len(data_bytes),
-                "schema_variant": member.schema_variant,
             }
         )
 
@@ -274,7 +257,7 @@ async def run_review(
         "byTable": by_table,
         "action": "delete",
         "deletedRows": deleted_rows,
-        "removedArchives": removed_archives,
+        "removedArchives": {},  # 阶段二上传后回填(见下方)
         "warnings": warnings,
     }
 
@@ -286,43 +269,113 @@ async def run_review(
 
     note_action = f"内容审核净化(删除 {deleted_rows} 行,来自 v{version.version_no})"
     # 未被审的成员原样结转,产出版本保持输入版本的完整成员集
-    new_members_data += carry_over_members(
+    carried = carry_over_members(
         members, {m.table_name for m in members_to_process}
     )
-    out_version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=(
-            f"s3://{settings.storage_minio_datasets_bucket}/{dataset_id}/v{new_vno}/"
-        ),
-        format="multi" if len(new_members_data) > 1 else "jsonl",
-        rows=sum(m["rows"] or 0 for m in new_members_data),
-        size=sum(m["size"] or 0 for m in new_members_data),
-        origin="review",
-        produced_by_job_id=job.id,
-        note=note_action,
-        scan_verdict=output_verdict,
-        verdict_source="auto",
+    total_out_rows = sum(p["rows"] for p in products) + sum(
+        m["rows"] or 0 for m in carried
     )
-    session.add(out_version)
-    await session.flush()
-    for m_data in new_members_data:
-        session.add(
-            DatasetVersionTable(
-                id=_new_member_id(),
-                dataset_version_id=out_version.id,
-                **m_data,
-            )
+    total_out_size = sum(len(p["data_bytes"]) for p in products) + sum(
+        m["size"] or 0 for m in carried
+    )
+    member_count = len(products) + len(carried)
+
+    # 占版本号(uq_dataset_version_no 冲突自动重试)→ 上传净化/存档产物 →
+    # 成员行 → 单事务提交。先占号再上传,storage_uri 的 v<n> 前缀与实际占到
+    # 的版本号保证一致
+    async def _build_version(version_no: int) -> DatasetVersion:
+        v = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=(
+                f"s3://{settings.storage_minio_datasets_bucket}"
+                f"/{dataset_id}/v{version_no}/"
+            ),
+            format="multi" if member_count > 1 else "jsonl",
+            rows=total_out_rows,
+            size=total_out_size,
+            origin="review",
+            produced_by_job_id=job.id,
+            note=note_action,
+            scan_verdict=output_verdict,
+            verdict_source="auto",
         )
+        session.add(v)
+        return v
 
-    # 回写被审版本 verdict(供发布门直接校验) + 血缘边 + 报告
-    version.scan_verdict = input_verdict
-    version.verdict_source = "auto"
-    session.add(JobInput(job_id=job.id, dataset_version_id=version.id))
-    job.review_report = agg_report
+    out_version = await with_version_conflict_retry(
+        session, dataset_id, _build_version
+    )
+    new_vno = out_version.version_no
+    try:
+        removed_archives: dict[str, str] = {}
+        for p in products:
+            member = p["member"]
+            storage_uri = await upload_jsonl_member(
+                dataset_id, new_vno, member.table_name, p["data_bytes"]
+            )
+            if p["removed_bytes"] is not None:
+                removed_archives[member.table_name] = await upload_jsonl_member(
+                    dataset_id,
+                    new_vno,
+                    f"{member.table_name}.removed",
+                    p["removed_bytes"],
+                )
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(),
+                    dataset_version_id=out_version.id,
+                    table_name=member.table_name,
+                    storage_uri=storage_uri,
+                    format="jsonl",
+                    rows=p["rows"],
+                    size=len(p["data_bytes"]),
+                    schema_variant=member.schema_variant,
+                )
+            )
+        for m_data in carried:
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(),
+                    dataset_version_id=out_version.id,
+                    **m_data,
+                )
+            )
+        agg_report["removedArchives"] = removed_archives
 
-    await session.commit()
+        # 回写被审版本 verdict(供发布门直接校验) + 血缘边 + 报告
+        version.scan_verdict = input_verdict
+        version.verdict_source = "auto"
+        session.add(JobInput(job_id=job.id, dataset_version_id=version.id))
+        job.review_report = agg_report
+        # 契约 C:降级/跳过类告警(LLM 服务故障、规则运行异常等)同步进
+        # Job.warnings,不只是埋在 review_report 里等着被忽略
+        if warnings:
+            job.warnings = [*(job.warnings or []), *warnings]
+
+        await session.commit()
+    except BaseException:
+        # 上传/入库阶段失败:回滚已 flush 的版本行(否则 job_runner 落 failed
+        # 态的 commit 会把半成品版本一并提交),并 best-effort 清掉已传到
+        # v<n> 前缀的对象,不留孤立版本
+        await session.rollback()
+        try:
+            from app.services.external_store import platform_config, remove_prefix
+
+            await remove_prefix(
+                platform_config(),
+                settings.storage_minio_datasets_bucket,
+                f"{dataset_id}/v{new_vno}/",
+            )
+        except Exception:  # noqa: BLE001 清理失败不掩盖原始错误,但必须留痕
+            logger.warning(
+                "job %s 回滚后清理 v%s 前缀残留对象失败,可能留下孤儿对象",
+                job.id,
+                new_vno,
+                exc_info=True,
+            )
+        raise
     await session.refresh(out_version)
     return out_version
 
@@ -355,26 +408,24 @@ async def _run_review_legacy(
     )
 
     kept, removed = _split_flagged(tagged_rows)
+    data_bytes = _jsonl_bytes(kept)
 
     dataset_id = version.dataset_id
-    new_vno = await _next_version_no(session, dataset_id)
-    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "data.jsonl"
-    out_path.write_bytes(_jsonl_bytes(kept))
-
-    removed_archives: dict[str, str] = {}
+    # 本地处理目录先按 job_id 命名,与版本号解耦;占到版本号后再整目录改名
+    # 为 v<n>(见下方),避免"先猜号写盘、后占号时撞车"导致目录名和实际
+    # 占到的版本号对不上
+    staging_dir = Path(settings.datasets_dir) / dataset_id / f"job-{job.id}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / "data.jsonl").write_bytes(data_bytes)
     if removed:
-        removed_path = out_dir / "data.removed.jsonl"
-        removed_path.write_bytes(_jsonl_bytes(removed))
-        removed_archives["data"] = str(removed_path)
+        (staging_dir / "data.removed.jsonl").write_bytes(_jsonl_bytes(removed))
 
     report = {
         **report,
         "byTable": {},
         "action": "delete",
         "deletedRows": len(removed),
-        "removedArchives": removed_archives,
+        "removedArchives": {},  # 目录改名为 v<n> 后回填(见下方)
     }
 
     input_verdict, output_verdict = _verdicts(
@@ -384,29 +435,66 @@ async def _run_review_legacy(
     )
 
     note_action = f"内容审核净化(删除 {len(removed)} 行,来自 v{version.version_no})"
-    out_version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=str(out_path),
-        format="jsonl",
-        rows=len(kept),
-        size=out_path.stat().st_size,
-        origin="review",
-        produced_by_job_id=job.id,
-        note=note_action,
-        scan_verdict=output_verdict,
-        verdict_source="auto",
-    )
-    session.add(out_version)
-    # 回写被审版本的 scan_verdict:使被审版本本身也持有扫描结论,
-    # 从而让用户可直接对它执行 publish(发布门校验 scan_verdict==passed)。
-    version.scan_verdict = input_verdict
-    version.verdict_source = "auto"
-    # 血缘边:被审版本 → review job
-    session.add(JobInput(job_id=job.id, dataset_version_id=version.id))
-    job.review_report = report
 
-    await session.commit()
+    # 占版本号(uq_dataset_version_no 冲突自动重试)→ 目录改名 → 提交;先占号
+    # 再改名,storage_uri 的 v<n> 路径与实际占到的版本号保证一致
+    async def _build_version(version_no: int) -> DatasetVersion:
+        out_dir = Path(settings.datasets_dir) / dataset_id / f"v{version_no}"
+        v = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=str(out_dir / "data.jsonl"),
+            format="jsonl",
+            rows=len(kept),
+            size=len(data_bytes),
+            origin="review",
+            produced_by_job_id=job.id,
+            note=note_action,
+            scan_verdict=output_verdict,
+            verdict_source="auto",
+        )
+        session.add(v)
+        return v
+
+    out_version = await with_version_conflict_retry(
+        session, dataset_id, _build_version
+    )
+    new_vno = out_version.version_no
+    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
+    try:
+        staging_dir.rename(out_dir)
+        if removed:
+            report["removedArchives"] = {"data": str(out_dir / "data.removed.jsonl")}
+        # 回写被审版本的 scan_verdict:使被审版本本身也持有扫描结论,
+        # 从而让用户可直接对它执行 publish(发布门校验 scan_verdict==passed)。
+        version.scan_verdict = input_verdict
+        version.verdict_source = "auto"
+        # 血缘边:被审版本 → review job
+        session.add(JobInput(job_id=job.id, dataset_version_id=version.id))
+        job.review_report = report
+        # 契约 C:降级/跳过类告警同步进 Job.warnings(同 run_review)
+        if report["warnings"]:
+            job.warnings = [*(job.warnings or []), *report["warnings"]]
+
+        await session.commit()
+    except BaseException:
+        # 目录改名/提交失败:回滚已 flush 的版本行,不留孤立版本。
+        # rename 半途失败时 staging_dir 可能仍残留(未成功改名为 out_dir),
+        # 必须留痕 + best-effort 清理,否则磁盘上留一个无法从版本行反查的
+        # 孤儿目录,且失败原因无处可查。
+        logger.exception(
+            "job %s 净化产出目录改名/提交失败(staging=%s, out=%s)",
+            job.id,
+            staging_dir,
+            out_dir,
+        )
+        await session.rollback()
+        if staging_dir.exists():
+            try:
+                shutil.rmtree(staging_dir)
+            except OSError:
+                logger.warning("清理孤儿 staging 目录失败:%s", staging_dir)
+        raise
     await session.refresh(out_version)
     return out_version

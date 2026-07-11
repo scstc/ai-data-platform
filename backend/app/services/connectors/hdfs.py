@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 import time
 import urllib.parse
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -203,6 +205,43 @@ class HdfsConnector:
                 f"HDFS WebHDFS 请求失败:{exc}"
             ) from exc
 
+    async def _download_to_temp(self, url: str, hdfs_path: str) -> Path:
+        """流式下载 WebHDFS ``OPEN`` 响应到临时文件,返回路径(调用方负责清理)。
+
+        §8 缺陷修复:原 ``resp.content`` 把整文件读入内存;改为分块写盘(对齐 S3
+        connector 的 download_to_temp 范式),避免大文件驻留内存。
+        非 200 / 网络错误 → ``ConnectorNotReady``(含状态码与路径)。
+        任一失败都清掉半成品临时文件,不留孤儿。
+        """
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".hdfs")  # noqa: SIM115
+        tmp_path = Path(tmp.name)
+        try:
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, follow_redirects=True
+            ) as client:
+                async with client.stream("GET", url) as resp:
+                    if resp.status_code != 200:
+                        raise ConnectorNotReady(
+                            f"HDFS OPEN 失败:HTTP {resp.status_code},"
+                            f"路径 {hdfs_path!r}"
+                        )
+                    async for chunk in resp.aiter_bytes():
+                        tmp.write(chunk)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            tmp.close()
+            tmp_path.unlink(missing_ok=True)
+            raise ConnectorNotReady(f"HDFS DataNode 不可达:{exc}") from exc
+        except httpx.HTTPError as exc:
+            tmp.close()
+            tmp_path.unlink(missing_ok=True)
+            raise ConnectorNotReady(f"HDFS OPEN 请求失败:{exc}") from exc
+        except BaseException:
+            tmp.close()
+            tmp_path.unlink(missing_ok=True)
+            raise
+        tmp.close()
+        return tmp_path
+
     # ── Connector 协议实现 ───────────────────────────────────────────────────
 
     async def probe(self, config: dict) -> tuple[bool, int, str]:
@@ -324,64 +363,79 @@ class HdfsConnector:
                 paths = [p for p in paths if p > wm_value]
 
         version: DatasetVersion | None = None
+        # §7:多文件采集中途失败时点名「已落成功的文件 + 失败于哪个路径」,
+        # 让半成品 draft 可判断。
+        landed: list[str] = []
 
         for hdfs_path in paths:
-            url = _build_webhdfs_url(nn, hdfs_path, "OPEN", **extra)
-            resp = await self._get(url)
+            try:
+                url = _build_webhdfs_url(nn, hdfs_path, "OPEN", **extra)
+                # §8:流式落临时文件,读回后即删,避免整文件驻留内存。
+                tmp_path = await self._download_to_temp(url, hdfs_path)
+                try:
+                    content: bytes = tmp_path.read_bytes()
+                finally:
+                    tmp_path.unlink(missing_ok=True)
 
-            if resp.status_code != 200:
-                raise ConnectorNotReady(
-                    f"HDFS OPEN 失败:HTTP {resp.status_code},路径 {hdfs_path!r}"
+                # 从路径推断格式(取最后一段扩展名)
+                filename = hdfs_path.rstrip("/").rsplit("/", 1)[-1]
+                ext = (
+                    filename.rsplit(".", 1)[-1].lower()
+                    if "." in filename
+                    else "txt"
                 )
 
-            content: bytes = resp.content
+                if task.lake_id:
+                    # 治理改造:文件原样入湖归档(湖不解析,抽取时才规范化),
+                    # 数据集经「湖抽取」单独产生。
+                    from app.services.data_lake import (  # noqa: PLC0415
+                        ingest_to_lake_raw,
+                    )
+                    from app.services.landing import media_kind  # noqa: PLC0415
 
-            # 从路径推断格式(取最后一段扩展名)
-            filename = hdfs_path.rstrip("/").rsplit("/", 1)[-1]
-            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "txt"
+                    snapshot = await ingest_to_lake_raw(
+                        session,
+                        lake_id=task.lake_id,
+                        file_content=content,
+                        original_filename=filename or "data",
+                        data_category=media_kind(ext) or "tabular",
+                        upload_channel="api",
+                        datasource_id=datasource.id,
+                        source_metadata={"hdfs_path": hdfs_path},
+                        ingest_task_id=task.id,
+                        job_id=job_id,
+                    )
+                    task.logs = [
+                        *task.logs,
+                        f"[INFO] 已入湖:{snapshot.source_version}({hdfs_path})",
+                    ]
+                else:
+                    records = normalize_to_records(content, ext)
 
-            if task.lake_id:
-                # 治理改造:文件原样入湖归档(湖不解析,抽取时才规范化),
-                # 数据集经「湖抽取」单独产生。
-                from app.services.data_lake import (  # noqa: PLC0415
-                    ingest_to_lake_raw,
-                )
-                from app.services.landing import media_kind  # noqa: PLC0415
-
-                snapshot = await ingest_to_lake_raw(
-                    session,
-                    lake_id=task.lake_id,
-                    file_content=content,
-                    original_filename=filename or "data",
-                    data_category=media_kind(ext) or "tabular",
-                    upload_channel="api",
-                    datasource_id=datasource.id,
-                    source_metadata={"hdfs_path": hdfs_path},
-                    ingest_task_id=task.id,
-                    job_id=job_id,
-                )
+                    # 存量数据集任务:每个文件作成员落进 task.dataset_id 的 draft
+                    # 版本;成员名 = 文件名(去路径),空则兜底 "data"。
+                    table_name = filename or "data"
+                    version, _member = await add_table_member(
+                        session,
+                        task.dataset_id,
+                        records,
+                        table_name=table_name,
+                        semantic_type=config.get("semantic_type"),
+                        # 三轴:来源=HDFS;格式=拉取对象原始扩展名
+                        source_format=ext,
+                        note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
+                        produced_by_job_id=job_id,
+                        source_kind="db_ingest",
+                    )
+            except Exception:
+                already = "、".join(landed) if landed else "无"
                 task.logs = [
                     *task.logs,
-                    f"[INFO] 已入湖:{snapshot.source_version}({hdfs_path})",
+                    f"[ERROR] 多文件采集在「{hdfs_path}」中断;"
+                    f"此前已成功落地:{already}",
                 ]
-            else:
-                records = normalize_to_records(content, ext)
-
-                # 存量数据集任务:每个文件作成员落进 task.dataset_id 的 draft
-                # 版本;成员名 = 文件名(去路径),空则兜底 "data"。
-                table_name = filename or "data"
-                version, _member = await add_table_member(
-                    session,
-                    task.dataset_id,
-                    records,
-                    table_name=table_name,
-                    semantic_type=config.get("semantic_type"),
-                    # 三轴:来源=HDFS;格式=拉取对象原始扩展名
-                    source_format=ext,
-                    note=f"HDFS 采集落地:{hdfs_path}(job={job_id})",
-                    produced_by_job_id=job_id,
-                    source_kind="db_ingest",
-                )
+                raise
+            landed.append(hdfs_path)
 
             # C5 评审 Finding 1 修复:水位推进改为每路径成功落地**之后**
             # running-max(当前水位, 本路径名)。中途失败 → 水位只反映此前已成功

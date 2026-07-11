@@ -31,7 +31,7 @@ def _base_create_payload(cron: str | None, mode: str = "cron") -> dict:
     return {
         "name": "t-cron",
         "datasourceId": "ds-1",
-        "datasetId": "dset-1",
+        "lakeId": "lake-1",
         "schedule": schedule,
     }
 
@@ -163,100 +163,131 @@ class TestIngestScheduleModeLiteralUnchanged:
         assert cron.mode == "cron"
 
 
-# ---------- 路由 best-effort: scheduler 缺席时不抛 ----------
+# ---------- 路由:scheduler 缺席/抛错时不 crash,但不再静默(§6 缺陷修复) ----------
 
 
-class TestRouteBestEffortWithoutScheduler:
-    """验证 _sync_cron_job / _unsync_cron_job 在 scheduler 缺席时静默跳过。
+class TestRouteSchedulerFailureSurfacing:
+    """验证 _sync_cron_job / _unsync_cron_job 的新契约(§6):调度失败不再静默。
+
+    旧契约是「scheduler 缺席/抛错 → best-effort 吞掉」;缺陷在于「建了 cron 却永不
+    触发」对用户完全不可见。新契约:主流程仍不被 jobstore 故障阻断(不向调用方抛),
+    但失败必须 log error 级 + 写进 task.logs(在任务详情可见),即 fail loud。
 
     DEFERRED:真实 jobstore upsert/remove 集成需 .60 PG 恢复后回归——本测只覆盖
-    「routes 在 scheduler 未启用 / 未启动 / 抛错时不 crash」的契约。
+    「routes 在 scheduler 未启用 / 未启动 / 抛错时不 crash 且非静默」的契约。
     """
 
-    def test_sync_cron_job_skips_when_scheduler_disabled(self, monkeypatch) -> None:
-        """scheduler_enabled=False → 不调 get_scheduler,直接返回。"""
+    async def test_sync_cron_job_skips_when_scheduler_disabled(
+        self, monkeypatch
+    ) -> None:
+        """scheduler_enabled=False → 不调 get_scheduler,直接返回,不记错、不 commit。"""
         from app.api.v1 import ingest_tasks as routes
 
         monkeypatch.setattr(routes.settings, "scheduler_enabled", False)
-        # 即便传一个 cron 任务,也不应抛(call_count 不会被检查,只要不抛即可)
-        routes._sync_cron_job(_FakeCronTask())  # 不抛即通过
+        session = _FakeSession()
+        task = _FakeCronTask()
+        await routes._sync_cron_job(session, task)  # 不抛即通过
+        assert session.commits == 0
+        assert task.logs == []
 
-    def test_sync_cron_job_skips_when_no_scheduler_instance(self, monkeypatch) -> None:
-        """scheduler_enabled=True 但 get_scheduler()=None(启动失败/未启动)→ 跳过。"""
+    async def test_sync_cron_job_records_error_when_no_scheduler_instance(
+        self, monkeypatch
+    ) -> None:
+        """scheduler_enabled=True 但 get_scheduler()=None → 记 error 到 task.logs。"""
         from app.api.v1 import ingest_tasks as routes
 
         monkeypatch.setattr(routes.settings, "scheduler_enabled", True)
+        monkeypatch.setattr(routes.scheduler_mod, "get_scheduler", lambda: None)
 
-        def _none():
-            return None
+        session = _FakeSession()
+        task = _FakeCronTask()
+        await routes._sync_cron_job(session, task)  # 不抛
+        assert session.commits == 1
+        assert any("[ERROR]" in line for line in task.logs)
 
-        monkeypatch.setattr(routes.scheduler_mod, "get_scheduler", _none)
-        routes._sync_cron_job(_FakeCronTask())  # 不抛即通过
-
-    def test_sync_cron_job_swallows_upsert_exception(self, monkeypatch) -> None:
-        """scheduler 抛错时 best-effort 吞掉,不阻断主流程。"""
+    async def test_sync_cron_job_records_error_on_upsert_exception(
+        self, monkeypatch
+    ) -> None:
+        """upsert 抛错 → 不向调用方传播(主流程不阻断),但 task.logs 记 error。"""
         from app.api.v1 import ingest_tasks as routes
 
         monkeypatch.setattr(routes.settings, "scheduler_enabled", True)
-
-        class _Boom:
-            pass
-
-        def _boom_scheduler():
-            return _Boom()
 
         def _boom_upsert(*_a, **_kw):
             raise RuntimeError("simulated jobstore unreachable")
 
-        monkeypatch.setattr(routes.scheduler_mod, "get_scheduler", _boom_scheduler)
+        monkeypatch.setattr(
+            routes.scheduler_mod, "get_scheduler", lambda: object()
+        )
         monkeypatch.setattr(routes.scheduler_mod, "upsert_cron_job", _boom_upsert)
-        # 不抛即通过——best-effort 契约
-        routes._sync_cron_job(_FakeCronTask())
 
-    def test_sync_cron_job_skips_once_mode_task_with_stale_cron(self, monkeypatch) -> None:
+        session = _FakeSession()
+        task = _FakeCronTask()
+        await routes._sync_cron_job(session, task)  # 不抛即通过(主流程不阻断)
+        assert session.commits == 1
+        assert any("[ERROR]" in line for line in task.logs)
+
+    async def test_sync_cron_job_skips_once_mode_task_with_stale_cron(
+        self, monkeypatch
+    ) -> None:
         """once 模式任务即便携带历史 cron 字段也不应建调度作业(回归)。"""
         from app.api.v1 import ingest_tasks as routes
 
         monkeypatch.setattr(routes.settings, "scheduler_enabled", True)
 
-        class _Scheduler:
-            pass
-
         calls: list[int] = []
-        monkeypatch.setattr(routes.scheduler_mod, "get_scheduler", lambda: _Scheduler())
+        monkeypatch.setattr(
+            routes.scheduler_mod, "get_scheduler", lambda: object()
+        )
         monkeypatch.setattr(
             routes.scheduler_mod, "upsert_cron_job", lambda *a, **k: calls.append(1)
         )
 
-        class _OnceTask:
-            id = "task-once"
-            schedule = {"mode": "once", "cron": "0 2 * * *"}
-
-        routes._sync_cron_job(_OnceTask())
+        session = _FakeSession()
+        task = _FakeCronTask()
+        task.schedule = {"mode": "once", "cron": "0 2 * * *"}
+        await routes._sync_cron_job(session, task)
         assert calls == [], "once 模式任务不应触发 upsert_cron_job"
+        assert session.commits == 0
 
-    def test_unsync_cron_job_swallows_remove_exception(self, monkeypatch) -> None:
-        """remove 抛错时 best-effort 吞掉,delete 不应被拖累。"""
+    async def test_unsync_cron_job_records_error_on_remove_exception(
+        self, monkeypatch
+    ) -> None:
+        """remove 抛错 → 不向调用方传播(delete 不被拖累),但传入 task 时记 error。"""
         from app.api.v1 import ingest_tasks as routes
 
         monkeypatch.setattr(routes.settings, "scheduler_enabled", True)
 
-        class _Boom:
-            pass
-
-        def _boom_scheduler():
-            return _Boom()
-
         def _boom_remove(*_a, **_kw):
             raise RuntimeError("simulated jobstore unreachable")
 
-        monkeypatch.setattr(routes.scheduler_mod, "get_scheduler", _boom_scheduler)
+        monkeypatch.setattr(
+            routes.scheduler_mod, "get_scheduler", lambda: object()
+        )
         monkeypatch.setattr(routes.scheduler_mod, "remove_cron_job", _boom_remove)
-        # 不抛即通过——delete 主流程不应被 jobstore 故障拖累
-        routes._unsync_cron_job("task-any")
+
+        session = _FakeSession()
+        task = _FakeCronTask()
+        # 更新路径:传入 task,失败应记到 task.logs 并 commit;不抛(主流程不阻断)
+        await routes._unsync_cron_job(session, "task-any", task)
+        assert session.commits == 1
+        assert any("[ERROR]" in line for line in task.logs)
+
+
+class _FakeSession:
+    """够用的会话替身:只需异步 commit,计数用于断言是否持久化了错误日志。"""
+
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
 
 
 class _FakeCronTask:
-    """够用的任务替身:_sync_cron_job 只读 task.id(用于 log);其他字段不读。"""
+    """够用的任务替身:_sync_cron_job 读 task.id / task.schedule / task.logs。"""
 
-    id = "task-fake"
+    def __init__(self) -> None:
+        self.id = "task-fake"
+        self.schedule = {"mode": "cron", "cron": "0 2 * * *"}
+        self.logs: list[str] = []

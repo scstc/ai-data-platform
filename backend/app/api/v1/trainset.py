@@ -28,6 +28,7 @@ from app.api.v1.jobs import (
     _build_input,
     _build_output,
     _dataset_job_filter,
+    _deleted_dataset_block,
     _item,
     _new_job_id,
     _now,
@@ -85,7 +86,8 @@ async def _start_trainset(
     unknown = [o.name for o in body.operators if oc.get_operator(o.name) is None]
     if unknown:
         return JSONResponse(
-            status_code=400, content={"success": False, "message": f"未知算子:{', '.join(unknown)}"}
+            status_code=400,
+            content={"success": False, "message": f"未知算子:{', '.join(unknown)}"},
         )
     if (block_msg := _trainset_operator_block(body.operators)) is not None:
         return JSONResponse(
@@ -102,6 +104,12 @@ async def _start_trainset(
         return JSONResponse(
             status_code=404, content={"success": False, "message": "数据集版本不存在"}
         )
+    if (
+        blocked_resp := await _deleted_dataset_block(
+            session, input_version.dataset_id
+        )
+    ) is not None:
+        return blocked_resp
 
     # 数据集 ACL:加工消费该数据集,要求 edit 及以上(view 只能查看数据)
     if not await dataset_acl.can_access(
@@ -243,13 +251,15 @@ async def rerun_trainset_job(
         )
     if not job.spec:
         return JSONResponse(
-            status_code=400, content={"success": False, "message": "该任务无可重跑的配置"}
+            status_code=400,
+            content={"success": False, "message": "该任务无可重跑的配置"},
         )
     try:
         spec = TrainsetJobCreate.model_validate(job.spec)
     except ValidationError:
         return JSONResponse(
-            status_code=400, content={"success": False, "message": "任务配置已损坏,无法重跑"}
+            status_code=400,
+            content={"success": False, "message": "任务配置已损坏,无法重跑"},
         )
     return await _start_trainset(session, spec, user=user)
 
@@ -266,7 +276,8 @@ async def stop_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
         )
     if job.state not in ("pending", "running"):
         return JSONResponse(
-            status_code=409, content={"success": False, "message": "任务不在运行中,无法停止"}
+            status_code=409,
+            content={"success": False, "message": "任务不在运行中,无法停止"},
         )
     job_runner.request_cancel(job_id)
     from app.services.engine import terminate_job
@@ -299,7 +310,8 @@ async def delete_trainset_job(job_id: str, session: SessionDep) -> JSONResponse:
         )
     if job.state == "running":
         return JSONResponse(
-            status_code=409, content={"success": False, "message": "任务运行中,无法删除"}
+            status_code=409,
+            content={"success": False, "message": "任务运行中,无法删除"},
         )
     await _delete_trainset_cascade(session, job)
     await session.commit()
@@ -349,8 +361,12 @@ async def get_trainset_report(job_id: str, session: SessionDep) -> JSONResponse:
             operator_chain=[o["name"] for o in spec.get("operators", [])],
             warnings=["任务尚未完成"] if job.state != "success" else [],
         )
-        return JSONResponse(content={"data": empty.model_dump(mode="json"), "success": True})
-    out_dir = Path(settings.datasets_dir) / version.dataset_id / f"v{version.version_no}"
+        return JSONResponse(
+            content={"data": empty.model_dump(mode="json"), "success": True}
+        )
+    out_dir = (
+        Path(settings.datasets_dir) / version.dataset_id / f"v{version.version_no}"
+    )
     report_path = out_dir / "report.json"
     if not report_path.exists():
         return JSONResponse(
@@ -360,6 +376,7 @@ async def get_trainset_report(job_id: str, session: SessionDep) -> JSONResponse:
         raw: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return JSONResponse(
-            status_code=500, content={"success": False, "message": f"报告解析失败:{exc}"}
+            status_code=500,
+            content={"success": False, "message": f"报告解析失败:{exc}"},
         )
     return JSONResponse(content={"data": raw, "success": True})

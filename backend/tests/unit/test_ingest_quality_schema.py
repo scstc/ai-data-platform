@@ -21,7 +21,7 @@ def _base_payload() -> dict:
     return {
         "name": "t-q",
         "datasourceId": "ds-1",
-        "datasetId": "dset-1",
+        "lakeId": "lake-1",
         "schedule": {"mode": "once"},
     }
 

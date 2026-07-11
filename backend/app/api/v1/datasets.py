@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from starlette.background import BackgroundTask
 
 from app.api.deps import current_user, require_admin, require_perm, require_user
@@ -31,6 +33,7 @@ from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
+from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.review_rule import ReviewRule
 from app.models.role import Role
@@ -102,6 +105,8 @@ from app.services.semantic_registry import (
 )
 
 router = APIRouter(tags=["datasets"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.get("/semantic-types")
@@ -234,7 +239,8 @@ async def _dataset_tags_map(
 async def _sync_dataset_tags(
     session: AsyncSession, dataset_id: str, names: list[str]
 ) -> None:
-    """全量替换某数据集的标签:names 去重去空白 → find-or-create Tag → 删旧关联 → 建新。"""
+    """全量替换某数据集的标签:names 去重去空白 → find-or-create Tag → 删旧关联
+    → 建新。"""
     seen: set[str] = set()
     clean: list[str] = []
     for n in names:
@@ -821,7 +827,8 @@ async def dataset_lineage(
 async def _members_of(
     version: DatasetVersion, session: AsyncSession
 ) -> list[DatasetMemberRead]:
-    """枚举版本的成员文件(优先 dataset_version_tables 表成员 → manifest → originals/ → 单一成员)。
+    """枚举版本的成员文件
+    (优先 dataset_version_tables 表成员 → manifest → originals/ → 单一成员)。
     复用于 members 端点与多文件 zip 下载。存储错误抛 ExternalStoreError。"""
     # 数据集优先改造:优先按显式表成员(dataset_version_tables)枚举。
     # 单表数据集 = 恰好一个 "data" 成员;多表 = 各表一个成员。回填后的存量版本
@@ -1069,19 +1076,25 @@ async def delete_version_members(
                 )
             )
             if not shared:
-                bucket, obj_key = ("", key)
                 try:
                     bucket, obj_key = parse_s3_uri(row.storage_uri)
-                except Exception:
-                    pass
-                try:
-                    await remove_object(
-                        cfg,
-                        bucket or settings.storage_minio_datasets_bucket,
-                        obj_key,
-                    )
                 except ExternalStoreError:
-                    pass
+                    # 解析失败(storage_uri 不是合法 s3:// URI):绝不带猜测出的
+                    # bucket/key(此前是降级成默认桶 + 外层 key,可能误删同名的
+                    # 别的对象)去删——跳过本对象删除,只删 DB 行,记错误日志,
+                    # 留给人工核实清理残留对象。
+                    logger.error(
+                        "delete_version_members: 无法解析 storage_uri=%r"
+                        "(version_id=%s, table=%s),跳过对象删除仅删 DB 行",
+                        row.storage_uri,
+                        version_id,
+                        row.table_name,
+                    )
+                else:
+                    try:
+                        await remove_object(cfg, bucket, obj_key)
+                    except ExternalStoreError:
+                        pass
             size_freed += row.size or 0
             await session.delete(row)
             deleted += 1
@@ -1464,7 +1477,8 @@ async def list_datasets(
     ),
     modality: str | None = Query(
         None,
-        description="多模态子分类筛选:image|video|audio|cross(按展示版本 modalities 分类)",
+        description="多模态子分类筛选:image|video|audio|cross"
+        "(按展示版本 modalities 分类)",
     ),
 ) -> PageResponse[DatasetRead]:
     """分页查询数据集,按创建时间倒序;按元数据条件过滤(向后兼容)。
@@ -1800,11 +1814,48 @@ async def _has_hosted_version(session: AsyncSession, dataset_id: str) -> bool:
     return hit is not None
 
 
+async def _blocking_downstream_datasets(
+    session: AsyncSession, dataset_id: str
+) -> list[dict[str, str]]:
+    """本数据集的版本是否被其它「未删」数据集的任务消费为输入(经
+    JobInput→Job→产物版本 反查产物所属数据集)。
+
+    命中即不可硬删:_purge_dataset 会连带删掉本数据集的 DatasetVersion 行,若
+    某个下游数据集的任务曾以它为输入,删除后该任务的血缘边(job_inputs)、
+    任务详情「输入版本」、GET /lineage 展示都会悄悄断链/悬空,且下游数据集
+    本身仍在正常使用(未软删),这种失联对它是不可见的静默损坏。
+    仅未软删的下游数据集才算数(下游自己也在回收站/已彻底清理的不构成阻塞,
+    否则回收站数据集会永久卡住本数据集的删除)。
+
+    返回受影响下游数据集 [{id, name}, ...](已按 id 去重排序),供调用方拼 409
+    提示;空列表即可放行删除。
+    """
+    OutputVersion = aliased(DatasetVersion)
+    stmt = (
+        select(Dataset.id, Dataset.name)
+        .distinct()
+        .join(OutputVersion, OutputVersion.dataset_id == Dataset.id)
+        .join(Job, Job.id == OutputVersion.produced_by_job_id)
+        .join(JobInput, JobInput.job_id == Job.id)
+        .join(DatasetVersion, DatasetVersion.id == JobInput.dataset_version_id)
+        .where(
+            DatasetVersion.dataset_id == dataset_id,
+            Dataset.id != dataset_id,
+            Dataset.deleted_at.is_(None),
+        )
+        .order_by(Dataset.id)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [{"id": did, "name": name} for did, name in rows]
+
+
 async def _purge_dataset(session: AsyncSession, dataset_id: str) -> bool:
     """暂存删除一个数据集(版本 + 表成员 + 血缘边 + 元数据),不 commit;返回是否命中。
 
     注意:本函数只删平台记录,**绝不调用任何 S3 删除**(部署红线,#18)。
     含 hosted 版本时由调用方先行拦截(delete/batch-delete 返回 403),unhost 才允许。
+    调用方须先经 `_blocking_downstream_datasets` 确认无未删下游引用(P0:硬删前
+    必须查跨数据集下游,否则悄悄留下断链的血缘/任务)。
     """
     dataset = await session.get(Dataset, dataset_id)
     if dataset is None:
@@ -1921,6 +1972,15 @@ async def delete_dataset(
             status_code=403,
             content={"success": False, "message": _HOSTED_DELETE_MSG},
         )
+    if blockers := await _blocking_downstream_datasets(session, dataset_id):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": "该数据集版本被其他数据集引用为输入,删除会断血缘,请先处理",
+                "affectedDatasets": blockers,
+            },
+        )
     gc = await _manifest_gc_target(session, dataset_id)
     if not await _purge_dataset(session, dataset_id):
         return JSONResponse(
@@ -1942,12 +2002,25 @@ async def batch_delete_datasets(
     """批量删除数据集,返回实际删除数量。
 
     若任一目标含 hosted 版本 → 整批 403 拒绝(#18:删源禁止),绝不动 S3、不部分删。
+    若任一目标被其他未删数据集的任务引用为输入(会断下游血缘)→ 整批 409 拒绝,
+    与 hosted 校验同口径(先整体校验完再动手,不部分删)。
     """
     for ds_id in body.ids:
         if await _has_hosted_version(session, ds_id):
             return JSONResponse(
                 status_code=403,
                 content={"success": False, "message": _HOSTED_DELETE_MSG},
+            )
+    for ds_id in body.ids:
+        if blockers := await _blocking_downstream_datasets(session, ds_id):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": f"数据集 {ds_id} 版本被其他数据集引用,删除会断血缘",
+                    "datasetId": ds_id,
+                    "affectedDatasets": blockers,
+                },
             )
     deleted: list[str] = []
     gc_targets: list[tuple[str, str]] = []
@@ -2265,10 +2338,12 @@ async def query_version(
     session: SessionDep,
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
-    """对某版本数据跑 DuckDB 只读 SQL,返回 {columns,data,total,success,message?}(形状同 preview)。
+    """对某版本数据跑 DuckDB 只读 SQL,
+    返回 {columns,data,total,success,message?}(形状同 preview)。
 
     - 仅允许 SELECT(关键字黑名单拦截写/结构变更/副作用)。
-    - storage_uri 形态路由同 preview:s3:// → httpfs 直查 MinIO;本地路径 → read_json_auto。
+    - storage_uri 形态路由同 preview:s3:// → httpfs 直查 MinIO;
+      本地路径 → read_json_auto。
     - manifest / 二进制不支持(同 preview 拒绝策略)。
     - 重计算下沉 asyncio.to_thread(仿 quality._scan_stats),不阻塞事件循环。
     """
@@ -2589,6 +2664,15 @@ async def unhost_dataset(dataset_id: str, session: SessionDep) -> JSONResponse:
             content={
                 "success": False,
                 "message": "该数据集不含外部托管版本,请用常规删除",
+            },
+        )
+    if blockers := await _blocking_downstream_datasets(session, dataset_id):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": "该数据集版本被其他数据集引用,取消托管会断血缘,请先处理",
+                "affectedDatasets": blockers,
             },
         )
     # 只删平台引用(版本 + 血缘边 + 元数据);不动 S3 源对象
@@ -3221,7 +3305,8 @@ async def list_dataset_acl(
     session: SessionDep,
     user: Annotated[User, Depends(require_user)],
 ) -> JSONResponse:
-    """列出数据集的授权条目(需 admin 级);subjectName 批量解析显示名,避免前端只拿到 subjectId(UUID)。"""
+    """列出数据集的授权条目(需 admin 级);
+    subjectName 批量解析显示名,避免前端只拿到 subjectId(UUID)。"""
     denied = await _require_acl_admin(session, dataset_id, user)
     if denied is not None:
         return denied
@@ -3237,10 +3322,16 @@ async def list_dataset_acl(
     user_ids = [r.subject_id for r in rows if r.subject_type == "user"]
     role_ids = [r.subject_id for r in rows if r.subject_type == "role"]
     if user_ids:
-        for u in (await session.scalars(select(User).where(User.id.in_(user_ids)))).all():
+        user_rows = await session.scalars(
+            select(User).where(User.id.in_(user_ids))
+        )
+        for u in user_rows.all():
             name_map[("user", u.id)] = u.display_name or u.username
     if role_ids:
-        for rl in (await session.scalars(select(Role).where(Role.id.in_(role_ids)))).all():
+        role_rows = await session.scalars(
+            select(Role).where(Role.id.in_(role_ids))
+        )
+        for rl in role_rows.all():
             name_map[("role", rl.id)] = rl.name
 
     def name_of(r: DatasetAcl) -> str:

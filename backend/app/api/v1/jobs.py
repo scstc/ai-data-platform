@@ -37,7 +37,8 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 def _binary_block(version: DatasetVersion) -> JSONResponse | None:
-    """二进制数据集(图像/音频/视频)无法规范化为 jsonl → 提前 400,不让任务跑起来才失败。"""
+    """二进制数据集(图像/音频/视频)无法规范化为 jsonl
+    → 提前 400,不让任务跑起来才失败。"""
     if version.format in BINARY_FORMATS:
         return JSONResponse(
             status_code=400,
@@ -67,6 +68,25 @@ async def _multimodal_block(version: DatasetVersion) -> JSONResponse | None:
                     "引擎的环境(如 GPU 机)运行"
                 ),
             },
+        )
+    return None
+
+
+async def _deleted_dataset_block(
+    session: AsyncSession, dataset_id: str
+) -> JSONResponse | None:
+    """输入数据集已进回收站(软删)或不存在 → 404,堵「看不见但还在跑」。
+
+    数据集列表/详情已把回收站数据集隐藏(见 datasets.list_datasets/get_dataset 的
+    deleted_at 过滤),质量评估/合并/合成的建任务入口不能绕过这层不可见性继续对它
+    发起新任务——否则出现"数据集在界面上已消失,任务却还能对它跑起来"的矛盾态。
+    仅按 dataset_id 校验(回收站是软删语义,版本行本身仍在库中未必跟随硬删)。
+    """
+    dataset = await session.get(Dataset, dataset_id)
+    if dataset is None or dataset.deleted_at is not None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集已删除或在回收站"},
         )
     return None
 
@@ -319,6 +339,14 @@ async def _reset_for_edit_rerun(
     job.error = None
     job.started_at = None
     job.finished_at = None
+    # worker 模式下 claim_job 只认领 attempts < max_attempts 的 pending 任务:
+    # 若该任务此前已因心跳超时被反复重排耗尽 attempts 才失败,这里不清零就
+    # 会让复位后的 pending 任务永远无人认领,静默卡死(无回收机制兜底)。
+    # claimed_by/heartbeat_at/queued_at 一并清空,避免残留上一轮认领信息。
+    job.attempts = 0
+    job.claimed_by = None
+    job.heartbeat_at = None
+    job.queued_at = None
     await session.execute(delete(JobInput).where(JobInput.job_id == job.id))
 
 
@@ -339,7 +367,10 @@ async def _start_job(
     if body.member_configs and body.operators:
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": "不能同时指定 memberConfigs 和 operators"}
+            content={
+                "success": False,
+                "message": "不能同时指定 memberConfigs 和 operators",
+            },
         )
 
     if not body.member_configs and not body.operators:
@@ -391,13 +422,19 @@ async def _start_job(
             if cfg.member_name not in member_names:
                 return JSONResponse(
                     status_code=400,
-                    content={"success": False, "message": f"成员不存在: {cfg.member_name}"}
+                    content={
+                        "success": False,
+                        "message": f"成员不存在: {cfg.member_name}",
+                    },
                 )
 
             if not cfg.operators:
                 return JSONResponse(
                     status_code=400,
-                    content={"success": False, "message": f"成员 {cfg.member_name} 未指定算子"}
+                    content={
+                        "success": False,
+                        "message": f"成员 {cfg.member_name} 未指定算子",
+                    },
                 )
 
             # 校验算子存在性
@@ -406,7 +443,12 @@ async def _start_job(
             if unknown:
                 return JSONResponse(
                     status_code=400,
-                    content={"success": False, "message": f"成员 {cfg.member_name} 包含未知算子: {', '.join(unknown)}"}
+                    content={
+                        "success": False,
+                        "message": (
+                            f"成员 {cfg.member_name} 包含未知算子: {', '.join(unknown)}"
+                        ),
+                    },
                 )
 
     # 校验 operators（旧版统一配置模式）
@@ -455,7 +497,9 @@ async def _start_job(
     elif body.operators:
         all_operators = body.operators
 
-    if all_operators and (blocked_resp := _operator_block(all_operators, input_version)) is not None:
+    if all_operators and (
+        blocked_resp := _operator_block(all_operators, input_version)
+    ) is not None:
         return blocked_resp
 
     # G6:请求 Ray 分布式但环境未就绪(未开启 / DJ venv 未装 ray)→ 提前 400,
@@ -594,9 +638,21 @@ async def stop_job(job_id: str, session: SessionDep) -> JSONResponse:
         # (review 纯计算/LLM)→ 取消后台协程。pending 靠起跑前意图检查,无需取消。
         if not terminate_job(job_id) and was_running:
             job_runner.cancel_running_task(job_id)
-    job.state = "cancelled"
-    job.finished_at = _now()
+    # CAS:上面的 get() 到这里之间,后台可能已把任务收敛为终态(如 success/failed)——
+    # 无条件写 state="cancelled" 会覆盖真实产出信息(TOCTOU)。改用条件 UPDATE,
+    # 只有仍处于可停止状态时才落地;rowcount=0 说明已被后台抢先收尾,回 409 而不
+    # 覆盖它的真实终态。
+    result = await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.state.in_(("pending", "running", "paused")))
+        .values(state="cancelled", finished_at=_now())
+    )
     await session.commit()
+    if result.rowcount == 0:
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务已结束,无需停止"},
+        )
     return JSONResponse(content={"success": True})
 
 
@@ -625,9 +681,18 @@ async def pause_job(job_id: str, session: SessionDep) -> JSONResponse:
     job_runner.request_pause(job_id)
     if not terminate_job(job_id) and was_running:
         job_runner.cancel_running_task(job_id)
-    job.state = "paused"
-    job.finished_at = _now()
+    # CAS(同 stop_job):防上面 get() 到此刻之间任务被后台收敛为终态时无条件覆写。
+    result = await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.state.in_(("pending", "running")))
+        .values(state="paused", finished_at=_now())
+    )
     await session.commit()
+    if result.rowcount == 0:
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "任务不在运行中,无法暂停"},
+        )
     return JSONResponse(content={"success": True})
 
 
@@ -661,6 +726,13 @@ async def resume_job(job_id: str, session: SessionDep) -> JSONResponse:
     job.error = None
     job.started_at = None
     job.finished_at = None
+    # 同 _reset_for_edit_rerun:清零 attempts,否则此前因心跳超时被反复重排
+    # 耗尽 attempts 才失败的任务,复位后会因 attempts>=max_attempts 永远无
+    # worker 认领(worker 模式下 API 进程不再跑 reconcile_orphans 兜底)。
+    job.attempts = 0
+    job.claimed_by = None
+    job.heartbeat_at = None
+    job.queued_at = None
     await session.commit()
     await session.refresh(job)
     job_runner.spawn(job.id)
@@ -701,7 +773,7 @@ async def delete_job(job_id: str, session: SessionDep) -> JSONResponse:
 
     清掉该任务的血缘边(job_inputs),并把它产出版本的 produced_by_job_id 置空——
     产出的数据集版本作为独立资产保留(可能已发布 / 被下游引用,有独立删除入口)。
-    运行中的任务不可删 → 409;未知任务 → 404。
+    运行中/排队中的任务不可删(请先停止)→ 409;未知任务 → 404。
     """
     job = await session.get(Job, job_id)
     if job is None:
@@ -709,10 +781,14 @@ async def delete_job(job_id: str, session: SessionDep) -> JSONResponse:
             status_code=404,
             content={"success": False, "message": "任务不存在"},
         )
-    if job.state == "running":
+    # pending 也一并拒删(不止 running):后台协程可能在本次 get() 之后、级联删除
+    # 执行之前把这个排队中的任务捞起来跑(pending→running),届时 job_runner 仍持有
+    # 该 Job 行的引用去更新状态/写 job_inputs,而行已被删 → FK/UPDATE 撞空。终态
+    # 任务不存在此竞态(job_runner 不会再碰它),故只需堵 pending/running 两态。
+    if job.state in ("running", "pending"):
         return JSONResponse(
             status_code=409,
-            content={"success": False, "message": "任务运行中,无法删除"},
+            content={"success": False, "message": "任务运行中或排队中,请先停止再删除"},
         )
     await _delete_job_cascade(session, job)
     await session.commit()
@@ -731,12 +807,12 @@ async def batch_delete_jobs(
 ) -> JSONResponse:
     """批量删除加工任务记录,返回实际删除数量(只删任务,产物版本保留)。
 
-    删除语义同单条 delete;运行中或不存在的任务自动跳过(不阻断整批)。
+    删除语义同单条 delete;运行中/排队中或不存在的任务自动跳过(不阻断整批)。
     """
     deleted = 0
     for job_id in body.ids:
         job = await session.get(Job, job_id)
-        if job is None or job.state == "running":
+        if job is None or job.state in ("running", "pending"):
             continue
         await _delete_job_cascade(session, job)
         deleted += 1

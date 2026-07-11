@@ -45,19 +45,17 @@ def _datasets_dir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_push_state() -> None:
-    """每用例清空 push 端点的内存限流/幂等状态,避免跨用例串味。
+    """每用例清空 push 端点的内存限流状态,避免跨用例串味。
 
-    限流 / 幂等键都是模块级 dict;不清会让上一个用例的计数/键漏进下一个,
-    导致 429/幂等断言飘。
+    限流计数仍是模块级 dict(进程内);不清会让上一个用例的计数漏进下一个,
+    导致 429 断言飘。幂等键已迁到 push_idempotency 表(迁移 0069),由 conftest
+    的函数级 create_all/drop_all 天然隔离,无需在此手动清理。
     """
     from app.api.v1 import ingest_push
-    from app.services.connectors import push as push_svc
 
     ingest_push._rate_state.clear()
-    push_svc._idempotency_cache.clear()
     yield
     ingest_push._rate_state.clear()
-    push_svc._idempotency_cache.clear()
 
 
 async def _create_api_datasource(

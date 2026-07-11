@@ -12,12 +12,12 @@ mode='synthesize' 保留:走 data-juicer LLM Mapper 链(存量任务重跑/流�
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -25,7 +25,6 @@ from app.models.dataset import Dataset
 from app.models.dataset_version import DatasetVersion
 from app.models.job_input import JobInput
 from app.schemas.make import MakeGoal, MakeReport
-from app.services.external_store import upload_file_to_datasets
 from app.services.engine import (
     EngineError,
     _new_version_id,
@@ -35,11 +34,32 @@ from app.services.engine import (
     detect_text_key,
     materialized_version,
 )
+from app.services.external_store import upload_file_to_datasets
+from app.services.version_alloc import with_version_conflict_retry
 
+logger = logging.getLogger(__name__)
 
 # 视为句末标点的分隔符:片段先去尾重复,再在整段结尾补一个,
 # 使产物形如「片段A。片段B。」(见需求示例);空格/换行等分隔符不补尾。
 _TERMINAL_SEPARATORS = ("。", ".", "!", "?", "！", "？", ";", "；")
+
+
+async def _write_job_warnings(
+    session: AsyncSession, job_id: str, warnings: list[str]
+) -> None:
+    """把 warnings 写进 Job.warnings(契约 C),不只是埋在 MakeReport.raw 里。
+
+    merge/concat 是纯 Python 路径,没有像 review_runner 那样收一个活的
+    Job 对象,这里按 job_id 现查一次;查不到(理论上不会,job 先于 runner
+    创建)则跳过,不因此让整个任务失败。
+    """
+    if not warnings:
+        return
+    from app.models.job import Job
+
+    job_row = await session.get(Job, job_id)
+    if job_row is not None:
+        job_row.warnings = [*(job_row.warnings or []), *warnings]
 
 
 def _fragment(row: dict[str, Any], field: str, terminal: str) -> str | None:
@@ -182,8 +202,8 @@ async def _run_merge_job(
     from app.services.engine import (
         _get_member_output_path,
         _get_version_members,
-        _materialize_member,
         _new_member_id,
+        materialized_member,
     )
     from app.services.external_store import upload_jsonl_member
 
@@ -199,12 +219,12 @@ async def _run_merge_job(
     # 读入各成员并校验合并字段确为共同字段(抽样前 50 行)
     named_rows: list[tuple[str, list[dict[str, Any]]]] = []
     for n in names:
-        path = await _materialize_member(session, by_name[n])
-        rows = [
-            json.loads(line)
-            for line in path.open(encoding="utf-8")
-            if line.strip()
-        ]
+        async with materialized_member(session, by_name[n]) as path:
+            rows = [
+                json.loads(line)
+                for line in path.open(encoding="utf-8")
+                if line.strip()
+            ]
         sampled_fields = sorted({k for r in rows[:50] for k in r})
         if field not in sampled_fields:
             raise EngineError(
@@ -220,63 +240,95 @@ async def _run_merge_job(
 
     merged, warnings = merge_records(named_rows, field, separator, key_field)
 
-    # 落盘 + 上传:产物成员沿用主文件名
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
+    # 产物成员沿用主文件名;合并内容已在内存中算好,与版本号无关
     primary_name = names[0]
-    out_path = _get_member_output_path(dataset_id, new_vno, primary_name, "jsonl")
     data_bytes = "".join(
         json.dumps(r, ensure_ascii=False) + "\n" for r in merged
     ).encode("utf-8")
-    out_path.write_bytes(data_bytes)
-    storage_uri = await upload_jsonl_member(
-        dataset_id, new_vno, primary_name, data_bytes
-    )
 
-    new_members_data: list[dict[str, Any]] = [
-        {
-            "table_name": primary_name,
-            "storage_uri": storage_uri,
-            "format": "jsonl",
-            "rows": len(merged),
-            "size": len(data_bytes),
-            "schema_variant": by_name[primary_name].schema_variant,
-        }
-    ]
     # 写回输入同数据集时,未参与合并的成员原样结转(被合并的扩展文件已并入主文件)
     from app.models.dataset_version_table import DatasetVersionTable
     from app.services.engine import carry_over_members
 
-    if dataset_id == input_version.dataset_id:
-        new_members_data += carry_over_members(members, set(names))
-
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=f"s3://{settings.storage_minio_datasets_bucket}/{dataset_id}/v{new_vno}/",
-        format="multi" if len(new_members_data) > 1 else "jsonl",
-        rows=sum(m["rows"] or 0 for m in new_members_data),
-        size=sum(m["size"] or 0 for m in new_members_data),
-        origin="synthetic",
-        produced_by_job_id=job_id,
-        note=goal.note
-        or f"合并产出({' + '.join(names)},来自 v{input_version.version_no})",
+    carried = (
+        carry_over_members(members, set(names))
+        if dataset_id == input_version.dataset_id
+        else []
     )
-    session.add(version)
-    await session.flush()
-    for m_data in new_members_data:
+    total_rows = len(merged) + sum(m["rows"] or 0 for m in carried)
+    total_size = len(data_bytes) + sum(m["size"] or 0 for m in carried)
+
+    # 占版本号(uq_dataset_version_no 冲突自动重试)→ 落盘/上传主文件 → 成员行 →
+    # 单事务提交。先占号再上传,storage_uri 的 v<n> 前缀与实际占到的版本号一致
+    async def _build_version(version_no: int) -> DatasetVersion:
+        v = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=(
+                f"s3://{settings.storage_minio_datasets_bucket}"
+                f"/{dataset_id}/v{version_no}/"
+            ),
+            format="multi" if carried else "jsonl",
+            rows=total_rows,
+            size=total_size,
+            origin="synthetic",
+            produced_by_job_id=job_id,
+            note=goal.note
+            or f"合并产出({' + '.join(names)},来自 v{input_version.version_no})",
+        )
+        session.add(v)
+        return v
+
+    version = await with_version_conflict_retry(session, dataset_id, _build_version)
+    new_vno = version.version_no
+    out_path = _get_member_output_path(dataset_id, new_vno, primary_name, "jsonl")
+    out_path.write_bytes(data_bytes)
+    try:
+        storage_uri = await upload_jsonl_member(
+            dataset_id, new_vno, primary_name, data_bytes
+        )
         session.add(
             DatasetVersionTable(
-                id=_new_member_id(), dataset_version_id=version.id, **m_data
+                id=_new_member_id(),
+                dataset_version_id=version.id,
+                table_name=primary_name,
+                storage_uri=storage_uri,
+                format="jsonl",
+                rows=len(merged),
+                size=len(data_bytes),
+                schema_variant=by_name[primary_name].schema_variant,
             )
         )
-    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
-    await session.commit()
+        for m_data in carried:
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(), dataset_version_id=version.id, **m_data
+                )
+            )
+        session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+        # 契约 C:行号对齐丢行/缺失行等 warnings 同步进 Job.warnings,
+        # 不只是埋在下方 MakeReport.raw 里等着被忽略
+        await _write_job_warnings(session, job_id, warnings)
+        await session.commit()
+    except BaseException:
+        await session.rollback()
+        try:
+            from app.services.external_store import platform_config, remove_prefix
+
+            await remove_prefix(
+                platform_config(),
+                settings.storage_minio_datasets_bucket,
+                f"{dataset_id}/v{new_vno}/",
+            )
+        except Exception:  # noqa: BLE001 清理失败不掩盖原始错误,但必须留痕
+            logger.warning(
+                "job %s 回滚后清理 v%s 前缀残留对象失败,可能留下孤儿对象",
+                job_id,
+                new_vno,
+                exc_info=True,
+            )
+        raise
     await session.refresh(version)
 
     # 配置回显(job.config_yaml)与日志/报告
@@ -353,8 +405,8 @@ async def _run_concat_job(
     from app.services.engine import (
         _get_member_output_path,
         _get_version_members,
-        _materialize_member,
         _new_member_id,
+        materialized_member,
     )
     from app.services.external_store import upload_jsonl_member
 
@@ -369,74 +421,118 @@ async def _run_concat_job(
 
     named_rows: list[tuple[str, list[dict[str, Any]]]] = []
     for n in names:
-        path = await _materialize_member(session, by_name[n])
-        rows = [
-            json.loads(line)
-            for line in path.open(encoding="utf-8")
-            if line.strip()
-        ]
+        async with materialized_member(session, by_name[n]) as path:
+            rows = [
+                json.loads(line)
+                for line in path.open(encoding="utf-8")
+                if line.strip()
+            ]
         named_rows.append((n, rows))
 
     merged: list[dict[str, Any]] = []
     for _n, rows in named_rows:
         merged.extend(rows)
 
-    # 落盘 + 上传:产物成员沿用第一个成员的文件名
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
+    # concat 纵向堆叠、不拼字段:各成员字段不一致时产物行形状不一(有的行有
+    # 该字段有的没有),抽样前 50 行按主文件对比,点名差异字段(不阻断任务,
+    # 只作 warning——concat 本就允许成员字段不完全相同)
+    warnings: list[str] = []
+    primary_fields = {k for r in named_rows[0][1][:50] for k in r}
+    for n, rows in named_rows[1:]:
+        diff = ({k for r in rows[:50] for k in r}) ^ primary_fields
+        if diff:
+            warnings.append(
+                f"成员 {n} 与主文件 {names[0]} 字段不一致:{', '.join(sorted(diff))}"
+            )
+
+    # 产物成员沿用第一个成员的文件名;追加内容已在内存中算好,与版本号无关
     primary_name = names[0]
-    out_path = _get_member_output_path(dataset_id, new_vno, primary_name, "jsonl")
     data_bytes = "".join(
         json.dumps(r, ensure_ascii=False) + "\n" for r in merged
     ).encode("utf-8")
-    out_path.write_bytes(data_bytes)
-    storage_uri = await upload_jsonl_member(
-        dataset_id, new_vno, primary_name, data_bytes
-    )
 
-    new_members_data: list[dict[str, Any]] = [
-        {
-            "table_name": primary_name,
-            "storage_uri": storage_uri,
-            "format": "jsonl",
-            "rows": len(merged),
-            "size": len(data_bytes),
-            "schema_variant": by_name[primary_name].schema_variant,
-        }
-    ]
     from app.models.dataset_version_table import DatasetVersionTable
     from app.services.engine import carry_over_members
 
-    if dataset_id == input_version.dataset_id:
-        new_members_data += carry_over_members(members, set(names))
-
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=f"s3://{settings.storage_minio_datasets_bucket}/{dataset_id}/v{new_vno}/",
-        format="multi" if len(new_members_data) > 1 else "jsonl",
-        rows=sum(m["rows"] or 0 for m in new_members_data),
-        size=sum(m["size"] or 0 for m in new_members_data),
-        origin="synthetic",
-        produced_by_job_id=job_id,
-        note=goal.note
-        or f"追加合并产出({' + '.join(names)},来自 v{input_version.version_no})",
+    carried = (
+        carry_over_members(members, set(names))
+        if dataset_id == input_version.dataset_id
+        else []
     )
-    session.add(version)
-    await session.flush()
-    for m_data in new_members_data:
+    total_rows = len(merged) + sum(m["rows"] or 0 for m in carried)
+    total_size = len(data_bytes) + sum(m["size"] or 0 for m in carried)
+
+    # 占版本号(uq_dataset_version_no 冲突自动重试)→ 落盘/上传主文件 → 成员行 →
+    # 单事务提交。先占号再上传,storage_uri 的 v<n> 前缀与实际占到的版本号一致
+    async def _build_version(version_no: int) -> DatasetVersion:
+        v = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=(
+                f"s3://{settings.storage_minio_datasets_bucket}"
+                f"/{dataset_id}/v{version_no}/"
+            ),
+            format="multi" if carried else "jsonl",
+            rows=total_rows,
+            size=total_size,
+            origin="synthetic",
+            produced_by_job_id=job_id,
+            note=goal.note
+            or f"追加合并产出({' + '.join(names)},来自 v{input_version.version_no})",
+        )
+        session.add(v)
+        return v
+
+    version = await with_version_conflict_retry(session, dataset_id, _build_version)
+    new_vno = version.version_no
+    out_path = _get_member_output_path(dataset_id, new_vno, primary_name, "jsonl")
+    out_path.write_bytes(data_bytes)
+    try:
+        storage_uri = await upload_jsonl_member(
+            dataset_id, new_vno, primary_name, data_bytes
+        )
         session.add(
             DatasetVersionTable(
-                id=_new_member_id(), dataset_version_id=version.id, **m_data
+                id=_new_member_id(),
+                dataset_version_id=version.id,
+                table_name=primary_name,
+                storage_uri=storage_uri,
+                format="jsonl",
+                rows=len(merged),
+                size=len(data_bytes),
+                schema_variant=by_name[primary_name].schema_variant,
             )
         )
-    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
-    await session.commit()
+        for m_data in carried:
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(), dataset_version_id=version.id, **m_data
+                )
+            )
+        session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+        # 契约 C:成员字段不一致等 warnings 同步进 Job.warnings,不只是埋在
+        # 下方 MakeReport.raw 里等着被忽略
+        await _write_job_warnings(session, job_id, warnings)
+        await session.commit()
+    except BaseException:
+        await session.rollback()
+        try:
+            from app.services.external_store import platform_config, remove_prefix
+
+            await remove_prefix(
+                platform_config(),
+                settings.storage_minio_datasets_bucket,
+                f"{dataset_id}/v{new_vno}/",
+            )
+        except Exception:  # noqa: BLE001 清理失败不掩盖原始错误,但必须留痕
+            logger.warning(
+                "job %s 回滚后清理 v%s 前缀残留对象失败,可能留下孤儿对象",
+                job_id,
+                new_vno,
+                exc_info=True,
+            )
+        raise
     await session.refresh(version)
 
     yaml_text = yaml.safe_dump(
@@ -449,6 +545,7 @@ async def _run_concat_job(
         f"concat 模式(追加合并):{' + '.join(names)}",
         *(f"输入 {n}: {len(rows)} 行" for n, rows in named_rows),
         f"输出 {primary_name}: {len(merged)} 行",
+        *warnings,
     ]
     log_path = out_dir / "run.log"
     log_path.write_text("\n".join(log_lines), encoding="utf-8")
@@ -464,7 +561,7 @@ async def _run_concat_job(
         # 合并没有"扩增比"概念(不造新数据),expansion_ratio 留空
         elapsed_seconds=round(time.time() - started, 2),
         operator_chain=[],
-        warnings=[],
+        warnings=warnings,
         raw={
             "goal": goal.model_dump(mode="json"),
             "input_rows": {n: len(rows) for n, rows in named_rows},
@@ -498,7 +595,8 @@ async def run_make_job(
     goal: 全局合成目标参数（不按成员区分）
     llm_snapshot(可复现凭证):透传给 build_config/_run_dj(merge/concat 模式不
     走 DJ,不涉及);None 时行为不变。
-    产物 origin='synthetic',返回 (新版本, yaml 文本, 日志路径, 报告)。失败抛 EngineError。
+    产物 origin='synthetic',返回 (新版本, yaml 文本, 日志路径, 报告)。
+    失败抛 EngineError。
     """
     # merge/concat 模式:纯 Python 处理,不走下方 DJ 算子链
     if goal.mode == "merge":
@@ -537,6 +635,7 @@ async def run_make_job(
             operators=operators,
             goal=goal,
             output_dataset_id=output_dataset_id,
+            text_keys=text_keys,
             llm_snapshot=llm_snapshot,
         )
 
@@ -560,23 +659,18 @@ async def run_make_job(
             for m in members_to_process
         }
 
-    # 3. 创建新版本目录
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
-    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
+    # 3. 本地处理目录:按 job_id 命名,与版本号解耦——版本号要等全部成员
+    #    处理成功后才占用(见下方阶段二),避免"处理时先猜号、后占号时撞车"
+    #    导致 storage_uri 里的 v<n> 前缀和实际占到的版本号对不上
+    out_dir = Path(settings.datasets_dir) / dataset_id / f"job-{job_id}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
 
-    # 4. 对每个成员独立处理
+    # 4. 对每个成员独立处理(本阶段只跑 dj-process 落本地,不占版本号、不传对象存储)
     from app.services.engine import (
-        _get_member_output_path,
-        _materialize_member,
         _new_member_id,
+        materialized_member,
     )
     from app.services.external_store import (
         upload_jsonl_member,
@@ -586,130 +680,178 @@ async def run_make_job(
 
     all_logs: list[str] = []
     all_yamls: list[str] = []
-    new_members_data: list[dict[str, Any]] = []
+    products: list[dict[str, Any]] = []  # 阶段一产出;阶段二占号后统一上传
     total_input_count = 0
-    total_output_count = 0
     all_operator_names: list[str] = []
 
     for member in members_to_process:
         member_cfg = config_map[member.table_name]
         member_operators = member_cfg["operators"]
 
-        # 物化成员文件
-        input_path = await _materialize_member(session, member)
-
-        # 输出路径
-        out_format = member.format if member.format in ("parquet", "jsonl") else "jsonl"
-        output_path = _get_member_output_path(
-            dataset_id, new_vno, member.table_name, out_format
-        )
-        yaml_path = out_dir / f"{member.table_name}_job.yaml"
-
-        # 构建 DJ 配置（合成用 dj-process）
-        cfg = build_config(
-            project_name=f"{job_id}-{member.table_name}",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            operators=member_operators,
-            llm_snapshot=llm_snapshot,
-        )
-        yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
-        yaml_path.write_text(yaml_content, encoding="utf-8")
-
-        all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
-
-        # 计数输入行
-        if input_path.suffix == ".jsonl":
-            member_input_count = sum(
-                1 for line in input_path.open(encoding="utf-8") if line.strip()
+        # 物化成员文件(async with 兜底:s3 来源的临时落地文件退出时自动清理)
+        async with materialized_member(session, member) as input_path:
+            # 输出路径(本地,job_id 目录下,版本号未知阶段)
+            out_format = (
+                member.format if member.format in ("parquet", "jsonl") else "jsonl"
             )
-        else:
-            # parquet
-            member_input_count = len(parquet_bytes_to_records(input_path.read_bytes()))
-        total_input_count += member_input_count
+            output_path = out_dir / f"{member.table_name}.{out_format}"
+            yaml_path = out_dir / f"{member.table_name}_job.yaml"
 
-        # 运行 dj-process
-        code, log = await _run_dj(
-            yaml_path,
-            job_id=f"{job_id}-{member.table_name}",
-            llm_snapshot=llm_snapshot,
-        )
+            # 构建 DJ 配置（合成用 dj-process）
+            cfg = build_config(
+                project_name=f"{job_id}-{member.table_name}",
+                input_path=str(input_path),
+                output_path=str(output_path),
+                operators=member_operators,
+                llm_snapshot=llm_snapshot,
+            )
+            yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+            yaml_path.write_text(yaml_content, encoding="utf-8")
 
-        operator_names = [op["name"] for op in member_operators]
-        all_logs.append(
-            f"=== {member.table_name} ===\n算子: {operator_names}\n输入: {member_input_count} 行\n{log}"
-        )
-        all_operator_names.extend(operator_names)
+            all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
 
-        if code != 0 or not output_path.exists():
-            tail = "\n".join(log.strip().splitlines()[-8:])
-            raise EngineError(
-                f"成员 {member.table_name} 合成失败(dj-process 退出码 {code})\n{tail}"
+            # 计数输入行
+            if input_path.suffix == ".jsonl":
+                member_input_count = sum(
+                    1 for line in input_path.open(encoding="utf-8") if line.strip()
+                )
+            else:
+                # parquet
+                member_input_count = len(
+                    parquet_bytes_to_records(input_path.read_bytes())
+                )
+            total_input_count += member_input_count
+
+            # 运行 dj-process
+            code, log = await _run_dj(
+                yaml_path,
+                job_id=f"{job_id}-{member.table_name}",
+                llm_snapshot=llm_snapshot,
             )
 
-        # 上传产出文件
-        if out_format == "parquet":
-            data_bytes = output_path.read_bytes()
-            storage_uri = await upload_parquet_member(
-                dataset_id, new_vno, member.table_name, data_bytes
+            operator_names = [op["name"] for op in member_operators]
+            all_logs.append(
+                f"=== {member.table_name} ===\n算子: {operator_names}\n"
+                f"输入: {member_input_count} 行\n{log}"
             )
-            rows = len(parquet_bytes_to_records(data_bytes))
-        else:
-            data_bytes = output_path.read_bytes()
-            storage_uri = await upload_jsonl_member(
-                dataset_id, new_vno, member.table_name, data_bytes
-            )
-            rows = sum(
-                1 for line in output_path.open(encoding="utf-8") if line.strip()
+            all_operator_names.extend(operator_names)
+
+            if code != 0 or not output_path.exists():
+                tail = "\n".join(log.strip().splitlines()[-8:])
+                raise EngineError(
+                    f"成员 {member.table_name} 合成失败"
+                    f"(dj-process 退出码 {code})\n{tail}"
+                )
+
+            # 阶段一只落本地,不传对象存储(见下方阶段二统一上传)
+            if out_format == "parquet":
+                rows = len(parquet_bytes_to_records(output_path.read_bytes()))
+            else:
+                rows = sum(
+                    1 for line in output_path.open(encoding="utf-8") if line.strip()
+                )
+
+            products.append(
+                {
+                    "member": member,
+                    "out_format": out_format,
+                    "out_path": output_path,
+                    "rows": rows,
+                    "size": output_path.stat().st_size,
+                }
             )
 
-        total_output_count += rows
+    total_output_count = sum(p["rows"] for p in products)
 
-        new_members_data.append(
-            {
-                "table_name": member.table_name,
-                "storage_uri": storage_uri,
-                "format": out_format,
-                "rows": rows,
-                "size": len(data_bytes),
-                "schema_variant": member.schema_variant,
-            }
-        )
-
-    # 5. 创建新版本和成员记录;写回输入同数据集时,未处理成员原样结转
-    #    (跨数据集输出时不结转:输出集的版本只承载合成产物)
+    # 5. 占版本号(uq_dataset_version_no 冲突自动重试)→ 上传产物 → 成员行 →
+    #    单事务提交。先占号再上传:storage_uri 的 v<n> 前缀与实际占到的版本号
+    #    保证一致。写回输入同数据集时,未处理成员原样结转(跨数据集输出时不
+    #    结转:输出集的版本只承载合成产物)
     from app.models.dataset_version_table import DatasetVersionTable
     from app.services.engine import carry_over_members
 
-    if dataset_id == input_version.dataset_id:
-        new_members_data += carry_over_members(
-            members, {m.table_name for m in members_to_process}
-        )
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=f"s3://{settings.storage_minio_datasets_bucket}/{dataset_id}/v{new_vno}/",
-        format="multi" if len(new_members_data) > 1 else new_members_data[0]["format"],
-        rows=sum(m["rows"] or 0 for m in new_members_data),
-        size=sum(m["size"] or 0 for m in new_members_data),
-        origin="synthetic",
-        produced_by_job_id=job_id,
-        note=f"合成产出(来自 v{input_version.version_no})",
+    carried = (
+        carry_over_members(members, {m.table_name for m in members_to_process})
+        if dataset_id == input_version.dataset_id
+        else []
     )
-    session.add(version)
-    await session.flush()
+    total_size = sum(p["size"] for p in products) + sum(
+        m["size"] or 0 for m in carried
+    )
+    total_rows = total_output_count + sum(m["rows"] or 0 for m in carried)
+    member_count = len(products) + len(carried)
 
-    for m_data in new_members_data:
-        member_rec = DatasetVersionTable(
-            id=_new_member_id(),
-            dataset_version_id=version.id,
-            **m_data,
+    async def _build_version(version_no: int) -> DatasetVersion:
+        v = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=(
+                f"s3://{settings.storage_minio_datasets_bucket}"
+                f"/{dataset_id}/v{version_no}/"
+            ),
+            format="multi" if member_count > 1 else products[0]["out_format"],
+            rows=total_rows,
+            size=total_size,
+            origin="synthetic",
+            produced_by_job_id=job_id,
+            note=f"合成产出(来自 v{input_version.version_no})",
         )
-        session.add(member_rec)
+        session.add(v)
+        return v
 
-    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
-    await session.commit()
+    version = await with_version_conflict_retry(session, dataset_id, _build_version)
+    new_vno = version.version_no
+    try:
+        for p in products:
+            member = p["member"]
+            data_bytes = p["out_path"].read_bytes()
+            if p["out_format"] == "parquet":
+                storage_uri = await upload_parquet_member(
+                    dataset_id, new_vno, member.table_name, data_bytes
+                )
+            else:
+                storage_uri = await upload_jsonl_member(
+                    dataset_id, new_vno, member.table_name, data_bytes
+                )
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(),
+                    dataset_version_id=version.id,
+                    table_name=member.table_name,
+                    storage_uri=storage_uri,
+                    format=p["out_format"],
+                    rows=p["rows"],
+                    size=p["size"],
+                    schema_variant=member.schema_variant,
+                )
+            )
+        for m_data in carried:
+            session.add(
+                DatasetVersionTable(
+                    id=_new_member_id(), dataset_version_id=version.id, **m_data
+                )
+            )
+        session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+        await session.commit()
+    except BaseException:
+        await session.rollback()
+        try:
+            from app.services.external_store import platform_config, remove_prefix
+
+            await remove_prefix(
+                platform_config(),
+                settings.storage_minio_datasets_bucket,
+                f"{dataset_id}/v{new_vno}/",
+            )
+        except Exception:  # noqa: BLE001 清理失败不掩盖原始错误,但必须留痕
+            logger.warning(
+                "job %s 回滚后清理 v%s 前缀残留对象失败,可能留下孤儿对象",
+                job_id,
+                new_vno,
+                exc_info=True,
+            )
+        raise
     await session.refresh(version)
 
     # 6. 汇总日志和YAML
@@ -765,6 +907,7 @@ async def _run_make_job_legacy(
     operators: list[dict[str, Any]] | None = None,
     goal: MakeGoal,
     output_dataset_id: str | None = None,
+    text_keys: list[str] | None = None,
     llm_snapshot: dict[str, str | None] | None = None,
 ) -> tuple[DatasetVersion, str, str, MakeReport]:
     """旧版单文件合成逻辑（无成员表的版本）。"""
@@ -773,13 +916,9 @@ async def _run_make_job_legacy(
 
     dataset_id = output_dataset_id or input_version.dataset_id
 
-    max_vno = await session.scalar(
-        select(func.max(DatasetVersion.version_no)).where(
-            DatasetVersion.dataset_id == dataset_id
-        )
-    )
-    new_vno = (max_vno or 0) + 1
-    out_dir = Path(settings.datasets_dir) / dataset_id / f"v{new_vno}"
+    # 本地处理目录按 job_id 命名,与版本号解耦——版本号等 dj-process 成功后
+    # 才占用(见下方),避免"先猜号处理、后占号时撞车"导致 storage_uri 对不上
+    out_dir = Path(settings.datasets_dir) / dataset_id / f"job-{job_id}"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "data.jsonl"
     yaml_path = out_dir / "job.yaml"
@@ -806,7 +945,8 @@ async def _run_make_job_legacy(
         yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
         yaml_path.write_text(yaml_text, encoding="utf-8")
 
-        input_count = sum(1 for line in Path(input_path).open(encoding="utf-8") if line.strip())
+        with Path(input_path).open(encoding="utf-8") as f:
+            input_count = sum(1 for line in f if line.strip())
         code, log = await _run_dj(yaml_path, job_id=job_id, llm_snapshot=llm_snapshot)
     log_path.write_text(log, encoding="utf-8")
 
@@ -815,23 +955,54 @@ async def _run_make_job_legacy(
         raise EngineError(f"dj-process 退出码 {code}\n{tail}")
 
     rows = sum(1 for line in out_path.open(encoding="utf-8") if line.strip())
-    # 产出上传 MinIO(治理产出持久化到对象存储;读路径已按 s3:// 走)
-    storage_uri = await upload_file_to_datasets(dataset_id, new_vno, out_path)
-    version = DatasetVersion(
-        id=_new_version_id(),
-        dataset_id=dataset_id,
-        version_no=new_vno,
-        storage_uri=storage_uri,
-        format="jsonl",
-        rows=rows,
-        size=out_path.stat().st_size,
-        origin="synthetic",
-        produced_by_job_id=job_id,
-        note=f"合成产出(来自 v{input_version.version_no},job={job_id})",
-    )
-    session.add(version)
-    session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
-    await session.commit()
+    size = out_path.stat().st_size
+
+    # 占版本号(uq_dataset_version_no 冲突自动重试)→ 上传 → 提交;先占号再
+    # 上传,storage_uri 的 v<n> 前缀与实际占到的版本号保证一致
+    async def _build_version(version_no: int) -> DatasetVersion:
+        v = DatasetVersion(
+            id=_new_version_id(),
+            dataset_id=dataset_id,
+            version_no=version_no,
+            storage_uri=(
+                f"s3://{settings.storage_minio_datasets_bucket}"
+                f"/{dataset_id}/v{version_no}/data.jsonl"
+            ),
+            format="jsonl",
+            rows=rows,
+            size=size,
+            origin="synthetic",
+            produced_by_job_id=job_id,
+            note=f"合成产出(来自 v{input_version.version_no},job={job_id})",
+        )
+        session.add(v)
+        return v
+
+    version = await with_version_conflict_retry(session, dataset_id, _build_version)
+    new_vno = version.version_no
+    try:
+        # 产出上传 MinIO(治理产出持久化到对象存储;读路径已按 s3:// 走)
+        await upload_file_to_datasets(dataset_id, new_vno, out_path)
+        session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))
+        await session.commit()
+    except BaseException:
+        await session.rollback()
+        try:
+            from app.services.external_store import platform_config, remove_prefix
+
+            await remove_prefix(
+                platform_config(),
+                settings.storage_minio_datasets_bucket,
+                f"{dataset_id}/v{new_vno}/",
+            )
+        except Exception:  # noqa: BLE001 清理失败不掩盖原始错误,但必须留痕
+            logger.warning(
+                "job %s 回滚后清理 v%s 前缀残留对象失败,可能留下孤儿对象",
+                job_id,
+                new_vno,
+                exc_info=True,
+            )
+        raise
     await session.refresh(version)
 
     warnings: list[str] = []

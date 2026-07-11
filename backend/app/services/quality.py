@@ -25,12 +25,12 @@ from app.models.job_input import JobInput
 from app.services.engine import (
     _get_version_members,
     _kill_proc_tree,
-    _materialize_member,
     _read_head_records,
     _running_procs,
     _semaphore,
     build_config,
     detect_text_key,
+    materialized_member,
 )
 from app.services.external_store import materialized_version
 
@@ -176,67 +176,68 @@ async def run_quality_job(
         member_text_keys = member_cfg.get("text_keys")
         member_job_id = f"{job_id}-{member.table_name}"
 
-        # 物化成员文件
-        input_path = await _materialize_member(session, member)
+        # 物化成员文件(async with 兜底:s3 来源的临时落地文件退出时自动清理)
+        async with materialized_member(session, member) as input_path:
+            # 每个成员独立的 work_dir(以 member_job_id 结尾),避免 DJ 的
+            # resolve_job_directories 因 work_dir 不以 job_id 结尾而自动再拼一层
+            # job_id 子目录,导致 analysis/ 与 stats 文件不同级(见 _analysis_dir
+            # 依赖 stats_path.parent / "analysis" 的假设)。
+            member_work_dir = out_dir / member_job_id
+            member_work_dir.mkdir(parents=True, exist_ok=True)
 
-        # 每个成员独立的 work_dir(以 member_job_id 结尾),避免 DJ 的
-        # resolve_job_directories 因 work_dir 不以 job_id 结尾而自动再拼一层
-        # job_id 子目录,导致 analysis/ 与 stats 文件不同级(见 _analysis_dir
-        # 依赖 stats_path.parent / "analysis" 的假设)。
-        member_work_dir = out_dir / member_job_id
-        member_work_dir.mkdir(parents=True, exist_ok=True)
+            # export_path 仅作 stats 文件命名锚点:dj-analyze 默认
+            # export_original_dataset=False,不导出数据本身,只落
+            # <table>_stats.jsonl + analysis/ 图表
+            out_format = (
+                member.format if member.format in ("parquet", "jsonl") else "jsonl"
+            )
+            output_path = member_work_dir / f"{member.table_name}.{out_format}"
+            stats_path = output_path.parent / f"{member.table_name}_stats.jsonl"
+            yaml_path = member_work_dir / f"{member.table_name}_job.yaml"
 
-        # export_path 仅作 stats 文件命名锚点:dj-analyze 默认
-        # export_original_dataset=False,不导出数据本身,只落
-        # <table>_stats.jsonl + analysis/ 图表
-        out_format = member.format if member.format in ("parquet", "jsonl") else "jsonl"
-        output_path = member_work_dir / f"{member.table_name}.{out_format}"
-        stats_path = output_path.parent / f"{member.table_name}_stats.jsonl"
-        yaml_path = member_work_dir / f"{member.table_name}_job.yaml"
+            # 构建 DJ Analyzer 配置(text_key 走质量评估专用探测,避开 wordcloud 崩溃)
+            detected_key = (
+                None
+                if member_text_keys
+                else detect_quality_text_key(_read_head_records(input_path, 50))
+            )
+            cfg = build_config(
+                project_name=member_job_id,
+                input_path=str(input_path),
+                output_path=str(output_path),
+                operators=member_operators,
+                text_key=detected_key,
+                text_keys=member_text_keys,
+                llm_snapshot=llm_snapshot,
+            )
+            # 固定 work_dir + job_id：work_dir 已以 job_id 结尾,DJ 不再追加,
+            # 分析产物稳定落在 member_work_dir/analysis/(与 stats_path 同级)。
+            cfg["work_dir"] = member_work_dir.as_posix()
+            cfg["job_id"] = member_job_id
+            yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+            yaml_path.write_text(yaml_content, encoding="utf-8")
 
-        # 构建 DJ Analyzer 配置(text_key 走质量评估专用探测,避开 wordcloud 崩溃)
-        detected_key = (
-            None
-            if member_text_keys
-            else detect_quality_text_key(_read_head_records(input_path, 50))
-        )
-        cfg = build_config(
-            project_name=member_job_id,
-            input_path=str(input_path),
-            output_path=str(output_path),
-            operators=member_operators,
-            text_key=detected_key,
-            text_keys=member_text_keys,
-            llm_snapshot=llm_snapshot,
-        )
-        # 固定 work_dir + job_id：work_dir 已以 job_id 结尾,DJ 不再追加,
-        # 分析产物稳定落在 member_work_dir/analysis/(与 stats_path 同级)。
-        cfg["work_dir"] = member_work_dir.as_posix()
-        cfg["job_id"] = member_job_id
-        yaml_content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
-        yaml_path.write_text(yaml_content, encoding="utf-8")
+            all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
 
-        all_yamls.append(f"# Member: {member.table_name}\n{yaml_content}")
+            # 运行 dj-analyze
+            async with _semaphore:
+                code, log = await _run_dj_analyze(yaml_path, job_id=member_job_id)
 
-        # 运行 dj-analyze
-        async with _semaphore:
-            code, log = await _run_dj_analyze(yaml_path, job_id=member_job_id)
-
-        operator_names = [op["name"] for op in member_operators]
-        all_logs.append(
-            f"=== {member.table_name} ===\n算子: {operator_names}\n{log}"
-        )
-
-        if code != 0 or not stats_path.exists():
-            tail = "\n".join(log.strip().splitlines()[-8:])
-            raise QualityError(
-                f"成员 {member.table_name} 质量评估失败"
-                f"(dj-analyze 退出码 {code})\n{tail}"
+            operator_names = [op["name"] for op in member_operators]
+            all_logs.append(
+                f"=== {member.table_name} ===\n算子: {operator_names}\n{log}"
             )
 
-        # 评估不改数据、不产新版本:stats_uri 直接回写输入成员
-        # (重复评估同一成员时后评覆盖前评)
-        member.stats_uri = str(stats_path)
+            if code != 0 or not stats_path.exists():
+                tail = "\n".join(log.strip().splitlines()[-8:])
+                raise QualityError(
+                    f"成员 {member.table_name} 质量评估失败"
+                    f"(dj-analyze 退出码 {code})\n{tail}"
+                )
+
+            # 评估不改数据、不产新版本:stats_uri 直接回写输入成员
+            # (重复评估同一成员时后评覆盖前评)
+            member.stats_uri = str(stats_path)
 
     # 5. 落血缘边并提交成员 stats_uri 回写
     session.add(JobInput(job_id=job_id, dataset_version_id=input_version.id))

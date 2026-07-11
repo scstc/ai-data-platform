@@ -279,6 +279,10 @@ def describe_job(job: Job) -> dict[str, Any]:
         "operators": ops,
         "memberOperators": member_ops,
         "createdAt": job.created_at.isoformat(),
+        # 软删标记(治理整改:血缘节点 deleted 标注):任务所属数据集过期回收站
+        # 级联标记时,job.deleted_at 非空——不从图里过滤掉(血缘要看得见全链),
+        # 只标记 deleted=true,前端据此置灰/加提示,消除"可点却 404"的矛盾。
+        "deleted": job.deleted_at is not None,
         # LLM 快照(P0-① 可复现凭证):任务执行时固化的 model/base_url(不含 key)。
         # 资产清单据此展示"这次用了哪个模型/端点";老任务无此键为 None。
         "llmSnapshot": (
@@ -427,6 +431,10 @@ async def build_lineage(
             "sourceKind": ds.source_kind if ds else None,
             "sourceFormat": ds.source_format if ds else None,
             "createdAt": version.created_at.isoformat(),
+            # 软删标记(同 describe_job 的 deleted):DatasetVersion 本身无
+            # deleted_at 列,回收站是对所属 Dataset 打标、级联隐藏其全部版本——
+            # 借用已取的 ds 判定,不额外查询。not filtered,只标记。
+            "deleted": ds.deleted_at is not None if ds else False,
         }
         if depth >= max_depth:
             continue

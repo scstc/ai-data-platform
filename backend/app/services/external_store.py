@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -45,6 +46,8 @@ from app.services.landing import (
     MANIFEST_FORMAT,
     normalize_to_records,
 )
+
+logger = logging.getLogger(__name__)
 
 # 列对象/列桶的硬上限,避免大桶把内存/响应打爆(spec §2.1)
 _LIST_LIMIT = 1000
@@ -149,7 +152,8 @@ def client_for(config: dict[str, Any] | None, *, fast_fail: bool = False) -> Min
 def s3_settings_for_duckdb(
     config: dict[str, Any] | None,
 ) -> tuple[str, bool, str, str]:
-    """从 S3 cfg(``datasource.config`` 或 ``platform_config()``)解析 DuckDB httpfs 所需设置。
+    """从 S3 cfg(``datasource.config`` 或 ``platform_config()``)解析 DuckDB
+    httpfs 所需设置。
 
     返回 ``(endpoint, use_ssl, access_key, secret_key)``。endpoint 剥 scheme、
     只留 ``host[:port]``(DuckDB 的 ``s3_endpoint`` 不带 scheme),与 ``client_for``
@@ -275,8 +279,11 @@ def _download_to_temp_sync(client: Minio, bucket: str, key: str) -> Path:
         with open(fd, "wb") as fp:
             for chunk in response.stream(64 * 1024):
                 fp.write(chunk)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("下载失败后清理临时文件失败:%s", tmp_path)
         raise
     finally:
         if response is not None:
@@ -395,8 +402,11 @@ async def cached_bytes(
                 await asyncio.to_thread(
                     _install_and_evict, tmp_path, cache_path, max_bytes
                 )
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("安装缓存失败后清理临时文件失败:%s", tmp_path)
             raise
         return await asyncio.to_thread(cache_path.read_bytes)
 
@@ -744,7 +754,8 @@ async def upload_jsonl_to_datasets(
 async def upload_parquet_to_datasets(
     dataset_id: str, version_no: int, parquet_bytes: bytes
 ) -> str:
-    """把 parquet 字节上传到平台 MinIO 数据集桶,键 = ``<dataset_id>/v<n>/data.parquet``。
+    """把 parquet 字节上传到平台 MinIO 数据集桶,
+    键 = ``<dataset_id>/v<n>/data.parquet``。
 
     与 upload_jsonl_to_datasets 同前缀约定(不同版本落不同文件夹)。
     返回 storage_uri(``s3://<bucket>/<key>``)。平台未配置 → ExternalStoreError。
@@ -820,7 +831,8 @@ async def copy_object_to_datasets(
 async def upload_file_to_datasets(
     dataset_id: str, version_no: int, path: Path
 ) -> str:
-    """把本地 jsonl 文件**流式**上传到平台 MinIO 数据集桶(键同 upload_jsonl_to_datasets)。
+    """把本地 jsonl 文件**流式**上传到平台 MinIO 数据集桶
+    (键同 upload_jsonl_to_datasets)。
 
     供治理任务产出持久化:DJ 写本地文件后调此上传,storage_uri 指向 s3://,
     产出不在本地停留(读路径 preview/download/materialize 已按 s3:// scheme 走)。
@@ -841,7 +853,8 @@ async def upload_file_to_datasets(
 async def upload_parquet_file_to_datasets(
     dataset_id: str, version_no: int, path: Path
 ) -> str:
-    """把本地 parquet 产物**流式**上传到平台 MinIO 数据集桶,键 = ``<id>/v<n>/data.parquet``。
+    """把本地 parquet 产物**流式**上传到平台 MinIO 数据集桶,
+    键 = ``<id>/v<n>/data.parquet``。
 
     镜像 upload_file_to_datasets,但产物格式为 parquet。流式上传(不全量入内存),
     适合大体量产出。平台未配置 → ExternalStoreError。

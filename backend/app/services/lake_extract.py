@@ -232,6 +232,57 @@ async def _read_raw_from_snapshot(
         ) from exc
 
 
+async def _cleanup_orphan_empty_versions(
+    db: AsyncSession, dataset_id: str, existing_version_ids: set[str]
+) -> None:
+    """抽取失败时的兜底:删除本次尝试新建但零成员的空版本,不留孤立中间态。
+
+    landing.add_table_member → landing._target_draft_version 建 draft 版本时
+    会立即单独提交;若同一次 add_table_member 调用随后写成员/落盘失败,DB 里
+    会残留一个已提交、零成员的空版本(不属于任何一次完整成功的抽取)。只清理
+    existing_version_ids 之外(本次新建)的空版本,不动用户此前已有的空 draft
+    (那不是本次失败造成的)。best-effort:清理本身失败只记日志,绝不掩盖
+    调用方原始异常(调用方仍会 raise 原异常)。
+    """
+    from sqlalchemy import func, select
+
+    from app.models.dataset_version import DatasetVersion
+    from app.models.dataset_version_table import DatasetVersionTable
+
+    try:
+        candidates = (
+            (
+                await db.execute(
+                    select(DatasetVersion).where(
+                        DatasetVersion.dataset_id == dataset_id,
+                        DatasetVersion.id.notin_(existing_version_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        deleted = 0
+        for v in candidates:
+            member_count = await db.scalar(
+                select(func.count())
+                .select_from(DatasetVersionTable)
+                .where(DatasetVersionTable.dataset_version_id == v.id)
+            )
+            if not member_count:
+                await db.delete(v)
+                deleted += 1
+        if deleted:
+            await db.commit()
+            _logger.info(
+                "湖抽取失败,已清理 dataset=%s 下 %d 个空版本中间态",
+                dataset_id,
+                deleted,
+            )
+    except Exception as exc:  # noqa: BLE001 清理失败不掩盖原始异常
+        _logger.warning("清理空版本失败,需人工核查 dataset=%s: %s", dataset_id, exc)
+
+
 def _lake_file_name(snapshot: DataLakeSnapshot) -> str:
     """取快照在数据湖中的原始文件名(对象键末段),用于命名数据集内的文件/成员。
 
@@ -453,6 +504,22 @@ async def extract_to_new_dataset(
             creator=creator,
         )
 
+    # 记录本次尝试开始前 dataset 已有的版本 id:失败时只清理本次新建的空
+    # 版本,不动用户此前已有的空 draft(见下方 except 分支)
+    from app.models.dataset_version import DatasetVersion as _DatasetVersion
+
+    existing_version_ids = set(
+        (
+            await db.execute(
+                select(_DatasetVersion.id).where(
+                    _DatasetVersion.dataset_id == dataset.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     # 补建 Job(可溯源可复现整改 P0-②):抽取此前静默无痕,产出版本 isOriginal
     # 判据(datasets.py::dataset_lineage)与血缘 extract 边据此挂上 job 节点。
     # 不写 JobInput——抽取不消费平台版本,读的是湖快照,语义上仍是 root。
@@ -576,6 +643,8 @@ async def extract_to_new_dataset(
         job.state = "failed"
         job.error = str(exc)
         job.finished_at = _now()
+        # 失败路径不留孤立的空版本中间态(见 _cleanup_orphan_empty_versions)
+        await _cleanup_orphan_empty_versions(db, dataset.id, existing_version_ids)
         await db.commit()
         raise
 

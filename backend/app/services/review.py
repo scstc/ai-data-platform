@@ -145,11 +145,14 @@ def _scan_rules(
     regex_specs: list[dict[str, Any]],
     flagged_words: dict[str, list[str]],
     use_flagged: bool,
+    skipped_regex: set[str],
 ) -> list[dict[str, Any]]:
     """规则路:敏感词(keyword) + 正则(regex) + 内置词表(flagged_words)。
 
     word_specs/regex_specs 已把「任务临时自定义」与「规则库条目」归一
-    (每条带 category/severity;临时项为旧默认值)。
+    (每条带 category/severity;临时项为旧默认值)。运行期正则异常的规则名
+    写入 skipped_regex(调用方按行传入同一个 set,跨行去重后统一转 warning,
+    避免同一条坏正则命中每行都各记一遍)。
     """
     hits: list[dict[str, Any]] = []
     lower = text.lower()
@@ -177,6 +180,7 @@ def _scan_rules(
             m = spec["pattern"].search(text)
         except Exception:  # noqa: BLE001 — 单条正则运行期异常不应中断整行审核
             logger.warning("自定义正则运行期异常 name=%s,跳过该条", spec["name"])
+            skipped_regex.add(str(spec["name"]))
             continue
         if m:
             hits.append(
@@ -333,7 +337,10 @@ async def scan_version(
     # 截断超长文本(见 _MAX_SCAN_CHARS):防超长字段拖垮正则/PII 扫描
     texts = [_pick_text(r)[:_MAX_SCAN_CHARS] for r in scan_rows]
 
-    # LLM 路:整批 moderate;任一环节失败 → 整体跳过(降级),不影响其余 source
+    # LLM 路:整批 moderate;任一环节失败 → 整体跳过(降级),不影响其余 source。
+    # 故障与"LLM 扫过且干净"外观相同(都不产生 llm 命中),用统一措辞的
+    # warning 明确写出「LLM 服务故障,N 条未评分」,供调用方(review_runner)
+    # 转写进 Job.warnings,不与真·未评分静默混同
     llm_verdicts: list[dict[str, Any]] | None = None
     if use_llm and provider is not None and texts:
         try:
@@ -341,14 +348,16 @@ async def scan_version(
             if len(verdicts) == len(texts):
                 llm_verdicts = verdicts
             else:
-                warnings.append("LLM 审核返回条数与样本不一致,已跳过 LLM 检测")
+                warnings.append(
+                    f"LLM 服务故障,{len(texts)} 条未评分(返回条数与样本不一致)"
+                )
                 logger.warning(
                     "moderate_texts 返回 %d 条,期望 %d 条,跳过 llm",
                     len(verdicts),
                     len(texts),
                 )
         except Exception as exc:  # noqa: BLE001 — LLM 失败必须降级,绝不让审核 500
-            warnings.append(f"LLM 审核不可用,已降级(其余检测正常):{exc}")
+            warnings.append(f"LLM 服务故障,{len(texts)} 条未评分:{exc}")
             logger.warning("moderate_texts 失败,跳过 llm source:%s", exc)
 
     findings: list[dict[str, Any]] = []
@@ -357,6 +366,8 @@ async def scan_version(
     by_category: dict[str, int] = {}
     by_severity: dict[str, int] = {}
     by_source: dict[str, int] = {}
+    # 运行期正则异常的规则名(跨行去重,见 _scan_rules)
+    skipped_regex: set[str] = set()
 
     for i, row in enumerate(rows):
         if i >= scanned_count:
@@ -373,6 +384,7 @@ async def scan_version(
             regex_specs=regex_specs,
             flagged_words=flagged_words,
             use_flagged=use_flagged,
+            skipped_regex=skipped_regex,
         )
         if use_pii:
             hits.extend(_scan_pii(text))
@@ -410,6 +422,10 @@ async def scan_version(
         tagged = dict(row)
         tagged["safety"] = safety
         tagged_rows.append(tagged)
+
+    warnings.extend(
+        f"规则「{name}」已跳过(运行期异常)" for name in sorted(skipped_regex)
+    )
 
     report = {
         "totalRows": total,

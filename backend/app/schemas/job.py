@@ -98,6 +98,9 @@ class JobRead(CamelModel):
     # 字段名与 ORM 的 spec(snake_case 原始存储)错开,避免 from_attributes 自动
     # 把 snake 键的原始 dict 带进所有列表响应。
     edit_spec: dict[str, Any] | None = None
+    # 非致命告警(0069 新列,list[str] 语义):字段名与 ORM 同名,from_attributes
+    # 自动带出,详情/列表均可见。无数字字段,to_camel 安全(不触发 title() 数字坑)。
+    warnings: list[str] | None = None
 
     # 以下三个控制位由 state 派生,供「数据任务」统一控制台按状态渲染操作按钮。
     # computed_field + to_camel 别名 → 序列化为 canPause / canResume / canStop,

@@ -342,6 +342,11 @@ class _FakeCursor:
     async def fetchall(self):
         return list(self._rows)
 
+    async def fetchmany(self, size):
+        # §1 分批读:_drain_cursor 循环 fetchmany 直到空批;逐批消费固定行
+        batch, self._rows = list(self._rows[:size]), list(self._rows[size:])
+        return batch
+
     async def __aenter__(self):
         return self
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,8 @@ from app.core.config import settings
 from app.core.ids import uuid7_hex
 from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
 from app.services.external_store import ExternalStoreError, client_for, parse_s3_uri
+
+logger = logging.getLogger(__name__)
 
 
 def derive_identity_key(
@@ -141,6 +144,13 @@ async def _resolve_object(
         obj = result.scalar_one_or_none()
         if obj is None:
             raise
+        # 并发下他人已抢先插入同 identity_key 的文件身份行,唯一约束挡下本次插入;
+        # 回滚后复用已有对象。明示而非静默,便于排查并发入湖的身份归并行为。
+        logger.info(
+            "并发入湖:identity_key=%s 已由其他请求创建 DataLakeObject(id=%s),复用之",
+            identity_key,
+            obj.id,
+        )
         return obj
     await db.refresh(obj)
     return obj
@@ -309,6 +319,35 @@ async def _put_object_to_lake_minio(
         raise ExternalStoreError(f"上传到 MinIO 失败: {exc}") from exc
 
 
+async def _remove_object_from_lake_minio(object_key: str) -> None:
+    """删除数据湖桶内单个对象(孤儿回收用,§10)。
+
+    与 ``_put_object_to_lake_minio`` 对称,面向同一湖桶;MinIO 未配置或删除失败
+    抛 ``ExternalStoreError``,由调用方 best-effort 吞掉(孤儿回收失败不应污染
+    上层错误)。
+    """
+    if not all(
+        [
+            settings.storage_minio_endpoint,
+            settings.storage_minio_access_key,
+            settings.storage_minio_secret_key,
+        ]
+    ):
+        raise ExternalStoreError("平台 MinIO 未配置")
+
+    config = {
+        "endpoint": settings.storage_minio_endpoint,
+        "accessKey": settings.storage_minio_access_key,
+        "secretKey": settings.storage_minio_secret_key,
+    }
+    client = client_for(config)
+    bucket = settings.storage_minio_lake_bucket
+    try:
+        await asyncio.to_thread(client.remove_object, bucket, object_key)
+    except S3Error as exc:
+        raise ExternalStoreError(f"删除 MinIO 对象失败: {exc}") from exc
+
+
 async def ingest_to_lake_parquet(
     db: AsyncSession,
     *,
@@ -345,11 +384,13 @@ async def ingest_to_lake_parquet(
         创建的数据湖快照对象
     """
     # 1. 转换为 Parquet(可复用,不含 source_version/存储路径)
-    df = pd.DataFrame(data)
-    table = pa.Table.from_pandas(df)
+    # §2 缺陷修复:直接 pyarrow.Table.from_pylist,不经 pandas。
+    # 经 pandas 会把含 NULL 的整数列升为 float64,大整数(> 2^53)丢精度;
+    # 且 DataFrame→Table 多一份内存拷贝。from_pylist 逐列推断类型,NULL 保持
+    # 为 null、整数保持 int64,精度与内存都更优。
+    table = pa.Table.from_pylist(data)
     parquet_buffer = io.BytesIO()
     pq.write_table(table, parquet_buffer)
-    parquet_buffer.seek(0)
     parquet_bytes = parquet_buffer.getvalue()
 
     # 2. 解析文件身份,找/建 DataLakeObject
@@ -424,10 +465,15 @@ async def _persist_snapshot_with_retry(
     `latest_snapshot_id` / `data_category` / `storage_format` 推进到本次快照。
     """
     last_exc: Exception | None = None
+    # §10:每次尝试的 build() 会先把 parquet/原文件写进湖桶(commit 之前);冲突回滚后
+    # 该次 version_no 对应的对象可能成为孤儿。记录本次写入的 storage_uri,最终失败时
+    # 尽力回收——但仅回收「无任何已提交快照引用」的对象,避免误删并发赢家的同键对象。
+    written_uris: list[str] = []
     for attempt in range(max_retries):
         batch_no = await _next_batch_no(db, lake_id, date, source_type)
         version_no = await _next_object_version_no(db, obj.id)
         snapshot = await build(batch_no, version_no)
+        written_uris.append(snapshot.storage_uri)
         db.add(snapshot)
         obj.latest_version_no = version_no
         obj.latest_snapshot_id = snapshot.id
@@ -442,9 +488,35 @@ async def _persist_snapshot_with_retry(
             last_exc = exc
             if attempt == max_retries - 1:
                 break
+    # 重试耗尽:本请求未能提交任何快照。回收本请求写入的、无快照引用的孤儿对象。
+    await _gc_orphan_lake_objects(db, written_uris)
     raise ExternalStoreError(
         f"数据湖 {lake_id} 版本号冲突,重试 {max_retries} 次仍失败,请稍后重试"
     ) from last_exc
+
+
+async def _gc_orphan_lake_objects(db: AsyncSession, uris: list[str]) -> None:
+    """best-effort 回收孤儿湖对象(§10):仅删无任何已提交快照引用的对象。
+
+    version_no 冲突常源于并发对同一文件入湖,双方算到同一 ``version_no`` → 写到
+    同一 object_key。此时赢家的已提交快照仍引用该对象,绝不能删(否则丢赢家数据)。
+    故逐个校验:``storage_uri`` 无 DataLakeSnapshot 引用才删。删除失败仅记日志,
+    不向上抛(回收失败不应改变调用方要抛的版本冲突错误)。
+    """
+    for uri in uris:
+        referenced = await db.scalar(
+            select(func.count())
+            .select_from(DataLakeSnapshot)
+            .where(DataLakeSnapshot.storage_uri == uri)
+        )
+        if referenced:
+            continue
+        try:
+            _bucket, key = parse_s3_uri(uri)
+            await _remove_object_from_lake_minio(key)
+            logger.info("回收孤儿湖对象(版本冲突重试失败):%s", uri)
+        except (ExternalStoreError, ValueError) as exc:
+            logger.warning("回收孤儿湖对象失败(已忽略):%s(%s)", uri, exc)
 
 
 async def ingest_to_lake_raw(

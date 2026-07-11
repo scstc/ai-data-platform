@@ -153,4 +153,15 @@ async def record_usage(
             session.add(usage)
             await session.commit()
     except Exception as exc:  # noqa: BLE001 — best-effort，不影响主流程
-        logger.warning("record_usage 写入失败（已忽略）：%s", exc)
+        # error 级 + 关键字段:用量写库失败会导致对账缺条,需要能定位到具体
+        # job/模型/token 数,而不是只知道"失败了"
+        logger.error(
+            "record_usage 写入失败(已忽略):job_id=%s model=%s "
+            "prompt_tokens=%s completion_tokens=%s success=%s：%s",
+            job_id,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            success,
+            exc,
+        )

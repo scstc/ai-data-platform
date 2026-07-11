@@ -53,15 +53,7 @@ from app.services import operator_catalog as oc
 from app.services import scheduler as scheduler_mod
 from app.services.connectors import resolve
 from app.services.connectors.base import ConnectorNotReady, IngestError
-from app.services.external_store import (
-    ExternalStoreError,
-    upload_jsonl_to_datasets,
-)
-from app.services.landing import (
-    _new_dataset_id,
-    _new_version_id,
-    records_to_jsonl_bytes,
-)
+from app.services.external_store import ExternalStoreError
 from app.services.llm_config import get_active_llm_config
 
 _logger = logging.getLogger(__name__)
@@ -133,13 +125,13 @@ def _not_found() -> JSONResponse:
     )
 
 
-def _sync_cron_job(task: IngestTask) -> None:
-    """best-effort upsert 调度作业(切片 C / Task 3)。
+async def _sync_cron_job(session: AsyncSession, task: IngestTask) -> None:
+    """upsert 调度作业(切片 C / Task 3;§6 缺陷修复:失败不再静默)。
 
-    仅当 ``settings.scheduler_enabled`` 且 ``scheduler_mod.get_scheduler()``
-    返回实例时才尝试 upsert;任何异常(调度器未启动 / jobstore 不可达 /
-    cron 表达式异常)均 try/except + log,不抛给调用方——采集主流程不依赖
-    调度器在线(用户可手工 rerun)。
+    仅 cron 模式任务建调度作业。采集主流程仍不依赖调度器在线(用户可手工 rerun),
+    但「建了 cron 却永不触发」必须让用户看见,而非静默吞掉:
+    - 调度器未启动 / upsert 抛错 → log ``error`` 级 + 在 task.logs 追加 [ERROR] 明示
+      (并 commit 持久化),用户在任务详情即可发现 cron 未生效。
     """
     if not settings.scheduler_enabled:
         return
@@ -147,24 +139,37 @@ def _sync_cron_job(task: IngestTask) -> None:
     schedule = getattr(task, "schedule", None)
     if not isinstance(schedule, dict) or schedule.get("mode") != "cron":
         return
+
+    async def _flag(msg: str, exc: Exception | None = None) -> None:
+        _logger.error(
+            "%s task_id=%s", msg, getattr(task, "id", "?"), exc_info=exc is not None
+        )
+        detail = f":{exc}" if exc is not None else ""
+        task.logs = [
+            *task.logs,
+            f"[ERROR] {msg}(本 cron 任务不会按计划自动触发,请重试或手动运行){detail}",
+        ]
+        await session.commit()
+
     scheduler = scheduler_mod.get_scheduler()
     if scheduler is None:
+        await _flag("调度器未启动,cron 调度作业注册失败")
         return
     try:
         scheduler_mod.upsert_cron_job(scheduler, task)
-    except Exception:  # noqa: BLE001
-        _logger.warning(
-            "调度作业 upsert 失败(已忽略,采集不依赖调度器) task_id=%s",
-            getattr(task, "id", "?"),
-            exc_info=True,
-        )
+    except Exception as exc:  # noqa: BLE001
+        await _flag("调度作业 upsert 失败", exc)
 
 
-def _unsync_cron_job(task_id: str) -> None:
-    """best-effort remove 调度作业(切片 C / Task 3)。
+async def _unsync_cron_job(
+    session: AsyncSession, task_id: str, task: IngestTask | None = None
+) -> None:
+    """remove 调度作业(切片 C / Task 3;§6 缺陷修复:失败记 error 级 + 明示)。
 
-    与 ``_sync_cron_job`` 对称:``scheduler_enabled=False`` / scheduler 未启动 /
-    remove 抛错均 try/except + log,绝不阻断 delete/update 主流程。
+    与 ``_sync_cron_job`` 对称。``scheduler_enabled=False`` / 无调度器 → 无作业可移除,
+    直接返回(移除是幂等清理)。remove 抛错 → log ``error`` 级;若传入 ``task``
+    (更新路径任务仍存在)则在 task.logs 追加 [ERROR] 明示并 commit;删除路径无
+    task 可持久化,仅 error 日志(孤儿作业由 reconcile 下次启动兜底清理)。
     """
     if not settings.scheduler_enabled:
         return
@@ -173,10 +178,14 @@ def _unsync_cron_job(task_id: str) -> None:
         return
     try:
         scheduler_mod.remove_cron_job(scheduler, task_id)
-    except Exception:  # noqa: BLE001
-        _logger.warning(
-            "调度作业 remove 失败(已忽略) task_id=%s", task_id, exc_info=True
-        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.error("调度作业 remove 失败 task_id=%s", task_id, exc_info=True)
+        if task is not None:
+            task.logs = [
+                *task.logs,
+                f"[ERROR] 调度作业移除失败(可能仍会按旧计划触发,请重试):{exc}",
+            ]
+            await session.commit()
 
 
 def _item(
@@ -239,7 +248,8 @@ async def _build_output(session: AsyncSession, task_id: str) -> list[dict]:
             "rows": version.rows,
             # 切片 B / B6:透传版本级质量字段,前端详情 Drawer 据此渲染结论 + 列空值率
             # + 表结构快照。键名 camelCase 对齐前端 IngestOutput typings;缺省值由
-            # 模型 server_default / nullable 兜底(verdict=skipped、stats/snapshot 可空)。
+            # 模型 server_default / nullable 兜底
+            # (verdict=skipped、stats/snapshot 可空)。
             "qualityVerdict": version.quality_verdict,
             "qualityStats": version.quality_stats,
             "schemaSnapshot": version.schema_snapshot,
@@ -308,7 +318,8 @@ async def list_ingest_tasks(
 
 # ---------------------------------------------------------------------------
 # 页顶概览 dashboard 统计(/ingest-tasks/stats)
-# 镜像 data-tasks/stats 的形态:状态/数据源类型分布 + 近 24h 完成 + 平均时长 + 14 天趋势。
+# 镜像 data-tasks/stats 的形态:
+# 状态/数据源类型分布 + 近 24h 完成 + 平均时长 + 14 天趋势。
 # - by_state 来自 IngestTask.status(任务级「当前态」)
 # - by_ds_type_state 来自 IngestTask JOIN DataSource(数据源类型 × 状态,堆叠柱)
 # - completed_last24h / avg_duration_sec / trend14d 来自 Job.type='ingest'(运行级)
@@ -362,7 +373,8 @@ class IngestTaskStats(CamelModel):
 
 
 def _coerce_date(value: object) -> date:
-    """把 DB 返回的日期(asyncpg 通常给 date,亦兼容 datetime / ISO 字符串)规整为 date。"""
+    """把 DB 返回的日期
+    (asyncpg 通常给 date,亦兼容 datetime / ISO 字符串)规整为 date。"""
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -370,7 +382,9 @@ def _coerce_date(value: object) -> date:
     return date.fromisoformat(str(value)[:10])
 
 
-async def _build_ingest_trend14d(session: SessionDep, now_utc: datetime) -> list[IngestTrendPoint]:
+async def _build_ingest_trend14d(
+    session: SessionDep, now_utc: datetime
+) -> list[IngestTrendPoint]:
     """近 14 天(北京日)采集运行趋势:Job.type='ingest' 的创建数 + 当日完成的成功/失败数。
 
     库内时间戳为 naive UTC,按 ``ts + interval '8 hours'`` 取北京日分桶,
@@ -522,6 +536,19 @@ async def create_ingest_task(
             status_code=400, content={"success": False, "message": reason}
         )
 
+    # §4 缺陷修复:入湖任务(lake_id)不产出数据集版本(数据集经「湖抽取」单独产生),
+    # 任务级 quality_policy 的质量门在入湖路径上无落点,会被静默跳过。拒绝该组合而非
+    # 让用户以为质量门生效(Rule 12,fail loud);湖上质量门待「湖抽取」侧支持后再开。
+    if payload.lake_id and payload.quality_policy:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "入湖任务暂不支持质量门(quality_policy);"
+                "请在「湖抽取生成数据集」环节配置质量策略",
+            },
+        )
+
     task = IngestTask(
         id=_new_task_id(),
         name=payload.name,
@@ -545,9 +572,9 @@ async def create_ingest_task(
     session.add(task)
     await session.commit()
     await session.refresh(task)
-    # 切片 C / Task 3:cron 任务 best-effort upsert 调度作业(scheduler 未启用
-    # / 未启动 / upsert 抛错均静默跳过,采集主流程不依赖调度器在线)
-    _sync_cron_job(task)
+    # 切片 C / Task 3:cron 任务 upsert 调度作业(§6:失败不再静默,
+    # log error + task.logs 明示;采集主流程仍不依赖调度器在线)
+    await _sync_cron_job(session, task)
     return JSONResponse(
         content=_item(task, category_name=await _category_name(session, task))
     )
@@ -620,9 +647,9 @@ async def update_ingest_task(
     #   (upsert_cron_job 是 replace_existing=True;once 模式 remove 容忍 JobLookupError)
     # scheduler 未启用 / 未启动 / 抛错均静默跳过,采集主流程不依赖调度器在线。
     if new_mode == "cron":
-        _sync_cron_job(task)
+        await _sync_cron_job(session, task)
     elif new_mode == "once" and prev_mode == "cron":
-        _unsync_cron_job(task.id)
+        await _unsync_cron_job(session, task.id, task)
     return JSONResponse(
         content=_item(task, category_name=await _category_name(session, task))
     )
@@ -708,6 +735,17 @@ async def _execute_ingest(
             session, task, datasource, job_id=job.id
         )
         total_rows = sum(v.rows or 0 for _, v in results)
+
+        # §4 缺陷修复:存量入湖任务若带 quality_policy,质量门在入湖路径无落点
+        # (results 为空,evaluate_policy 空跑)。明示「质量门跳过」而非静默——新建
+        # 已在 create 拒绝该组合,此处兜底 create 拦截前建的存量任务(Rule 12)。
+        if task.quality_policy and task.lake_id:
+            skip_msg = (
+                "[WARN] 质量门跳过:入湖任务不产出数据集版本,"
+                "quality_policy 未生效(请在湖抽取环节配置质量策略)"
+            )
+            task.logs = [*task.logs, skip_msg]
+            job.warnings = [*(job.warnings or []), skip_msg]
 
         # 切片 B / Task 4:对每个落地版本应用任务级 quality_policy(空值率阈值
         # 阻断发布门)。drift=None:_execute_ingest 总是经 land_records 新建首版,
@@ -800,6 +838,17 @@ async def rerun_ingest_task(
     task = await session.get(IngestTask, task_id)
     if task is None:
         return _not_found()
+
+    # §5 并发闸:任务正在运行时拒绝重复触发(双击 / cron+manual 撞车),返回 409。
+    # rerun 为同步执行,运行期间 status=running;完成即转 success/failed,不误挡后续重跑。
+    if task.status == "running":
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "success": False,
+                "message": "任务正在运行中,请勿重复触发(等待本次运行结束后再重跑)",
+            },
+        )
 
     datasource = await session.get(DataSource, task.datasource_id)
     connector = (
@@ -982,7 +1031,8 @@ async def list_ingest_runs(
                 started_at=job.started_at or job.created_at,
                 finished_at=job.finished_at,
                 # 切片 C6:Job.trigger(manual|cron)透传到读模型,前端「触发来源」
-                # column 据此渲染。存量 job 经迁移 0025 server_default='manual' 安全回填。
+                # column 据此渲染。存量 job 经迁移 0025
+                # server_default='manual' 安全回填。
                 trigger=job.trigger,
             )
         )
@@ -1024,7 +1074,7 @@ async def delete_ingest_task(
     if task is None:
         return _not_found()
 
-    _unsync_cron_job(task.id)
+    await _unsync_cron_job(session, task.id)
     await session.delete(task)
     await session.commit()
     return JSONResponse(content={"success": True})

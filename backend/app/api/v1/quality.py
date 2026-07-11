@@ -24,6 +24,7 @@ from app.api.deps import current_user
 from app.api.v1.jobs import (
     SessionDep,
     _binary_block,
+    _deleted_dataset_block,
     _item,
     _new_job_id,
 )
@@ -102,6 +103,12 @@ async def create_quality_job(
             status_code=404,
             content={"success": False, "message": "数据集版本不存在"},
         )
+    if (
+        blocked_resp := await _deleted_dataset_block(
+            session, input_version.dataset_id
+        )
+    ) is not None:
+        return blocked_resp
     # 数据集 ACL:质量评估会回写输入版本 stats,要求 edit 及以上
     if not await dataset_acl.can_access(
         session, user, input_version.dataset_id, "edit"

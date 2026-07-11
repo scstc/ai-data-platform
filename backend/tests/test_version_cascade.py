@@ -9,10 +9,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 
 from app.models import DatasetVersionTable
+from app.models.dataset import Dataset
+from app.models.dataset_version import DatasetVersion
+from app.models.job import Job
 from app.models.job_input import JobInput
 from app.services.landing import add_table_member, create_dataset
 
@@ -70,6 +75,77 @@ async def test_delete_dataset_cascades_member_rows(client, db_session):
     assert resp.status_code == 200, resp.text
 
     assert await _member_rows(db_session, vid) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_dataset_blocked_by_downstream_reference(client, db_session):
+    """P0:硬删数据集前必须查跨数据集下游引用——本数据集的版本若被其它「未删」
+    数据集的任务消费为输入,硬删会让那条任务的血缘边(job_inputs)、任务详情
+    「输入版本」、GET /lineage 展示悄悄悬空,而下游数据集本身仍在正常使用
+    (未软删),这种失联对它是不可见的静默损坏,必须 409 拒绝并点名受影响数据集。
+    """
+    upstream = await create_dataset(db_session, name="上游被引用集")
+    v_up, _ = await add_table_member(
+        db_session, upstream.id, [{"text": "a"}], table_name="t1"
+    )
+    downstream = await create_dataset(db_session, name="下游消费集")
+    db_session.add(
+        Job(id="job-cross", name="跨集", type="clean", state="success", progress=100)
+    )
+    db_session.add(JobInput(job_id="job-cross", dataset_version_id=v_up.id))
+    db_session.add(
+        DatasetVersion(
+            id="dsv-cross-out",
+            dataset_id=downstream.id,
+            version_no=1,
+            storage_uri="/data/datasets/cross.jsonl",
+            format="jsonl",
+            produced_by_job_id="job-cross",
+        )
+    )
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/v1/datasets/{upstream.id}")
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    affected_ids = {d["id"] for d in body["affectedDatasets"]}
+    assert downstream.id in affected_ids
+
+    # 拒绝生效:上游数据集未被误删
+    assert await db_session.get(Dataset, upstream.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_dataset_allowed_when_downstream_already_deleted(
+    client, db_session
+):
+    """下游数据集本身已软删(在回收站)不构成阻塞——否则回收站里的数据集会
+    永久卡住上游数据集的删除,与「仅未删数据集的引用才算数」的设计对齐。"""
+    upstream = await create_dataset(db_session, name="上游集2")
+    v_up, _ = await add_table_member(
+        db_session, upstream.id, [{"text": "a"}], table_name="t1"
+    )
+    downstream = await create_dataset(db_session, name="下游已删集")
+    downstream.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    db_session.add(
+        Job(id="job-cross2", name="跨集2", type="clean", state="success", progress=100)
+    )
+    db_session.add(JobInput(job_id="job-cross2", dataset_version_id=v_up.id))
+    db_session.add(
+        DatasetVersion(
+            id="dsv-cross-out2",
+            dataset_id=downstream.id,
+            version_no=1,
+            storage_uri="/data/datasets/cross2.jsonl",
+            format="jsonl",
+            produced_by_job_id="job-cross2",
+        )
+    )
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/v1/datasets/{upstream.id}")
+    assert resp.status_code == 200, resp.text
 
 
 @pytest.mark.asyncio
@@ -133,4 +209,46 @@ async def test_delete_member_keeps_object_shared_by_carry_over(
     )
     assert resp.status_code == 200, resp.text
     assert len(removed) == 1
+    assert await _member_rows(db_session, vid) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_member_malformed_uri_skips_remove_object(
+    client, db_session, monkeypatch, caplog
+):
+    """storage_uri 不是合法 s3:// URI(脏数据)时,绝不猜测 bucket/key 去删对象——
+    此前的降级(默认桶 + 猜测 key)可能误删无关对象;正确做法是跳过该对象删除、
+    只删 DB 行,并记错误日志留痕,不静默吞掉。"""
+    import logging
+
+    from app.api.v1 import datasets as dmod
+
+    ds = await create_dataset(db_session, name="脏 URI 测试")
+    v1, m1 = await add_table_member(
+        db_session, ds.id, [{"text": "x"}], table_name="broken"
+    )
+    vid = v1.id
+    # 人为破坏该成员的 storage_uri,模拟脏数据(非法 s3:// URI)
+    m1.storage_uri = "not-a-valid-uri"
+    await db_session.commit()
+
+    called: list[tuple[str, str]] = []
+
+    async def _record_remove(cfg, bucket, key):
+        called.append((bucket, key))
+
+    monkeypatch.setattr(dmod, "platform_config", lambda: object())
+    monkeypatch.setattr(dmod, "remove_object", _record_remove)
+
+    with caplog.at_level(logging.ERROR):
+        resp = await client.delete(
+            f"/api/v1/dataset-versions/{vid}/members",
+            params={"keys": ["not-a-valid-uri"]},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["deleted"] == 1
+    # 绝不带猜测出的 bucket/key 去删对象
+    assert called == []
+    # 记了错误日志,不是静默吞掉
+    assert any("无法解析" in r.message for r in caplog.records)
     assert await _member_rows(db_session, vid) == []

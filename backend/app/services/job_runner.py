@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -150,12 +152,46 @@ def body_from_spec(job: Job) -> Any:
     raise ValueError(f"不支持后台执行的任务类型:{job_type}")
 
 
+async def _mark_queued(job_id: str) -> None:
+    """worker 模式入队:把 pending 任务的 queued_at 置为当前时间(仅记排队时刻)。
+
+    以 ``state=='pending'`` + ``queued_at IS NULL`` 为条件,故 worker 抢先认领
+    (state 已变)时本更新自然 no-op,不会覆盖运行态。best-effort:失败仅告警,
+    queued_at 缺失不影响 worker 认领(认领按 created_at 兜底排序)。
+    """
+    try:
+        async with async_session_factory() as session:
+            await session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.state == "pending",
+                    Job.queued_at.is_(None),
+                )
+                .values(queued_at=datetime.now(UTC))
+            )
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("job %s 入队标记 queued_at 失败(已忽略)", job_id, exc_info=True)
+
+
 def spawn(job_id: str) -> None:
     """起一个后台任务执行该任务(立即返回,不等跑完)。
 
     入参 body 由 _run_job 从 ``job.spec`` 重建(按 job.type 分派),故此处只需 job_id ——
     统一了新建 / 重跑 / 继续:它们都只负责把 Job 行落到正确状态,执行路径只有这一条。
+
+    执行模式(settings.job_execution_mode):
+    - inline(默认):本进程起 asyncio 协程执行,行为与历史一致。
+    - worker:不进程内执行,只异步标记 queued_at 入队,交独立 worker 进程
+      (python -m app.worker)认领执行。job 行已由调用方 commit 为 pending。
     """
+    if settings.job_execution_mode == "worker":
+        task = asyncio.create_task(_mark_queued(job_id))
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        return
+
     task = asyncio.create_task(_run_job(job_id))
     _tasks.add(task)
     _task_by_job[job_id] = task
@@ -177,6 +213,7 @@ async def reconcile_orphans(session: AsyncSession) -> int:
     """启动回收:把残留 pending/running 的任务标记失败(重启已中断其子进程)。返回条数。
 
     paused 不回收——那是用户主动暂停的意图,重启后应保持 paused 等用户继续。
+    顺带清扫 datasets_dir/.staging 下的孤儿目录(见 `_cleanup_staging_orphans`)。
     """
     result = await session.execute(
         update(Job)
@@ -184,7 +221,32 @@ async def reconcile_orphans(session: AsyncSession) -> int:
         .values(state="failed", error="服务重启,任务中断", finished_at=_now())
     )
     await session.commit()
+    _cleanup_staging_orphans()
     return result.rowcount or 0
+
+
+def _cleanup_staging_orphans() -> None:
+    """清空 datasets_dir/.staging 下的残留目录(供 reconcile_orphans 在启动时调用)。
+
+    staging 目录(`engine._new_staging_dir`)只在单次引擎执行期间存在,函数返回
+    前必 `shutil.rmtree` 清理;重启意味着上次进程内所有引擎子进程均已中断,
+    残留目录只可能是崩溃 / kill -9 留下的半成品,不可能还有任务在用,直接
+    全清。best-effort:单个目录清理失败只记 warning,不影响其余目录 / 启动流程。
+    """
+    staging_root = Path(settings.datasets_dir) / ".staging"
+    if not staging_root.is_dir():
+        return
+    cleaned = 0
+    for child in staging_root.iterdir():
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+            cleaned += 1
+        except OSError:
+            logger.warning("清理孤儿 staging 目录失败:%s", child)
+    logger.info("启动回收:清理 %d 个孤儿 staging 目录(%s)", cleaned, staging_root)
 
 
 async def _run_job(job_id: str) -> None:
@@ -367,7 +429,8 @@ async def _run_job(job_id: str) -> None:
                         goal=body.goal,
                     )
                 elif job.type == "review":
-                    # review 无 yaml/日志产物;run_review 内部落命中 + 打标版本 + 回写报告
+                    # review 无 yaml/日志产物;run_review 内部落命中 + 打标版本
+                    # + 回写报告
                     await run_review(
                         session,
                         job=job,
@@ -471,4 +534,33 @@ async def _run_job(job_id: str) -> None:
                 ),
                 body=job.error if job.state == "failed" else None,
             )
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception:
+            # 兜底:上面的业务异常若已导致本会话事务 aborted(某 runner 内部
+            # flush 冲突/异常未 rollback 直接冒泡),即便已把终态写进 job 对象,
+            # 这次 commit 仍会失败(如 PendingRollbackError)——终态因此丢失,
+            # 任务会永远停在 running。这里保留已算出的终态(不用本次 commit
+            # 失败的异常覆盖原始业务错误),rollback 当前失效会话后换一个全新
+            # 会话重写,确保 failed/success 等终态必落库。
+            logger.exception(
+                "job %s 终态提交失败(状态 %s),换新会话重写终态", job_id, job.state
+            )
+            final_state = job.state
+            final_error = job.error
+            final_finished_at = job.finished_at
+            await session.rollback()
+            try:
+                async with async_session_factory() as fresh_session:
+                    fresh_job = await fresh_session.get(Job, job_id)
+                    if fresh_job is not None:
+                        fresh_job.state = final_state
+                        fresh_job.error = final_error
+                        fresh_job.finished_at = final_finished_at
+                        await fresh_session.commit()
+            except Exception:
+                # 兜底的兜底:新会话仍提交失败(如 DB 本身不可用),已无更多手段——
+                # 记 critical 明确暴露"任务将残留 running",不再吞掉。
+                logger.critical(
+                    "job %s 终态兜底重写仍失败,任务将残留 running 态", job_id
+                )
