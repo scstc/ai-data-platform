@@ -503,6 +503,9 @@ declare namespace DataPlatform {
     canStop?: boolean;
     /** 来源流水线 id(治理工场执行产生的任务才有;手工编辑器新建任务为空) */
     pipelineId?: string | null;
+    /** 运行期非致命告警(list[str]):如合并丢行、LLM 故障未评分等,任务成功但需提示;
+     *  详情接口返回,列表不带。 */
+    warnings?: string[];
   };
 
   /** 新建加工任务入参 */
@@ -961,6 +964,8 @@ declare namespace DataPlatform {
     id: string;
     kind: 'version' | 'job' | 'lake_snapshot' | 'datasource' | 'member';
     createdAt?: string;
+    /** 实体已删除(如版本/数据集进回收站或被清理):图上灰显 + 「已删除」徽标,禁跳详情 */
+    deleted?: boolean;
     // version 字段
     datasetId?: string;
     datasetName?: string;

@@ -13,6 +13,7 @@ import {
   Button,
   Dropdown,
   type MenuProps,
+  Modal,
   message,
   Popconfirm,
   Popover,
@@ -182,19 +183,58 @@ const DatasetsList: React.FC = () => {
   // 外部托管数据集不可删除(后端 403 兜底)——批量删除前先拦截给提示
   const hasHostedSelected = selectedRows.some((r) => r.hosted);
 
+  // 硬删被下游引用时后端返回 409 + affectedDatasets;弹窗列清单(可点进下游详情)
+  // 替代裸报错。命中 409 返回 true(调用方据此跳过通用错误提示)。
+  const showDownstreamBlock = (e: any): boolean => {
+    const body = e?.response?.data ?? e?.data;
+    const affected = body?.affectedDatasets as
+      | { id: string; name: string }[]
+      | undefined;
+    if (e?.response?.status !== 409 || !affected?.length) return false;
+    Modal.error({
+      title: '无法删除:存在下游引用',
+      width: 480,
+      content: (
+        <div>
+          <p style={{ marginTop: 0 }}>
+            {body?.message ??
+              '该数据集被下列数据集引用为输入,删除会断血缘,请先处理这些下游数据集:'}
+          </p>
+          <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+            {affected.map((d) => (
+              <li key={d.id}>
+                <a
+                  onClick={() => {
+                    Modal.destroyAll();
+                    history.push(`/datasets/${d.id}`);
+                  }}
+                >
+                  {d.name}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ),
+    });
+    return true;
+  };
+
   const handleBatchDelete = async () => {
     const hide = message.loading('正在批量删除…', 0);
     try {
-      const res = await batchDeleteDatasets(selectedRowKeys);
+      const res = await batchDeleteDatasets(selectedRowKeys, {
+        skipErrorHandler: true,
+      });
       hide();
       message.success(
         `已删除 ${res?.data?.deleted ?? selectedRowKeys.length} 个数据集`,
       );
       setSelectedRows([]);
       actionRef.current?.reload();
-    } catch {
+    } catch (e: any) {
       hide();
-      message.error('批量删除失败，请重试');
+      if (!showDownstreamBlock(e)) message.error('批量删除失败，请重试');
     }
   };
 
@@ -215,13 +255,13 @@ const DatasetsList: React.FC = () => {
   const handleDelete = async (id: string) => {
     const hide = message.loading('正在删除…', 0);
     try {
-      await deleteDataset(id);
+      await deleteDataset(id, { skipErrorHandler: true });
       hide();
       message.success('删除成功');
       actionRef.current?.reload();
-    } catch {
+    } catch (e: any) {
       hide();
-      message.error('删除失败，请重试');
+      if (!showDownstreamBlock(e)) message.error('删除失败，请重试');
     }
   };
 

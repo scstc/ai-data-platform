@@ -126,6 +126,14 @@ const scanTag = (v?: string) =>
       ? { c: 'red', t: '安全未过' }
       : { c: 'default', t: '未扫描' };
 
+// 已删除节点(实体进回收站/已清理):灰显 + 「已删除」徽标 + 禁跳详情。
+const DELETED_STYLE = { opacity: 0.5, filter: 'grayscale(1)' } as const;
+const DeletedTag: React.FC = () => (
+  <Tag color="default" style={{ margin: 0 }}>
+    已删除
+  </Tag>
+);
+
 /** 节点卡右上角「聚焦」小图标:点任意节点下钻的统一入口,stopPropagation 避免
  *  与卡片体既有的跳转导航(版本→数据集详情、快照→湖详情)冲突。 */
 const FocusButton: React.FC<{ onFocus?: () => void }> = ({ onFocus }) => {
@@ -199,13 +207,16 @@ const SnapshotNode: React.FC<{
   onFocus?: () => void;
 }> = ({ n, onFocus }) => (
   <div
-    onClick={() => n.lakeId && history.push(`/data-lakes/${n.lakeId}`)}
+    onClick={() => {
+      if (n.deleted) return;
+      if (n.lakeId) history.push(`/data-lakes/${n.lakeId}`);
+    }}
     style={{
       position: 'relative',
       height: '100%',
       padding: 10,
       borderRadius: 8,
-      cursor: n.lakeId ? 'pointer' : 'default',
+      cursor: n.deleted ? 'not-allowed' : n.lakeId ? 'pointer' : 'default',
       background: 'var(--ant-color-bg-container)',
       border: '1px solid var(--ant-color-border)',
       borderLeft: `3px solid ${KIND_META.lake_snapshot.color}`,
@@ -213,6 +224,7 @@ const SnapshotNode: React.FC<{
       flexDirection: 'column',
       gap: 4,
       overflow: 'hidden',
+      ...(n.deleted ? DELETED_STYLE : {}),
     }}
   >
     <FocusButton onFocus={onFocus} />
@@ -232,6 +244,7 @@ const SnapshotNode: React.FC<{
       </Typography.Text>
     )}
     <Space size={4} wrap>
+      {n.deleted && <DeletedTag />}
       <Tag color="cyan" style={{ margin: 0, fontSize: 11 }}>
         {n.uploadChannel ?? n.dataCategory ?? '快照'}
       </Tag>
@@ -295,15 +308,18 @@ const VersionNode: React.FC<{
   const sc = scanTag(n.scanVerdict);
   return (
     <div
-      onClick={() =>
-        n.datasetId && history.push(`/datasets/${n.datasetId}?version=${n.id}`)
-      }
+      onClick={() => {
+        // 已删除版本禁跳详情(目标已进回收站/清理,详情页会 404)
+        if (n.deleted) return;
+        if (n.datasetId)
+          history.push(`/datasets/${n.datasetId}?version=${n.id}`);
+      }}
       style={{
         position: 'relative',
         height: '100%',
         padding: 10,
         borderRadius: 8,
-        cursor: 'pointer',
+        cursor: n.deleted ? 'not-allowed' : 'pointer',
         background: 'var(--ant-color-bg-container)',
         border: `1.5px solid ${
           n.isFocus ? 'var(--ant-color-primary)' : 'var(--ant-color-border)'
@@ -316,6 +332,7 @@ const VersionNode: React.FC<{
         flexDirection: 'column',
         gap: 4,
         overflow: 'hidden',
+        ...(n.deleted ? DELETED_STYLE : {}),
       }}
     >
       <FocusButton onFocus={onFocus} />
@@ -327,6 +344,7 @@ const VersionNode: React.FC<{
         {n.versionLabel} · {n.rows ?? '-'} 行
       </Typography.Text>
       <Space size={4} wrap>
+        {n.deleted && <DeletedTag />}
         {n.origin && n.origin !== 'managed' && (
           <Tag color="gold" style={{ margin: 0 }}>
             {n.origin}
@@ -409,12 +427,16 @@ const MemberNode: React.FC<{
       gap: 4,
       justifyContent: 'center',
       overflow: 'hidden',
+      ...(n.deleted ? DELETED_STYLE : {}),
     }}
   >
     <FocusButton onFocus={onFocus} />
-    <Tag color="purple" style={{ margin: 0, width: 'fit-content' }}>
-      成员
-    </Tag>
+    <Space size={4} wrap>
+      <Tag color="purple" style={{ margin: 0, width: 'fit-content' }}>
+        成员
+      </Tag>
+      {n.deleted && <DeletedTag />}
+    </Space>
     <Tooltip title={n.tableName}>
       <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
         {n.tableName}

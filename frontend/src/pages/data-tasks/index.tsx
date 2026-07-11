@@ -399,7 +399,7 @@ const DataTasks: React.FC = () => {
       title: '操作',
       valueType: 'option',
       key: 'option',
-      width: 240,
+      width: 280,
       search: false,
       render: (_, r) => {
         const actions: React.ReactNode[] = [];
@@ -466,6 +466,19 @@ const DataTasks: React.FC = () => {
           !r.canStop &&
           canRerun
         ) {
+          // 编辑入口与各场景任务列表对齐:跳场景编辑器 ?jobId= 编辑模式
+          if (PIPELINE_EDITOR_PAGE[r.type]) {
+            actions.push(
+              <a
+                key="edit"
+                onClick={() =>
+                  history.push(`${PIPELINE_EDITOR_PAGE[r.type]}?jobId=${r.id}`)
+                }
+              >
+                编辑
+              </a>,
+            );
+          }
           actions.push(
             <Popconfirm
               key="rerun"

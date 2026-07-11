@@ -40,6 +40,8 @@ import {
   deleteVersionMembers,
   exportVersionToS3,
   getDataset,
+  getQualityMembers,
+  getQualityReport,
   listBuckets,
   listCategories,
   listDataSources,
@@ -164,6 +166,84 @@ const ManifestPreviewModal: React.FC<{
         }}
       />
     </Modal>
+  );
+};
+
+/** 版本质量摘要:复用质量报告数据接口(versionId 维度,无需 jobId),内嵌该版本的
+ *  关键质量指标(每指标均值 + 样本行数)。未做过质量评估则提示引导发起评估。 */
+const VersionQualitySummary: React.FC<{
+  version: DataPlatform.DatasetVersion;
+  onEvaluate?: () => void;
+}> = ({ version, onEvaluate }) => {
+  const [loading, setLoading] = useState(true);
+  const [report, setReport] = useState<DataPlatform.QualityReport>();
+  const [hasStats, setHasStats] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setReport(undefined);
+    setHasStats(false);
+    // 先看各成员评估状态,挑首个已评估成员取报告(多成员版本才需带 member 参数)
+    getQualityMembers(version.id)
+      .then(async (res) => {
+        if (cancelled) return;
+        const members = res.data ?? [];
+        const scored = members.find((m) => m.hasStats);
+        if (!scored) return;
+        setHasStats(true);
+        const memberParam = members.length > 1 ? scored.memberName : undefined;
+        const rep = await getQualityReport(version.id, {
+          member: memberParam,
+        }).catch(() => undefined);
+        if (!cancelled && rep?.data) setReport(rep.data);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [version.id]);
+
+  if (loading) return <Spin size="small" />;
+  if (!hasStats) {
+    return (
+      <Space size={8}>
+        <Typography.Text type="secondary">尚未做质量评估</Typography.Text>
+        {onEvaluate && (
+          <Button
+            size="small"
+            type="link"
+            style={{ padding: 0, height: 'auto' }}
+            onClick={onEvaluate}
+          >
+            发起质量评估
+          </Button>
+        )}
+      </Space>
+    );
+  }
+  const metrics = report?.metrics ?? [];
+  return (
+    <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
+      <Descriptions.Item label="评估样本">
+        {report?.rows ?? '-'} 行
+      </Descriptions.Item>
+      {metrics.slice(0, 5).map((m) => (
+        <Descriptions.Item
+          key={m.name}
+          label={
+            <Tooltip title={`min ${m.min} · p50 ${m.p50} · max ${m.max}`}>
+              {m.name}
+            </Tooltip>
+          }
+        >
+          {Number.isFinite(m.mean) ? m.mean.toFixed(2) : '-'}
+        </Descriptions.Item>
+      ))}
+    </Descriptions>
   );
 };
 
@@ -395,6 +475,12 @@ const DatasetDetail: React.FC = () => {
     }
   };
 
+  /** 深链到各新建页并预选当前数据集 + 版本(编辑器支持 ?datasetId=&versionId= 预选)。 */
+  const goEditor = (path: string, versionId: string) => {
+    if (!id) return;
+    history.push(`${path}?datasetId=${id}&versionId=${versionId}`);
+  };
+
   /** 管理员才有的发布门操作（预览由左侧选中隐式触发，故不再有单独「预览」入口）。 */
   const renderVersionActions = (v: DataPlatform.DatasetVersion) => (
     <Space size="small" wrap>
@@ -456,6 +542,9 @@ const DatasetDetail: React.FC = () => {
 
   /** 右侧:选中版本的完整详情(行数/大小/来源/血缘/扫描/发布 + 流程 + 操作)。 */
   const renderVersionDetail = (v: DataPlatform.DatasetVersion) => {
+    // 加工/合成/合并会产新版本,须 edit 及以上 ACL(与「新建版本」同门槛);质量评估只读不设限
+    const canEditData =
+      detail?.myLevel === 'edit' || detail?.myLevel === 'admin';
     const scan =
       SCAN_VERDICT_TAG[v.scanVerdict ?? 'unscanned'] ??
       SCAN_VERDICT_TAG.unscanned;
@@ -540,6 +629,11 @@ const DatasetDetail: React.FC = () => {
             <Tag color={pub.color}>{pub.text}</Tag>
           </Descriptions.Item>
         </Descriptions>
+        <Divider style={{ margin: '12px 0' }}>质量摘要</Divider>
+        <VersionQualitySummary
+          version={v}
+          onEvaluate={() => goEditor('/assessment/quality/editor', v.id)}
+        />
         {(v.tables?.length ?? 0) > 1 && (
           <>
             <Divider style={{ margin: '12px 0' }}>
@@ -648,6 +742,43 @@ const DatasetDetail: React.FC = () => {
             <Button size="small" onClick={() => setManifestVersion(v)}>
               查看清单
             </Button>
+          )}
+        </Space>
+        <Divider style={{ margin: '12px 0' }}>血缘与下一步</Divider>
+        <Space size="small" wrap>
+          <Button
+            size="small"
+            onClick={() => history.push(`/ops/lineage?versionId=${v.id}`)}
+          >
+            查看血缘
+          </Button>
+          <Button
+            size="small"
+            onClick={() => goEditor('/assessment/quality/editor', v.id)}
+          >
+            质量评估
+          </Button>
+          {canEditData && (
+            <>
+              <Button
+                size="small"
+                onClick={() => goEditor('/governance/cleaning/editor', v.id)}
+              >
+                发起加工
+              </Button>
+              <Button
+                size="small"
+                onClick={() => goEditor('/governance/trainset/editor', v.id)}
+              >
+                数据合成
+              </Button>
+              <Button
+                size="small"
+                onClick={() => goEditor('/governance/make/editor', v.id)}
+              >
+                数据合并
+              </Button>
+            </>
           )}
         </Space>
         {access.canAdmin && (

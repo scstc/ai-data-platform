@@ -1,5 +1,6 @@
 import { ProDescriptions } from '@ant-design/pro-components';
-import { Space, Tabs, Typography } from 'antd';
+import { history } from '@umijs/max';
+import { Alert, Button, Space, Tabs, Typography } from 'antd';
 import { formatDateTime } from '@/utils/format';
 import { renderJobType, renderState } from '@/utils/jobState';
 import VersionFilePreview from '../VersionFilePreview';
@@ -9,6 +10,69 @@ export interface JobDetailProps {
   job: DataPlatform.Job;
 }
 
+/** 成功任务的「下一步」动作条:按任务类型给出承接动作,把用户从"看完详情"顺畅
+ *  带到下一环节(评估产物 / 查看新版本 / 看报告),避免回列表手动找入口。
+ *  - clean(数据加工/清洗):[评估新版本][查看新版本]
+ *  - quality(质量评估):[查看报告](报告页按 jobId 定位)
+ *  - synthesis(数据合并)/ trainset(数据合成):[查看产物版本][发起评估]
+ *  评估/查看均深链到对应新建页/详情页并预选产物数据集+版本(编辑器支持 query 预选)。 */
+const NextStepBar: React.FC<{ job: DataPlatform.Job }> = ({ job }) => {
+  if (job.state !== 'success') return null;
+  const out = job.output;
+  const evalBtn = out ? (
+    <Button
+      key="eval"
+      type="primary"
+      onClick={() =>
+        history.push(
+          `/assessment/quality/editor?datasetId=${out.datasetId}&versionId=${out.versionId}`,
+        )
+      }
+    >
+      {job.type === 'clean' ? '评估新版本' : '发起评估'}
+    </Button>
+  ) : null;
+  const viewBtn = out ? (
+    <Button
+      key="view"
+      onClick={() =>
+        history.push(`/datasets/${out.datasetId}?version=${out.versionId}`)
+      }
+    >
+      {job.type === 'clean' ? '查看新版本' : '查看产物版本'}
+    </Button>
+  ) : null;
+
+  let actions: React.ReactNode[] = [];
+  if (job.type === 'quality') {
+    actions = [
+      <Button
+        key="report"
+        type="primary"
+        onClick={() =>
+          history.push(`/assessment/quality/report?jobId=${job.id}`)
+        }
+      >
+        查看报告
+      </Button>,
+    ];
+  } else if (job.type === 'clean') {
+    actions = [evalBtn, viewBtn];
+  } else if (job.type === 'synthesis' || job.type === 'trainset') {
+    actions = [viewBtn, evalBtn];
+  }
+  const filtered = actions.filter(Boolean);
+  if (filtered.length === 0) return null;
+  return (
+    <Alert
+      type="success"
+      showIcon
+      message="任务已完成,继续下一步"
+      description={<Space wrap>{filtered}</Space>}
+    />
+  );
+};
+
 /** 概览:基础信息(ProDescriptions)+ 算子配置 + 数据集 + 输入/产物版本按文件预览。
  *  原 JobDetail 的全部内容,现作为「概览」Tab 与「资产清单」Tab 并列。 */
 const JobOverview: React.FC<{ job: DataPlatform.Job }> = ({ job }) => {
@@ -16,6 +80,24 @@ const JobOverview: React.FC<{ job: DataPlatform.Job }> = ({ job }) => {
   const outputVer = job.output;
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <NextStepBar job={job} />
+
+      {(job.warnings?.length ?? 0) > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message="运行告警"
+          description={
+            <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+              {job.warnings?.map((w, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: warnings 为无 id 的纯文本行
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          }
+        />
+      )}
+
       <ProDescriptions<DataPlatform.Job>
         column={2}
         dataSource={job}
