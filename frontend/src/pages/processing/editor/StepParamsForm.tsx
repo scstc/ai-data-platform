@@ -8,7 +8,12 @@ import {
   Typography,
 } from 'antd';
 import { useEffect, useState } from 'react';
-import { listLlmProviders, listLocalModels } from '@/services/data-platform';
+import {
+  listLlmProviders,
+  listLlmSystemModels,
+  listLocalModels,
+  listProviderModels,
+} from '@/services/data-platform';
 import { PARAM_ZH_DESC } from '../market/_paramZhDict';
 
 const { Text } = Typography;
@@ -23,7 +28,8 @@ const paramTooltip = (p: DataPlatform.CatalogParam) => {
 
 // LLM 模型参数(DJ 各算子命名不统一):留空时后端按 LLM 配置页生效模型注入
 // (见 engine.build_config,激活项优先,无激活回退最近配置);用户显式填写则尊重。
-// 下拉可选各提供商模型,api_or_hf_model 还可选模型仓库已就位的本地模型。
+// 下拉与「系统模型设置」同款按供应商分组列各家模型清单,
+// api_or_hf_model 还可选模型仓库已就位的本地模型。
 const MODEL_PARAM_NAMES = new Set(['api_model', 'api_or_hf_model']);
 
 /** 本地 HF 模型参数(hf_model / hf_nsfw_model / sam2_hf_model…):
@@ -47,20 +53,52 @@ const StepParamsForm: React.FC<{
   );
   const needsModel = fields.some((p) => MODEL_PARAM_NAMES.has(p.name));
   const [providers, setProviders] = useState<DataPlatform.LlmProvider[]>();
+  const [providerModels, setProviderModels] = useState<
+    Record<string, string[]>
+  >({});
+  const [systemModels, setSystemModels] = useState<
+    DataPlatform.LlmSystemModelItem[]
+  >([]);
   useEffect(() => {
     if (!needsModel || providers !== undefined) return;
-    listLlmProviders()
-      .then((res) => setProviders(res?.data ?? []))
-      .catch(() => setProviders([]));
+    (async () => {
+      try {
+        const res = await listLlmProviders();
+        const list = res?.data ?? [];
+        setProviders(list);
+        const confd = list.filter((p) => p.apiKeyMasked !== '未配置');
+        const [sysRes, ...modelRes] = await Promise.all([
+          listLlmSystemModels().catch(() => null),
+          ...confd.map((p) => listProviderModels(p.id).catch(() => null)),
+        ]);
+        if (sysRes?.success) setSystemModels(sysRes.data);
+        const pm: Record<string, string[]> = {};
+        confd.forEach((p, i) => {
+          const r = modelRes[i];
+          const models = r?.success ? r.data.map((m) => m.model) : [];
+          // 当前生效模型可能不在清单里,始终可选(与系统模型设置弹窗同处理)
+          if (p.model && !models.includes(p.model)) models.unshift(p.model);
+          pm[p.id] = models;
+        });
+        setProviderModels(pm);
+      } catch {
+        setProviders([]);
+      }
+    })();
   }, [needsModel, providers]);
-  // 与后端 refresh_cache 同序:激活项优先,无激活回退最近更新的已配 Key 提供商
   const configured = (providers ?? []).filter(
     (p) => p.apiKeyMasked !== '未配置',
   );
-  const effectiveModel =
-    configured.find((p) => p.isActive)?.model ??
-    [...configured].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
-      ?.model;
+  // 默认模型 = 「系统模型设置」chat 位(系统推理模型);未设置时与后端
+  // refresh_cache 同序回退:激活项优先,再回退最近更新的已配 Key 提供商
+  const chatItem = systemModels.find(
+    (i) => i.capability === 'chat' && i.providerId && i.model,
+  );
+  const fallbackProv =
+    configured.find((p) => p.isActive) ??
+    [...configured].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const effectiveProviderId = chatItem?.providerId ?? fallbackProv?.id;
+  const effectiveModel = chatItem?.model ?? fallbackProv?.model;
 
   // 本地模型仓库已就位的 HF 模型(供 hf_* 与 api_or_hf_model 参数下拉;未配置仓库则为空)
   const needsLocalModel = fields.some(
@@ -93,21 +131,42 @@ const StepParamsForm: React.FC<{
         const val = params[p.name];
         const t = p.type || '';
         if (MODEL_PARAM_NAMES.has(p.name)) {
+          // 与「系统模型设置」同款:按供应商分组,组内列该供应商全部模型
           const seen = new Set<string>();
           const options = [
-            ...configured.map((prov) => ({
-              value: prov.model,
-              label: `${prov.model}（${prov.name}${
-                prov.model === effectiveModel ? '，默认' : ''
-              }）`,
-            })),
+            ...configured.map((prov) => {
+              let models = providerModels[prov.id] ?? [];
+              if (
+                prov.id === effectiveProviderId &&
+                effectiveModel &&
+                !models.includes(effectiveModel)
+              ) {
+                models = [effectiveModel, ...models];
+              }
+              return {
+                label: prov.name,
+                options: models
+                  .filter((m) => !seen.has(m) && seen.add(m))
+                  .map((m) => ({
+                    value: m,
+                    label:
+                      prov.id === effectiveProviderId && m === effectiveModel
+                        ? `${m}（系统推理模型）`
+                        : m,
+                  })),
+              };
+            }),
             ...(p.name === 'api_or_hf_model'
-              ? (localModels ?? []).map((id) => ({
-                  value: id,
-                  label: `${id}（本地）`,
-                }))
+              ? [
+                  {
+                    label: '本地模型',
+                    options: (localModels ?? [])
+                      .filter((m) => !seen.has(m) && seen.add(m))
+                      .map((id) => ({ value: id, label: id })),
+                  },
+                ]
               : []),
-          ].filter((o) => !seen.has(o.value) && seen.add(o.value));
+          ].filter((g) => g.options.length > 0);
           return (
             <Form.Item
               key={p.name}
@@ -115,8 +174,8 @@ const StepParamsForm: React.FC<{
               tooltip={paramTooltip(p)}
               help={
                 effectiveModel
-                  ? `留空自动用 LLM 配置页生效模型 ${effectiveModel}`
-                  : '留空自动用 LLM 配置页生效模型'
+                  ? `留空自动用系统推理模型 ${effectiveModel}`
+                  : '留空自动用「LLM 配置-系统模型设置」的系统推理模型'
               }
             >
               <AutoComplete
@@ -131,7 +190,10 @@ const StepParamsForm: React.FC<{
                 placeholder={effectiveModel ?? '未配置 LLM'}
                 options={options}
                 filterOption={(input, option) =>
-                  String(option?.value ?? '')
+                  // 分组结构下仅叶子选项有 value(组对象只有 label+options)
+                  String(
+                    (option as { value?: string } | undefined)?.value ?? '',
+                  )
                     .toLowerCase()
                     .includes(input.toLowerCase())
                 }
