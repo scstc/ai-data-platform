@@ -121,9 +121,29 @@ const MakeEditor: React.FC = () => {
     const dsId = new URLSearchParams(location.search).get('datasetId');
     if (dsId) setDatasetId(dsId);
   }, []);
+  // 无 URL 预选且非编辑模式时默认选中最新数据集(列表按创建时间倒序),
+  // 进页直达合并配置,不停留在"请先选择"空态
   useEffect(() => {
-    const vId = new URLSearchParams(location.search).get('versionId');
-    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+    if (datasetId || !datasets.length) return;
+    const q = new URLSearchParams(location.search);
+    if (q.get('datasetId') || q.get('jobId')) return;
+    setDatasetId(datasets[0].id);
+  }, [datasets, datasetId]);
+  useEffect(() => {
+    const q = new URLSearchParams(location.search);
+    const vId = q.get('versionId');
+    if (vId && versions.some((v) => v.id === vId)) {
+      setVersionId(vId);
+      return;
+    }
+    if (!versions.length || q.get('jobId')) return;
+    // 默认选最新版本(版本列表升序取尾);切换数据集后旧 versionId
+    // 不在新列表里,也走这里重选
+    setVersionId((cur) =>
+      cur && versions.some((v) => v.id === cur)
+        ? cur
+        : versions[versions.length - 1]?.id,
+    );
   }, [versions]);
 
   // 编辑模式:URL 带 jobId 时按任务的 editSpec 回填(名称/数据集/版本/合并配置),

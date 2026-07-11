@@ -141,9 +141,25 @@ const QualityEditor: React.FC = () => {
     const dsId = new URLSearchParams(location.search).get('datasetId');
     if (dsId) setDatasetId(dsId);
   }, []);
+  // 无 URL 预选时默认选中最新数据集(列表按创建时间倒序),
+  // 进页直接进入编排,不停留在"请先选择"空态
+  useEffect(() => {
+    if (!datasetId && datasets.length) setDatasetId(datasets[0].id);
+  }, [datasets, datasetId]);
   useEffect(() => {
     const vId = new URLSearchParams(location.search).get('versionId');
-    if (vId && versions.some((v) => v.id === vId)) setVersionId(vId);
+    if (vId && versions.some((v) => v.id === vId)) {
+      setVersionId(vId);
+      return;
+    }
+    if (!versions.length) return;
+    // 默认选最新的可评估版本(版本列表升序,从尾部找非二进制);
+    // 切换数据集后旧 versionId 不在新列表里,也走这里重选
+    setVersionId((cur) =>
+      cur && versions.some((v) => v.id === cur)
+        ? cur
+        : [...versions].reverse().find((v) => !isBinaryFormat(v.format))?.id,
+    );
   }, [versions]);
 
   const labelOf = (n: string) => opMap[n]?.zhLabel || n;
