@@ -62,13 +62,6 @@ const VersionHistoryDrawer: FC<VersionHistoryDrawerProps> = ({
       render: (_, r) => <Tag color="blue">v{r.versionNo ?? '-'}</Tag>,
     },
     {
-      title: '行数',
-      dataIndex: 'rows',
-      width: 90,
-      align: 'right' as const,
-      render: (_, r) => (r.rows != null ? r.rows.toLocaleString() : '-'),
-    },
-    {
       title: '大小',
       dataIndex: 'size',
       width: 100,

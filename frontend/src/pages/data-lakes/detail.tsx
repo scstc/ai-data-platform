@@ -144,14 +144,6 @@ const DataLakeDetailPage: FC = () => {
       align: 'right' as const,
     },
     {
-      title: '行数',
-      dataIndex: 'latestRows',
-      width: 90,
-      align: 'right' as const,
-      render: (_, r) =>
-        r.latestRows != null ? r.latestRows.toLocaleString() : '-',
-    },
-    {
       title: '大小',
       dataIndex: 'totalSize',
       width: 100,
