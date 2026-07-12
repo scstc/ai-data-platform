@@ -36,6 +36,15 @@ class AIProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def generate_pipeline(self, goal: str) -> dict[str, Any]:
+        """据中文目标描述生成一条算子流水线，返回 GeneratedPipeline 形状 dict。
+
+        operators 只能来自算子目录中 ready 状态的算子（经 sanitize_pipeline
+        裁剪未知/不可执行算子与非法参数键），保证前端拿到的流水线可直接执行。
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def suggest_dataset_name(
         self, filenames: list[str], data_type: str, category: str | None
     ) -> dict[str, str]:

@@ -312,6 +312,44 @@ def generate_task_from_prompt(prompt_raw: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 生成算子流水线（中文关键词启发式，从算子目录挑选 ready 算子）
+# ---------------------------------------------------------------------------
+
+
+def generate_pipeline_from_goal(goal_raw: str) -> dict[str, Any]:
+    """根据中文目标描述生成一条算子流水线，返回 GeneratedPipeline 形状 dict。
+
+    按关键词命中场景类别（去重/过滤），从算子目录该类别下的 ready 算子中
+    取前几个组成流水线；未命中或目标为空时兜底给通用质量过滤流水线，
+    保证任何输入都能拿到非空的可执行流水线。
+    """
+    from app.services import operator_catalog as oc
+
+    goal = (goal_raw or "").strip()
+    if re.search(r"去重|重复去除|dedup", goal, re.IGNORECASE):
+        category = "deduplicator"
+        reason = "包含「去重/重复」→ 选用去重类算子"
+    elif re.search(r"过滤|质量|清洗|低质|filter", goal, re.IGNORECASE):
+        category = "filter"
+        reason = "包含「过滤/质量/清洗」→ 选用规则过滤类算子"
+    else:
+        category = "filter"
+        reason = "未识别到明确目标关键词 → 默认给出通用质量过滤流水线"
+
+    candidates = oc.ready_operator_context(category=category)
+    steps = [{"name": c["name"], "params": {}} for c in candidates[:3]]
+    if not steps:
+        # 极端兜底(目录该类目下暂无 ready 算子):退回任意可运行算子
+        fallback = oc.ready_operator_context()[:1]
+        steps = [{"name": c["name"], "params": {}} for c in fallback]
+    operators = oc.sanitize_pipeline(steps)
+    return {
+        "operators": operators,
+        "explanation": f"根据目标「{goal or '(未提供)'}」的关键词解析:{reason}。",
+    }
+
+
+# ---------------------------------------------------------------------------
 # 固定问答
 # ---------------------------------------------------------------------------
 
@@ -430,6 +468,9 @@ class HeuristicProvider(AIProvider):
 
     async def qa(self, question: str) -> dict[str, str]:
         return {"answer": answer_question(question)}
+
+    async def generate_pipeline(self, goal: str) -> dict[str, Any]:
+        return generate_pipeline_from_goal(goal)
 
     async def suggest_dataset_name(
         self, filenames: list[str], data_type: str, category: str | None

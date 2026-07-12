@@ -820,9 +820,11 @@ def sanitize_pipeline(
             continue
         # 排除 args/kwargs 变长占位项(与 _ui_field 口径一致):它们不是可配置参数,
         # 若放行经 build_config 进入 DJ YAML 会在运行期被 dj-process 当非法参数报错。
+        # 自定义算子 params 列可为 None,须显式 `or []`
+        # (同 _ui_params/ready_operator_context)
         allowed = {
             p["name"]
-            for p in op.get("params", [])
+            for p in (op.get("params") or [])
             if p["name"] not in ("args", "kwargs")
         }
         raw = step.get("params") or {}

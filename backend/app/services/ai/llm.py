@@ -39,6 +39,15 @@ _TASK_SYSTEM_PROMPT = (
     '"schedule":{"mode":"once"|"cron","cron"?:string}, '
     '"config":object, "explanation":string(中文)}。'
 )
+_PIPELINE_SYSTEM_PROMPT = (
+    "你是数据处理流水线编排助手。根据用户给出的中文目标描述，"
+    "从提示中给定的「可用算子清单」里选择 1~5 个算子组成一条流水线，"
+    "严禁选择清单外的算子名。只输出一个 JSON 对象："
+    '{"operators":[{"name":string,"params":object}],'
+    '"explanation":string(中文，说明选择理由)}。'
+    "params 只能使用该算子「合法参数名」列表中的键，不确定就给空对象 {}。"
+    "不要任何额外解释或 markdown 代码块。"
+)
 _QA_SYSTEM_PROMPT = (
     "你是 AI 数据平台的客服助手，用简洁中文回答用户关于数据源、文件格式、采集任务、"
     "cron 调度、测试连接的问题。只输出一个 JSON 对象："
@@ -215,6 +224,33 @@ class OpenAICompatProvider(AIProvider):
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM generate_task 失败，回退启发式：%s", exc)
             return await self._heuristic.generate_task(prompt)
+
+    async def generate_pipeline(self, goal: str) -> dict[str, Any]:
+        from app.services import operator_catalog as oc
+
+        # 候选清单截断(仿 suggest_tags 的 known_tags[:100]),避免提示过长
+        context = oc.ready_operator_context()[:80]
+        user = (
+            f"目标：{goal}\n"
+            f"可用算子清单(JSON)：{json.dumps(context, ensure_ascii=False)}"
+        )
+        try:
+            result = await self._chat_json(
+                _PIPELINE_SYSTEM_PROMPT, user, feature="generate_pipeline"
+            )
+        except Exception as exc:  # noqa: BLE001 — 任何失败都回退，保证可用性
+            logger.warning("LLM generate_pipeline 失败，回退启发式：%s", exc)
+            return await self._heuristic.generate_pipeline(goal)
+        raw_ops = result.get("operators")
+        explanation = result.get("explanation")
+        if not isinstance(raw_ops, list) or not isinstance(explanation, str):
+            logger.warning("LLM generate_pipeline 返回形状不合法，回退启发式")
+            return await self._heuristic.generate_pipeline(goal)
+        sanitized = oc.sanitize_pipeline(raw_ops)
+        if not sanitized:
+            logger.warning("LLM generate_pipeline 选出的算子全部不可执行，回退启发式")
+            return await self._heuristic.generate_pipeline(goal)
+        return {"operators": sanitized, "explanation": explanation}
 
     async def qa(self, question: str) -> dict[str, str]:
         try:

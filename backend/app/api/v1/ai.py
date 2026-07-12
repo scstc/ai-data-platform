@@ -15,7 +15,9 @@ from fastapi import APIRouter, Depends
 
 from app.core.config import settings
 from app.schemas.ai import (
+    GeneratedPipeline,
     GeneratedTaskConfig,
+    GeneratePipelineRequest,
     GenerateTaskRequest,
     InferredSchema,
     InferSchemaRequest,
@@ -69,6 +71,13 @@ class QaResponse(CamelModel):
     success: bool = True
 
 
+class GeneratePipelineResponse(CamelModel):
+    """AI 生成流水线响应。"""
+
+    data: GeneratedPipeline
+    success: bool = True
+
+
 class SuggestDatasetNameResponse(CamelModel):
     """数据集 AI 命名响应。"""
 
@@ -101,6 +110,16 @@ async def generate_task(
     """根据自然语言描述生成采集任务配置。"""
     result = await provider.generate_task(body.prompt)
     return GenerateTaskResponse(data=GeneratedTaskConfig.model_validate(result))
+
+
+@router.post("/generate-pipeline", response_model=GeneratePipelineResponse)
+async def generate_pipeline(
+    body: GeneratePipelineRequest,
+    provider: ProviderDep,
+) -> GeneratePipelineResponse:
+    """根据中文目标描述生成一条算子流水线。"""
+    result = await provider.generate_pipeline(body.goal)
+    return GeneratePipelineResponse(data=GeneratedPipeline.model_validate(result))
 
 
 @router.post("/qa", response_model=QaResponse)
