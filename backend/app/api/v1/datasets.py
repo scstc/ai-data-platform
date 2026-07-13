@@ -23,6 +23,8 @@ from starlette.background import BackgroundTask
 
 from app.api.deps import current_user, require_admin, require_perm, require_user
 from app.api.v1.categories import build_category_name_map
+from app.api.v1.ingest_tasks import _unsync_cron_job
+from app.api.v1.jobs import _delete_job_cascade
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.ids import uuid7_hex
@@ -31,6 +33,8 @@ from app.models.dataset_acl import DatasetAcl
 from app.models.dataset_version import DatasetVersion
 from app.models.dataset_version_table import DatasetVersionTable
 from app.models.datasource import DataSource
+from app.models.ingest_task import IngestTask
+from app.models.job import Job
 from app.models.job_input import JobInput
 from app.models.review_rule import ReviewRule
 from app.models.role import Role
@@ -53,7 +57,7 @@ from app.schemas.dataset import (
 from app.schemas.dataset_acl import AclCreate, AclRead, AclUpdate
 from app.services import dataset_acl, dataset_lifecycle
 from app.services.ai import get_ai_provider
-from app.services.engine import _semaphore
+from app.services.engine import _semaphore, terminate_job
 from app.services.external_store import (
     MAX_MANIFEST_MEMBERS,
     MAX_MATERIALIZE_BYTES,
@@ -1801,7 +1805,13 @@ async def _has_hosted_version(session: AsyncSession, dataset_id: str) -> bool:
 
 
 async def _purge_dataset(session: AsyncSession, dataset_id: str) -> bool:
-    """暂存删除一个数据集(版本 + 表成员 + 血缘边 + 元数据),不 commit;返回是否命中。
+    """暂存删除数据集(版本+表成员+血缘边+元数据+关联任务),不 commit;返回是否命中。
+
+    级联删任务(与过期回收站的级联打标同一关联口径 _related_job_ids):产出/消费
+    该数据集任一版本的加工任务、绑定它的采集任务一并硬删——运行中的先 terminate
+    (best-effort 杀 dj-process 子进程),采集任务先解除调度作业。跨数据集共享的
+    任务也会被删(输入没了本就无法重跑);其在**其他**数据集产出的版本保留、
+    仅置空 produced_by_job_id(_delete_job_cascade 语义)。
 
     注意:本函数只删平台记录,**绝不调用任何 S3 删除**(部署红线,#18)。
     含 hosted 版本时由调用方先行拦截(delete/batch-delete 返回 403),unhost 才允许。
@@ -1809,6 +1819,23 @@ async def _purge_dataset(session: AsyncSession, dataset_id: str) -> bool:
     dataset = await session.get(Dataset, dataset_id)
     if dataset is None:
         return False
+    # 先收集关联任务再删版本/血缘边(关联查询依赖它们)
+    job_ids = await dataset_lifecycle._related_job_ids(session, dataset_id)
+    if job_ids:
+        jobs = (
+            await session.scalars(select(Job).where(Job.id.in_(job_ids)))
+        ).all()
+        for job in jobs:
+            terminate_job(job.id)
+            await _delete_job_cascade(session, job)
+    ingest_tasks = (
+        await session.scalars(
+            select(IngestTask).where(IngestTask.dataset_id == dataset_id)
+        )
+    ).all()
+    for task in ingest_tasks:
+        _unsync_cron_job(task.id)
+        await session.delete(task)
     version_ids = (
         await session.scalars(
             select(DatasetVersion.id).where(
@@ -1899,7 +1926,10 @@ async def delete_dataset(
     session: SessionDep,
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
-    """删除数据集:级联删版本 + 清血缘边(job_inputs)+ 删磁盘产物。
+    """删除数据集:级联删版本 + 清血缘边(job_inputs)+ 删关联任务 + 删磁盘产物。
+
+    关联任务(产出/消费该数据集的加工任务、绑定它的采集任务)一并硬删,
+    不留孤儿任务;运行中的先停止。详见 _purge_dataset。
 
     仅 owner/超管可删(销毁性操作不给 ACL-admin);匿名放行(兼容现状)。
     含 hosted 版本 → 403 拒绝(#18:删源禁止,请走取消托管),绝不动 S3。

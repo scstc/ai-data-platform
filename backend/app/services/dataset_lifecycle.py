@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import async_session_factory
@@ -48,7 +48,11 @@ def _expiry_cutoff(now: datetime) -> datetime:
 
 
 async def _related_job_ids(session: AsyncSession, dataset_id: str) -> set[str]:
-    """该数据集关联的 job:产出它任一版本的 + 消费它任一版本做输入的。"""
+    """该数据集关联的 job:产出它任一版本的 + 消费它任一版本做输入的。
+
+    消费侧除 job_inputs 血缘边外,还按 spec 里的输入版本反查——失败/取消的
+    任务不写血缘边(见 jobs._build_input 的回退逻辑),只靠边会漏掉它们。
+    """
     version_ids = select(DatasetVersion.id).where(
         DatasetVersion.dataset_id == dataset_id
     )
@@ -63,7 +67,16 @@ async def _related_job_ids(session: AsyncSession, dataset_id: str) -> set[str]:
             JobInput.dataset_version_id.in_(version_ids)
         )
     )
-    return set(produced) | set(consumed)
+    # spec 蛇形键为主(model_dump 默认),兼容 camelCase 旧数据
+    spec_matched = await session.scalars(
+        select(Job.id).where(
+            or_(
+                Job.spec.op("->>")("dataset_version_id").in_(version_ids),
+                Job.spec.op("->>")("datasetVersionId").in_(version_ids),
+            )
+        )
+    )
+    return set(produced) | set(consumed) | set(spec_matched)
 
 
 async def _cascade_mark(
