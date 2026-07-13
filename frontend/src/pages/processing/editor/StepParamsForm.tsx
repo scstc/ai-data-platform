@@ -131,26 +131,35 @@ const StepParamsForm: React.FC<{
         const val = params[p.name];
         const t = p.type || '';
         if (MODEL_PARAM_NAMES.has(p.name)) {
-          // 与「系统模型设置」同款:按供应商分组,组内列该供应商全部模型
+          // 与「系统模型设置」同款:按供应商分组,组内列该供应商全部模型。
+          // 任务级凭证按生效供应商解析(后端建任务同规则拦截),非生效供应商
+          // 的模型置灰不可选;生效供应商排最前,同名模型归属其名下。
           const seen = new Set<string>();
+          const ordered = [...configured].sort(
+            (a, b) =>
+              Number(b.id === effectiveProviderId) -
+              Number(a.id === effectiveProviderId),
+          );
           const options = [
-            ...configured.map((prov) => {
+            ...ordered.map((prov) => {
+              const isEffective = prov.id === effectiveProviderId;
               let models = providerModels[prov.id] ?? [];
               if (
-                prov.id === effectiveProviderId &&
+                isEffective &&
                 effectiveModel &&
                 !models.includes(effectiveModel)
               ) {
                 models = [effectiveModel, ...models];
               }
               return {
-                label: prov.name,
+                label: isEffective ? prov.name : `${prov.name}（非生效供应商）`,
                 options: models
                   .filter((m) => !seen.has(m) && seen.add(m))
                   .map((m) => ({
                     value: m,
+                    disabled: !isEffective,
                     label:
-                      prov.id === effectiveProviderId && m === effectiveModel
+                      isEffective && m === effectiveModel
                         ? `${m}（系统推理模型）`
                         : m,
                   })),
