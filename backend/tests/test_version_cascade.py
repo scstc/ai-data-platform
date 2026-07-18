@@ -149,6 +149,83 @@ async def test_delete_dataset_allowed_when_downstream_already_deleted(
 
 
 @pytest.mark.asyncio
+async def test_delete_dataset_cascades_related_jobs(client, db_session):
+    """删数据集必须级联硬删关联任务(消费/产出/spec 反查/采集),不留孤儿。
+
+    为什么:过期回收站会级联打标,手动删除若不删任务,任务列表会留下输入版本
+    已不存在的孤儿任务(详情空白、重跑 404)。无关任务绝不能被误删;共享任务在
+    其他数据集的产出版本保留、仅置空上游 job 指针(与单删任务同语义)。
+    """
+    from app.models.dataset_version import DatasetVersion
+    from app.models.ingest_task import IngestTask
+    from app.models.job import Job
+
+    ds = await create_dataset(db_session, name="任务级联测试")
+    dsid = ds.id
+    v1, _ = await add_table_member(
+        db_session, dsid, [{"text": "a"}], table_name="t1"
+    )
+    other = await create_dataset(db_session, name="旁观数据集")
+    ov, _ = await add_table_member(
+        db_session, other.id, [{"text": "b"}], table_name="t1"
+    )
+    db_session.add_all(
+        [
+            # 消费者:血缘边指向被删数据集的版本
+            Job(id="job-consumer", name="消费任务", type="process"),
+            JobInput(job_id="job-consumer", dataset_version_id=v1.id),
+            # 失败任务:无血缘边,仅 spec 记录输入版本(spec 反查兜底)
+            Job(
+                id="job-speconly",
+                name="失败任务",
+                type="process",
+                state="failed",
+                spec={"dataset_version_id": v1.id},
+            ),
+            # 生产者:产出了旁观数据集的一个版本(共享任务跨数据集产出)
+            Job(id="job-producer", name="生产任务", type="process"),
+            # 无关任务:与被删数据集毫无关联,必须幸存
+            Job(
+                id="job-unrelated",
+                name="无关任务",
+                type="process",
+                spec={"dataset_version_id": ov.id},
+            ),
+            # 绑定被删数据集的采集任务
+            IngestTask(
+                id="task-cascade",
+                name="采集任务",
+                datasource_id="src-x",
+                datasource_name="源",
+                schedule={"mode": "once"},
+                status="success",
+                logs=[],
+                dataset_id=dsid,
+            ),
+        ]
+    )
+    # job-producer 同时产出:被删数据集的 v1 + 旁观数据集的 ov
+    v1.produced_by_job_id = "job-producer"
+    ov.produced_by_job_id = "job-producer"
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/v1/datasets/{dsid}")
+    assert resp.status_code == 200, resp.text
+
+    remaining = set(
+        (await db_session.execute(select(Job.id))).scalars().all()
+    )
+    assert remaining == {"job-unrelated"}
+    assert await db_session.get(IngestTask, "task-cascade") is None
+    # 共享任务在旁观数据集的产出版本保留,上游指针置空
+    await db_session.refresh(ov)
+    assert isinstance(ov, DatasetVersion) and ov.produced_by_job_id is None
+    # 血缘边不残留
+    edges = (await db_session.execute(select(JobInput))).scalars().all()
+    assert edges == []
+
+
+@pytest.mark.asyncio
 async def test_delete_member_keeps_object_shared_by_carry_over(
     client, db_session, monkeypatch
 ):

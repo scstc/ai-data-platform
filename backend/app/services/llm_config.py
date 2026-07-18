@@ -82,13 +82,11 @@ def set_active_cache(cfg: ResolvedLLMConfig | None) -> None:
     _active = cfg
 
 
-async def refresh_cache(session: AsyncSession) -> None:
-    """从数据库查询生效的 LLM 提供商并刷新缓存。
+async def get_effective_provider(session: AsyncSession):
+    """查出运行时生效的 LLM 提供商行(LlmProvider | None)。
 
-    找到 is_active=True 的第一条 → 更新缓存；
-    没有激活项 → 回退到最近更新的已配 Key 提供商（配置测试通过即可用，
-    无需显式激活；激活仅用于多提供商时指定优先）；
-    一条都没有 → 清空缓存（回退到 env 变量）。
+    生效顺序(refresh_cache 与建任务校验共用本函数,口径必须一致):
+    is_active=True 优先 → 回退最近更新的已配 Key 提供商 → 都没有返回 None。
     """
     from app.models.llm_provider import LlmProvider  # 延迟导入避免循环
 
@@ -106,6 +104,18 @@ async def refresh_cache(session: AsyncSession) -> None:
                 .limit(1)
             )
         ).first()
+    return row
+
+
+async def refresh_cache(session: AsyncSession) -> None:
+    """从数据库查询生效的 LLM 提供商并刷新缓存。
+
+    找到 is_active=True 的第一条 → 更新缓存；
+    没有激活项 → 回退到最近更新的已配 Key 提供商（配置测试通过即可用，
+    无需显式激活；激活仅用于多提供商时指定优先）；
+    一条都没有 → 清空缓存（回退到 env 变量）。
+    """
+    row = await get_effective_provider(session)
     if row is not None:
         set_active_cache(
             ResolvedLLMConfig(

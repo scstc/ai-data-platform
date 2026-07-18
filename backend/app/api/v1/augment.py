@@ -73,17 +73,39 @@ async def _start_augment(
 
     传入 job = 编辑任务:校验通过后覆盖该任务配置并原地重跑,不新建记录。
     """
-    if not body.operators:
+    if body.member_configs and body.operators:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "不能同时指定 memberConfigs 和 operators",
+            },
+        )
+    if not body.member_configs and not body.operators:
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": "请至少选择一个算子"},
         )
-    unknown = [o.name for o in body.operators if oc.get_operator(o.name) is None]
+    if body.member_configs:
+        for cfg in body.member_configs:
+            if not cfg.operators:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": f"成员 {cfg.member_name} 请至少选择一个算子",
+                    },
+                )
+    # member_configs 模式下拉平所有成员算子做统一校验(未知算子/资源门)
+    all_operators = body.operators or [
+        o for cfg in body.member_configs for o in cfg.operators
+    ]
+    unknown = [o.name for o in all_operators if oc.get_operator(o.name) is None]
     if unknown:
         return JSONResponse(
             status_code=400, content={"success": False, "message": f"未知算子:{', '.join(unknown)}"}
         )
-    if (block_msg := _augment_operator_block(body.operators)) is not None:
+    if (block_msg := _augment_operator_block(all_operators)) is not None:
         return JSONResponse(
             status_code=400, content={"success": False, "message": block_msg}
         )
@@ -108,6 +130,27 @@ async def _start_augment(
         )
     if (blocked_resp := _binary_block(input_version)) is not None:
         return blocked_resp
+    # member_configs 指向的成员必须存在于该版本(否则引擎会静默跳过)
+    if body.member_configs:
+        from app.models.dataset_version_table import DatasetVersionTable
+
+        stmt = select(DatasetVersionTable.table_name).where(
+            DatasetVersionTable.dataset_version_id == body.dataset_version_id
+        )
+        member_names = set((await session.scalars(stmt)).all())
+        missing = [
+            cfg.member_name
+            for cfg in body.member_configs
+            if cfg.member_name not in member_names
+        ]
+        if missing:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": f"成员不存在:{', '.join(missing)}",
+                },
+            )
 
     if job is None:
         job = Job(
@@ -362,7 +405,7 @@ async def get_augment_report(job_id: str, session: SessionDep) -> JSONResponse:
             input_version_id=spec.get("dataset_version_id", ""),
             mode=goal_mode,
             input_count=0,
-            operator_chain=[o["name"] for o in spec.get("operators", [])],
+            operator_chain=[o["name"] for o in spec.get("operators") or []],
             warnings=["任务尚未完成"] if job.state != "success" else [],
         )
         # by_alias=True:AugmentReport 继承 CamelModel,默认 model_dump 输出 snake_case;

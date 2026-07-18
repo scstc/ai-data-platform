@@ -29,7 +29,7 @@ from app.services.engine import (
     terminate_job,
 )
 from app.services.landing import BINARY_FORMATS, MANIFEST_FORMAT, MANIFEST_MEMBER_NAME
-from app.services.llm_config import get_active_llm_config
+from app.services.llm_config import get_active_llm_config, get_effective_provider
 
 router = APIRouter(tags=["jobs"])
 
@@ -117,6 +117,74 @@ def _operator_block(
             content={"success": False, "message": "；".join(blocked)},
         )
     return None
+
+
+async def _cross_provider_model_block(
+    session: AsyncSession, operators: list[OperatorSpec]
+) -> JSONResponse | None:
+    """跨供应商模型拦截:凭证与端点是任务级单例(engine 只注入生效供应商的
+    key,llm-proxy 只转发到快照里的一个 base_url),算子显式选了其他供应商
+    清单里的模型,运行期必然 401/模型不存在 → 建任务时提前 400 给出原因。
+
+    只拦"确定属于其他供应商清单且不在生效供应商清单"的模型;生效供应商
+    清单内、生效供应商当前模型、本地 HF 模型与自由输入的未知名称一律放行
+    (api_or_hf_model 合法值可以是本地模型,不可误伤)。库里无供应商
+    (纯 env 回退)时无从判定归属,跳过。
+    """
+    from app.models.llm_model import LlmModel
+
+    picked = {
+        str(v)
+        for o in operators
+        for k in ("api_model", "api_or_hf_model")
+        if (v := (o.params or {}).get(k))
+    }
+    if not picked:
+        return None
+    effective = await get_effective_provider(session)
+    if effective is None:
+        return None
+    rows = (
+        await session.execute(
+            select(LlmModel.provider_id, LlmModel.model).where(
+                LlmModel.model.in_(picked)
+            )
+        )
+    ).all()
+    owners: dict[str, set[str]] = {}
+    for pid, model in rows:
+        owners.setdefault(model, set()).add(pid)
+    offending = [
+        (model, owner_ids)
+        for model in sorted(picked)
+        if model != effective.model
+        and (owner_ids := owners.get(model))
+        and effective.id not in owner_ids
+    ]
+    if not offending:
+        return None
+    from app.models.llm_provider import LlmProvider
+
+    ids = {pid for _, owner_ids in offending for pid in owner_ids}
+    names = {
+        p.id: p.name
+        for p in (
+            await session.scalars(select(LlmProvider).where(LlmProvider.id.in_(ids)))
+        ).all()
+    }
+    model, owner_ids = offending[0]
+    other = "、".join(sorted(names.get(i, i) for i in owner_ids))
+    return JSONResponse(
+        status_code=400,
+        content={
+            "success": False,
+            "message": (
+                f"模型 {model} 属于供应商「{other}」,而当前生效供应商是"
+                f"「{effective.name}」;同一任务的密钥与端点按生效供应商解析,"
+                f"请改选「{effective.name}」的模型,或先在 LLM 配置切换生效供应商"
+            ),
+        },
+    )
 
 
 class JobItemResponse(CamelModel):
@@ -499,6 +567,12 @@ async def _start_job(
 
     if all_operators and (
         blocked_resp := _operator_block(all_operators, input_version)
+    ) is not None:
+        return blocked_resp
+
+    # 跨供应商模型拦截:算子选了非生效供应商的模型 → 运行期必挂,提前 400
+    if all_operators and (
+        blocked_resp := await _cross_provider_model_block(session, all_operators)
     ) is not None:
         return blocked_resp
 

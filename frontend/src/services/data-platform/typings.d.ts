@@ -555,7 +555,10 @@ declare namespace DataPlatform {
   type DistillationJobCreate = {
     name: string;
     datasetVersionId: string;
-    operators: { name: string; params?: Record<string, any> }[];
+    /** 成员级独立配置(多表成员场景,优先);与 operators 二选一 */
+    memberConfigs?: MemberOperatorConfig[];
+    /** 旧版统一配置(向后兼容,套用到所有成员) */
+    operators?: { name: string; params?: Record<string, any> }[];
     outputDatasetId?: string;
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
      *  蒸馏数据通常无 text 字段(如 instruction),建议显式指定 */
@@ -716,7 +719,10 @@ declare namespace DataPlatform {
   type AugmentJobCreate = {
     name: string;
     datasetVersionId: string;
-    operators: { name: string; params?: Record<string, any> }[];
+    /** 成员级独立配置(多表成员场景,优先);与 operators 二选一 */
+    memberConfigs?: MemberOperatorConfig[];
+    /** 旧版统一配置(向后兼容,套用到所有成员) */
+    operators?: { name: string; params?: Record<string, any> }[];
     goal: AugmentGoal;
     outputDatasetId?: string;
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
@@ -748,7 +754,10 @@ declare namespace DataPlatform {
   type TrainsetJobCreate = {
     name: string;
     datasetVersionId: string;
-    operators: { name: string; params?: Record<string, any> }[];
+    /** 成员级独立配置(多表成员场景,优先);与 operators 二选一 */
+    memberConfigs?: MemberOperatorConfig[];
+    /** 旧版统一配置(向后兼容,套用到所有成员) */
+    operators?: { name: string; params?: Record<string, any> }[];
     goal: TrainsetGoal;
     outputDatasetId?: string;
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段 */
