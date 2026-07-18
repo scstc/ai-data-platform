@@ -1884,7 +1884,7 @@ async def _purge_dataset(session: AsyncSession, dataset_id: str) -> bool:
         )
     ).all()
     for task in ingest_tasks:
-        _unsync_cron_job(task.id)
+        await _unsync_cron_job(session, task.id)
         await session.delete(task)
     version_ids = (
         await session.scalars(
