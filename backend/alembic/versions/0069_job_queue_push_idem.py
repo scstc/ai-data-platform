@@ -17,7 +17,7 @@ Create Date: 2026-07-11
 原生 UUID 类型,与既有外键无关联但格式对齐的引用列保持一致——否则真实
 UUID 列会在写入这些字符串 ID 时报类型错误。`depends_on_job_id` 同理。
 
-**只对整改库 adp_flow 执行 upgrade**。
+**只对整改库 adp_trace 执行 upgrade**(历史曾称 adp_gov / adp_flow)。
 """
 
 from __future__ import annotations
