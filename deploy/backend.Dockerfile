@@ -32,11 +32,14 @@ ARG DJ_EXTRAS="[generic]"
 COPY data-juicer/ /opt/dj/
 # 大依赖(GPU extra 几 GB)在弱网下偶发连接中断,--mount=cache 让已下完的包跨构建复用
 # (RUN 失败不会保留 Docker 层缓存,没有这个 mount 重试等于从零重下);外层再加重试兜底。
+# ray 必装(裸包即可):fork 的 lazy_loader 对 ray 禁用 auto_install,而 dj-process 启动
+# import 链(core/executor/ray_executor)无条件 @ray.remote,缺 ray 时任何算子任务直接崩。
+# [generic] 会经 vllm 连带装 ray,但 DJ_EXTRAS="" 的精简构建不会——这里显式钉住,两种构建都齐。
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv /opt/dj/.venv --python 3.12 \
-    && ( uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" \
-         || (echo "uv pip install failed, retry 1/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}") \
-         || (echo "uv pip install failed, retry 2/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}") )
+    && ( uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0" \
+         || (echo "uv pip install failed, retry 1/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0") \
+         || (echo "uv pip install failed, retry 2/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0") )
 
 # GPU 化:generic 装的是 torch 2.8.0+cpu(有卡也用不了),换成 cu126(Linux/py3.12)让 NVIDIA 卡可用。
 # 直连 download.pytorch.org 卡死、aliyun 403,改用 SJTU 镜像;--no-deps 只替换 torch 三件套、

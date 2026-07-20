@@ -54,6 +54,9 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # 外部 S3 托管(#18)物化缓存:不设会回退 config.py 写死的开发机路径,
+      # 缓存写进容器层(重建即丢、最多撑大 10GiB);显式落到 /data 卷
+      HOSTED_CACHE_DIR: /data/hosted-cache
     volumes:
       - adp_data:/data
     depends_on:
@@ -76,6 +79,10 @@ services:
       <<: *backend_env
       # worker 并发执行的任务数;0 = 沿用 ENGINE_CONCURRENCY
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-0}
+      # LLM 算子经 /api/v1/llm-proxy/{job_id} 回连做用量计量(engine.py 注入
+      # OPENAI_BASE_URL)。默认 127.0.0.1:18003 只在 backend 容器内成立;worker
+      # 容器不起 HTTP,必须指向 backend 服务,否则 LLM 算子任务全部连接失败。
+      LLM_PROXY_SELF_URL: http://backend:18003
     volumes:
       - adp_data:/data
     depends_on:
