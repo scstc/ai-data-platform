@@ -144,5 +144,27 @@ $C down -v           # 停止并清空全部数据（慎用）
 - **执行形态与生产一致**：backend + 独立 worker 双容器（`JOB_EXECUTION_MODE=worker`，
   API 只入队、`adp-local-worker` 认领 PG 队列执行）；置 `.env.local` 的
   `JOB_EXECUTION_MODE=inline` 可回退 backend 进程内执行（此时 worker 容器闲置）。
-- **改 `.py` 不生效**：镜像里是拷贝进去的代码，非挂载。改后端代码要
-  `$C up -d --build backend` 重建；要即时生效请改用 `/adp-start`。
+- **后端镜像用的是全量 CPU 版，别对 backend/worker 跑 `--build`**：
+  `adp-local-backend:latest` 实际是 `adp-backend:cpu-generic-nlp-vision` 的 retag
+  （DJ venv 3.8G，含 torch cpu / transformers，能跑 hf_model/NLP/视觉算子；
+  由一份**未入库**的改版 Dockerfile 以 `DJ_PKGS="/opt/dj[nlp] torch==2.8.0
+  transformers==4.57.1 ..." --torch-backend=cpu` 构建）。而本命令派生的 compose
+  是 `DJ_EXTRAS=""` 精简构建，**一跑 `up -d --build backend worker` 就会把 tag
+  覆盖回精简版、模型算子失效**（万一覆盖了，retag 回来即可：
+  `docker tag adp-backend:cpu-generic-nlp-vision adp-local-backend:latest`）。
+- **改 `.py` 不生效**：镜像里是拷贝进去的代码，非挂载。改后端代码后，
+  以全量镜像为基底只刷新 `/app` 代码层（几秒完成，DJ venv 等全部保留）：
+
+  ```bash
+  cd ~/ai-project/ai-data-platform
+  docker build -t adp-local-backend:latest -f - . <<'EOF'
+  FROM adp-backend:cpu-generic-nlp-vision
+  COPY backend/ /app/
+  EOF
+  # backend 与 worker 共用镜像,任务实际在 worker 执行,必须一起重建容器
+  $C up -d --no-build backend worker
+
+  $C up -d --build frontend   # 前端不受影响,正常 --build
+  ```
+
+  数据在 named volume 里，重建不丢。要改完即时生效请改用 `/adp-start`。
