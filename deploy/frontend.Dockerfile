@@ -1,6 +1,9 @@
 # 前端镜像:Umi Max(utoopack)构建静态产物 → nginx 托管 + 反代 /api 到后端。
 # 构建上下文 = 仓库根目录(与后端共用,便于 deploy/nginx.conf 一并拷入)。
-FROM node:22-slim AS build
+# --platform=$BUILDPLATFORM:构建阶段固定用构建机原生架构。前端产物是纯静态文件,
+# 与目标架构无关,交叉构建(如 x86 上出 arm64 镜像)时无需让 node 在 qemu 模拟下跑
+# npm install/build——那会慢十几倍。只有下面 nginx 运行阶段才按目标架构走。
+FROM --platform=$BUILDPLATFORM node:22-slim AS build
 WORKDIR /app
 ENV HUSKY=0
 # 先装依赖,再拷源码。用 npm install(非 ci):仓库 package-lock 与 package.json
