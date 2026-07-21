@@ -10,8 +10,9 @@ ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     DJ_PROCESS_BIN=/opt/dj/.venv/bin/dj-process
 
-# uv:两段安装共用
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# uv:两段安装共用。版本钉死(tag+digest):latest 浮动标签会随上游发版改变 digest,
+# 这层一变后面 apt/DJ venv/后端依赖全部缓存失效,触发 15min+ 全量重建。升级需手动改这里。
+COPY --from=ghcr.io/astral-sh/uv:0.11.30@sha256:93b61e21202b1dab861092748e46bbd6e0e41dd84f59b9174efd2353186e1b47 /uv /uvx /bin/
 
 # 系统依赖:编译(lz4/zstandard 等) + 媒体算子运行期(ffmpeg / libGL)
 # + 老 .doc 二进制文件解析:antiword(快路径) / libreoffice(兜底 headless 转 .docx)
