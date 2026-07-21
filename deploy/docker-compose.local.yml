@@ -64,8 +64,11 @@ services:
             - driver: nvidia
               count: ${GPU_COUNT:-all}
               capabilities: [gpu]
-    environment:
+    # &backend_env:与 worker 共享同一套环境(worker 服务 <<: *backend_env 复用),对齐生产形态
+    environment: &backend_env
       DATABASE_URL: postgresql+asyncpg://${PG_USER:-adp}:${PG_PASSWORD:-adp_dev_pw}@postgres:5432/${PG_DB:-adp}
+      # 与生产一致:默认独立 worker 进程执行任务(API 只入队);置 inline 可回退进程内执行
+      JOB_EXECUTION_MODE: ${JOB_EXECUTION_MODE:-worker}
       UPLOAD_DIR: /data/uploads
       DATASETS_DIR: /data/datasets
       DJ_PROCESS_BIN: /opt/dj/.venv/bin/dj-process
@@ -89,12 +92,50 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # 外部 S3 托管(#18)物化缓存:同生产,显式落到 /data 卷,避免写进容器层(重建即丢)
+      HOSTED_CACHE_DIR: /data/hosted-cache
     volumes:
       - adp_local_data:/data
     depends_on:
       postgres:
         condition: service_healthy
       minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 任务执行 worker(路线 C,同生产):同后端镜像,不起 HTTP、不跑迁移(backend 负责),
+  # 只 python -m app.worker 认领 PG 队列执行。共享 adp_local_data 卷(引擎产物 /data)与
+  # 后端同套环境(<<: *backend_env,含 JOB_EXECUTION_MODE=worker)。DB/迁移未就绪时
+  # worker 认领会失败并自动重试,故仅依赖 postgres 健康即可。
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+      args:
+        # 与 backend 同镜像同 ARG,避免 bake 对同一 tag 出现冲突构建参数
+        DJ_EXTRAS: "[generic]"
+    image: adp-local-backend:latest
+    container_name: adp-local-worker
+    command: ["python", "-m", "app.worker"]
+    # 任务(含 GPU/hf_model 算子)实际在 worker 执行,GPU 直通须与 backend 一致;
+    # 无 GPU 机器同样由 /adp-start-for-wsl 派生时整段剔除
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-all}
+              capabilities: [gpu]
+    environment:
+      <<: *backend_env
+      # worker 并发执行的任务数;0 = 沿用 ENGINE_CONCURRENCY
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-0}
+      # LLM 算子经 /api/v1/llm-proxy/{job_id} 回连计量;worker 容器不起 HTTP,必须指向 backend
+      LLM_PROXY_SELF_URL: http://backend:18003
+    volumes:
+      - adp_local_data:/data
+    depends_on:
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 

@@ -129,7 +129,8 @@ WSL 镜像网络模式下 Windows 与 WSL 共享 `localhost`，两边浏览器�
 cd ~/ai-project/ai-data-platform
 C="docker compose -f deploy/docker-compose.local.wsl.yml --env-file deploy/.env.local -p adp-local"
 $C ps                # 状态
-$C logs -f backend   # 后端日志（加工任务也在这里跑，该栈无独立 worker，走 inline）
+$C logs -f backend   # 后端日志（API/入队）
+$C logs -f worker    # worker 日志（任务实际在这里执行，与生产同形态）
 $C down              # 停止，数据卷保留
 $C down -v           # 停止并清空全部数据（慎用）
 ```
@@ -140,7 +141,8 @@ $C down -v           # 停止并清空全部数据（慎用）
   该区间是 Windows 的 TCP 动态端口范围，会被临时出站连接随机抢占，表现为
   `address already in use` 但 `ss -ltn` / `Get-NetTCPConnection` 都查不到占用方
   （它是转瞬即逝的临时连接，不是长期 listener）。本栈端口全部选在该区间之外。
-- **该栈没有 worker 服务**：任务在 backend 进程内 inline 执行，与生产
-  （backend + worker 双容器）形态不同；要验证 worker 模式请用离线部署栈。
+- **执行形态与生产一致**：backend + 独立 worker 双容器（`JOB_EXECUTION_MODE=worker`，
+  API 只入队、`adp-local-worker` 认领 PG 队列执行）；置 `.env.local` 的
+  `JOB_EXECUTION_MODE=inline` 可回退 backend 进程内执行（此时 worker 容器闲置）。
 - **改 `.py` 不生效**：镜像里是拷贝进去的代码，非挂载。改后端代码要
   `$C up -d --build backend` 重建；要即时生效请改用 `/adp-start`。
