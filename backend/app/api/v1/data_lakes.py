@@ -458,13 +458,16 @@ async def merge_lake_objects(
 async def get_snapshot(
     snapshot_id: str,
     db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
 ) -> DataLakeSnapshotRead:
-    """获取单个快照详情。"""
+    """获取单个快照详情。需登录且对源湖有 ACL-view 及以上(无权限同样 404)。"""
     result = await db.execute(
         select(DataLakeSnapshot).where(DataLakeSnapshot.id == snapshot_id)
     )
     snapshot = result.scalar_one_or_none()
-    if not snapshot:
+    if not snapshot or not await lake_acl.can_access(
+        db, user, snapshot.lake_id, "view"
+    ):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="快照不存在")
@@ -520,10 +523,12 @@ async def rename_snapshot(
 async def get_snapshot_presigned_url(
     snapshot_id: str,
     db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
     expires: int = Query(default=3600, ge=60, le=86400),
 ) -> dict[str, Any]:
     """生成快照文件的 presigned URL(用于预览/下载)。
 
+    - 需登录且对源湖有 ACL-view 及以上(无权限与不存在同样 404,不泄露存在性)。
     - 有效期默认 1 小时(3600s),可指定 60s~24h。
     - 返回 `{url: str, filename: str, storageFormat: str}`,前端用于 kkFileView 预览
       或直接下载。
@@ -534,7 +539,9 @@ async def get_snapshot_presigned_url(
         select(DataLakeSnapshot).where(DataLakeSnapshot.id == snapshot_id)
     )
     snapshot = result.scalar_one_or_none()
-    if not snapshot:
+    if not snapshot or not await lake_acl.can_access(
+        db, user, snapshot.lake_id, "view"
+    ):
         raise HTTPException(status_code=404, detail="快照不存在")
 
     try:
@@ -575,11 +582,13 @@ async def get_snapshot_presigned_url(
 async def preview_snapshot(
     snapshot_id: str,
     db: SessionDep,
+    user: Annotated[User, Depends(require_user)],
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> JSONResponse:
     """预览快照数据(结构化文件走表格,二进制文件不支持预览)。
 
+    - 需登录且对源湖有 ACL-view 及以上(无权限与不存在同样 404,不泄露存在性)。
     - jsonl/csv/parquet/xlsx 等结构化文件:返回 {data:行,columns:列,total:总行数}
     - 二进制文件(mp4/jpg/pdf 等):返回空数据 + message 提示下载
     """
@@ -587,7 +596,9 @@ async def preview_snapshot(
         select(DataLakeSnapshot).where(DataLakeSnapshot.id == snapshot_id)
     )
     snapshot = result.scalar_one_or_none()
-    if not snapshot:
+    if not snapshot or not await lake_acl.can_access(
+        db, user, snapshot.lake_id, "view"
+    ):
         raise HTTPException(status_code=404, detail="快照不存在")
 
     fmt = (snapshot.storage_format or "").lower()

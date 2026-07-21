@@ -546,7 +546,7 @@ async def test_rename_snapshot_updates_display_name_keeps_lineage(db_session):
         snapshot_id=snap.id,
         body=SnapshotRenameRequest(filename="  2026订单表  "),
         db=db_session,
-        _admin=None,
+        user=None,
     )
     # 展示名 = 去空白后的新名字;血缘字段原样保留
     assert result.source_metadata["original_filename"] == "2026订单表"
@@ -561,7 +561,7 @@ async def test_rename_snapshot_updates_display_name_keeps_lineage(db_session):
                 snapshot_id=snap.id,
                 body=SnapshotRenameRequest(filename=bad),
                 db=db_session,
-                _admin=None,
+                user=None,
             )
         assert exc_info.value.status_code == 400
 
@@ -571,7 +571,7 @@ async def test_rename_snapshot_updates_display_name_keeps_lineage(db_session):
             snapshot_id="snap-nothere",
             body=SnapshotRenameRequest(filename="x"),
             db=db_session,
-            _admin=None,
+            user=None,
         )
     assert exc_info.value.status_code == 404
 

@@ -240,7 +240,8 @@ async def test_api_acl_share_flow(client, session_factory, seed_rbac) -> None:
 
 
 async def test_api_extract_to_dataset_gated(client, session_factory, seed_rbac) -> None:
-    """抽取生成数据集:需源湖 edit 及以上;view/无授权 403,升到 edit 后放行(ACL 门控先于业务校验)。"""
+    """抽取生成数据集:需源湖 edit 及以上;view/无授权 403,
+    升到 edit 后放行(ACL 门控先于业务校验)。"""
     from app.services.auth import sign_token
 
     await _make_lakes(session_factory)
@@ -328,3 +329,56 @@ async def test_api_acl_candidates_and_level_update(
     client.cookies.set("adp_session", sign_token("u-staff"))
     r2 = await client.patch("/api/v1/data-lakes/lake-mgr", json={"description": "z"})
     assert r2.status_code == 403, r2.text
+
+
+async def test_api_snapshot_reads_gated(client, session_factory, seed_rbac) -> None:
+    """快照粒度读接口(详情/presigned-url/preview):未登录 401;
+    登录但对源湖无 view 404(不泄露存在性);授 view 后详情放行。"""
+    from app.models.data_lake import DataLakeSnapshot
+    from app.services.auth import sign_token
+
+    await _make_lakes(session_factory)
+    async with session_factory() as s:
+        s.add(
+            DataLakeSnapshot(
+                id="snap-aclro1",
+                lake_id="lake-mgr",
+                source_version="source_v20260701_01_local",
+                storage_uri="s3://data-lake/lake-mgr/source_v20260701_01_local/a.jsonl",
+                storage_format="jsonl",
+                data_category="text",
+                upload_channel="local",
+            )
+        )
+        await s.commit()
+
+    paths = [
+        "/api/v1/data-lake-snapshots/snap-aclro1",
+        "/api/v1/data-lake-snapshots/snap-aclro1/presigned-url",
+        "/api/v1/data-lake-snapshots/snap-aclro1/preview",
+    ]
+
+    # 未登录 → 401
+    client.cookies.clear()
+    for p in paths:
+        r = await client.get(p)
+        assert r.status_code == 401, f"{p}: {r.status_code} {r.text}"
+
+    # 登录但对源湖无授权 → 与不存在同样 404
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    for p in paths:
+        r = await client.get(p)
+        assert r.status_code == 404, f"{p}: {r.status_code} {r.text}"
+
+    # owner 授 view → 详情放行(presigned-url/preview 依赖对象存储,门控之后
+    # 走业务逻辑,不在本用例断言)
+    client.cookies.set("adp_session", sign_token("u-mgr"))
+    grant = await client.post(
+        "/api/v1/data-lakes/lake-mgr/acl",
+        json={"subjectType": "user", "subjectId": "u-staff", "level": "view"},
+    )
+    assert grant.status_code == 200, grant.text
+    client.cookies.set("adp_session", sign_token("u-staff"))
+    detail = await client.get(paths[0])
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["lakeId"] == "lake-mgr"

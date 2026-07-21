@@ -29,6 +29,8 @@ export type VersionHistoryDrawerProps = {
   onClose: () => void;
   onPreview: (snapshot: DataPlatform.DataLakeSnapshot) => void;
   onExtract: (items: ExtractItem[]) => void;
+  /** ACL-edit 及以上才显示「抽取」,与主表抽取按钮口径一致(后端同样门控) */
+  canExtract: boolean;
 };
 
 /**
@@ -40,6 +42,7 @@ const VersionHistoryDrawer: FC<VersionHistoryDrawerProps> = ({
   onClose,
   onPreview,
   onExtract,
+  canExtract,
 }) => {
   const actionRef = useRef<ActionType | null>(null);
 
@@ -96,22 +99,24 @@ const VersionHistoryDrawer: FC<VersionHistoryDrawerProps> = ({
           >
             下载
           </Button>
-          <Button
-            type="link"
-            size="small"
-            onClick={() =>
-              onExtract([
-                {
-                  snapshotId: record.id,
-                  displayName: object?.displayName ?? record.id,
-                  dataCategory: record.dataCategory,
-                  storageFormat: record.storageFormat,
-                },
-              ])
-            }
-          >
-            抽取
-          </Button>
+          {canExtract && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() =>
+                onExtract([
+                  {
+                    snapshotId: record.id,
+                    displayName: object?.displayName ?? record.id,
+                    dataCategory: record.dataCategory,
+                    storageFormat: record.storageFormat,
+                  },
+                ])
+              }
+            >
+              抽取
+            </Button>
+          )}
         </Space>
       ),
     },

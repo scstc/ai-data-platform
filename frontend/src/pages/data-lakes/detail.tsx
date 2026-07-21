@@ -629,6 +629,7 @@ const DataLakeDetailPage: FC = () => {
           setHistoryObject(null);
           setExtractItems(items);
         }}
+        canExtract={meta.myLevel === 'edit' || meta.myLevel === 'admin'}
       />
 
       <LakeSnapshotPreview
