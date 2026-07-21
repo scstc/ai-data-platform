@@ -32,3 +32,5 @@ CLAUDE.local.md
 /backend/scripts/_op_demos.json
 /backend/scripts/_media_demos.json
 deploy/.env.local
+# /adp-start-for-wsl 从 docker-compose.local.yml 派生的 WSL 专用编排(剥 GPU 段 + DJ_EXTRAS 置空)
+deploy/docker-compose.local.wsl.yml
