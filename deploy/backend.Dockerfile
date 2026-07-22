@@ -78,6 +78,10 @@ RUN --mount=type=cache,target=/root/.cache/uv uv pip install -r /app/pyproject.t
 # 后端 venv 补 mammoth(.doc 解析兜底链 soffice→.docx→mammoth 需要)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /app/.venv/bin/python 'mammoth>=1.8.0'
+# DuckDB httpfs 扩展预装进镜像(落 /root/.duckdb):运行时 INSTALL httpfs 首次会去
+# extensions.duckdb.org 在线下载,内网/离线环境必失败(parquet 预览、数据集 SQL
+# 查询都走 httpfs 直查 s3://)。构建期装好后运行时 INSTALL 命中本地即 no-op。
+RUN /app/.venv/bin/python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs')"
 COPY backend/ /app/
 
 EXPOSE 18003
