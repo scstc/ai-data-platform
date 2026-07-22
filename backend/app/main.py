@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -103,6 +104,22 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         await ensure_lake_bucket()
     except Exception:  # noqa: BLE001
         _logger.warning("启动时确保平台 MinIO 桶失败（已忽略）", exc_info=True)
+    # best-effort:内置自定义算子源码同步到 uploads 目录(引擎按
+    # <upload_dir>/custom_operators/<source_object_key> 读源码;目录条目由迁移
+    # 0070 种子化,源码随镜像带在 app/data/custom_operators,启动时补齐到卷上。
+    # 只补缺失文件,不覆盖——用户在页面重新上传过的版本以卷上为准)
+    try:
+        import shutil
+
+        builtin_dir = Path(__file__).parent / "data" / "custom_operators"
+        dest_dir = Path(settings.upload_dir) / "custom_operators"
+        if builtin_dir.is_dir():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            for src in builtin_dir.glob("*.py"):
+                if not (dest_dir / src.name).exists():
+                    shutil.copyfile(src, dest_dir / src.name)
+    except Exception:  # noqa: BLE001
+        _logger.warning("启动时同步内置自定义算子源码失败（已忽略）", exc_info=True)
 
     # best-effort:过期数据集补扫打删除标记(#19 生命周期,不依赖调度器在线)
     try:

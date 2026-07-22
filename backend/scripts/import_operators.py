@@ -1,6 +1,9 @@
 """从 operators_catalog.json 导入算子到数据库。
 
 运行：python backend/scripts/import_operators.py
+
+清空重插仅针对内置目录(is_custom=False);自定义算子(页面上传 / 迁移 0070
+种子化)不受影响,可放心重跑。
 """
 
 from __future__ import annotations
@@ -35,9 +38,14 @@ def main():
     session = Session()
 
     try:
-        # 清空现有数据
-        deleted = session.query(Operator).delete()
-        print(f"清空现有数据: {deleted} 行")
+        # 清空现有内置目录(保留自定义算子——它们不在 catalog.json 里,
+        # 全量 delete 会把用户上传/迁移种子化的算子一并抹掉)
+        deleted = (
+            session.query(Operator)
+            .filter(Operator.is_custom.is_(False))
+            .delete()
+        )
+        print(f"清空现有内置算子: {deleted} 行(自定义算子保留)")
 
         # 批量插入
         count = 0
