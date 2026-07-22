@@ -45,6 +45,7 @@ from app.core.config import settings
 from app.core.db import async_session_factory
 from app.models.job import Job
 from app.services import job_runner
+from app.services.llm_config import refresh_cache
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,14 @@ async def _execute(job_id: str, worker_id: str) -> None:
 
     _run_job 自身兜底所有业务异常并落终态,这里的 try 只防其意外冒泡导致
     整个 worker 崩溃(含被心跳续跳因所有权丢失而主动 cancel 的情形)。"""
+    # worker 进程没有 API lifespan,LLM 活跃配置缓存不会自动加载/更新;不刷新
+    # 则 needs_api 算子拿不到 key,逐样本失败被 DJ 跳过,空产出还报 success。
+    # 每次执行前从 DB 现刷,顺带覆盖运行期间管理员轮换 key 的场景。
+    try:
+        async with async_session_factory() as session:
+            await refresh_cache(session)
+    except Exception:  # noqa: BLE001
+        logger.exception("刷新 LLM 配置缓存失败,继续执行(回退 env 凭证)")
     hb_stop = asyncio.Event()
     run_task = asyncio.create_task(job_runner._run_job(job_id))
     hb = asyncio.create_task(_heartbeat_loop(job_id, worker_id, hb_stop, run_task))
