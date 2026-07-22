@@ -33,6 +33,7 @@ import {
   listBuckets,
   listDataSources,
   listDatasets,
+  syncVersionToLocal,
   updateDatasetVersion,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
@@ -62,6 +63,22 @@ const DatasetsPresets: React.FC = () => {
   const [editVersionOpen, setEditVersionOpen] = useState(false);
   const [editingVersion, setEditingVersion] =
     useState<DataPlatform.DatasetVersion>();
+  const [syncingId, setSyncingId] = useState<string>();
+
+  // 同步到服务器交付目录(路径由后端 SYNC_EXPORT_DIR 配置)
+  const handleSync = async (v: DataPlatform.DatasetVersion) => {
+    setSyncingId(v.id);
+    try {
+      const res = await syncVersionToLocal(v.id);
+      message.success(`已同步 ${res.data.synced} 个文件到 ${res.data.target}`);
+    } catch (e: any) {
+      const msg =
+        e?.info?.errorMessage || e?.response?.data?.message || e?.data?.message;
+      message.error(msg || '同步失败，请重试');
+    } finally {
+      setSyncingId(undefined);
+    }
+  };
 
   const openDetail = async (id: string) => {
     const res = await getDataset(id);
@@ -318,6 +335,22 @@ const DatasetsPresets: React.FC = () => {
                                 style={{ fontSize: 12 }}
                               >
                                 导出到 S3
+                              </a>
+                            )}
+                            {canExport && (
+                              <a
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (syncingId !== v.id) handleSync(v);
+                                }}
+                                style={{
+                                  fontSize: 12,
+                                  ...(syncingId === v.id
+                                    ? { pointerEvents: 'none', opacity: 0.5 }
+                                    : {}),
+                                }}
+                              >
+                                {syncingId === v.id ? '同步中…' : '同步'}
                               </a>
                             )}
                           </Space>

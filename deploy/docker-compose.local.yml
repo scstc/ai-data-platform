@@ -94,8 +94,12 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       # 外部 S3 托管(#18)物化缓存:同生产,显式落到 /data 卷,避免写进容器层(重建即丢)
       HOSTED_CACHE_DIR: /data/hosted-cache
+      # 已发布版本「同步」交付目录(容器内路径,与宿主同路径挂载见 volumes)
+      SYNC_EXPORT_DIR: ${SYNC_EXPORT_DIR:-/opt/bcc/storage2/users/csyh-admin-5}
     volumes:
       - adp_local_data:/data
+      # 同步交付目录:宿主↔容器同路径直通,同步产物直接落宿主该目录
+      - ${SYNC_EXPORT_DIR:-/opt/bcc/storage2/users/csyh-admin-5}:${SYNC_EXPORT_DIR:-/opt/bcc/storage2/users/csyh-admin-5}
     depends_on:
       postgres:
         condition: service_healthy

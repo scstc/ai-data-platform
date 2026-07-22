@@ -3307,6 +3307,137 @@ async def export_version_to_s3(
     )
 
 
+@router.post("/dataset-versions/{version_id}/sync-local", response_model=None)
+async def sync_version_to_local(
+    version_id: str,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """同步一个版本的文件到本机交付目录(settings.sync_export_dir,env SYNC_EXPORT_DIR)。
+
+    成员读取逻辑与 export-s3 一致(本地 / 平台 / 托管 S3 均可),落盘到
+    ``<sync_export_dir>/<数据集名>/<版本号>/``;manifest 版本媒体 + 清单
+    data.jsonl 一并落盘,目录可直接喂 dj-process / 训练侧。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "数据集版本不存在"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无数据集编辑权限,无法同步"},
+        )
+    dataset = await session.get(Dataset, version.dataset_id)
+    try:
+        members = await _members_of(version, session)
+    except ExternalStoreError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": f"读取成员失败:{exc}"},
+        )
+    is_manifest = version.format == MANIFEST_FORMAT
+    has_s3 = any(m.bucket for m in members)
+    src_cfg = (
+        await _version_storage_cfg(version, session)
+        if (has_s3 or is_manifest)
+        else None
+    )
+    if (has_s3 or is_manifest) and src_cfg is None:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "message": "平台存储(MinIO)未配置"},
+        )
+    try:
+        own_bucket, _own_key = parse_s3_uri(version.storage_uri)
+    except ExternalStoreError:
+        own_bucket = ""
+
+    # 目录名剔除路径分隔符,避免数据集名/版本号里带 / 逃出目标目录
+    def _safe(name: str) -> str:
+        return re.sub(r"[/\\]+", "_", name).strip() or "unnamed"
+
+    dest_root = (
+        Path(settings.sync_export_dir)
+        / _safe(dataset.name if dataset else version.dataset_id)
+        / f"v{version.version_no}"
+    )
+    try:
+        await asyncio.to_thread(dest_root.mkdir, parents=True, exist_ok=True)
+    except OSError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": f"同步目录不可写:{dest_root}({exc});"
+                "容器部署请确认宿主目录已挂载进 backend 容器",
+            },
+        )
+    synced = 0
+    used: set[str] = set()
+    skipped: list[str] = []
+    if is_manifest:
+        try:
+            rows = await _read_manifest_rows(src_cfg, version.storage_uri)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": f"读取清单失败:{exc}"},
+            )
+        clean_rows = [
+            {k: v for k, v in r.items() if k != "__member"} for r in rows
+        ]
+        data = _manifest_bytes(clean_rows)
+        await asyncio.to_thread((dest_root / "data.jsonl").write_bytes, data)
+        synced += 1
+        used.add("data.jsonl")
+        members = [m.model_copy(update={"name": Path(m.key).name}) for m in members]
+    for m in members:
+        if m.bucket:  # s3 成员:从源对象存储取字节(命中物化缓存则免重复下载)
+            try:
+                data = await cached_bytes(src_cfg, m.bucket or own_bucket, m.key)
+            except ExternalStoreError as exc:
+                skipped.append(f"{m.name or m.key}:S3 拉取失败({exc})")
+                continue
+        else:  # 本地路径成员(managed 本地 jsonl)
+            p = Path(m.key)
+            if not p.exists():
+                skipped.append(f"{m.name or m.key}:本地文件不存在({m.key})")
+                continue
+            data = await asyncio.to_thread(p.read_bytes)
+        name = _safe(m.name or Path(m.key).name or "file")
+        if name in used:  # 同名成员加序号去重(与 export-s3 一致)
+            pp = Path(name)
+            n = 1
+            while f"{pp.stem} ({n}){pp.suffix}" in used:
+                n += 1
+            name = f"{pp.stem} ({n}){pp.suffix}"
+        used.add(name)
+        try:
+            await asyncio.to_thread((dest_root / name).write_bytes, data)
+        except OSError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": f"写入失败:{exc}"},
+            )
+        synced += 1
+
+    if synced == 0:
+        reason = "；".join(skipped[:5]) if skipped else "成员列表为空"
+        return JSONResponse(
+            status_code=410,
+            content={"success": False, "message": f"无可同步的成员文件:{reason}"},
+        )
+    return JSONResponse(
+        content={
+            "success": True,
+            "data": {"synced": synced, "target": str(dest_root)},
+        }
+    )
+
+
 # ---- 数据集级 ACL(共享/成员权限)----------------------------------------------
 # 管理 (dataset × subject × level) 授权条目;需 admin 级(owner/超管/ACL-admin)。
 # 权限本体挂在菜单上(系统 perms),这里的 ACL 是数据集维度的共享控制。

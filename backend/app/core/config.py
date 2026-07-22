@@ -55,6 +55,10 @@ class Settings(BaseSettings):
         "/Users/enjoy/ai-project/ai-data-platform/backend/var/datasets"
     )
 
+    # 已发布版本「同步」目标目录(env SYNC_EXPORT_DIR):把版本文件复制到本机/挂载
+    # 目录交付给训练侧。容器部署时需把宿主目录挂载到 backend 容器同路径。
+    sync_export_dir: str = "/opt/bcc/storage2/users/csyh-admin-5"
+
     # 外部 S3 托管(#18)物化缓存:避免每次加工/预览都从三方 S3 重复拉同一对象。
     # 按 (endpoint,bucket,key,etag) 缓存到本地磁盘,LRU(按访问时间)+ 总量上限淘汰;
     # 源对象 etag 变即自动失效重拉。缓存只是可丢弃的性能副本——绝不回写源、可随时清空,

@@ -395,6 +395,21 @@ export async function exportVersionToS3(
   });
 }
 
+/** 同步已发布版本到服务器交付目录 POST /api/v1/dataset-versions/:id/sync-local */
+export async function syncVersionToLocal(
+  versionId: string,
+  options?: { [key: string]: any },
+) {
+  return request<{
+    data: { synced: number; target: string };
+    success: boolean;
+  }>(`/api/v1/dataset-versions/${versionId}/sync-local`, {
+    method: 'POST',
+    skipErrorHandler: true,
+    ...(options || {}),
+  });
+}
+
 /** 更新版本元数据(训练用途/说明/schema变体) PATCH /api/v1/dataset-versions/:id */
 export async function updateDatasetVersion(
   versionId: string,
