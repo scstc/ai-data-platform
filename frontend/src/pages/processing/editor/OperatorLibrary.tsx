@@ -86,7 +86,8 @@ const OperatorLibrary: React.FC<{
       keyword,
       bucket: restrictToBucket ? bucket : undefined,
       current: 1,
-      pageSize: 200,
+      // 全量目录 212+ 个算子,上限须大于总数,否则列表静默截尾
+      pageSize: 500,
     })
       .then((r) => setData(r.data))
       .finally(() => setLoading(false));

@@ -16,7 +16,6 @@ const DEFAULT_GOAL: DataPlatform.TrainsetGoal = {
 const TrainsetEditor: React.FC = () => (
   <LlmScenarioEditor<DataPlatform.TrainsetGoal>
     bucket="trainset"
-    restrictToBucket
     pageTitle="新建数据合成"
     submitLabel="创建任务"
     selectedOperatorsTitle="已选生成算子"
