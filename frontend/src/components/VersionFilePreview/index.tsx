@@ -24,10 +24,12 @@ import {
   previewDatasetVersion,
   queryDatasetVersion,
 } from '@/services/data-platform';
+import { toBrowserFileUrl } from '@/utils/storageUrl';
 
 hljs.registerLanguage('json', jsonLang);
 
-/** 预览格式分流:结构化走表格;其余统一走 kkFileView(onlinePreview?url=base64(presigned))。
+/** 预览格式分流:结构化走表格;图片 <img> 直嵌(URL 经 toBrowserFileUrl 归一化);
+ *  其余走 kkFileView(onlinePreview?url=base64(presigned))。
  *  与 datasets/detail 原内联逻辑一致——抽到这里供「数据集详情」与「数据任务详情抽屉」共用。
  *  parquet 后端 preview_version 走 DuckDB read_parquet(类型保真),与 csv/jsonl 同走表格预览。 */
 const PREVIEW_STRUCTURAL = new Set([
@@ -42,8 +44,20 @@ const PREVIEW_STRUCTURAL = new Set([
   'log',
 ]);
 
-/** kkFileView 服务地址(60 上 docker compose 部署,KK_PORT 默认 8012)。 */
-const KK_FILEVIEW_BASE = 'http://10.60.1.60:8012';
+/** 图片格式:<img> 直嵌。不走 kkFileView——kk 对图片是把原始 URL 交给浏览器端
+ *  渲染,内部域名签发形态下浏览器不可达;直嵌配合 toBrowserFileUrl 两种形态都通。 */
+const PREVIEW_IMAGE = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'svg',
+]);
+
+/** kkFileView 同源相对路径,由 nginx 反代到 compose 内 kkfileview:8012(KK_CONTEXT_PATH=/kkfileview)。 */
+const KK_FILEVIEW_BASE = '/kkfileview';
 
 const fmtSize = (n?: number) => {
   if (!n && n !== 0) return '-';
@@ -69,7 +83,8 @@ export interface VersionFilePreviewProps {
  *
  * 给定 versionId,列出其成员文件;点「预览」按格式分流:
  * 结构化(csv/tsv/xlsx/json/jsonl/txt/log)→ preview?key= 表格(DatasetDataView);
- * 其余(pdf/office/媒体/图片)→ presigned URL 经 kkFileView onlinePreview 渲染。
+ * 图片 → presigned URL(归一化)<img> 直嵌;
+ * 其余(pdf/office/媒体)→ presigned URL 经 kkFileView onlinePreview 渲染。
  *
  * 抽自 datasets/detail,数据任务详情抽屉的「输入版本/产出版本」面板各用一个实例。
  */
@@ -229,7 +244,9 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
       await deleteVersionMembers(versionId, keys);
       setSelectedKeys((prev) => {
         const next = new Set(prev);
-        keys.forEach((k) => next.delete(k));
+        keys.forEach((k) => {
+          next.delete(k);
+        });
         return next;
       });
       reloadMembers();
@@ -290,7 +307,18 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
       );
     }
     if (!modalUrl) return null;
-    // 非结构化统一走 kkFileView:onlinePreview?url={base64(presigned)},
+    if (PREVIEW_IMAGE.has(fmt)) {
+      return (
+        <img
+          src={toBrowserFileUrl(modalUrl)}
+          alt={m.name}
+          onLoad={() => setModalLoading(false)}
+          onError={() => setModalLoading(false)}
+          style={{ maxWidth: '100%', display: 'block', margin: '0 auto' }}
+        />
+      );
+    }
+    // 其余非结构化走 kkFileView:onlinePreview?url={base64(presigned)},
     // kkFileView 从 MinIO 拉原件转换渲染(Office 转 PDF、媒体原生播放等)。
     const kkUrl = `${KK_FILEVIEW_BASE}/onlinePreview?url=${encodeURIComponent(
       btoa(modalUrl),

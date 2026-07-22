@@ -7,6 +7,7 @@ import {
   getSnapshotPresignedUrl,
   getSnapshotPreview,
 } from '@/services/data-platform';
+import { toBrowserFileUrl } from '@/utils/storageUrl';
 
 hljs.registerLanguage('json', jsonLang);
 
@@ -16,7 +17,7 @@ hljs.registerLanguage('json', jsonLang);
  * 参照 VersionFilePreview,针对数据湖单快照(不可变、单文件):
  * - 结构化(csv/tsv/xlsx/xls/json/jsonl/parquet/txt/log)→ preview API,
  *   表格(DatasetDataView) + JSON(highlight.js 折叠高亮)双视图
- * - 图片(png/jpg/…)→ presigned URL 内嵌 <img>
+ * - 图片(png/jpg/…)→ presigned URL(经 toBrowserFileUrl 归一化)内嵌 <img>
  * - kkFileView 可渲染(pdf/office/媒体)→ presigned URL 经 kkFileView iframe
  * - 其余 → 「不支持预览,请下载」+ 下载按钮
  */
@@ -34,7 +35,8 @@ const PREVIEW_STRUCTURAL = new Set([
   'log',
 ]);
 
-/** 图片格式:直接 <img> 内嵌 presigned URL。 */
+/** 图片格式:<img> 直嵌。不走 kkFileView——kk 对图片是把原始 URL 交给浏览器端
+ *  渲染,内部域名签发形态下浏览器不可达;直嵌配合 toBrowserFileUrl 两种形态都通。 */
 const PREVIEW_IMAGE = new Set([
   'png',
   'jpg',
@@ -61,8 +63,8 @@ const PREVIEW_KK = new Set([
   'mkv',
 ]);
 
-/** kkFileView 服务地址(60 上 docker compose 部署,KK_PORT 默认 8012)。 */
-const KK_FILEVIEW_BASE = 'http://10.60.1.60:8012';
+/** kkFileView 同源相对路径,由 nginx 反代到 compose 内 kkfileview:8012(KK_CONTEXT_PATH=/kkfileview)。 */
+const KK_FILEVIEW_BASE = '/kkfileview';
 
 export type LakeSnapshotPreviewProps = {
   /** 快照 ID */
@@ -220,9 +222,8 @@ const LakeSnapshotPreview: FC<LakeSnapshotPreviewProps> = ({
     if (mode === 'image') {
       if (!url) return null;
       return (
-        // biome-ignore lint/a11y/useAltText: alt 用文件名兜底
         <img
-          src={url}
+          src={toBrowserFileUrl(url)}
           alt={filename ?? '图片预览'}
           onLoad={() => setLoading(false)}
           onError={() => setLoading(false)}
@@ -255,7 +256,7 @@ const LakeSnapshotPreview: FC<LakeSnapshotPreviewProps> = ({
         {url && (
           <Button
             type="primary"
-            href={url}
+            href={toBrowserFileUrl(url)}
             target="_blank"
             rel="noreferrer"
             download={filename}

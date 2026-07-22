@@ -154,6 +154,9 @@ services:
   kkfileview:
     image: keking/kkfileview:latest
     container_name: adp-local-kkfileview
+    environment:
+      # 路由挪到 /kkfileview 前缀下,配合 nginx 同源反代(前端相对路径免配置)
+      KK_CONTEXT_PATH: /kkfileview
     ports:
       - "${KK_PORT:-8012}:8012"
     restart: unless-stopped
