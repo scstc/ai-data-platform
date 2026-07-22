@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import math
 import re
 import secrets
 import shutil
@@ -64,9 +65,11 @@ from app.services.external_store import (
     MAX_MANIFEST_MEMBERS,
     MAX_MATERIALIZE_BYTES,
     ExternalStoreError,
+    browser_file_url,
     cached_bytes,
     download_to_temp,
     head_records,
+    json_safe,
     list_objects,
     parse_s3_uri,
     platform_config,
@@ -2275,7 +2278,8 @@ async def preview_version(
                 break
             line = line.strip()
             if line:
-                rows.append(json.loads(line))
+                # json.loads 放行 NaN/Infinity,序列化前清洗,否则整个接口 500
+                rows.append(json_safe(json.loads(line)))
     return JSONResponse(
         content={
             "data": rows,
@@ -2318,7 +2322,10 @@ def _duck_reader_sql(fmt: str, path: str) -> str:
 
 
 def _duck_safe(v: object) -> object:
-    """把 DuckDB 返回值归一为 JSON 可序列化(Decimal/datetime/bytes → str)。"""
+    """把 DuckDB 返回值归一为 JSON 可序列化(Decimal/datetime/bytes → str;
+    NaN/Inf → None,JSONResponse 严格 JSON 序列化不接受)。"""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
     if v is None or isinstance(v, (bool, int, float, str, list, dict)):
         return v
     return str(v)
@@ -3136,7 +3143,8 @@ async def download_version(
                 status_code=503,
                 content={"success": False, "message": f"生成下载链接失败:{exc}"},
             )
-        return RedirectResponse(url, status_code=302)
+        # 内部域名签发形态改写为同源 /minio/ 相对路径,浏览器才可达
+        return RedirectResponse(browser_file_url(url), status_code=302)
     return await _download_zip(version, members, session)
 
 

@@ -40,6 +40,7 @@ import {
   uploadPlatformFile,
 } from '@/services/data-platform';
 import { formatDateTime } from '@/utils/format';
+import { toBrowserFileUrl } from '@/utils/storageUrl';
 
 /** 文件管理默认桶:平台自有数据桶,固定为 adp-datasets(对应后端 storage_minio_datasets_bucket)。 */
 const DEFAULT_BUCKET = 'adp-datasets';
@@ -169,7 +170,7 @@ const FilesPage: React.FC = () => {
   const handleDownload = async (key: string) => {
     try {
       const res = await getFileDownloadUrl({ bucket: bucket as string, key });
-      window.open(res.data.url, '_blank');
+      window.open(toBrowserFileUrl(res.data.url), '_blank');
     } catch {
       messageApi.error('获取下载链接失败，请重试');
     }

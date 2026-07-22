@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import math
 import secrets
 from pathlib import Path
 from typing import Annotated, Any
@@ -79,7 +80,10 @@ PREVIEW_STRUCTURAL_FORMATS = {
 
 
 def _duck_safe(v: object) -> object:
-    """把 DuckDB 返回值归一为 JSON 可序列化(Decimal/datetime/bytes → str)。"""
+    """把 DuckDB 返回值归一为 JSON 可序列化(Decimal/datetime/bytes → str;
+    NaN/Inf → None,JSONResponse 严格 JSON 序列化不接受)。"""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
     if v is None or isinstance(v, (bool, int, float, str, list, dict)):
         return v
     return str(v)

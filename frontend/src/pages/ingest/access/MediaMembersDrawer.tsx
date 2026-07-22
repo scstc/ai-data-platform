@@ -19,6 +19,7 @@ import {
   getDatasetMemberUrl,
   listDatasetMembers,
 } from '@/services/data-platform';
+import { toBrowserFileUrl } from '@/utils/storageUrl';
 
 const AUDIO = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg']);
 const VIDEO = new Set(['mp4', 'avi', 'mov', 'mkv', 'webm']);
@@ -56,7 +57,7 @@ const MemberView: React.FC<{
   useEffect(() => {
     let alive = true;
     getDatasetMemberUrl(versionId, member.key)
-      .then((r) => alive && setUrl(r.data.url))
+      .then((r) => alive && setUrl(toBrowserFileUrl(r.data.url)))
       .catch(() => alive && setFailed(true));
     return () => {
       alive = false;

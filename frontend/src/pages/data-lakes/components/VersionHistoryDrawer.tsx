@@ -11,6 +11,7 @@ import {
   getSnapshotPresignedUrl,
   listObjectVersions,
 } from '@/services/data-platform';
+import { toBrowserFileUrl } from '@/utils/storageUrl';
 import { UploadChannelTag } from '@/utils/uploadChannel';
 import type { ExtractItem } from './extractItem';
 
@@ -49,7 +50,7 @@ const VersionHistoryDrawer: FC<VersionHistoryDrawerProps> = ({
   const handleDownload = async (snapshot: DataPlatform.DataLakeSnapshot) => {
     try {
       const res = await getSnapshotPresignedUrl(snapshot.id);
-      window.open(res.url, '_blank');
+      window.open(toBrowserFileUrl(res.url), '_blank');
     } catch (e: any) {
       message.error(
         e?.info?.errorMessage || e?.response?.data?.message || '下载失败',

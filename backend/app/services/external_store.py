@@ -22,6 +22,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -411,6 +412,31 @@ async def cached_bytes(
         return await asyncio.to_thread(cache_path.read_bytes)
 
 
+_INTERNAL_MINIO_ORIGIN = "http://minio:9000"
+
+
+def browser_file_url(url: str) -> str:
+    """presigned URL 归一为浏览器可达形态:内部域名(http://minio:9000,全容器化
+    部署)改写为相对路径 /minio/...,浏览器基于页面同源解析后由前端 nginx 反代回
+    MinIO(Host 固定与签名一致,SigV4 仍有效);其余形态(宿主 IP 直连、外部 S3)
+    原样返回。与前端 utils/storageUrl.ts 的 toBrowserFileUrl 同一约定。
+    仅用于交给浏览器跳转/下载的 URL;容器间消费(如 kkFileView 取件)勿用。"""
+    prefix = f"{_INTERNAL_MINIO_ORIGIN}/"
+    return f"/minio/{url[len(prefix):]}" if url.startswith(prefix) else url
+
+
+def json_safe(value: Any) -> Any:
+    """递归把非有限浮点(NaN/±Inf)转 None。json.loads 默认放行这些非标字面量,
+    而 JSONResponse 按严格 JSON(allow_nan=False)序列化,漏一个整个接口 500。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [json_safe(v) for v in value]
+    return value
+
+
 async def head_records(
     config: dict[str, Any] | None,
     bucket: str,
@@ -420,11 +446,12 @@ async def head_records(
 ) -> list[dict[str, Any]]:
     """预览用:取对象(命中缓存则免下载)→ normalize_to_records 取前 limit 条。
 
-    简单稳妥(大对象成本在 spec §5 已注明,预览靠取前 N 缓解):规范化后截前 limit。
+    简单稳妥(大对象成本在 spec §5 已注明,预览靠取前 N 缓解):规范化后截前 limit,
+    出口统一 json_safe 清洗(数据里的 NaN/Inf 会让预览接口 500)。
     """
     content = await cached_bytes(config, bucket, key)
     records = normalize_to_records(content, fmt)
-    return records[:limit] if limit > 0 else records
+    return json_safe(records[:limit] if limit > 0 else records)
 
 
 def _write_jsonl_sync(records: list[dict[str, Any]]) -> Path:
