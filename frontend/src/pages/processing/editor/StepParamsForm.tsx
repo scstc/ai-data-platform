@@ -4,6 +4,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Select,
   Switch,
   Typography,
 } from 'antd';
@@ -40,6 +41,20 @@ const isLocalModelParam = (p: DataPlatform.CatalogParam) =>
   p.name.includes('model') &&
   !MODEL_PARAM_NAMES.has(p.name) &&
   !(p.type || '').includes('bool');
+
+/** list 型参数值 → tags 控件回显:真数组直接用;历史数据里存成
+ *  '["a","b"]' JSON 字符串的解析回数组,解析不出整串当一个 tag。 */
+const toTagValues = (val: unknown): string[] => {
+  if (Array.isArray(val)) return (val as (string | number)[]).map(String);
+  if (typeof val !== 'string' || !val.trim()) return [];
+  try {
+    const parsed = JSON.parse(val);
+    if (Array.isArray(parsed)) return parsed.map(String);
+  } catch {
+    // 非 JSON:按单值回显
+  }
+  return [val];
+};
 
 /** 右栏:按选中算子的参数定义渲染表单,改动回填到该步骤的 params。 */
 const StepParamsForm: React.FC<{
@@ -256,7 +271,49 @@ const StepParamsForm: React.FC<{
             tooltip={paramTooltip(p)}
             help={p.default ? `默认 ${p.default}` : undefined}
           >
-            {t.includes('bool') ? (
+            {t.toLowerCase().includes('list') ? (
+              // list 型参数必须产出真数组:文本框会让值以字符串进 YAML,
+              // DJ 侧对字符串做 `in` 判断退化为子串匹配,过滤结果静默出错。
+              // 判定须在 int/float 之前(List[int] 也归这里)。
+              <Select
+                mode="tags"
+                style={{ width: '100%' }}
+                value={toTagValues(val)}
+                onChange={(vs: string[]) => {
+                  const numeric = t.includes('int') || t.includes('float');
+                  // 容错:习惯性输入/粘贴 '["a","b"]' 或 '[]' 时按 JSON 数组
+                  // 展开成多个值,而不是把带方括号的整串当一个值收进去
+                  const expanded = vs.flatMap((s) => {
+                    const trimmed = s.trim();
+                    if (trimmed.startsWith('[')) {
+                      try {
+                        const parsed = JSON.parse(trimmed);
+                        if (Array.isArray(parsed)) return parsed.map(String);
+                      } catch {
+                        // 非法 JSON:保留原样,交给用户自己看
+                      }
+                    }
+                    return [s];
+                  });
+                  const items = expanded
+                    .filter((s) => s.trim() !== '')
+                    .map((s) =>
+                      numeric && Number.isFinite(Number(s)) ? Number(s) : s,
+                    );
+                  if (items.length) set(p.name, items);
+                  else {
+                    // 清空 = 删键,不提交空数组覆盖算子默认值
+                    const next = { ...params };
+                    delete next[p.name];
+                    onChange(next);
+                  }
+                }}
+                tokenSeparators={[',', '，']}
+                open={false}
+                suffixIcon={null}
+                placeholder="输入后回车,可加多个值"
+              />
+            ) : t.includes('bool') ? (
               <Switch checked={Boolean(val)} onChange={(v) => set(p.name, v)} />
             ) : t.includes('int') || t.includes('float') ? (
               <InputNumber
