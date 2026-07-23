@@ -36,11 +36,13 @@ COPY data-juicer/ /opt/dj/
 # ray 必装(裸包即可):fork 的 lazy_loader 对 ray 禁用 auto_install,而 dj-process 启动
 # import 链(core/executor/ray_executor)无条件 @ray.remote,缺 ray 时任何算子任务直接崩。
 # [generic] 会经 vllm 连带装 ray,但 DJ_EXTRAS="" 的精简构建不会——这里显式钉住,两种构建都齐。
+# wordcloud 必装:dj-analyze 词云图走 lazy_loader,缺包时运行时 pip 自动安装,
+# 离线内网必失败(dj-analyze 退出码 1、质量评估任务整单失败)。
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv /opt/dj/.venv --python 3.12 \
-    && ( uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0" \
-         || (echo "uv pip install failed, retry 1/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0") \
-         || (echo "uv pip install failed, retry 2/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0") )
+    && ( uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0" "wordcloud==1.9.6" \
+         || (echo "uv pip install failed, retry 1/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0" "wordcloud==1.9.6") \
+         || (echo "uv pip install failed, retry 2/2..." && sleep 5 && uv pip install --python /opt/dj/.venv/bin/python "/opt/dj${DJ_EXTRAS}" "ray>=2.51.0" "wordcloud==1.9.6") )
 
 # GPU 化:generic 装的是 torch 2.8.0+cpu(有卡也用不了),换成 cu126(Linux/py3.12)让 NVIDIA 卡可用。
 # 直连 download.pytorch.org 卡死、aliyun 403,改用 SJTU 镜像;--no-deps 只替换 torch 三件套、
@@ -67,6 +69,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY deploy/patch_dj_correlation_stringdtype.py /tmp/patch_dj_correlation_stringdtype.py
 RUN /opt/dj/.venv/bin/python /tmp/patch_dj_correlation_stringdtype.py \
     && rm /tmp/patch_dj_correlation_stringdtype.py
+
+# CJK 字体:dj-analyze 分析图表(直方图/词云)含中文,基础镜像无中文字体时全画成方框。
+# Noto Sans CJK SC 为 OFL 协议可随离线包分发;从 .ttc 抽出的单字面 .otf
+# (matplotlib 不扫描 .ttc 集合文件)。ANALYZER_FONT 是 data-juicer
+# column_wise_analysis.py 读的字体名(默认 Heiti SC 仅 macOS 有)。
+COPY deploy/fonts/NotoSansCJKsc-Regular.otf /usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf
+ENV ANALYZER_FONT="Noto Sans CJK SC"
 
 # --- 后端应用 venv ---
 WORKDIR /app
