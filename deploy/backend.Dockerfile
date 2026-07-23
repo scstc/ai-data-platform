@@ -77,6 +77,15 @@ RUN /opt/dj/.venv/bin/python /tmp/patch_dj_correlation_stringdtype.py \
 COPY deploy/fonts/NotoSansCJKsc-Regular.otf /usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf
 ENV ANALYZER_FONT="Noto Sans CJK SC"
 
+# 离线运行期补齐:以下依赖 DJ 走 lazy_loader 缺包时运行期 pip 自动安装,内网必失败。
+# openai=API 类算子(calibrate_qa/自定义 generate_*);librosa+soundfile=音频算子;
+# ffmpeg-python=视频算子(ffmpeg 二进制已随 apt 装好)。numpy<2 防连带升级打挂 fasttext。
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/dj/.venv/bin/python 'numpy<2' \
+        openai==2.46.0 'librosa>=0.10' soundfile ffmpeg-python
+# 词表资产:flagged_words/stopwords_filter 首次运行会从阿里云 OSS 在线下载,离线必失败。
+COPY deploy/dj-assets/flagged_words.json deploy/dj-assets/stopwords.json /root/.cache/data_juicer/assets/
+
 # --- 后端应用 venv ---
 WORKDIR /app
 RUN uv venv /app/.venv --python 3.12
