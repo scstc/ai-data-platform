@@ -2910,6 +2910,19 @@ async def override_verdict(
 # 读路径一致不强制登录,门控落在发布状态上(草稿区数据取不出去)。
 
 
+def _member_filename(m: DatasetMemberRead) -> str:
+    """成员落盘/打包文件名。显示名(m.name)通常不带后缀(如"银行业务QA_2500条"),
+    裸名流出后下游无法识别格式:无后缀时补存储对象 key 的真实后缀,
+    key 也没有再用 format 字段兜底。zip 下载 / export-s3 / 交付同步三处共用。"""
+    name = m.name or Path(m.key).name or "file"
+    if not Path(name).suffix:
+        ext = Path(m.key).suffix or (
+            f".{m.format.lower()}" if m.format and m.format.isalnum() else ""
+        )
+        name += ext
+    return name
+
+
 async def _download_zip(
     version: DatasetVersion,
     members: list[DatasetMemberRead],
@@ -2962,7 +2975,7 @@ async def _download_zip(
                         )
                         continue
                     data = p.read_bytes()
-                name = m.name or Path(m.key).name or "file"
+                name = _member_filename(m)
                 if name in used:
                     pp = Path(name)
                     n = 1
@@ -3259,7 +3272,7 @@ async def export_version_to_s3(
                 )
                 continue
             data = await asyncio.to_thread(p.read_bytes)
-        name = m.name or Path(m.key).name or "file"
+        name = _member_filename(m)
         if name in used:  # 同名成员加序号去重(与 _download_zip 一致)
             pp = Path(name)
             n = 1
@@ -3407,7 +3420,7 @@ async def sync_version_to_local(
                 skipped.append(f"{m.name or m.key}:本地文件不存在({m.key})")
                 continue
             data = await asyncio.to_thread(p.read_bytes)
-        name = _safe(m.name or Path(m.key).name or "file")
+        name = _safe(_member_filename(m))
         if name in used:  # 同名成员加序号去重(与 export-s3 一致)
             pp = Path(name)
             n = 1
