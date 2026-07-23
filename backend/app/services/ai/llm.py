@@ -62,6 +62,9 @@ _SUGGEST_NAME_SYSTEM_PROMPT = (
 _SUGGEST_TAGS_SYSTEM_PROMPT = (
     "你是数据集打标助手。根据数据集名称、描述、分类、数据类型等元数据,"
     "从「已有标签库」中挑选语义相关的标签(每个不超过 8 字,名词短语,不带 # 与引号)。"
+    "宁缺毋滥:只选与元数据有明确对应关系的标签,拿不准的一律不选,"
+    "标签库里没有相关的就输出空数组,严禁为了凑数量把不相关的标签硬选进来;"
+    "至多 5 个。"
     "严禁输出「已有标签库」以外的标签;不得新造标签;不要输出「已有标签」中已存在的。"
     '只输出一个 JSON 对象:{"tags":[string]},不要任何额外解释或 markdown 代码块。'
 )
@@ -386,7 +389,9 @@ class OpenAICompatProvider(AIProvider):
                 and t in known_set  # 强制只能从标签库选
             ):
                 tags.append(t)
-        return {"tags": tags[:8]}
+        # 上限 5:与提示词「宁缺毋滥、至多 5 个」对齐;弱模型倾向凑满上限,
+        # 放到 8 会把不相关标签也带出来(空结果由 API 层兜底默认标签)
+        return {"tags": tags[:5]}
 
     async def _moderate_batch(self, batch: list[str]) -> list[dict[str, Any]]:
         """审核一批文本(<=_MODERATE_BATCH 条),返回与 batch 等长、按下标对齐的结果。
