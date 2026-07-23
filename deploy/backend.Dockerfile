@@ -80,9 +80,12 @@ ENV ANALYZER_FONT="Noto Sans CJK SC"
 # 离线运行期补齐:以下依赖 DJ 走 lazy_loader 缺包时运行期 pip 自动安装,内网必失败。
 # openai=API 类算子(calibrate_qa/自定义 generate_*);librosa+soundfile=音频算子;
 # ffmpeg-python=视频算子(ffmpeg 二进制已随 apt 装好)。numpy<2 防连带升级打挂 fasttext。
+# torchcodec 版本必须匹配 torch(2.8↔0.7,官方兼容表);懒装最新版是 CUDA 构建
+# (加载要 libnvrtc),CPU 镜像必败且音频样本被静默丢光。resampy/samplerate 为重采样懒装依赖。
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/dj/.venv/bin/python 'numpy<2' \
-        openai==2.46.0 'librosa>=0.10' soundfile ffmpeg-python
+        openai==2.46.0 'librosa>=0.10' soundfile ffmpeg-python \
+        'torchcodec==0.7.0' resampy samplerate
 # 词表资产:flagged_words/stopwords_filter 首次运行会从阿里云 OSS 在线下载,离线必失败。
 COPY deploy/dj-assets/flagged_words.json deploy/dj-assets/stopwords.json /root/.cache/data_juicer/assets/
 

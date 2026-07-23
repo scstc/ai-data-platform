@@ -139,7 +139,7 @@ docker save <tag> | pigz > /home/change/ai-data-platform-deploy/images/<name>.ta
 - 后端全量重建 10–20 min（DJ C++ 扩展编译 + vision extras；uv cache mount 复用已下载包），后台跑
 - 每次替换 tar 后在部署包 `README.md` 顶部变更块登记内容
 - 本地栈同 tag（`adp-local-backend:latest` / `adp-local-frontend:latest`），构建后 `docker compose -p adp-local -f deploy/docker-compose.local.wsl.yml --env-file deploy/.env.local up -d --no-build <svc>` 重建容器即可本地验证（**`docker restart` 不换镜像；漏 `--env-file` 会改端口配置触发全栈重建/端口冲突**）
-- 镜像内离线固化清单：CJK 字体（`deploy/fonts/` + `ANALYZER_FONT`）、`wordcloud`/`openai`/`librosa`/`soundfile`/`ffmpeg-python`、DJ 词表（`deploy/dj-assets/` → `/root/.cache/data_juicer/assets/`）、DuckDB httpfs 扩展；kenlm/spacy/NLTK/HF 模型走 `resources/dj-models*.tar.gz` + `load-models.sh`（不进镜像）
+- 镜像内离线固化清单：CJK 字体（`deploy/fonts/` + `ANALYZER_FONT`）、`wordcloud`/`openai`/`librosa`/`soundfile`/`ffmpeg-python`/`torchcodec==0.7.0`（须匹配 torch 版本，CUDA 构建在 CPU 镜像加载必败）/`resampy`/`samplerate`、DJ 词表（`deploy/dj-assets/` → `/root/.cache/data_juicer/assets/`）、DuckDB httpfs 扩展；kenlm/spacy/NLTK/HF 模型走 `resources/dj-models*.tar.gz` + `load-models.sh`（不进镜像）
 
 ## 开发约定
 
