@@ -120,6 +120,27 @@ nginx(frontend:80)  →  /api → backend:18003  →  postgres:16(:55433→5432)
 
 部署配置 `deploy/.env`：`WEB_PORT / PG_* / CORS_ORIGINS / AUTH_SECRET / STORAGE_MINIO_* / OPENAI_*`。**生产必改**：`PG_PASSWORD`、`AUTH_SECRET`（`openssl rand -hex 32`）。
 
+## 离线部署包镜像重建（麒麟内网，`/home/change/ai-data-platform-deploy`）
+
+代码/依赖变更后重建镜像并导出 tar 到部署包 `images/` 目录。目标机完全离线（无 PyPI/HF/OSS），**凡是运行期在线获取的东西都必须构建期固化进镜像**——DJ 的 lazy_loader 缺包会运行期 `pip install`（离线必失败），词表/模型资产会在线下载，均已在 Dockerfile 固化，新增算子依赖时照此办理。
+
+| 镜像 | 构建（上下文=仓库根目录） | 导出文件名 |
+|---|---|---|
+| 后端(CPU+vision) | `docker build -f /home/change/ai-data-platform-deploy/build/backend.cpu.Dockerfile --build-arg WITH_VISION=1 -t adp-backend:cpu-generic-nlp-vision -t adp-local-backend:latest .` | `adp-backend-cpu-generic-nlp-vision.tar.gz` |
+| 前端 | `docker build -f deploy/frontend.Dockerfile -t adp-local-frontend:latest .` | `adp-local-frontend.tar.gz` |
+
+导出（原子替换 + 完整性校验，勿直接覆盖）：
+
+```bash
+docker save <tag> | pigz > /home/change/ai-data-platform-deploy/images/<name>.tar.gz.new \
+  && pigz -t .../<name>.tar.gz.new && mv .../<name>.tar.gz.new .../<name>.tar.gz
+```
+
+- 后端全量重建 10–20 min（DJ C++ 扩展编译 + vision extras；uv cache mount 复用已下载包），后台跑
+- 每次替换 tar 后在部署包 `README.md` 顶部变更块登记内容
+- 本地栈同 tag（`adp-local-backend:latest` / `adp-local-frontend:latest`），构建后 `docker compose -p adp-local -f deploy/docker-compose.local.wsl.yml --env-file deploy/.env.local up -d --no-build <svc>` 重建容器即可本地验证（**`docker restart` 不换镜像；漏 `--env-file` 会改端口配置触发全栈重建/端口冲突**）
+- 镜像内离线固化清单：CJK 字体（`deploy/fonts/` + `ANALYZER_FONT`）、`wordcloud`/`openai`/`librosa`/`soundfile`/`ffmpeg-python`、DJ 词表（`deploy/dj-assets/` → `/root/.cache/data_juicer/assets/`）、DuckDB httpfs 扩展；kenlm/spacy/NLTK/HF 模型走 `resources/dj-models*.tar.gz` + `load-models.sh`（不进镜像）
+
 ## 开发约定
 
 ### 后端（Python 3.12 + uv）
