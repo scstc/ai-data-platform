@@ -4,14 +4,12 @@ import {
   Collapse,
   Empty,
   Flex,
-  Input,
   List,
   Modal,
+  Pagination,
   Popconfirm,
-  Space,
   Spin,
   Tabs,
-  Typography,
 } from 'antd';
 import hljs from 'highlight.js/lib/core';
 import jsonLang from 'highlight.js/lib/languages/json';
@@ -22,7 +20,6 @@ import {
   getDatasetMemberUrl,
   listDatasetMembers,
   previewDatasetVersion,
-  queryDatasetVersion,
 } from '@/services/data-platform';
 import { toBrowserFileUrl } from '@/utils/storageUrl';
 
@@ -88,38 +85,53 @@ export interface VersionFilePreviewProps {
  *
  * 抽自 datasets/detail,数据任务详情抽屉的「输入版本/产出版本」面板各用一个实例。
  */
-/** 结构化预览的多视图:表格 / JSON(可折叠高亮) / SQL 查询(整个版本,只读)。
- *  解决"jsonl 只能显示成表格"——表格复用 DatasetDataView;JSON 用 highlight.js
- *  高亮 + Collapse 折叠(每行一面板);SQL 调 queryDatasetVersion,结果复用 DatasetDataView。 */
+/** 结构化预览的多视图:表格 / JSON(可折叠高亮),服务端真分页。
+ *  自己按 (page, pageSize) 调 preview?key=&offset=&limit= 拉当前页,
+ *  分页器在 Tabs 下方对两个视图共用;总行数优先用成员元数据 rows
+ *  (接口 total 是版本级行数,多文件版本下不等于单成员行数)。 */
 const StructuralViews: React.FC<{
   versionId?: string;
+  memberKey?: string;
+  memberRows?: number;
   semanticType?: DataPlatform.SemanticType;
-  preview?: DataPlatform.DatasetPreview;
-}> = ({ versionId, semanticType, preview }) => {
-  const [sql, setSql] = useState('SELECT * FROM t LIMIT 50');
-  const [sqlResult, setSqlResult] = useState<DataPlatform.DatasetPreview>();
-  const [sqlLoading, setSqlLoading] = useState(false);
-  const [sqlError, setSqlError] = useState<string>();
+}> = ({ versionId, memberKey, memberRows, semanticType }) => {
+  const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
-  const runSql = async () => {
-    if (!versionId) return;
-    setSqlLoading(true);
-    setSqlError(undefined);
-    try {
-      const res = await queryDatasetVersion(versionId, { sql, limit: 100 });
-      setSqlResult(res);
-    } catch (e: any) {
-      setSqlError(
-        e?.info?.errorMessage || e?.response?.data?.message || '查询失败',
-      );
-    } finally {
-      setSqlLoading(false);
-    }
-  };
+  useEffect(() => {
+    setPage(1);
+  }, [versionId, memberKey]);
 
+  useEffect(() => {
+    if (!versionId || !memberKey) return;
+    let cancelled = false;
+    setLoading(true);
+    previewDatasetVersion(versionId, {
+      key: memberKey,
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    })
+      .then((res) => {
+        if (!cancelled) setPreview(res);
+      })
+      .catch(() => {
+        if (!cancelled) setPreview(undefined);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [versionId, memberKey, page, pageSize]);
+
+  const offset = (page - 1) * pageSize;
+  const total = memberRows ?? preview?.total ?? 0;
   const jsonPanels = (preview?.data ?? []).map((row, i) => ({
     key: String(i),
-    label: `第 ${i + 1} 行`,
+    label: `第 ${offset + i + 1} 行`,
     children: (
       <pre
         style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}
@@ -134,54 +146,53 @@ const StructuralViews: React.FC<{
   }));
 
   return (
-    <Tabs
-      defaultActiveKey="table"
-      items={[
-        {
-          key: 'table',
-          label: '表格',
-          children: (
-            <DatasetDataView semanticType={semanticType} preview={preview} />
-          ),
-        },
-        {
-          key: 'json',
-          label: 'JSON',
-          children: jsonPanels.length ? (
-            <Collapse
-              items={jsonPanels}
-              style={{ maxHeight: '70vh', overflow: 'auto' }}
-            />
-          ) : (
-            <Empty description="无数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-          ),
-        },
-        {
-          key: 'sql',
-          label: 'SQL 查询',
-          children: (
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <Typography.Text type="secondary">
-                对整个版本数据跑只读 SQL(表名 t,仅 SELECT)。例:SELECT count(*)
-                FROM t
-              </Typography.Text>
-              <Input.TextArea
-                value={sql}
-                onChange={(e) => setSql(e.target.value)}
-                autoSize={{ minRows: 2, maxRows: 6 }}
+    <Spin spinning={loading}>
+      <Tabs
+        defaultActiveKey="table"
+        items={[
+          {
+            key: 'table',
+            label: '表格',
+            children: (
+              <DatasetDataView
+                semanticType={semanticType}
+                preview={preview}
+                pagination={false}
               />
-              <Button loading={sqlLoading} onClick={runSql}>
-                执行
-              </Button>
-              {sqlError && (
-                <Typography.Text type="danger">{sqlError}</Typography.Text>
-              )}
-              <DatasetDataView preview={sqlResult} />
-            </Space>
-          ),
-        },
-      ]}
-    />
+            ),
+          },
+          {
+            key: 'json',
+            label: 'JSON',
+            children: jsonPanels.length ? (
+              <Collapse
+                items={jsonPanels}
+                style={{ maxHeight: '70vh', overflow: 'auto' }}
+              />
+            ) : (
+              <Empty
+                description="无数据"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            ),
+          },
+        ]}
+      />
+      <Flex justify="flex-end" style={{ marginTop: 12 }}>
+        <Pagination
+          current={page}
+          pageSize={pageSize}
+          total={total}
+          showSizeChanger
+          pageSizeOptions={[20, 50, 100, 200]}
+          showTotal={(t) => `共 ${t.toLocaleString()} 行`}
+          onChange={(p, ps) => {
+            setPage(ps !== pageSize ? 1 : p);
+            setPageSize(ps);
+          }}
+        />
+      </Flex>
+    </Spin>
   );
 };
 
@@ -197,8 +208,6 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
   const [modalMember, setModalMember] = useState<DataPlatform.DatasetMember>();
   const [modalOpen, setModalOpen] = useState(false);
   const [modalLoading, setModalLoading] = useState(false);
-  const [modalPreview, setModalPreview] =
-    useState<DataPlatform.DatasetPreview>();
   const [modalUrl, setModalUrl] = useState<string>();
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
@@ -272,23 +281,18 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
     if (!versionId) return;
     setModalMember(m);
     setModalOpen(true);
-    setModalPreview(undefined);
     setModalUrl(undefined);
-    setModalLoading(true);
     const fmt = (m.format || '').toLowerCase();
+    if (PREVIEW_STRUCTURAL.has(fmt)) {
+      // 结构化:StructuralViews 自带分页拉取与 loading,父层不再预取
+      setModalLoading(false);
+      return;
+    }
+    setModalLoading(true);
     try {
-      if (PREVIEW_STRUCTURAL.has(fmt)) {
-        const res = await previewDatasetVersion(versionId, {
-          key: m.key,
-          limit: 50,
-        });
-        setModalPreview(res);
-        setModalLoading(false); // 结构化:数据到即结束
-      } else {
-        const res = await getDatasetMemberUrl(versionId, m.key);
-        setModalUrl(res.data?.url);
-        // 非结构化:modalLoading 保持,等 iframe onLoad(kkFileView 就绪)再结束
-      }
+      const res = await getDatasetMemberUrl(versionId, m.key);
+      setModalUrl(res.data?.url);
+      // 非结构化:modalLoading 保持,等 iframe onLoad(kkFileView 就绪)再结束
     } catch {
       setModalLoading(false);
     }
@@ -301,8 +305,9 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
       return (
         <StructuralViews
           versionId={versionId}
+          memberKey={m.key}
+          memberRows={m.rows}
           semanticType={semanticType}
-          preview={modalPreview}
         />
       );
     }
