@@ -47,21 +47,16 @@ const PREVIEW_IMAGE = new Set([
   'svg',
 ]);
 
-/** kkFileView 可渲染格式:pdf / office 文档 / 媒体。 */
-const PREVIEW_KK = new Set([
-  'pdf',
-  'doc',
-  'docx',
-  'ppt',
-  'pptx',
-  'mp4',
-  'mp3',
-  'wav',
-  'avi',
-  'mov',
-  'flv',
-  'mkv',
-]);
+/** 浏览器原生可播的音频格式:<audio> 直嵌(presigned URL 归一化后直连),
+ *  不走 kkFileView——kk 的音频页体验差且内部端点形态下经常播不了。
+ *  与 VersionFilePreview 保持一致。 */
+const PREVIEW_AUDIO = new Set(['wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac', 'opus']);
+
+/** 浏览器原生可播的视频格式:<video> 直嵌,同音频理由。 */
+const PREVIEW_VIDEO = new Set(['mp4', 'webm', 'mov', 'm4v']);
+
+/** kkFileView 可渲染格式:pdf / office 文档 / 浏览器不支持的视频容器。 */
+const PREVIEW_KK = new Set(['pdf', 'doc', 'docx', 'ppt', 'pptx', 'avi', 'flv', 'mkv']);
 
 /** kkFileView 同源相对路径,由 nginx 反代到 compose 内 kkfileview:8012(KK_CONTEXT_PATH=/kkfileview)。 */
 const KK_FILEVIEW_BASE = '/kkfileview';
@@ -78,11 +73,13 @@ export type LakeSnapshotPreviewProps = {
   onClose: () => void;
 };
 
-type PreviewMode = 'structural' | 'image' | 'kk' | 'download';
+type PreviewMode = 'structural' | 'image' | 'audio' | 'video' | 'kk' | 'download';
 
 const resolveMode = (fmt: string): PreviewMode => {
   if (PREVIEW_STRUCTURAL.has(fmt)) return 'structural';
   if (PREVIEW_IMAGE.has(fmt)) return 'image';
+  if (PREVIEW_AUDIO.has(fmt)) return 'audio';
+  if (PREVIEW_VIDEO.has(fmt)) return 'video';
   if (PREVIEW_KK.has(fmt)) return 'kk';
   return 'download';
 };
@@ -147,8 +144,13 @@ const LakeSnapshotPreview: FC<LakeSnapshotPreviewProps> = ({
           );
         })
         .finally(() => {
-          // 图片 / kk 保持 loading,等 img/iframe onLoad 再结束;下载模式直接结束
-          if (!cancelled && mode === 'download') setLoading(false);
+          // 图片 / kk 保持 loading,等 img/iframe onLoad 再结束;
+          // 音/视频(原生标签直嵌,URL 到手即可渲染)与下载模式直接结束
+          if (
+            !cancelled &&
+            (mode === 'audio' || mode === 'video' || mode === 'download')
+          )
+            setLoading(false);
         });
     }
 
@@ -228,6 +230,39 @@ const LakeSnapshotPreview: FC<LakeSnapshotPreviewProps> = ({
           onLoad={() => setLoading(false)}
           onError={() => setLoading(false)}
           style={{ maxWidth: '100%', display: 'block', margin: '0 auto' }}
+        />
+      );
+    }
+
+    if (mode === 'audio') {
+      if (!url) return null;
+      return (
+        <div style={{ padding: '40px 24px' }}>
+          {/* biome-ignore lint/a11y/useMediaCaption: 数据湖音频原件预览,无字幕轨可提供 */}
+          <audio
+            controls
+            preload="metadata"
+            src={toBrowserFileUrl(url)}
+            style={{ width: '100%' }}
+          />
+        </div>
+      );
+    }
+
+    if (mode === 'video') {
+      if (!url) return null;
+      return (
+        // biome-ignore lint/a11y/useMediaCaption: 数据湖视频原件预览,无字幕轨可提供
+        <video
+          controls
+          preload="metadata"
+          src={toBrowserFileUrl(url)}
+          style={{
+            width: '100%',
+            maxHeight: '70vh',
+            display: 'block',
+            background: '#000',
+          }}
         />
       );
     }

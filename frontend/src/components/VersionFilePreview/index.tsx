@@ -53,6 +53,15 @@ const PREVIEW_IMAGE = new Set([
   'svg',
 ]);
 
+/** 浏览器原生可播的音频格式:<audio> 直嵌(presigned URL 归一化后直连),
+ *  不走 kkFileView——kk 的音频页体验差且内部端点形态下经常播不了。
+ *  amr/wma 等浏览器不支持的仍走 kkFileView 转换。 */
+const PREVIEW_AUDIO = new Set(['wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac', 'opus']);
+
+/** 浏览器原生可播的视频格式:<video> 直嵌,同音频理由。
+ *  avi/flv/mkv/wmv 等浏览器不支持的仍走 kkFileView 转码。 */
+const PREVIEW_VIDEO = new Set(['mp4', 'webm', 'mov', 'm4v']);
+
 /** kkFileView 同源相对路径,由 nginx 反代到 compose 内 kkfileview:8012(KK_CONTEXT_PATH=/kkfileview)。 */
 const KK_FILEVIEW_BASE = '/kkfileview';
 
@@ -292,7 +301,10 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
     try {
       const res = await getDatasetMemberUrl(versionId, m.key);
       setModalUrl(res.data?.url);
-      // 非结构化:modalLoading 保持,等 iframe onLoad(kkFileView 就绪)再结束
+      // 音/视频:原生标签直嵌,URL 到手即可渲染,不等 iframe
+      if (PREVIEW_AUDIO.has(fmt) || PREVIEW_VIDEO.has(fmt))
+        setModalLoading(false);
+      // 其余非结构化:modalLoading 保持,等 iframe onLoad(kkFileView 就绪)再结束
     } catch {
       setModalLoading(false);
     }
@@ -320,6 +332,35 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
           onLoad={() => setModalLoading(false)}
           onError={() => setModalLoading(false)}
           style={{ maxWidth: '100%', display: 'block', margin: '0 auto' }}
+        />
+      );
+    }
+    if (PREVIEW_AUDIO.has(fmt)) {
+      return (
+        <Flex vertical align="center" gap={16} style={{ padding: '40px 24px' }}>
+          {/* biome-ignore lint/a11y/useMediaCaption: 数据集音频原件预览,无字幕轨可提供 */}
+          <audio
+            controls
+            preload="metadata"
+            src={toBrowserFileUrl(modalUrl)}
+            style={{ width: '100%' }}
+          />
+        </Flex>
+      );
+    }
+    if (PREVIEW_VIDEO.has(fmt)) {
+      return (
+        // biome-ignore lint/a11y/useMediaCaption: 数据集视频原件预览,无字幕轨可提供
+        <video
+          controls
+          preload="metadata"
+          src={toBrowserFileUrl(modalUrl)}
+          style={{
+            width: '100%',
+            maxHeight: '70vh',
+            display: 'block',
+            background: '#000',
+          }}
         />
       );
     }
