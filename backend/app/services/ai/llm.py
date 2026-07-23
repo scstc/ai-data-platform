@@ -10,6 +10,7 @@ token 数 + 延迟 + 成功/失败），异常全部吞掉，不影响主流程�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -95,6 +96,17 @@ _JUDGE_SYSTEM_PROMPT = (
 _JUDGE_BATCH = 10
 # 裁判单批超时(秒)
 _JUDGE_TIMEOUT = 60.0
+# 批处理(审核/裁判)单批瞬时故障重试:限流(429)/服务端错误(5xx)/网络抖动/
+# 空 content 各重试至多 _BATCH_RETRIES 次再判失败。长任务(500 条=25 批)中一次
+# 抖动就整体作废代价太大;鉴权/参数错误(4xx)不重试,立即抛。
+_BATCH_RETRIES = 2
+_RETRY_DELAYS = (2.0, 5.0)
+# 混合思考型模型(Qwen3.x / GLM-4.5 等)默认开启思考:先产数千字 reasoning 再产
+# 答案,单批耗时放大 10 倍以上直至撞超时(20 条审核批实测 ~60s vs 关闭后 ~5s)。
+# 平台各能力只要最终 JSON,不需要思考过程,统一显式关闭。SiliconFlow/DashScope/
+# vLLM 均识别该参数,非思考模型忽略之;个别严格网关报 400 时去掉该参数重试一次
+# (见 _post_chat)。
+_NO_THINKING = {"enable_thinking": False}
 # 合法 category 枚举(LLM 越界回退 other)
 _MODERATE_CATEGORIES = {
     "porn",
@@ -148,36 +160,31 @@ class OpenAICompatProvider(AIProvider):
         # 内部持有启发式兜底实例
         self._heuristic = heuristic or HeuristicProvider()
 
-    async def _chat_json(
-        self, system_prompt: str, user_content: str, *, feature: str = "chat"
+    async def _post_chat(
+        self, payload: dict[str, Any], *, feature: str, timeout: float
     ) -> dict[str, Any]:
-        """调用 LLM 并解析其 JSON 输出；任一环节失败抛异常交由调用方回退。
+        """POST /chat/completions 并返回响应 JSON;失败抛异常交调用方处理。
 
-        同时 best-effort 记录一条 llm_usage（成功/失败 + token + 延迟）。
+        统一追加 enable_thinking=false(见 _NO_THINKING);严格网关对该参数报
+        400 时去掉重试一次。同时 best-effort 记录一条 llm_usage（成功/失败 +
+        token + 延迟）。
         """
         from app.services.llm_config import record_usage  # 延迟导入避免循环
 
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-        }
+        payload = {**payload, **_NO_THINKING}
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+        url = f"{self._base_url}/chat/completions"
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 400:
+                    retry = dict(payload)
+                    retry.pop("enable_thinking", None)
+                    resp = await client.post(url, json=retry, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
             t1 = time.monotonic()
@@ -201,6 +208,51 @@ class OpenAICompatProvider(AIProvider):
                 latency_ms=int((t1 - t0) * 1000),
             )
             raise
+        return data
+
+    @staticmethod
+    async def _with_batch_retry(coro_fn, batch, *, what: str):
+        """执行单批调用,瞬时故障(429/5xx/网络抖动/解析失败)按 _RETRY_DELAYS 重试。
+
+        重试耗尽或不可重试错误 → 抛 RuntimeError,消息带异常类名(httpx 超时/
+        断连类异常 str() 常为空,裸转发会让 Job.warnings 只剩空白,无从排障)。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_BATCH_RETRIES + 1):
+            if attempt:
+                delay = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)]
+                logger.warning(
+                    "%s 批次第 %d 次重试(%.0fs 后):%r", what, attempt, delay, last_exc
+                )
+                await asyncio.sleep(delay)
+            try:
+                return await coro_fn(batch)
+            except httpx.HTTPStatusError as exc:
+                code = exc.response.status_code
+                if code != 429 and code < 500:
+                    raise  # 鉴权/参数类 4xx,重试无意义
+                last_exc = exc
+            except (httpx.TransportError, ValueError) as exc:
+                # 超时/断连/限流断流 + LLM 偶发坏输出(空 content/非 JSON)
+                last_exc = exc
+        raise RuntimeError(
+            f"{type(last_exc).__name__}: {last_exc}"
+        ) from last_exc
+
+    async def _chat_json(
+        self, system_prompt: str, user_content: str, *, feature: str = "chat"
+    ) -> dict[str, Any]:
+        """调用 LLM 并解析其 JSON 输出；任一环节失败抛异常交由调用方回退。"""
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        data = await self._post_chat(payload, feature=feature, timeout=self._timeout)
         content = data["choices"][0]["message"]["content"]
         parsed = _parse_json_content(content)
         if not isinstance(parsed, dict):
@@ -342,8 +394,6 @@ class OpenAICompatProvider(AIProvider):
         任一环节失败(请求异常/超时/解析失败/缺编号)直接抛,交 moderate_texts 处理。
         同时 best-effort 记录用量（feature='moderate'）。
         """
-        from app.services.llm_config import record_usage  # 延迟导入避免循环
-
         numbered = "\n".join(f"[{i}] {t}" for i, t in enumerate(batch))
         payload = {
             "model": self._model,
@@ -357,41 +407,9 @@ class OpenAICompatProvider(AIProvider):
             # 耗尽致 content 为空(整批降级),显式给足上限。
             "max_tokens": 8192,
         }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        t0 = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=_MODERATE_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            t1 = time.monotonic()
-            usage = data.get("usage") or {}
-            await record_usage(
-                feature="moderate",
-                model=self._model,
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                success=True,
-                latency_ms=int((t1 - t0) * 1000),
-            )
-        except Exception:
-            t1 = time.monotonic()
-            await record_usage(
-                feature="moderate",
-                model=self._model,
-                prompt_tokens=0,
-                completion_tokens=0,
-                success=False,
-                latency_ms=int((t1 - t0) * 1000),
-            )
-            raise
+        data = await self._post_chat(
+            payload, feature="moderate", timeout=_MODERATE_TIMEOUT
+        )
         content = data["choices"][0]["message"]["content"]
         parsed = _parse_json_content(content)
         results = parsed.get("results") if isinstance(parsed, dict) else parsed
@@ -445,7 +463,11 @@ class OpenAICompatProvider(AIProvider):
         out: list[dict[str, Any]] = []
         for start in range(0, len(texts), _MODERATE_BATCH):
             batch = texts[start : start + _MODERATE_BATCH]
-            out.extend(await self._moderate_batch(batch))
+            out.extend(
+                await self._with_batch_retry(
+                    self._moderate_batch, batch, what="moderate"
+                )
+            )
         return out
 
     @staticmethod
@@ -476,8 +498,6 @@ class OpenAICompatProvider(AIProvider):
 
         任一环节失败直接抛,交 judge_answers 处理(降级回退启发式)。
         """
-        from app.services.llm_config import record_usage  # 延迟导入避免循环
-
         numbered = "\n".join(
             f"[{i}] 问题:{it.get('prompt', '')}\n参考答案:{it.get('reference', '')}\n"
             f"模型回答:{it.get('completion', '')}"
@@ -492,41 +512,7 @@ class OpenAICompatProvider(AIProvider):
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        t0 = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=_JUDGE_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            t1 = time.monotonic()
-            usage = data.get("usage") or {}
-            await record_usage(
-                feature="judge",
-                model=self._model,
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                success=True,
-                latency_ms=int((t1 - t0) * 1000),
-            )
-        except Exception:
-            t1 = time.monotonic()
-            await record_usage(
-                feature="judge",
-                model=self._model,
-                prompt_tokens=0,
-                completion_tokens=0,
-                success=False,
-                latency_ms=int((t1 - t0) * 1000),
-            )
-            raise
+        data = await self._post_chat(payload, feature="judge", timeout=_JUDGE_TIMEOUT)
         content = data["choices"][0]["message"]["content"]
         parsed = _parse_json_content(content)
         results = parsed.get("results") if isinstance(parsed, dict) else parsed
@@ -552,7 +538,11 @@ class OpenAICompatProvider(AIProvider):
             out: list[dict[str, Any]] = []
             for start in range(0, len(items), _JUDGE_BATCH):
                 batch = items[start : start + _JUDGE_BATCH]
-                out.extend(await self._judge_batch(batch))
+                out.extend(
+                    await self._with_batch_retry(
+                        self._judge_batch, batch, what="judge"
+                    )
+                )
             return out
         except Exception as exc:  # noqa: BLE001 — 任何失败都回退,保证可用性
             logger.warning("LLM judge_answers 失败,回退启发式:%s", exc)
