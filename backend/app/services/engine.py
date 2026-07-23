@@ -7,6 +7,7 @@ data-juicer venv(py3.11)的 dj-process,进程隔离、规避版本冲突。
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import io
 import json
@@ -172,6 +173,50 @@ def _new_member_id() -> str:
     return f"dsvt-{secrets.token_hex(3)}"
 
 
+def _accepts_bare_str(type_str: str) -> bool:
+    """类型声明是否本身也接受裸字符串(如 Union[str, List[str]])。"""
+    return "union[str," in type_str.lower().replace(" ", "")
+
+
+def _coerce_list_param(raw: str, type_str: str) -> list[Any] | None:
+    """把表单文本框里的 list 型参数值解析回真列表;解析不出返回 None(保持原值)。
+
+    动态表单把 list 型参数渲染成文本框(见 operator_catalog._ui_field),用户填的
+    '["a","b"]' 到这里是字符串。不还原成列表的话,DJ 侧对字符串做 `in` 判断退化为
+    子串匹配,过滤结果静默出错(如 target_value 含"电子银行"时"银行"被误保留)。
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            parsed = loader(text)
+        except Exception:
+            continue
+        if isinstance(parsed, (list, tuple)):
+            return list(parsed)
+    if text.startswith("["):
+        return None  # 想写列表但语法坏了:原样透传,让 DJ 报错而不是猜
+    if _accepts_bare_str(type_str):
+        return None  # Union[str, List[str]]:裸字符串本身合法,不动
+    # 纯 list 类型的裸值/逗号分隔兜底(全角逗号同样常见)
+    return [part.strip() for part in text.replace("，", ",").split(",") if part.strip()]
+
+
+def _coerce_list_params(
+    params: dict[str, Any], meta_params: list[dict[str, Any]]
+) -> None:
+    """就地把 params 里字符串形态的 list 型参数还原为列表。"""
+    for p in meta_params:
+        if not isinstance(p, dict) or "list" not in str(p.get("type", "")).lower():
+            continue
+        value = params.get(p.get("name", ""))
+        if isinstance(value, str):
+            coerced = _coerce_list_param(value, str(p.get("type", "")))
+            if coerced is not None:
+                params[p["name"]] = coerced
+
+
 def build_config(
     *,
     project_name: str,
@@ -210,8 +255,12 @@ def build_config(
     process: list[dict[str, Any]] = []
     for op in operators:
         params = dict(op.get("params") or {})
+        meta = oc.get_operator(op["name"]) if params else None
+        meta_params = (meta.get("params") or []) if meta else []
+        _coerce_list_params(params, meta_params)
         if cfg.api_key:
-            meta = oc.get_operator(op["name"])
+            if meta is None:
+                meta = oc.get_operator(op["name"])
             valid = {p["name"] for p in (meta.get("params") or [])} if meta else set()
             # DJ 各算子模型参数名不统一(api_model / api_or_hf_model),默认都写死
             # gpt-4o;不覆盖会向自定义端点请求不存在的模型而失败。用户显式填了则尊重。
