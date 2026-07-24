@@ -759,7 +759,9 @@ def query_catalog(
         # Runnable 过滤
         if runnable and effective_runnable(op, caps, media_ok=True) != runnable:
             continue
-        # 关键字搜索:hay = 英文名 + 中文标签 + 中文摘要 + 场景分组 + 业务桶别名
+        # 关键字搜索:hay = 英文名 + 中文标签 + 中文摘要 + 使用提示 + 场景分组
+        # + 业务桶别名。zh_usage_tip 是市场卡片/编辑器展示的首选文案(summary_zh
+        # 多为机翻),用户照着界面文字搜必须能命中。
         # 加 scenarioGroup 是为了支持"质量过滤/视频处理"这类 DJ 原生场景词;
         # 加业务桶中文名是为了支持"评估/蒸馏/清洗"这类平台业务叫法(同一算子可
         # 属多桶 → 多别名一并塞进去,大小写无关)。别名来源见 _BUCKET_LABELS。
@@ -768,6 +770,7 @@ def query_catalog(
                 op["name"]
                 + (op.get("summary_zh") or "")
                 + (op.get("zh_label") or "")
+                + (op.get("zh_usage_tip") or "")
                 + (op.get("scenario_group") or "")
                 + _bucket_labels_for(op["name"])
             ).lower()

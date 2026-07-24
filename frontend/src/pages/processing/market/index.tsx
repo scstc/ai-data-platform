@@ -173,6 +173,8 @@ const Market: React.FC = () => {
           op.name +
           (op.zhLabel ?? '') +
           (op.summaryZh ?? '') +
+          // 卡片展示文案是 zhUsageTip 优先,用户照着卡片文字搜必须能命中
+          (op.zhUsageTip ?? '') +
           (op.tags ?? []).join(' ')
         ).toLowerCase();
         if (!hay.includes(kw)) return false;
