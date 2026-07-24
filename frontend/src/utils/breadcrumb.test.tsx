@@ -31,7 +31,7 @@ describe('buildBreadcrumb', () => {
     const items = [
       { title: '数据接入', path: '/ingest/datasources' },
       { title: '本地上传', path: '/ingest/local-upload' },
-      { title: '单一数据' },
+      { title: '通用文件' },
     ];
     const bc = buildBreadcrumb(items);
     expect(bc.items).toBe(items);
@@ -45,7 +45,7 @@ describe('buildBreadcrumb', () => {
 
     const last = renderCrumb(bc, items, 2).container;
     expect(last.querySelector('a')).toBeNull();
-    expect(last.textContent).toBe('单一数据');
+    expect(last.textContent).toBe('通用文件');
   });
 
   it('末级项即使带 path 也是纯文本(当前页不应可跳转)', () => {

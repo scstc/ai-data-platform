@@ -20,8 +20,8 @@ import {
   message,
   Select,
   Space,
+  Tag,
   Typography,
-  theme,
   Upload,
 } from 'antd';
 import { type ReactNode, useCallback, useState } from 'react';
@@ -31,22 +31,7 @@ import { buildBreadcrumb } from '@/utils/breadcrumb';
 const { Text } = Typography;
 const { Dragger } = Upload;
 
-/** 媒体格式集合,对应后端 landing.py IMAGE/AUDIO/VIDEO_FORMATS */
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp']);
-const AUDIO_EXTS = new Set(['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg']);
-const VIDEO_EXTS = new Set(['mp4', 'avi', 'mov', 'mkv', 'webm']);
-const MEDIA_EXTS = new Set([...IMAGE_EXTS, ...AUDIO_EXTS, ...VIDEO_EXTS]);
-
-/** 媒体扩展名 → data_type(供 /upload-media 的 dataType 参数) */
-const mediaDataType = (ext: string): 'image' | 'audio' | 'video' | null => {
-  if (IMAGE_EXTS.has(ext)) return 'image';
-  if (AUDIO_EXTS.has(ext)) return 'audio';
-  if (VIDEO_EXTS.has(ext)) return 'video';
-  return null;
-};
-
-/** 支持格式展示(对齐后端 landing.LANDABLE_FORMATS 的非二进制、可规范化格式)。
- *  媒体(图/音/视频)走「多模态」接入,不在此列。
+/** 支持格式展示(对齐后端 landing.LANDABLE_FORMATS,含图/音/视频媒体)。
  *  仅作展示,不限制上传——同一批可混合任意支持的格式。 */
 const FORMAT_GROUPS: {
   label: string;
@@ -237,7 +222,7 @@ const getExt = (filename: string): string => {
   return i >= 0 ? filename.slice(i + 1).toLowerCase() : '';
 };
 
-/** 单一数据接入:一批文件 → 数据湖归档(结构化解析 parquet、媒体原格式),
+/** 通用文件接入:一批任意格式文件 → 数据湖归档(结构化解析 parquet、媒体原格式),
  *  后续到数据湖详情页勾快照抽取生成数据集。 */
 const SingleUploadPage: React.FC = () => {
   const access = useAccess();
@@ -264,7 +249,6 @@ const SingleUploadPage: React.FC = () => {
       })
       .finally(() => setLakeLoading(false));
   }, []);
-  const { token } = theme.useToken();
 
   // 仅暂存、不自动上传:校验支持的扩展名 + 单文件 200MB,提交时统一发送
   const beforeUpload: NonNullable<UploadProps['beforeUpload']> = (file) => {
@@ -320,123 +304,120 @@ const SingleUploadPage: React.FC = () => {
       breadcrumb={buildBreadcrumb([
         { title: '数据接入', path: '/ingest/datasources' },
         { title: '本地上传', path: '/ingest/local-upload' },
-        { title: '单一数据' },
+        { title: '通用文件' },
       ])}
-      title="单一数据接入"
+      title="通用文件接入"
       content="批量上传文件:结构化文件解析成 parquet 归档、媒体原格式归档,后续到数据湖详情页勾快照抽取生成数据集。"
       onBack={() => history.push('/ingest/local-upload')}
     >
-      <Card style={{ maxWidth: 760 }}>
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          <div>
-            <Text strong>支持格式</Text>
-            <div style={{ marginTop: 8 }}>
-              {FORMAT_GROUPS.map((group) => (
-                <div key={group.label} style={{ marginBottom: 14 }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {group.label}
-                  </Text>
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      gap: 8,
-                      marginTop: 6,
-                    }}
-                  >
-                    {group.options.map((opt) => (
-                      <div
-                        key={opt.value}
-                        style={{
-                          width: 84,
-                          padding: '10px 8px',
-                          textAlign: 'center',
-                          borderRadius: 8,
-                          border: `1px solid ${token.colorBorderSecondary}`,
-                          background: token.colorBgContainer,
-                        }}
-                      >
-                        <span style={{ fontSize: 22, color: opt.color }}>
-                          {opt.icon}
-                        </span>
-                        <div
-                          style={{
-                            marginTop: 4,
-                            fontSize: 13,
-                            fontWeight: 500,
-                          }}
-                        >
-                          {opt.label}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: token.colorTextTertiary,
-                          }}
-                        >
-                          .{opt.value}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
+      <div
+        style={{
+          display: 'flex',
+          gap: 16,
+          alignItems: 'flex-start',
+          flexWrap: 'wrap',
+        }}
+      >
+        {/* 操作区置于主位:选湖 → 拖拽上传 → 提交 */}
+        <Card style={{ flex: '1 1 460px', maxWidth: 760 }}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <div>
+              <Text strong>
+                目标数据湖 <Text type="danger">*</Text>
+              </Text>
+              <div style={{ marginTop: 8 }}>
+                <Select
+                  style={{ width: '100%' }}
+                  placeholder="选择已有数据湖(文件归档后可抽取生成数据集)"
+                  value={lakeId}
+                  onChange={setLakeId}
+                  showSearch
+                  allowClear
+                  filterOption={false}
+                  onSearch={(kw) => loadLakeOptions(kw)}
+                  onFocus={() => loadLakeOptions()}
+                  options={lakeOptions}
+                  notFoundContent={
+                    lakeLoading
+                      ? '加载中…'
+                      : '无匹配数据湖,请先到「数据湖」页新建'
+                  }
+                />
+              </div>
             </div>
-          </div>
-          <div>
-            <Text strong>
-              目标数据湖 <Text type="danger">*</Text>
-            </Text>
-            <div style={{ marginTop: 8 }}>
-              <Select
-                style={{ width: '100%' }}
-                placeholder="选择已有数据湖(文件归档后可抽取生成数据集)"
-                value={lakeId}
-                onChange={setLakeId}
-                showSearch
-                allowClear
-                filterOption={false}
-                onSearch={(kw) => loadLakeOptions(kw)}
-                onFocus={() => loadLakeOptions()}
-                options={lakeOptions}
-                notFoundContent={
-                  lakeLoading
-                    ? '加载中…'
-                    : '无匹配数据湖,请先到「数据湖」页新建'
-                }
-              />
-            </div>
-          </div>
-          <Dragger
-            multiple
-            fileList={fileList}
-            beforeUpload={beforeUpload}
-            onChange={({ fileList: fl }) => setFileList(fl)}
-            accept={Array.from(SUPPORTED_EXTS)
-              .map((e) => `.${e}`)
-              .join(',')}
-          >
-            <p className="ant-upload-drag-icon">
-              <InboxOutlined />
-            </p>
-            <p className="ant-upload-text">点击或拖拽文件到此处</p>
-            <p className="ant-upload-hint">
-              支持多文件批量上传;结构化文件解析为 parquet 快照、媒体原格式归档;
-              单文件最大 200MB。
-            </p>
-          </Dragger>
-          {canUpload && (
-            <Button
-              type="primary"
-              onClick={onSubmit}
-              loading={submitting}
-              disabled={fileList.length === 0}
+            <Dragger
+              multiple
+              fileList={fileList}
+              beforeUpload={beforeUpload}
+              onChange={({ fileList: fl }) => setFileList(fl)}
+              accept={Array.from(SUPPORTED_EXTS)
+                .map((e) => `.${e}`)
+                .join(',')}
             >
-              上传并归档到数据湖({fileList.length})
-            </Button>
-          )}
-        </Space>
-      </Card>
+              <div style={{ padding: '24px 0' }}>
+                <p className="ant-upload-drag-icon">
+                  <InboxOutlined />
+                </p>
+                <p className="ant-upload-text">点击或拖拽文件到此处</p>
+                <p className="ant-upload-hint">
+                  支持多文件批量上传;结构化文件解析为 parquet
+                  快照、媒体原格式归档;单文件最大 200MB。
+                </p>
+              </div>
+            </Dragger>
+            {canUpload && (
+              <Button
+                type="primary"
+                onClick={onSubmit}
+                loading={submitting}
+                disabled={fileList.length === 0}
+              >
+                上传并归档到数据湖({fileList.length})
+              </Button>
+            )}
+          </Space>
+        </Card>
+
+        {/* 支持格式:侧边参考卡,窄屏自动叠到操作区下方 */}
+        <Card
+          title="支持格式"
+          style={{ flex: '0 1 420px', minWidth: 340 }}
+        >
+          {FORMAT_GROUPS.map((group) => (
+            <div key={group.label} style={{ marginBottom: 16 }}>
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                {group.label}
+              </Text>
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 6,
+                  marginTop: 6,
+                }}
+              >
+                {group.options.map((opt) => (
+                  <Tag
+                    key={opt.value}
+                    style={{ margin: 0, fontSize: 13, padding: '4px 10px' }}
+                  >
+                    <span
+                      style={{
+                        color: opt.color,
+                        marginRight: 6,
+                        fontSize: 15,
+                      }}
+                    >
+                      {opt.icon}
+                    </span>
+                    {opt.label} .{opt.value}
+                  </Tag>
+                ))}
+              </div>
+            </div>
+          ))}
+        </Card>
+      </div>
     </PageContainer>
   );
 };

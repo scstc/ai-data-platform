@@ -11,7 +11,7 @@ import { buildBreadcrumb } from '@/utils/breadcrumb';
 const { Text, Title } = Typography;
 
 /** 本地上传落地页:选择数据类别。
- *  左「单一数据」→ 单一格式文件合并为 jsonl 数据集(已实现);
+ *  左「通用文件」→ 任意格式混合批量上传,归档到数据湖(已实现);
  *  右「场景数据」→ COT/问答对/偏好/时序/GIS/多模态 等数据类型选择页
  *  (多模态已有配置页,其余接入逻辑待定)。 */
 const LocalUploadHome: React.FC = () => {
@@ -42,11 +42,11 @@ const LocalUploadHome: React.FC = () => {
         >
           <FileTextOutlined style={{ fontSize: 28, color: '#1677ff' }} />
           <Title level={5} style={{ margin: '12px 0 6px' }}>
-            单一数据
+            通用文件
           </Title>
           <Text type="secondary" style={{ fontSize: 13 }}>
-            csv/tsv/word/pdf 等单一格式文件批量上传,原件存入内置
-            MinIO,合并生成一个 jsonl 数据集。
+            文档 / 表格 / 文本 / 图音视频等任意格式混合批量上传,
+            归档到数据湖,后续从湖抽取生成数据集。
           </Text>
           <div
             style={{
@@ -57,7 +57,7 @@ const LocalUploadHome: React.FC = () => {
             }}
           >
             <Tag color="blue" style={{ fontSize: 11 }}>
-              单一格式
+              混合格式
             </Tag>
             <ArrowRightOutlined style={{ color: '#1677ff' }} />
           </div>
