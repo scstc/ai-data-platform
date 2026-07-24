@@ -107,7 +107,7 @@ const StructuralViews: React.FC<{
   const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const [pageSize, setPageSize] = useState(20);
 
   useEffect(() => {
     setPage(1);
@@ -193,7 +193,7 @@ const StructuralViews: React.FC<{
           pageSize={pageSize}
           total={total}
           showSizeChanger
-          pageSizeOptions={[20, 50, 100, 200]}
+          pageSizeOptions={[10, 20, 50, 100, 200]}
           showTotal={(t) => `共 ${t.toLocaleString()} 行`}
           onChange={(p, ps) => {
             setPage(ps !== pageSize ? 1 : p);
@@ -487,7 +487,8 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
       <Modal
         open={modalOpen}
         title={modalMember?.name ?? '预览'}
-        width={960}
+        width="85%"
+        style={{ maxWidth: 1600 }}
         footer={null}
         destroyOnHidden
         onCancel={() => setModalOpen(false)}
