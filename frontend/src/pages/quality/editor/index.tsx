@@ -84,6 +84,8 @@ const QualityEditor: React.FC = () => {
     Record<string, DataPlatform.CatalogOperator>
   >({});
   const [submitting, setSubmitting] = useState(false);
+  // 评分并入数据产新版本(默认关:仅回写 stats,与既有行为一致)
+  const [produceVersion, setProduceVersion] = useState(false);
   const { token } = theme.useToken();
 
   useEffect(() => {
@@ -266,6 +268,7 @@ const QualityEditor: React.FC = () => {
         name,
         datasetVersionId: versionId,
         memberConfigs: configs,
+        produceVersion,
       });
       message.success('质量评估任务已创建，正在后台运行');
       history.push('/assessment/quality');
@@ -326,6 +329,12 @@ const QualityEditor: React.FC = () => {
           })}
         />
         {/* 文本字段由后端自动探测,前端不再下发 text_keys 字段。 */}
+        <Checkbox
+          checked={produceVersion}
+          onChange={(e) => setProduceVersion(e.target.checked)}
+        >
+          评分并入数据,产出新版本
+        </Checkbox>
       </Space>
 
       {versionMembers.length === 0 || !activeMember ? (

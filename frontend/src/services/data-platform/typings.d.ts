@@ -542,6 +542,9 @@ declare namespace DataPlatform {
     /** 文本字段(DJ text_keys):留空后端自动探测主文本字段;
      *  显式指定用于数据无 text 字段的场景(如蒸馏 instruction、GIS address) */
     textKeys?: string[];
+    /** 评分并入数据产新版本:开启后把逐条评分列(llm_quality_score 等)
+     *  合并进每条记录并产出一个新数据集版本;默认仅回写 stats 不产版本 */
+    produceVersion?: boolean;
   };
 
   /** 质量评估:版本内一个成员(表/文件)是否已做过评估 */

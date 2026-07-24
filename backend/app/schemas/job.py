@@ -67,6 +67,9 @@ class QualityJobCreate(CamelModel):
     # DJ text_keys:算子作用的主文本字段;留空则后端按字段名优先级自动探测。
     # 用于数据无 text 字段的场景(如蒸馏 instruction、GIS address)。
     text_keys: list[str] | None = None
+    # 评分并入数据产新版本:评估默认只回写 stats 不产版本;开启后把逐条评分列
+    # (llm_quality_score 等)合并进每条记录,按治理任务同款事务落一个新版本。
+    produce_version: bool = False
 
 
 class JobRead(CamelModel):

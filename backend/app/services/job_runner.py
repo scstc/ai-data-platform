@@ -401,6 +401,7 @@ async def _run_job(job_id: str) -> None:
                         target_members=target_members_arg,
                         text_keys=getattr(body, "text_keys", None),
                         llm_snapshot=llm_snapshot,
+                        produce_version=getattr(body, "produce_version", False),
                     )
                 elif job.type == "construct":
                     # 构造层:确定性列映射 → 训练 schema,无 operators
