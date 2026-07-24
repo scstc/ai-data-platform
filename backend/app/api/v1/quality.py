@@ -36,6 +36,12 @@ from app.models.user import User
 from app.schemas.job import OperatorSpec, QualityJobCreate
 from app.services import dataset_acl, job_runner
 from app.services import operator_catalog as oc
+from app.services.external_store import (
+    ExternalStoreError,
+    cached_bytes,
+    parse_s3_uri,
+    platform_config,
+)
 from app.services.llm_config import get_active_llm_config
 
 router = APIRouter(tags=["quality"])
@@ -218,17 +224,79 @@ def _safe_path(uri: str | None) -> Path | None:
     return path if path.is_relative_to(root) else None
 
 
+# 无 text 字段时的预览回退字段(与 quality.detect_quality_text_key 的短列白名单
+# 同源):问答数据优先拼「问+答」,否则按惯例取第一个命中的短文本列。
+_PREVIEW_FALLBACK_KEYS = (
+    "question",
+    "prompt",
+    "title",
+    "sentence",
+    "instruction",
+    "document",
+    "passage",
+)
+
+
+def _record_preview(rec: dict[str, Any]) -> str:
+    """单行数据的文本预览:text 优先;问答对拼「问+答」;再退回白名单短列。"""
+    text = rec.get("text")
+    if text is not None and str(text).strip():
+        return str(text)[:200]
+    q, a = rec.get("question"), rec.get("answer")
+    if q is not None and a is not None:
+        return f"问:{q} 答:{a}"[:200]
+    for key in _PREVIEW_FALLBACK_KEYS:
+        val = rec.get(key)
+        if val is not None and str(val).strip():
+            return str(val)[:200]
+    return ""
+
+
 def _window_texts(path: Path, offset: int, limit: int) -> dict[int, str]:
-    """读数据文件窗口内各行的 text(截断 200 字符),按绝对行号索引。"""
+    """读数据文件窗口内各行的文本预览(截断 200 字符),按绝对行号索引。"""
     result: dict[int, str] = {}
     if not path.exists():
         return result
     with path.open(encoding="utf-8") as fp:
         lines = (ln for ln in fp if ln.strip())
         for i, line in enumerate(islice(lines, offset, offset + limit)):
-            text = json.loads(line).get("text")
-            result[offset + i] = "" if text is None else str(text)[:200]
+            result[offset + i] = _record_preview(json.loads(line))
     return result
+
+
+async def _load_window_texts(
+    storage_uri: str | None, offset: int, limit: int
+) -> dict[int, str]:
+    """按 storage_uri 读窗口文本预览:本地路径直读;s3://(平台 MinIO 托管成员)
+    经 cached_bytes 取对象后按行切窗。取不到(越界路径/对象错误/非 jsonl 文本)
+    返回空 dict——文本列缺失不影响评分展示。
+    """
+    if not storage_uri:
+        return {}
+    if storage_uri.startswith("s3://"):
+        try:
+            bucket, key = parse_s3_uri(storage_uri)
+            data = await cached_bytes(platform_config(), bucket, key)
+        except ExternalStoreError:
+            return {}
+
+        def _scan() -> dict[int, str]:
+            result: dict[int, str] = {}
+            lines = (
+                ln for ln in data.decode("utf-8", "replace").splitlines() if ln.strip()
+            )
+            for i, line in enumerate(islice(lines, offset, offset + limit)):
+                try:
+                    result[offset + i] = _record_preview(json.loads(line))
+                except json.JSONDecodeError:
+                    result[offset + i] = ""
+            return result
+
+        return await asyncio.to_thread(_scan)
+    path = _safe_path(storage_uri)
+    if path is None:
+        return {}
+    return await asyncio.to_thread(_window_texts, path, offset, limit)
 
 
 async def _resolve_member(
@@ -275,11 +343,12 @@ async def _resolve_member(
 
 async def _get_version_with_stats(
     version_id: str, session: SessionDep, member: str | None = None
-) -> tuple[DatasetVersion, Path, Path | None] | JSONResponse:
+) -> tuple[DatasetVersion, Path, str | None] | JSONResponse:
     """取版本(+成员)并校验 stats 文件可用(且在受管目录内),失败直接给错误响应。
 
-    返回 (version, stats_path, storage_path);storage_path 供 stats 端点对齐 text
-    (成员级用 member.storage_uri,旧版单文件用 version.storage_uri)。
+    返回 (version, stats_path, storage_uri);storage_uri 供 stats 端点对齐文本预览
+    (成员级用 member.storage_uri,旧版单文件用 version.storage_uri),本地路径与
+    s3:// 托管对象均可(见 _load_window_texts)。
     """
     resolved = await _resolve_member(version_id, member, session)
     if isinstance(resolved, JSONResponse):
@@ -295,7 +364,7 @@ async def _get_version_with_stats(
             status_code=404,
             content={"success": False, "message": _NO_STATS_MSG},
         )
-    return version, stats_path, _safe_path(storage_uri)
+    return version, stats_path, storage_uri
 
 
 def _analysis_dir(stats_uri: str | None) -> Path | None:
@@ -412,12 +481,9 @@ async def analysis_image(
 
 
 def _scan_stats(
-    stats_path: Path, storage_path: Path | None, offset: int, limit: int
+    stats_path: Path, texts: dict[int, str], offset: int, limit: int
 ) -> tuple[list[dict[str, Any]], int, list[str]]:
     """同步扫 stats jsonl(供 to_thread):窗口行 + 总数 + 指标名集合。"""
-    texts = (
-        _window_texts(storage_path, offset, limit) if storage_path else {}
-    )
     items: list[dict[str, Any]] = []
     metrics: set[str] = set()
     total = 0
@@ -455,18 +521,19 @@ async def version_stats(
     found = await _get_version_with_stats(version_id, session, member)
     if isinstance(found, JSONResponse):
         return found
-    _version, stats_path, storage_path = found
+    _version, stats_path, storage_uri = found
     if not await dataset_acl.can_access(session, user, _version.dataset_id, "view"):
         return JSONResponse(
             status_code=403, content={"success": False, "message": "无数据集查看权限"}
         )
 
     offset = (current - 1) * page_size
+    texts = await _load_window_texts(storage_uri, offset, page_size)
     # 文件扫描放线程池,避免阻塞事件循环
     items, total, metrics = await asyncio.to_thread(
         _scan_stats,
         stats_path,
-        storage_path,
+        texts,
         offset,
         page_size,
     )

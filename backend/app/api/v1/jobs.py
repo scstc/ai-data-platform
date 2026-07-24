@@ -676,6 +676,21 @@ async def rerun_job(
                 "message": "该任务无可重跑的配置(早于重跑特性创建),请新建任务",
             },
         )
+    if job.type == "quality":
+        # 质量评估任务的 spec 是 QualityJobCreate,不能按 JobCreate 重建——否则
+        # 重跑会被错误创建成 process(治理)任务,对输入版本跑过滤产新版本。
+        # 函数级 import:quality.py 模块头 import 本模块,顶层互引会循环。
+        from app.api.v1.quality import QualityJobCreate, create_quality_job
+
+        try:
+            qspec = QualityJobCreate.model_validate(job.spec)
+        except ValidationError:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "任务配置已损坏,无法重跑"},
+            )
+        # 复用创建入口:重新走成员存在性 / 算子合法性 / ACL 全套校验
+        return await create_quality_job(body=qspec, session=session, user=user)
     try:
         spec = JobCreate.model_validate(job.spec)
     except ValidationError:
