@@ -6,8 +6,9 @@
 //   角「聚焦」小图标可换焦点(重新整图请求);点边弹出 Drawer 看边详情,关联加工任务的
 //   边内嵌 AssetManifest(算子链/参数/LLM 快照)。成员图层 Switch 控制是否把版本内的表/
 //   文件展开为一等 member 节点(后端驱动)。数据湖焦点=该湖全部快照及下游数据集。
-// ②「全景概览」:GET /lineage/panorama 全局血缘森林,按 湖/类型 过滤;点任意节点
-//   切回焦点模式并以该节点为中心。
+// ②「全景概览」:GET /lineage/panorama 全局血缘森林,按 湖/类型 过滤;数据湖以
+//   一等节点入图(contains 边连到湖内全部快照,同湖快照被布局聚拢在湖节点周围);
+//   点任意节点切回焦点模式并以该节点为中心。
 // 渲染:ReactFlow(@xyflow/react)+ dagre 布局(rankdir=LR),节点复用 antd 卡片,自带
 // 平移/缩放/自适应。深链 ?versionId=/?sourceId=/?snapshotId=/?jobId=/?lakeId=/?datasetId=
 // 直达焦点态(lakeId→数据湖焦点、datasetId→该集最新版本)。
@@ -80,6 +81,7 @@ const STATE_TEXT: Record<string, { t: string; c: string }> = {
 // 分层配色:节点卡左侧色带 + 图例共用,标识节点属于链路的哪一层。
 const KIND_META: Record<string, { label: string; color: string }> = {
   datasource: { label: '数据源', color: '#1677ff' },
+  lake: { label: '数据湖', color: '#2f54eb' },
   lake_snapshot: { label: '湖快照', color: '#13c2c2' },
   version: { label: '数据集版本', color: '#52c41a' },
   job: { label: '加工任务', color: '#fa8c16' },
@@ -115,6 +117,7 @@ const sizeOf = (n: DataPlatform.LineageNode) => {
     return { width: 250, height: 178 };
   }
   if (n.kind === 'datasource') return { width: 250, height: 96 };
+  if (n.kind === 'lake') return { width: 250, height: 96 };
   if (n.kind === 'member') return { width: 250, height: 108 };
   return { width: 250, height: 132 };
 };
@@ -197,6 +200,45 @@ const DatasourceNode: React.FC<{
     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
       {n.sourceType ?? '-'}
       {n.dbKind ? ` · ${n.dbKind}` : ''}
+    </Typography.Text>
+  </div>
+);
+
+/** 数据湖节点卡(仅全景森林出现:湖容器本体,contains 边连到湖内全部快照,
+ *  让"哪些快照属于哪个湖"一眼可辨);点击跳数据湖详情 */
+const LakeNode: React.FC<{
+  n: DataPlatform.LineageNode;
+  onFocus?: () => void;
+}> = ({ n, onFocus }) => (
+  <div
+    onClick={() => history.push(`/data-lakes/${n.id}`)}
+    style={{
+      position: 'relative',
+      height: '100%',
+      padding: 10,
+      borderRadius: 8,
+      cursor: 'pointer',
+      background: 'var(--ant-color-bg-container)',
+      border: '1px solid var(--ant-color-border)',
+      borderLeft: `3px solid ${KIND_META.lake.color}`,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      justifyContent: 'center',
+      overflow: 'hidden',
+    }}
+  >
+    <FocusButton onFocus={onFocus} />
+    <Tag color="geekblue" style={{ margin: 0, width: 'fit-content' }}>
+      数据湖
+    </Tag>
+    <Tooltip title={n.description ? `${n.name}:${n.description}` : n.name}>
+      <Typography.Text strong ellipsis style={{ fontSize: 13 }}>
+        {n.name}
+      </Typography.Text>
+    </Tooltip>
+    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      {n.snapshotCount ?? 0} 个快照
     </Typography.Text>
   </div>
 );
@@ -536,6 +578,16 @@ const RFJobNode = ({ data }: NodeProps) => {
     </>
   );
 };
+const RFLakeNode = ({ data }: NodeProps) => {
+  const d = data as VersionNodeData;
+  return (
+    <>
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
+      <LakeNode n={d} onFocus={d.onFocus} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
+    </>
+  );
+};
 const RFSnapshotNode = ({ data }: NodeProps) => {
   const d = data as VersionNodeData;
   return (
@@ -598,6 +650,7 @@ const LineageGraph: React.FC<{
     () => ({
       version: RFVersionNode,
       job: RFJobNode,
+      lake: RFLakeNode,
       lake_snapshot: RFSnapshotNode,
       datasource: RFDatasourceNode,
       member: RFMemberNode,
@@ -715,6 +768,8 @@ const nodeLabel = (n?: DataPlatform.LineageNode): string => {
       return `${n.name ?? '快照'}${n.versionNo != null ? ` @v${n.versionNo}` : ''}`;
     case 'datasource':
       return n.name ?? '数据源';
+    case 'lake':
+      return n.name ?? '数据湖';
     case 'member':
       return n.tableName ?? '成员';
     default:
@@ -729,6 +784,7 @@ const nodeToFocusParams = (
 ): FocusParams | undefined => {
   if (n.kind === 'version') return { kind: 'dataset_version', versionId: n.id };
   if (n.kind === 'job') return { kind: 'job', jobId: n.id };
+  if (n.kind === 'lake') return { kind: 'lake', lakeId: n.id };
   if (n.kind === 'lake_snapshot')
     return { kind: 'lake_snapshot', snapshotId: n.id };
   if (n.kind === 'datasource') return { kind: 'source', sourceId: n.id };
@@ -851,6 +907,8 @@ const Lineage: React.FC = () => {
   const [filterKinds, setFilterKinds] = useState<string[]>([]);
   const [panoramaGraph, setPanoramaGraph] =
     useState<DataPlatform.LineageGraph>();
+  // 每次全景新数据落地自增,作 LineageGraph 的 key 触发重挂载 fitView。
+  const [panoramaFitSeq, setPanoramaFitSeq] = useState(0);
   const [sourceOptions, setSourceOptions] = useState<
     { value: string; label: string }[]
   >([]);
@@ -984,7 +1042,10 @@ const Lineage: React.FC = () => {
       kinds: filterKinds.length ? filterKinds.join(',') : undefined,
     })
       .then((res) => {
-        if (!cancelled) setPanoramaGraph(res.data);
+        if (!cancelled) {
+          setPanoramaGraph(res.data);
+          setPanoramaFitSeq((s) => s + 1);
+        }
       })
       .catch(() => {
         if (!cancelled) setPanoramaGraph(undefined);
@@ -1199,7 +1260,7 @@ const Lineage: React.FC = () => {
         size="small"
         title={
           mode === 'panorama'
-            ? '血缘全景森林（数据源 → 湖快照 → 数据集版本 → 加工任务）'
+            ? '血缘全景森林（数据源 → 数据湖 → 湖快照 → 数据集版本 → 加工任务）'
             : '焦点血缘'
         }
         extra={
@@ -1227,8 +1288,16 @@ const Lineage: React.FC = () => {
         <Spin spinning={loading}>
           {mode === 'panorama' ? (
             panoramaGraph && panoramaGraph.nodes.length > 0 ? (
-              // 全景态:点任意节点 → focusOnNode 切回焦点模式并以该节点为中心
-              <LineageGraph graph={panoramaGraph} onFocusNode={focusOnNode} />
+              // 全景态:点任意节点 → focusOnNode 切回焦点模式并以该节点为中心。
+              // key 随新数据落地自增:ReactFlow 的 fitView 只在挂载时生效,换湖/类型
+              // 过滤后布局大变,不重挂载会停在旧视口(常见表现为一片空白)。注意不能
+              // key 到过滤条件——过滤一变立即重挂载,此时新图还没请求回来,fitView
+              // 适配的仍是旧图。
+              <LineageGraph
+                key={panoramaFitSeq}
+                graph={panoramaGraph}
+                onFocusNode={focusOnNode}
+              />
             ) : loading ? (
               <div style={{ height: 420 }} />
             ) : (

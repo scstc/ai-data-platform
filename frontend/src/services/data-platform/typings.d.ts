@@ -970,11 +970,12 @@ declare namespace DataPlatform {
     level: AclLevel;
   };
 
-  /** 血缘图节点:数据源 / 湖快照 / 版本 / 任务 / 成员(全链路:源→湖→集→任务;
-   * member 为版本内某个表/文件的一等节点,仅 expand_members 场景或本地展开时出现) */
+  /** 血缘图节点:数据源 / 数据湖 / 湖快照 / 版本 / 任务 / 成员(全链路:源→湖→集→任务;
+   * member 为版本内某个表/文件的一等节点,仅 expand_members 场景或本地展开时出现;
+   * lake 为数据湖容器本体,仅全景森林(GET /lineage/panorama)产出,contains 边连到湖内快照) */
   type LineageNode = {
     id: string;
-    kind: 'version' | 'job' | 'lake_snapshot' | 'datasource' | 'member';
+    kind: 'version' | 'job' | 'lake' | 'lake_snapshot' | 'datasource' | 'member';
     createdAt?: string;
     /** 实体已删除(如版本/数据集进回收站或被清理):图上灰显 + 「已删除」徽标,禁跳详情 */
     deleted?: boolean;
@@ -1034,6 +1035,10 @@ declare namespace DataPlatform {
     // datasource 字段
     sourceType?: string;
     dbKind?: string;
+    // lake 字段(kind='lake' 时填充;name 复用上方共用字段)
+    description?: string | null;
+    /** 该湖已入图的快照数(全景森林统计) */
+    snapshotCount?: number;
     // member 字段(kind='member' 时填充;versionId 为所属版本,sourceKind 复用上方版本级字段)
     versionId?: string;
     tableName?: string;

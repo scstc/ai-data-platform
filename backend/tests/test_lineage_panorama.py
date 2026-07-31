@@ -185,6 +185,49 @@ async def test_panorama_lake_id_filter_scopes_to_lake_and_no_dangling_edges(
         assert e["to"] in node_ids
 
 
+async def test_panorama_emits_lake_nodes_with_contains_edges(
+    client, session_factory
+):
+    """全景可读性整改:数据湖以一等节点入图,contains 边连到该湖全部快照——
+    全局视角能直接看出"哪些快照属于哪个湖"。"""
+    await _seed_panorama_forest(session_factory)
+
+    resp = await client.get("/api/v1/lineage/panorama")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    nodes = {n["id"]: n for n in data["nodes"]}
+
+    lake = nodes["lake-pan001"]
+    assert lake["kind"] == "lake"
+    assert lake["name"] == "全景测试湖"
+    assert lake["snapshotCount"] == 2
+    # 该湖两个快照(含孤立快照)都有 contains 边挂到湖节点
+    contains = {
+        (e["from"], e["to"]) for e in data["edges"] if e["kind"] == "contains"
+    }
+    assert ("lake-pan001", "snap-pan001a") in contains
+    assert ("lake-pan001", "snap-pan001c") in contains
+
+
+async def test_panorama_lake_id_filter_keeps_lake_node(client, session_factory):
+    """lake_id 过滤后湖节点自身仍在图里(contains 边由湖指向快照,湖节点必须
+    进可达性种子,否则被前向 BFS 过滤掉)。"""
+    await _seed_panorama_forest(session_factory)
+
+    resp = await client.get(
+        "/api/v1/lineage/panorama", params={"lakeId": "lake-pan001"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    node_ids = {n["id"] for n in data["nodes"]}
+
+    assert "lake-pan001" in node_ids
+    assert "snap-pan001a" in node_ids
+    for e in data["edges"]:
+        assert e["from"] in node_ids
+        assert e["to"] in node_ids
+
+
 async def test_panorama_kinds_filter_no_dangling_edges(client, session_factory):
     await _seed_panorama_forest(session_factory)
 

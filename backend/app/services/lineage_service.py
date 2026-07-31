@@ -1158,12 +1158,38 @@ async def build_panorama_lineage(
     nodes_by_id: dict[str, dict[str, Any]] = {n["id"]: n for n in graph["nodes"]}
     edges = graph["edges"]
 
+    # 数据湖一等节点(全景可读性整改):快照卡上的湖名只是一行小字,全局视角下
+    # 读不出归属、同湖快照还会被布局打散。每个湖发一个 `kind="lake"` 节点,用
+    # contains 边连到该湖全部已入图快照——布局器把同湖快照聚拢在湖节点周围,
+    # 归属一眼可辨;无快照的空湖也入图(与"孤立数据源要看得见"同一播种哲学)。
+    # 仅本函数产出该 kind,`build_lineage` 及其余端点不变;湖节点不带 createdAt
+    # (长期容器实体,与 datasource 一样不受 since 过滤)。
+    lake_snap_count: dict[str, int] = {}
+    for n in nodes_by_id.values():
+        if n["kind"] == "lake_snapshot" and n.get("lakeId"):
+            lake_snap_count[n["lakeId"]] = lake_snap_count.get(n["lakeId"], 0) + 1
+    for lid, lake in preload.lakes.items():
+        nodes_by_id[lid] = {
+            "id": lid,
+            "kind": "lake",
+            "name": lake.name,
+            "description": lake.description,
+            "snapshotCount": lake_snap_count.get(lid, 0),
+        }
+    for n in list(nodes_by_id.values()):
+        if n["kind"] == "lake_snapshot" and n.get("lakeId") in preload.lakes:
+            edges.append({"from": n["lakeId"], "to": n["id"], "kind": "contains"})
+
     if lake_id is not None:
         lake_snapshot_ids = {
             nid
             for nid, n in nodes_by_id.items()
             if n["kind"] == "lake_snapshot" and n.get("lakeId") == lake_id
         }
+        # 湖节点自身也入种子:contains 边由湖指向快照,只从快照播种的话湖节点
+        # 会被前向可达性过滤掉。
+        if lake_id in nodes_by_id:
+            lake_snapshot_ids = lake_snapshot_ids | {lake_id}
         adj: dict[str, list[str]] = {}
         for e in edges:
             adj.setdefault(e["from"], []).append(e["to"])
