@@ -1838,7 +1838,7 @@ export async function getQualityReport(
   );
 }
 
-/** 算子市场:目录概览 GET /api/v1/operators/catalog/meta */
+/** 算子工厂:目录概览 GET /api/v1/operators/catalog/meta */
 export async function getOperatorCatalogMeta(options?: {
   [key: string]: any;
 }) {
@@ -1848,7 +1848,7 @@ export async function getOperatorCatalogMeta(options?: {
   );
 }
 
-/** 算子市场:当前环境执行能力 GET /api/v1/operators/capabilities */
+/** 算子工厂:当前环境执行能力 GET /api/v1/operators/capabilities */
 export async function getOperatorCapabilities(options?: {
   [key: string]: any;
 }) {
@@ -1858,7 +1858,7 @@ export async function getOperatorCapabilities(options?: {
   }>('/api/v1/operators/capabilities', { method: 'GET', ...(options || {}) });
 }
 
-/** 算子市场:目录查询(分面 + 分页) GET /api/v1/operators/catalog */
+/** 算子工厂:目录查询(分面 + 分页) GET /api/v1/operators/catalog */
 export async function listOperatorCatalog(
   params?: DataPlatform.OperatorCatalogParams,
   options?: { [key: string]: any },
@@ -1869,7 +1869,7 @@ export async function listOperatorCatalog(
   );
 }
 
-/** 算子市场:单算子详情 GET /api/v1/operators/{name} */
+/** 算子工厂:单算子详情 GET /api/v1/operators/{name} */
 export async function getOperatorDetail(
   name: string,
   options?: { [key: string]: any },
@@ -1880,7 +1880,7 @@ export async function getOperatorDetail(
   );
 }
 
-/** 算子市场:设置算子可见性(隐藏后市场/编排不再展示) PATCH /api/v1/operators/{name}/visible */
+/** 算子工厂:设置算子可见性(隐藏后工厂/编排不再展示) PATCH /api/v1/operators/{name}/visible */
 export async function updateOperatorVisible(
   name: string,
   visible: boolean,
@@ -1896,7 +1896,7 @@ export async function updateOperatorVisible(
   });
 }
 
-/** 算子市场:五角星加星(纯人气计数,每次 +1,不可撤销) POST /api/v1/operators/{name}/star */
+/** 算子工厂:五角星加星(纯人气计数,每次 +1,不可撤销) POST /api/v1/operators/{name}/star */
 export async function starOperator(
   name: string,
   options?: { [key: string]: any },
@@ -1910,7 +1910,7 @@ export async function starOperator(
   });
 }
 
-/** 算子市场:上传自定义算子(.py 源码,静态校验后注册) POST /api/v1/operators/custom */
+/** 算子工厂:上传自定义算子(.py 源码,静态校验后注册) POST /api/v1/operators/custom */
 export async function uploadCustomOperator(
   formData: FormData,
   options?: { [key: string]: any },
@@ -1921,7 +1921,7 @@ export async function uploadCustomOperator(
   );
 }
 
-/** 算子市场:删除自定义算子 DELETE /api/v1/operators/custom/{name} */
+/** 算子工厂:删除自定义算子 DELETE /api/v1/operators/custom/{name} */
 export async function deleteCustomOperator(
   name: string,
   options?: { [key: string]: any },

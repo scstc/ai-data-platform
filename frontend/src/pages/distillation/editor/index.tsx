@@ -32,7 +32,7 @@ const DistillationEditor: React.FC = () => (
         ? undefined
         : '蒸馏算子链必须包含至少 1 个 selector(如 topk_specified_field_selector)';
     }}
-    footerNote='蒸馏对所选数据集版本按"过滤 + 去重 + 打分截断"产出子集,落到原数据集新版本(可改输出数据集); 算子链需至少含 1 个 selector,且必须在算子市场"蒸馏场景"内选择。后台异步执行,完成后可在列表查看报告。'
+    footerNote='蒸馏对所选数据集版本按"过滤 + 去重 + 打分截断"产出子集,落到原数据集新版本(可改输出数据集); 算子链需至少含 1 个 selector,且必须在算子工厂"蒸馏场景"内选择。后台异步执行,完成后可在列表查看报告。'
   />
 );
 

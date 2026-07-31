@@ -88,7 +88,7 @@ export default {
   'menu.assessment.quality': '质量评估',
   'menu.assessment.quality-editor': '新建质量评估',
   'menu.assessment.quality-report': '质量评估报告',
-  'menu.operators': '算子市场',
+  'menu.operators': '算子工厂',
   'menu.ops': '运维监控',
   'menu.ops.dataTasks': '数据任务',
   'menu.ops.lineage': '数据血缘',

@@ -108,7 +108,7 @@ def test_unknown_bucket_graceful_degrade(_stub_catalog):
 
 
 def test_no_bucket_returns_all(_stub_catalog):
-    """不传 bucket → 不过滤,返全量(算子市场默认行为)。"""
+    """不传 bucket → 不过滤,返全量(算子工厂默认行为)。"""
     result = query_catalog()
     assert result["total"] == len(_stub_catalog)
 

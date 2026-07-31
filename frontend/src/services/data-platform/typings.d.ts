@@ -268,7 +268,7 @@ declare namespace DataPlatform {
     params: OperatorParam[];
   };
 
-  /** 算子市场:目录项参数(data-juicer 原始参数表一行) */
+  /** 算子工厂:目录项参数(data-juicer 原始参数表一行) */
   type CatalogParam = {
     name: string;
     type: string;
@@ -278,7 +278,7 @@ declare namespace DataPlatform {
     descZh?: string | null;
   };
 
-  /** 算子市场:全量目录算子项 */
+  /** 算子工厂:全量目录算子项 */
   type CatalogOperator = {
     name: string;
     category: string;
@@ -297,10 +297,10 @@ declare namespace DataPlatform {
     detailPage?: string | null;
     recommend: boolean;
     runnable: 'ready' | 'needs_api' | 'needs_media' | 'needs_compute';
-    /** 是否在市场/编排展示;false=管理员隐藏(已编排任务不受影响) */
+    /** 是否在工厂/编排展示;false=管理员隐藏(已编排任务不受影响) */
     visible?: boolean;
     usageCount?: number;
-    /** 星标计数(市场/详情页五角星按钮点击数,纯人气信号,不可撤销) */
+    /** 星标计数(工厂/详情页五角星按钮点击数,纯人气信号,不可撤销) */
     starCount?: number;
     /** 使用方式(离线/在线);data-juicer 算子均为离线批处理 */
     usageMode?: string;
@@ -441,7 +441,7 @@ declare namespace DataPlatform {
     columns: string[];
   };
 
-  /** 算子市场:目录查询参数 */
+  /** 算子工厂:目录查询参数 */
   type OperatorCatalogParams = {
     scenario?: string;
     /** 业务桶:cleansing/distillation/make/augment——任务编辑器按此只展示对应算子 */
@@ -452,13 +452,13 @@ declare namespace DataPlatform {
     runnable?: string;
     recommend?: boolean;
     keyword?: string;
-    /** 纳入已隐藏算子(市场管理视图用);默认只出可见算子 */
+    /** 纳入已隐藏算子(工厂管理视图用);默认只出可见算子 */
     includeHidden?: boolean;
     current?: number;
     pageSize?: number;
   };
 
-  /** 算子市场:目录概览(各维度分布) */
+  /** 算子工厂:目录概览(各维度分布) */
   type OperatorCatalogMeta = {
     total: number;
     withDetailPage: number;

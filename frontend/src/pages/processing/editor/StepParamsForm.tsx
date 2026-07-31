@@ -20,7 +20,7 @@ import { PARAM_ZH_DESC } from '../market/_paramZhDict';
 const { Text } = Typography;
 
 /** 参数提示语:优先快照全量翻译 descZh;desc 本身是中文(自定义算子)直接用;
- *  再查中文字典(与市场详情页同一份),未命中回退英文原文,不吞信息。 */
+ *  再查中文字典(与工厂详情页同一份),未命中回退英文原文,不吞信息。 */
 const paramTooltip = (p: DataPlatform.CatalogParam) => {
   if (p.descZh) return p.descZh;
   if (p.desc && /[一-鿿]/.test(p.desc)) return p.desc;

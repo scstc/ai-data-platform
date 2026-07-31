@@ -77,7 +77,7 @@ def all_operators() -> list[dict[str, Any]]:
 
 
 def visible_operators() -> list[dict[str, Any]]:
-    """市场/编排口径:仅 visible 算子(管理员隐藏的不展示;执行校验仍走全量)。"""
+    """工厂/编排口径:仅 visible 算子(管理员隐藏的不展示;执行校验仍走全量)。"""
     return [op for op in all_operators() if op.get("visible", True)]
 
 
@@ -394,7 +394,7 @@ _BUCKET_SETS: dict[str, frozenset[str]] = {
 }
 
 
-# 业务桶的中文展示名(给算子市场 / 编辑器算子库当搜索别名用)。
+# 业务桶的中文展示名(给算子工厂 / 编辑器算子库当搜索别名用)。
 # 同一算子可属多桶(例如 language_id_score_filter 同时在 cleansing/distillation),最终
 # 搜索 hay 里会把命中的桶别名全部塞进去,搜「评估/质量评估」就能找到 quality 桶、
 # 搜「蒸馏」就能找到 distillation 桶。改这里不动白名单,只影响搜索可命中词。
@@ -484,7 +484,7 @@ def to_api(op: dict[str, Any]) -> dict[str, Any]:
     """单个算子 → camelCase 出参形态;``runnable`` 用运行时有效状态覆盖。
 
     scenarioGroup 保留 data-juicer 原生中文场景(如 质量过滤 / 文本清洗 / 去重),
-    供算子市场左侧场景菜单分组——不再覆盖为业务桶英文键。业务桶(cleansing/
+    供算子工厂左侧场景菜单分组——不再覆盖为业务桶英文键。业务桶(cleansing/
     distillation/make/augment/trainset/quality)归属由独立 ``bucket`` 查询参数 +
     ``_BUCKET_SETS`` 表达,与场景维度解耦。
     """
@@ -495,7 +495,7 @@ def to_api(op: dict[str, Any]) -> dict[str, Any]:
             {("descZh" if k == "desc_zh" else k): v for k, v in p.items()}
             for p in out["params"]
         ]
-    # 市场/编辑器口径:只看环境能力(media_ok=True),不预判数据集格式——
+    # 工厂/编辑器口径:只看环境能力(media_ok=True),不预判数据集格式——
     # 媒体算子按环境(GPU/LLM/...)判 ready,数据集适配留到提交期 runnable_reason。
     out["runnable"] = effective_runnable(op, media_ok=True)
     # 详情页补充字段(见上)
@@ -531,8 +531,8 @@ def effective_runnable(
     媒体模态的处理分两处口径,由 ``media_ok`` 切换:
     - ``media_ok=False``(默认;提交期 ``runnable_reason`` 用):数据集已知,媒体算子
       在非 manifest(文本)数据集上 → needs_media,由调用方再按真实数据集类型定夺。
-    - ``media_ok=True``(市场 / 编辑器浏览用):假定数据集匹配,**跳过 needs_media 分支**,
-      继续按 resource_class / ray_ 前缀判环境能力——市场只回答"环境能不能跑",
+    - ``media_ok=True``(工厂 / 编辑器浏览用):假定数据集匹配,**跳过 needs_media 分支**,
+      继续按 resource_class / ray_ 前缀判环境能力——工厂只回答"环境能不能跑",
       不预判数据集格式(那是提交时 _operator_block 的事)。
     """
     caps = caps or get_capabilities()
@@ -711,7 +711,7 @@ def legacy_operators(
 
 
 # ---------------------------------------------------------------------------
-# 市场查询(分面 + 分页)
+# 工厂查询(分面 + 分页)
 # ---------------------------------------------------------------------------
 def query_catalog(
     *,
@@ -732,7 +732,7 @@ def query_catalog(
     ``bucket``:业务桶(cleansing/distillation/make/augment/trainset/quality),
     供任务编辑器只展示对应算子;按白名单集合成员判定(见 ``_BUCKET_SETS``),
     未知桶名退化为不限制。
-    ``include_hidden``:纳入已隐藏算子(市场管理视图用);默认只出可见算子。
+    ``include_hidden``:纳入已隐藏算子(工厂管理视图用);默认只出可见算子。
     """
     ops = all_operators() if include_hidden else visible_operators()
     bucket_set = _BUCKET_SETS.get(bucket) if bucket else None
@@ -760,7 +760,7 @@ def query_catalog(
         if runnable and effective_runnable(op, caps, media_ok=True) != runnable:
             continue
         # 关键字搜索:hay = 英文名 + 中文标签 + 中文摘要 + 使用提示 + 场景分组
-        # + 业务桶别名。zh_usage_tip 是市场卡片/编辑器展示的首选文案(summary_zh
+        # + 业务桶别名。zh_usage_tip 是工厂卡片/编辑器展示的首选文案(summary_zh
         # 多为机翻),用户照着界面文字搜必须能命中。
         # 加 scenarioGroup 是为了支持"质量过滤/视频处理"这类 DJ 原生场景词;
         # 加业务桶中文名是为了支持"评估/蒸馏/清洗"这类平台业务叫法(同一算子可

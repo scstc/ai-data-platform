@@ -277,7 +277,7 @@ def build_config(
         "export_path": Path(output_path).as_posix(),
         "process": process,
     }
-    # 自定义算子(算子市场上传):流水线含自定义算子时,把其源文件绝对路径喂给 DJ
+    # 自定义算子(算子工厂上传):流水线含自定义算子时,把其源文件绝对路径喂给 DJ
     # 的 custom_operator_paths(见 data-juicer/data_juicer/config/config.py
     # load_custom_operators),使 dj-process 子进程启动时动态注册进 OPERATORS。
     custom_paths: list[str] = []

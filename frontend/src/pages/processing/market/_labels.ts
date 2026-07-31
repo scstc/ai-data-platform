@@ -1,5 +1,5 @@
 /**
- * 算子市场共用常量与中文映射。
+ * 算子工厂共用常量与中文映射。
  *
  * index.tsx / detail.tsx / upload.tsx 共用,不要在页内重复定义。
  * 字典顺序与后端 `backend/app/services/operator_catalog.py` 字段口径一致。

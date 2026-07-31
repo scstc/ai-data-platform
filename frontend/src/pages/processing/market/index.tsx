@@ -90,7 +90,7 @@ const Market: React.FC = () => {
   const access = useAccess();
   const { message } = App.useApp();
   const canUploadOperator = access.hasPerm('operator:upload');
-  // 隐藏/恢复算子(隐藏后市场与编排不再展示,已编排任务不受影响)
+  // 隐藏/恢复算子(隐藏后工厂与编排不再展示,已编排任务不受影响)
   const canManageVisibility = access.hasPerm('operator:visibility');
 
   // 全量算子(一次性拉取)
@@ -230,7 +230,7 @@ const Market: React.FC = () => {
       message.success(
         next
           ? `已恢复显示「${op.zhLabel}」`
-          : `已隐藏「${op.zhLabel}」,市场与编排不再展示`,
+          : `已隐藏「${op.zhLabel}」,工厂与编排不再展示`,
       );
     } catch {
       message.error('操作失败,请重试');

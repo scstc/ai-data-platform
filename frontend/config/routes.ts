@@ -44,7 +44,7 @@ export default [
   { path: '/security', redirect: '/ops/security' },
   { path: '/ingest/assistant', redirect: '/assistant' },
   { path: '/ingest/categories', redirect: '/datasets/categories' },
-  // 算子市场(置顶 · 独立顶级入口:data-juicer 算子目录,供加工任务编排选用)
+  // 算子工厂(置顶 · 独立顶级入口:data-juicer 算子目录,供加工任务编排选用)
   {
     path: '/operators',
     name: 'operators',
@@ -58,7 +58,7 @@ export default [
     component: './processing/market/upload',
     hideInMenu: true,
   },
-  // 算子详情(从市场卡片进入,不进左侧菜单)
+  // 算子详情(从工厂卡片进入,不进左侧菜单)
   {
     path: '/operators/:name',
     component: './processing/market/detail',

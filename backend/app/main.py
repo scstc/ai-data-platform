@@ -84,7 +84,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:  # noqa: BLE001
         _logger.warning("启动时刷新模型仓库路径缓存失败（已忽略）", exc_info=True)
     # best-effort:后台线程预热能力探测(DJ venv import torch 约 2.5s)。不预热则
-    # 首个 /operators/catalog 请求现场探测,工场/市场页首屏要等数秒。
+    # 首个 /operators/catalog 请求现场探测,治理工场/算子工厂页首屏要等数秒。
     try:
         import threading
 

@@ -4,7 +4,7 @@
 1. 一个文件只能定义一个算子类,且必须继承下列基类之一:
    Mapper(编辑) / Filter(过滤) / Deduplicator(去重) / Selector(选择)
 2. 算子类必须带 @OPERATORS.register_module("算子名") 装饰器——算子名就是你在
-   算子市场里搜索/编排时用到的 name,建议用 snake_case 并以类型后缀结尾
+   算子工厂里搜索/编排时用到的 name,建议用 snake_case 并以类型后缀结尾
    (如 xxx_mapper / xxx_filter)。
 3. 不要 import os / sys / subprocess / socket 等系统级模块,也不要用
    eval/exec/open 等——静态校验会拒绝。

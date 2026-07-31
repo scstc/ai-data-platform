@@ -1,4 +1,4 @@
-"""算子目录路由:兼容旧 /operators + 全量算子市场(查询/分面/详情)。
+"""算子目录路由:兼容旧 /operators + 全量算子工厂(查询/分面/详情)。
 
 设计见 docs/plan/04-算子市场设计.md。算子目录是无状态参考数据(不入库)。
 """
@@ -64,7 +64,7 @@ async def catalog_drift() -> JSONResponse:
 
 @router.get("/operators/catalog/meta")
 async def catalog_meta() -> JSONResponse:
-    """算子目录概览(总数/各维度分布/推荐数),驱动市场筛选项与统计卡。"""
+    """算子目录概览(总数/各维度分布/推荐数),驱动工厂筛选项与统计卡。"""
     return JSONResponse(content={"data": oc.meta_api(), "success": True})
 
 
@@ -84,10 +84,10 @@ def catalog(
     current: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=500, alias="pageSize")] = 24,
 ) -> JSONResponse:
-    """算子市场主接口:多维分面过滤 + 分页。
+    """算子工厂主接口:多维分面过滤 + 分页。
 
     ``bucket`` 业务桶(cleansing/distillation/make/augment):任务编辑器按此只拉对应算子。
-    ``includeHidden`` 纳入已隐藏算子(市场管理视图用);默认只出可见算子。
+    ``includeHidden`` 纳入已隐藏算子(工厂管理视图用);默认只出可见算子。
     """
     result = oc.query_catalog(
         scenario=scenario,
@@ -124,7 +124,7 @@ async def upload_custom_operator(
     example: Annotated[str | None, Form()] = None,
     params_json: Annotated[str | None, Form(alias="params")] = None,
 ) -> JSONResponse:
-    """上传自定义算子(.py 源码,静态校验后注册进算子市场目录)。
+    """上传自定义算子(.py 源码,静态校验后注册进算子工厂目录)。
 
     文件须恰好定义一个继承 Mapper/Filter/Deduplicator/Selector 的算子类,并带
     ``@OPERATORS.register_module("算子名")`` 装饰器——与 data-juicer 原生自定义
@@ -246,7 +246,7 @@ async def set_operator_visible(
     user: Annotated[User, Depends(require_perm("operator:visibility"))],
     visible: Annotated[bool, Body(embed=True)],
 ) -> JSONResponse:
-    """设置算子可见性:隐藏后市场与任务编排选择器不再展示。
+    """设置算子可见性:隐藏后工厂与任务编排选择器不再展示。
 
     已编排任务不受影响——执行与提交校验(get_operator/runnable_reason)仍走全量。
     """

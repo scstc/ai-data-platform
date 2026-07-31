@@ -85,7 +85,7 @@ export default {
   'menu.assessment.quality': 'Quality Assessment',
   'menu.assessment.quality-editor': 'New Quality Assessment',
   'menu.assessment.quality-report': 'Quality Assessment Report',
-  'menu.operators': 'Operator Market',
+  'menu.operators': 'Operator Factory',
   'menu.ops': 'Operations',
   'menu.ops.dataTasks': 'Data Tasks',
   'menu.ops.lineage': 'Data Lineage',

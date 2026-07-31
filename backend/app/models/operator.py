@@ -11,7 +11,7 @@ from app.core.db import Base
 
 
 class Operator(Base):
-    """算子：data-juicer 数据加工算子目录，支持市场展示、动态查询、统计分析。
+    """算子：data-juicer 数据加工算子目录，支持工厂展示、动态查询、统计分析。
 
     原设计：构建期从 data-juicer 文档解析生成 JSON 快照（operators_catalog.json）
     新设计：入库后支持运行时统计、用户自定义算子、版本管理
@@ -77,10 +77,10 @@ class Operator(Base):
     # 使用次数统计（由 job 提交时更新）
     usage_count: Mapped[int] = mapped_column(default=0, nullable=False)
 
-    # 星标计数(市场/详情页五角星按钮,每次点击 +1,纯人气信号,不做撤销)
+    # 星标计数(工厂/详情页五角星按钮,每次点击 +1,纯人气信号,不做撤销)
     star_count: Mapped[int] = mapped_column(default=0, nullable=False)
 
-    # 是否在市场/编排展示（False=管理员隐藏,不影响已编排任务的执行与校验）
+    # 是否在工厂/编排展示（False=管理员隐藏,不影响已编排任务的执行与校验）
     visible: Mapped[bool] = mapped_column(default=True, nullable=False)
 
     # 是否用户自定义上传（False=data-juicer 内置快照）

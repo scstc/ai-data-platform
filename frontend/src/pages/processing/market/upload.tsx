@@ -36,7 +36,7 @@ const PARAM_TYPE_OPTIONS = [
 ];
 
 /** 上传自定义算子:独立页(替代此前的弹框),补齐描述 / 使用提示 / 参数表 /
- *  用法示例等属性——这些字段驱动算子市场详情页展示 + 加工任务编排页的动态表单
+ *  用法示例等属性——这些字段驱动算子工厂详情页展示 + 加工任务编排页的动态表单
  *  (见 backend operator_catalog._ui_params)。 */
 const UploadCustomOperatorPage: React.FC = () => {
   const access = useAccess();
@@ -152,12 +152,12 @@ const UploadCustomOperatorPage: React.FC = () => {
                   .toLowerCase()
                   .includes(input.toLowerCase())
               }
-              placeholder="如:文本清洗——用于市场左侧场景菜单归类,可选已有分组"
+              placeholder="如:文本清洗——用于工厂左侧场景菜单归类,可选已有分组"
             />
           </Form.Item>
 
           <Form.Item name="summaryZh" label="简要说明(可选)">
-            <Input placeholder="一句话概括算子作用,展示在市场卡片上" />
+            <Input placeholder="一句话概括算子作用,展示在工厂卡片上" />
           </Form.Item>
 
           <Form.Item name="descZh" label="详细描述(可选)">

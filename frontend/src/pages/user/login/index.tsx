@@ -354,7 +354,7 @@ const Login: React.FC = () => {
           <span>AI 数据平台</span>
         </div>
         <div className={styles.brandHero}>
-          {/* 数据工程流水线:映射平台菜单 —— 算子市场 → 数据接入 → 数据治理 → 数据评估 → 数据集 → 训练就绪,
+          {/* 数据工程流水线:映射平台菜单 —— 算子工厂 → 数据接入 → 数据治理 → 数据评估 → 数据集 → 训练就绪,
               横切层为运维监控(任务/血缘/审计)与智能助手(GSAP 驱动) */}
           <svg
             data-anim="hero-svg"
@@ -483,7 +483,7 @@ const Login: React.FC = () => {
               数据接入
             </text>
 
-            {/* ── 算子市场:从上方喂入治理 hub ── */}
+            {/* ── 算子工厂:从上方喂入治理 hub ── */}
             <rect
               x="140"
               y="40"
@@ -501,7 +501,7 @@ const Login: React.FC = () => {
               fontSize="7.5"
               fill="rgba(255,255,255,0.7)"
             >
-              算子市场
+              算子工厂
             </text>
             <path
               data-flow="line"
