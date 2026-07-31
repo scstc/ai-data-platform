@@ -988,15 +988,34 @@ export async function batchDeleteDatasets(
   );
 }
 
-/** 版本数据预览 GET /api/v1/dataset-versions/{versionId}/preview */
+/** 版本数据预览 GET /api/v1/dataset-versions/{versionId}/preview
+ *  q:全文搜索(整行子串匹配,忽略大小写),带 q 时 total 为匹配行数。 */
 export async function previewDatasetVersion(
   versionId: string,
-  params?: { limit?: number; offset?: number; key?: string },
+  params?: { limit?: number; offset?: number; key?: string; q?: string },
   options?: { [key: string]: any },
 ) {
   return request<DataPlatform.DatasetPreview>(
     `/api/v1/dataset-versions/${versionId}/preview`,
     { method: 'GET', params: { ...params }, ...(options || {}) },
+  );
+}
+
+/** 版本数据行级增删改 POST /api/v1/dataset-versions/{versionId}/rows
+ *  直接改写存储中的 jsonl 对象(MinIO 原 key 写回);index 与 preview 的 indices 对齐。 */
+export async function editVersionRows(
+  versionId: string,
+  body: {
+    op: 'add' | 'update' | 'delete';
+    index?: number;
+    row?: Record<string, any>;
+    key?: string;
+  },
+  options?: { [key: string]: any },
+) {
+  return request<{ data: { rows: number; total?: number }; success: boolean }>(
+    `/api/v1/dataset-versions/${versionId}/rows`,
+    { method: 'POST', data: { ...body }, ...(options || {}) },
   );
 }
 

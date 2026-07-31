@@ -4,8 +4,10 @@ import {
   Collapse,
   Empty,
   Flex,
+  Input,
   List,
   Modal,
+  message,
   Pagination,
   Popconfirm,
   Spin,
@@ -17,6 +19,7 @@ import { useEffect, useState } from 'react';
 import DatasetDataView from '@/pages/datasets/detail/views/DataView';
 import {
   deleteVersionMembers,
+  editVersionRows,
   getDatasetMemberUrl,
   listDatasetMembers,
   previewDatasetVersion,
@@ -56,7 +59,15 @@ const PREVIEW_IMAGE = new Set([
 /** 浏览器原生可播的音频格式:<audio> 直嵌(presigned URL 归一化后直连),
  *  不走 kkFileView——kk 的音频页体验差且内部端点形态下经常播不了。
  *  amr/wma 等浏览器不支持的仍走 kkFileView 转换。 */
-const PREVIEW_AUDIO = new Set(['wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac', 'opus']);
+const PREVIEW_AUDIO = new Set([
+  'wav',
+  'mp3',
+  'flac',
+  'ogg',
+  'm4a',
+  'aac',
+  'opus',
+]);
 
 /** 浏览器原生可播的视频格式:<video> 直嵌,同音频理由。
  *  avi/flv/mkv/wmv 等浏览器不支持的仍走 kkFileView 转码。 */
@@ -103,15 +114,44 @@ const StructuralViews: React.FC<{
   memberKey?: string;
   memberRows?: number;
   semanticType?: DataPlatform.SemanticType;
-}> = ({ versionId, memberKey, memberRows, semanticType }) => {
+  /** 允许行级增删改(draft + edit 权限 + jsonl 成员时由父层置 true)。 */
+  editable?: boolean;
+  /** 行级增删改成功后的回调(父层刷新成员清单/版本信息)。 */
+  onMutated?: () => void;
+}> = ({
+  versionId,
+  memberKey,
+  memberRows,
+  semanticType,
+  editable,
+  onMutated,
+}) => {
   const [preview, setPreview] = useState<DataPlatform.DatasetPreview>();
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // searchText 是输入框内容,query 是已提交的搜索词(回车/点按钮才生效)
+  const [searchText, setSearchText] = useState('');
+  const [query, setQuery] = useState('');
+  // 行级编辑:refreshKey 触发重拉;rowsTotal 记录编辑后的最新行数
+  // (memberRows 来自打开弹窗时的成员快照,编辑后会过期)
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [rowsTotal, setRowsTotal] = useState<number | undefined>(memberRows);
+  const [editorOpen, setEditorOpen] = useState(false);
+  // undefined = 新增;否则为待更新行的文件内全局行号
+  const [editorIndex, setEditorIndex] = useState<number>();
+  const [editorText, setEditorText] = useState('');
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setPage(1);
+    setSearchText('');
+    setQuery('');
   }, [versionId, memberKey]);
+
+  useEffect(() => {
+    setRowsTotal(memberRows);
+  }, [memberRows, memberKey]);
 
   useEffect(() => {
     if (!versionId || !memberKey) return;
@@ -121,6 +161,7 @@ const StructuralViews: React.FC<{
       key: memberKey,
       limit: pageSize,
       offset: (page - 1) * pageSize,
+      q: query || undefined,
     })
       .then((res) => {
         if (!cancelled) setPreview(res);
@@ -134,10 +175,123 @@ const StructuralViews: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [versionId, memberKey, page, pageSize]);
+  }, [versionId, memberKey, page, pageSize, query, refreshKey]);
+
+  const runMutation = async (body: {
+    op: 'add' | 'update' | 'delete';
+    index?: number;
+    row?: Record<string, any>;
+  }) => {
+    if (!versionId) return;
+    setSaving(true);
+    try {
+      const res = await editVersionRows(versionId, {
+        ...body,
+        key: memberKey,
+      });
+      setRowsTotal(res.data?.rows);
+      message.success(
+        body.op === 'add'
+          ? '已新增行'
+          : body.op === 'update'
+            ? '已保存修改'
+            : '已删除行',
+      );
+      setEditorOpen(false);
+      // 删除后当前页只剩这一行且非第一页 → 回退一页;否则原页重拉
+      if (
+        body.op === 'delete' &&
+        (preview?.data?.length ?? 0) <= 1 &&
+        page > 1
+      ) {
+        setPage(page - 1);
+      }
+      setRefreshKey((k) => k + 1);
+      onMutated?.();
+    } catch {
+      // requestErrorConfig 已弹出后端 message,此处仅兜底
+      message.error('操作失败，请重试');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitEditor = () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(editorText);
+    } catch {
+      message.error('JSON 格式错误，请检查');
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      message.error('行内容必须是 JSON 对象（{...}）');
+      return;
+    }
+    runMutation(
+      editorIndex === undefined
+        ? { op: 'add', row: parsed as Record<string, any> }
+        : {
+            op: 'update',
+            index: editorIndex,
+            row: parsed as Record<string, any>,
+          },
+    );
+  };
+
+  // 行级编辑仅在 indices 可用时开放(非 jsonl 分支如 parquet 不返回 indices)
+  const canEdit = !!editable && !!preview?.indices;
+
+  const openAddEditor = () => {
+    setEditorIndex(undefined);
+    setEditorText(
+      JSON.stringify(
+        Object.fromEntries((preview?.columns ?? []).map((c) => [c, ''])),
+        null,
+        2,
+      ),
+    );
+    setEditorOpen(true);
+  };
+
+  const rowActions = canEdit
+    ? (row: Record<string, any>, i: number) => {
+        const globalIdx = preview?.indices?.[i];
+        if (globalIdx === undefined) return null;
+        return (
+          <>
+            <Button
+              type="link"
+              size="small"
+              onClick={() => {
+                setEditorIndex(globalIdx);
+                setEditorText(JSON.stringify(row, null, 2));
+                setEditorOpen(true);
+              }}
+            >
+              编辑
+            </Button>
+            <Popconfirm
+              title="确认删除此行？"
+              onConfirm={() => runMutation({ op: 'delete', index: globalIdx })}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+            >
+              <Button type="link" size="small" danger>
+                删除
+              </Button>
+            </Popconfirm>
+          </>
+        );
+      }
+    : undefined;
 
   const offset = (page - 1) * pageSize;
-  const total = memberRows ?? preview?.total ?? 0;
+  // 搜索时 total 是服务端返回的匹配行数;否则优先用成员行数(编辑后取最新)
+  const total = query
+    ? (preview?.total ?? 0)
+    : (rowsTotal ?? preview?.total ?? 0);
   const jsonPanels = (preview?.data ?? []).map((row, i) => ({
     key: String(i),
     label: `第 ${offset + i + 1} 行`,
@@ -158,6 +312,26 @@ const StructuralViews: React.FC<{
     <Spin spinning={loading}>
       <Tabs
         defaultActiveKey="table"
+        tabBarExtraContent={
+          <Flex gap={8}>
+            <Input.Search
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              onSearch={(v) => {
+                setQuery(v.trim());
+                setPage(1);
+              }}
+              placeholder="搜索全部行（全文匹配）"
+              allowClear
+              style={{ width: 260 }}
+            />
+            {canEdit && (
+              <Button type="primary" onClick={openAddEditor}>
+                新增行
+              </Button>
+            )}
+          </Flex>
+        }
         items={[
           {
             key: 'table',
@@ -167,6 +341,7 @@ const StructuralViews: React.FC<{
                 semanticType={semanticType}
                 preview={preview}
                 pagination={false}
+                rowActions={rowActions}
               />
             ),
           },
@@ -201,6 +376,26 @@ const StructuralViews: React.FC<{
           }}
         />
       </Flex>
+      <Modal
+        open={editorOpen}
+        title={
+          editorIndex === undefined ? '新增行' : `编辑第 ${editorIndex + 1} 行`
+        }
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={saving}
+        onOk={submitEditor}
+        onCancel={() => setEditorOpen(false)}
+        destroyOnHidden
+      >
+        <Input.TextArea
+          value={editorText}
+          onChange={(e) => setEditorText(e.target.value)}
+          autoSize={{ minRows: 10, maxRows: 24 }}
+          style={{ fontFamily: 'monospace', fontSize: 12 }}
+          placeholder='{"字段": "值", ...}'
+        />
+      </Modal>
     </Spin>
   );
 };
@@ -320,6 +515,11 @@ const VersionFilePreview: React.FC<VersionFilePreviewProps> = ({
           memberKey={m.key}
           memberRows={m.rows}
           semanticType={semanticType}
+          editable={editable && fmt === 'jsonl'}
+          onMutated={() => {
+            reloadMembers();
+            onDeleted?.();
+          }}
         />
       );
     }

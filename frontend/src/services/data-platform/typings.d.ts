@@ -1177,6 +1177,8 @@ declare namespace DataPlatform {
   type DatasetPreview = {
     data: Record<string, any>[];
     columns: string[];
+    /** 每行在文件内的全局记录序号(0 基),行级编辑定位用;非 jsonl 分支可能缺省 */
+    indices?: number[];
     total: number;
     success: boolean;
     message?: string;

@@ -3,10 +3,12 @@ import { Empty, Table } from 'antd';
 
 /** 各类型数据视图的统一入参:版本预览(列 + 行 + 总数)。
  *  pagination:透传给内部 Table;不传保持默认前端分页(pageSize 20),
- *  传 false 关闭(由外层做服务端分页,如 VersionFilePreview)。 */
+ *  传 false 关闭(由外层做服务端分页,如 VersionFilePreview)。
+ *  rowActions:提供时表格追加固定右侧「操作」列(行级编辑入口)。 */
 export type DataViewProps = {
   preview?: DataPlatform.DatasetPreview;
   pagination?: TablePaginationConfig | false;
+  rowActions?: (row: Record<string, any>, index: number) => React.ReactNode;
 };
 
 /** 单元格值渲染:对象转 JSON,其余转字符串。 */
@@ -18,7 +20,11 @@ export const cellText = (v: unknown): string =>
       : String(v);
 
 /** 通用扁平表格视图(默认 / text / structured / 未知语义类型)。 */
-export const TableView: React.FC<DataViewProps> = ({ preview, pagination }) => {
+export const TableView: React.FC<DataViewProps> = ({
+  preview,
+  pagination,
+  rowActions,
+}) => {
   if (!preview || preview.data.length === 0) {
     return (
       <Empty
@@ -27,13 +33,23 @@ export const TableView: React.FC<DataViewProps> = ({ preview, pagination }) => {
       />
     );
   }
-  const columns = (preview.columns ?? []).map((c) => ({
+  const columns: any[] = (preview.columns ?? []).map((c) => ({
     title: c,
     dataIndex: c,
     key: c,
     ellipsis: true,
     render: (v: unknown) => cellText(v),
   }));
+  if (rowActions) {
+    columns.push({
+      title: '操作',
+      key: '__actions',
+      fixed: 'right' as const,
+      width: 110,
+      render: (_: unknown, record: Record<string, any>, index: number) =>
+        rowActions(record, index),
+    });
+  }
   return (
     <Table
       rowKey={(_, i) => String(i)}
@@ -51,10 +67,16 @@ export const TableView: React.FC<DataViewProps> = ({ preview, pagination }) => {
  *  接入后在此 switch 中路由。 */
 const DatasetDataView: React.FC<
   DataViewProps & { semanticType?: string | null }
-> = ({ semanticType, preview, pagination }) => {
+> = ({ semanticType, preview, pagination, rowActions }) => {
   switch (semanticType) {
     default:
-      return <TableView preview={preview} pagination={pagination} />;
+      return (
+        <TableView
+          preview={preview}
+          pagination={pagination}
+          rowActions={rowActions}
+        />
+      );
   }
 };
 

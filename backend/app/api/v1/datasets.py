@@ -2082,6 +2082,12 @@ def _columns_of(rows: list[dict]) -> list[str]:
     return columns
 
 
+def _row_matches(rec: object, needle: str) -> bool:
+    """预览搜索的行匹配:整行 JSON 序列化后做不区分大小写的子串匹配。
+    needle 须已 lower;序列化 ensure_ascii=False 保证中文按原文匹配。"""
+    return needle in json.dumps(rec, ensure_ascii=False, default=str).lower()
+
+
 @router.get("/dataset-versions/{version_id}/preview")
 async def preview_version(
     version_id: str,
@@ -2089,13 +2095,18 @@ async def preview_version(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     key: str | None = Query(None, description="指定则预览该原件(单文件,列纯净)"),
+    q: str | None = Query(
+        None, description="全文搜索:整行子串匹配(忽略大小写),total 变为匹配行数"
+    ),
     user: Annotated[User | None, Depends(current_user)] = None,
 ) -> JSONResponse:
     """预览某版本的数据(读 jsonl,分页返回若干行 + 列名 + 总行数)。
 
     hosted 版本走 head_records(按需从 S3 取前 N,避免整对象下载缓存);
-    受管版本读本地 jsonl。
+    受管版本读本地 jsonl。带 q 时对全部行过滤后再分页(S3 侧 cached_bytes
+    本就整对象取回,全量过滤不新增下载成本)。
     """
+    needle = q.strip().lower() if q and q.strip() else None
     version = await session.get(DatasetVersion, version_id)
     if version is None:
         return JSONResponse(
@@ -2128,11 +2139,15 @@ async def preview_version(
             for r in rows
             if isinstance((m := r.get("__member")), dict)
         ]
+        if needle:
+            members = [m for m in members if _row_matches(m, needle)]
         return JSONResponse(
             content={
                 "data": members[offset : offset + limit],
                 "columns": ["name", "format", "size"],
-                "total": version.rows or len(members),
+                "total": len(members)
+                if needle
+                else (version.rows or len(members)),
                 "success": True,
             }
         )
@@ -2168,19 +2183,33 @@ async def preview_version(
             )
         try:
             rows = await head_records(
-                cfg, bucket, key, _file_ext(Path(key).name), offset + limit
+                cfg,
+                bucket,
+                key,
+                _file_ext(Path(key).name),
+                0 if needle else offset + limit,
             )
         except ExternalStoreError as exc:
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": f"读取原件失败:{exc}"},
             )
-        rows = rows[offset : offset + limit]
+        # (idx, row) 对:idx 是文件内记录序号,供行级编辑定位;
+        # 未搜索时 head 只取前 offset+limit 条,下标即全局行号
+        pairs = (
+            [(i, r) for i, r in enumerate(rows) if _row_matches(r, needle)]
+            if needle
+            else list(enumerate(rows))
+        )
+        matched = len(pairs)
+        page = pairs[offset : offset + limit]
+        rows = [r for _, r in page]
         return JSONResponse(
             content={
                 "data": rows,
                 "columns": _columns_of(rows),
-                "total": version.rows or len(rows),
+                "indices": [i for i, _ in page],
+                "total": matched if needle else (version.rows or len(rows)),
                 "success": True,
             }
         )
@@ -2201,10 +2230,20 @@ async def preview_version(
                     parquet_path = f"s3://{bucket}/{key}"
                 else:
                     parquet_path = version.storage_uri
-                rows, columns, _total = await asyncio.to_thread(
-                    _duck_query, parquet_path, "parquet",
-                    "SELECT * FROM t", limit, offset, s3,
-                )
+                if needle:
+                    # 整行 to_json 后子串匹配,needle 走 ? 参数绑定防注入;
+                    # count 同条件求匹配总数供前端分页
+                    cond = "contains(lower(CAST(to_json(t) AS VARCHAR)), ?)"
+                    rows, columns, matched = await asyncio.to_thread(
+                        _duck_query, parquet_path, "parquet",
+                        f"SELECT * FROM t WHERE {cond}", limit, offset, s3,
+                        (needle,), f"SELECT count(*) FROM t WHERE {cond}",
+                    )
+                else:
+                    rows, columns, matched = await asyncio.to_thread(
+                        _duck_query, parquet_path, "parquet",
+                        "SELECT * FROM t", limit, offset, s3,
+                    )
             except ExternalStoreError as exc:
                 return JSONResponse(
                     status_code=400,
@@ -2214,7 +2253,7 @@ async def preview_version(
                 content={
                     "data": rows,
                     "columns": columns,
-                    "total": version.rows or 0,
+                    "total": matched if needle else (version.rows or 0),
                     "success": True,
                 }
             )
@@ -2241,19 +2280,27 @@ async def preview_version(
         try:
             bucket, key = parse_s3_uri(version.storage_uri)
             head = await head_records(
-                cfg, bucket, key, version.format, offset + limit
+                cfg, bucket, key, version.format, 0 if needle else offset + limit
             )
         except ExternalStoreError as exc:
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": f"读取 S3 对象失败:{exc}"},
             )
-        rows = head[offset : offset + limit]
+        pairs = (
+            [(i, r) for i, r in enumerate(head) if _row_matches(r, needle)]
+            if needle
+            else list(enumerate(head))
+        )
+        matched = len(pairs)
+        page = pairs[offset : offset + limit]
+        rows = [r for _, r in page]
         return JSONResponse(
             content={
                 "data": rows,
                 "columns": _columns_of(rows),
-                "total": version.rows or 0,
+                "indices": [i for i, _ in page],
+                "total": matched if needle else (version.rows or 0),
                 "success": True,
             }
         )
@@ -2270,21 +2317,238 @@ async def preview_version(
             }
         )
     rows: list[dict] = []
+    indices: list[int] = []
+    matched = 0
+    rec_idx = -1
     with path.open(encoding="utf-8") as fp:
-        for idx, line in enumerate(fp):
-            if idx < offset:
-                continue
-            if len(rows) >= limit:
-                break
-            line = line.strip()
-            if line:
+        if needle:
+            # 搜索:全文件流式过滤,只收集当前页窗口,matched 计总匹配数供分页
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                rec_idx += 1
+                rec = json.loads(line)
+                if not _row_matches(rec, needle):
+                    continue
+                if matched >= offset and len(rows) < limit:
+                    # json.loads 放行 NaN/Infinity,序列化前清洗,否则整个接口 500
+                    rows.append(json_safe(rec))
+                    indices.append(rec_idx)
+                matched += 1
+        else:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                rec_idx += 1
+                if rec_idx < offset:
+                    continue
+                if len(rows) >= limit:
+                    break
                 # json.loads 放行 NaN/Infinity,序列化前清洗,否则整个接口 500
                 rows.append(json_safe(json.loads(line)))
+                indices.append(rec_idx)
     return JSONResponse(
         content={
             "data": rows,
             "columns": _columns_of(rows),
-            "total": version.rows or 0,
+            "indices": indices,
+            "total": matched if needle else (version.rows or 0),
+            "success": True,
+        }
+    )
+
+
+@router.post("/dataset-versions/{version_id}/rows")
+async def edit_version_rows(
+    version_id: str,
+    payload: dict,
+    session: SessionDep,
+    user: Annotated[User | None, Depends(current_user)] = None,
+) -> JSONResponse:
+    """预览页行级增删改:直接改写存储中的 jsonl 对象(MinIO 原 key 写回 / 本地重写)。
+
+    body: {op: "add"|"update"|"delete", index?: int, row?: dict, key?: str}
+    - index 是文件内记录序号(0 基,忽略空行),与 preview 返回的 indices 对齐。
+    - 仅 draft 版本(409)+ edit/admin 权限(403);仅 jsonl 文件(400)。
+    - key 必须是该版本的成员之一(防任意对象/路径写入);缺省编辑版本自身对象。
+    - 写回后同步刷新成员行与版本的 rows/size;物化缓存按 etag 入键,写回即失效。
+    - 零拷贝结转的版本共享同一对象:此处按预期直接改写原对象,共享方同步可见。
+    """
+    version = await session.get(DatasetVersion, version_id)
+    if version is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "版本不存在"},
+        )
+    if version.publish_status != "draft":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": "只有草稿版本可以编辑数据"},
+        )
+    if not await dataset_acl.can_access(session, user, version.dataset_id, "edit"):
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "无权限修改该数据集"},
+        )
+
+    op = str(payload.get("op") or "")
+    if op not in {"add", "update", "delete"}:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "op 须为 add/update/delete"},
+        )
+    row = payload.get("row")
+    if op in {"add", "update"} and not isinstance(row, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "row 必须是 JSON 对象"},
+        )
+    index = payload.get("index")
+    if op in {"update", "delete"}:
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = -1
+        if index < 0:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "index 须为非负整数"},
+            )
+
+    # 解析目标对象:key 必须在成员清单内;缺省为版本自身 storage_uri
+    storage_uri = str(version.storage_uri)
+    is_s3 = storage_uri.startswith("s3://")
+    member_key = payload.get("key") or None
+    if member_key:
+        try:
+            members = await _members_of(version, session)
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503, content={"success": False, "message": str(exc)}
+            )
+        if member_key not in {m.key for m in members}:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "成员文件不存在"},
+            )
+        target_key = member_key
+        target_fmt = _file_ext(Path(member_key).name)
+    else:
+        target_key = parse_s3_uri(storage_uri)[1] if is_s3 else storage_uri
+        target_fmt = version.format
+
+    # manifest 清单是版本结构本体(承载 __member),行级编辑会破坏媒体集
+    if version.format == MANIFEST_FORMAT:
+        own_key = parse_s3_uri(storage_uri)[1] if is_s3 else storage_uri
+        if target_key == own_key:
+            return JSONResponse(
+                status_code=409,
+                content={"success": False, "message": "媒体集清单不支持行级编辑"},
+            )
+    if (target_fmt or "").lower() != "jsonl":
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "仅 jsonl 文件支持行级编辑"},
+        )
+
+    # 读出全部行(jsonl 一行一记录,忽略空行)
+    local_path: Path | None = None
+    bucket = ""
+    cfg: dict | None = None
+    if is_s3:
+        try:
+            cfg = platform_config()
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503, content={"success": False, "message": str(exc)}
+            )
+        try:
+            bucket = parse_s3_uri(storage_uri)[0]
+            text = (await cached_bytes(cfg, bucket, target_key)).decode("utf-8")
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"读取对象失败:{exc}"},
+            )
+    else:
+        local_path = Path(target_key)
+        if not local_path.exists():
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "产物文件缺失"},
+            )
+        text = await asyncio.to_thread(local_path.read_text, encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+
+    if op == "add":
+        lines.append(json.dumps(row, ensure_ascii=False))
+    else:
+        if index >= len(lines):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "行号越界(数据可能已变化)"},
+            )
+        if op == "update":
+            lines[index] = json.dumps(row, ensure_ascii=False)
+        else:
+            del lines[index]
+
+    # 原位写回:S3 原 key put_object 覆盖,本地整文件重写
+    new_text = "\n".join(lines) + ("\n" if lines else "")
+    data = new_text.encode("utf-8")
+    if is_s3:
+        try:
+            await upload_object(cfg, bucket, target_key, io.BytesIO(data), len(data))
+        except ExternalStoreError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": f"写回对象失败:{exc}"},
+            )
+    else:
+        await asyncio.to_thread(local_path.write_text, new_text, encoding="utf-8")
+
+    # 元数据同步:命中的表成员行改 rows/size 并 rollup;否则直接同步版本计数
+    new_rows = len(lines)
+    new_size = len(data)
+    table_rows = list(
+        (
+            await session.execute(
+                select(DatasetVersionTable).where(
+                    DatasetVersionTable.dataset_version_id == version_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    matched_tm = None
+    for tm in table_rows:
+        try:
+            rkey = parse_s3_uri(tm.storage_uri)[1]
+        except Exception:  # noqa: BLE001 storage_uri 可能是本地路径/裸 key
+            rkey = str(tm.storage_uri)
+        if rkey == target_key:
+            matched_tm = tm
+            break
+    if matched_tm is not None:
+        matched_tm.rows = new_rows
+        matched_tm.size = new_size
+        version.rows = sum((t.rows or 0) for t in table_rows)
+        version.size = sum((t.size or 0) for t in table_rows)
+    else:
+        own_key = parse_s3_uri(storage_uri)[1] if is_s3 else storage_uri
+        if target_key == own_key:
+            version.rows = new_rows
+            version.size = new_size
+        elif version.rows is not None:
+            # originals/ 原件等无 DB 行的成员:版本级行数按增删差量调整
+            version.rows += 1 if op == "add" else (-1 if op == "delete" else 0)
+    await session.commit()
+    return JSONResponse(
+        content={
+            "data": {"rows": new_rows, "total": version.rows},
             "success": True,
         }
     )
@@ -2338,11 +2602,15 @@ def _duck_query(
     limit: int,
     offset: int,
     s3: tuple[str, bool, str, str] | None,
+    params: tuple = (),
+    count_sql: str | None = None,
 ) -> tuple[list[dict], list[str], int]:
     """同步执行 DuckDB 只读查询(供 asyncio.to_thread,避免阻塞事件循环)。
 
     s3 非 None 时配 httpfs 直查对象存储(MinIO/S3,免下载);否则读本地路径。
     用户 SQL 作为子查询包裹、强制 LIMIT/OFFSET 兜底,跑在 view `t` 上。
+    params 经 ? 占位绑定进 sql / count_sql(预览搜索用,防注入);
+    count_sql 给出时同连接求总数作第三返回值,否则返回本页行数。
     """
     con = duckdb.connect()
     try:
@@ -2356,13 +2624,20 @@ def _duck_query(
             con.execute(f"SET s3_secret_access_key='{sk}';")
         con.execute(f"CREATE VIEW t AS SELECT * FROM {_duck_reader_sql(fmt, path)}")
         wrapped = f"SELECT * FROM ({sql}) AS _q LIMIT {limit} OFFSET {offset}"
-        cur = con.execute(wrapped)
+        bound = list(params)
+        cur = con.execute(wrapped, bound) if bound else con.execute(wrapped)
         columns = [d[0] for d in cur.description]
         rows = [
             {columns[i]: _duck_safe(r[i]) for i in range(len(columns))}
             for r in cur.fetchall()
         ]
-        return rows, columns, len(rows)
+        total = len(rows)
+        if count_sql:
+            count_cur = (
+                con.execute(count_sql, bound) if bound else con.execute(count_sql)
+            )
+            total = int(count_cur.fetchone()[0])
+        return rows, columns, total
     finally:
         con.close()
 
