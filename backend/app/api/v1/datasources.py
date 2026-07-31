@@ -242,6 +242,15 @@ async def update_datasource(
         return _not_found()
 
     updates = body.model_dump(exclude_unset=True)
+    # api 数据源的 pushToken/url/boundDatasetId 由后端生成/绑定,编辑表单不回传;
+    # config 整体替换会把它们抹掉(推送地址即刻失效)→ 从现有 config 保留
+    if item.type == "api" and isinstance(updates.get("config"), dict):
+        preserved = {
+            k: v
+            for k in ("pushToken", "url", "boundDatasetId")
+            if (v := (item.config or {}).get(k)) is not None
+        }
+        updates["config"] = {**updates["config"], **preserved}
     for field, value in updates.items():
         setattr(item, field, value)
 
