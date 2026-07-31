@@ -125,8 +125,11 @@ async def land_push_records(
     *,
     semantic_type: str | None = None,
     idempotency_key: str | None = None,
-) -> DatasetVersion:
+) -> tuple[DatasetVersion, bool]:
     """API 推送入站核心:归并到同一数据集并产新版本。
+
+    返回 (version, deduped):deduped=True 表示幂等键命中,返回的是已落地的
+    历史版本,本次**未**重新落地(端点据此在响应中明示,避免调用方误判)。
 
     Parameters
     ----------
@@ -157,7 +160,7 @@ async def land_push_records(
             # 幂等命中:加载并返回已有版本
             existing = await session.get(DatasetVersion, cached_vid)
             if existing is not None:
-                return existing
+                return existing, True
 
     # --- 2. 语义类型解析(入参 > config.semanticType > data_type 推断) ---
     cfg: dict[str, Any] = dict(datasource.config or {})
@@ -174,6 +177,42 @@ async def land_push_records(
         dt = cfg.get("dataType") or cfg.get("data_type")
         inferred = infer_semantic_from_data_type(dt)
         effective_semantic = inferred.value if inferred else None
+
+    # --- 2.5 入湖归档(可选):config.lakeId 绑定目标湖时,推送记录先以 parquet
+    # 快照归档到湖(ODS 原始层,upload_channel="api"),同一推送源多次推送落到
+    # 同一 DataLakeObject 的递增版本;归档失败整体失败(诚实失败,不产生
+    # "仓有湖无"的静默缺口)。快照 commit 先于数据集落地——若后续落地失败,
+    # 快照作为不可变归档保留,重推产生新快照版本。
+    lake_snapshot_id: str | None = None
+    lake_id = cfg.get("lakeId") or cfg.get("lake_id")
+    if lake_id:
+        from app.models.data_lake import DataLake  # noqa: PLC0415
+        from app.services.data_lake import (  # noqa: PLC0415
+            ingest_to_lake_parquet,
+        )
+
+        lake = await session.get(DataLake, lake_id)
+        if lake is None:
+            raise LandingError(
+                f"api 推送数据源绑定的数据湖 {lake_id} 不存在,拒绝落地"
+            )
+        try:
+            snapshot = await ingest_to_lake_parquet(
+                session,
+                lake_id=lake_id,
+                data=records,
+                source_type="api",
+                source_metadata={
+                    "original_filename": f"{datasource.name or datasource.id}.jsonl",
+                    "push_datasource_id": datasource.id,
+                },
+                upload_channel="api",
+                data_category="tabular",
+                datasource_id=datasource.id,
+            )
+        except Exception as exc:  # noqa: BLE001 湖桶/MinIO/版本冲突统一转 LandingError
+            raise LandingError(f"api 推送入湖归档失败:{exc}") from exc
+        lake_snapshot_id = snapshot.id
 
     # --- 3. 归并到同一数据集 ---
     bound_id: str | None = cfg.get("boundDatasetId")
@@ -244,8 +283,10 @@ async def land_push_records(
         size=out_path.stat().st_size,
         origin="managed",
         semantic_type=effective_semantic,
-        # 血缘:推送版本回指来源 api 数据源(整改前恒为 None,数据集层面来源断链)
+        # 血缘:推送版本回指来源 api 数据源(整改前恒为 None,数据集层面来源断链);
+        # 绑定了湖归档时同步回指本次入湖快照
         source_datasource_id=datasource.id,
+        source_snapshot_ids=[lake_snapshot_id] if lake_snapshot_id else None,
         produced_by_job_id=None,
         note=f"api 推送 #{version_no}",
     )
@@ -265,7 +306,7 @@ async def land_push_records(
     await session.refresh(dataset)
     await session.refresh(version)
 
-    return version
+    return version, False
 
 
 # ---------------------------------------------------------------------------

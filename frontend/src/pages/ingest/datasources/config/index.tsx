@@ -40,6 +40,7 @@ import {
   createDataSource,
   listBuckets,
   listCategories,
+  listDataLakes,
   listDatasourceTables,
   listObjects,
   rotatePushToken,
@@ -86,6 +87,9 @@ function pickConfig(
         password: v.password,
         ...(v.table ? { table: v.table } : {}),
       };
+    case 'api':
+      // pushToken/url/boundDatasetId 由后端生成并在更新时保留,前端只传湖绑定
+      return { ...(v.lakeId ? { lakeId: v.lakeId } : {}) };
     default:
       return {};
   }
@@ -344,6 +348,24 @@ const DataSourceConfigPage: FC = () => {
     (editRecord?.config?.url as string) || '',
   );
   const [rotating, setRotating] = useState(false);
+  // api:可选绑定目标数据湖(推送数据同时以 parquet 快照归档入湖)
+  const [lakeOptions, setLakeOptions] = useState<
+    { label: string; value: string }[]
+  >([]);
+
+  useEffect(() => {
+    if (type !== 'api') return;
+    listDataLakes({ pageSize: 200 })
+      .then((res) =>
+        setLakeOptions(
+          (res.data ?? []).map((l: DataPlatform.DataLake) => ({
+            label: l.name,
+            value: l.id,
+          })),
+        ),
+      )
+      .catch(() => undefined);
+  }, [type]);
 
   useEffect(() => {
     listCategories()
@@ -765,6 +787,22 @@ const DataSourceConfigPage: FC = () => {
                     description="外部系统向生成的地址 POST 数据(JSON 数组或 jsonl)即可接入;在数据源编辑页查看地址、token 并按需轮换。"
                   />
                 )
+              )}
+
+              {isApi && (
+                <Form.Item
+                  name="lakeId"
+                  label="归档到数据湖(可选)"
+                  extra="绑定后,每次推送的数据同时以 parquet 快照归档到所选数据湖(ODS 原始层),数据集版本记录湖快照血缘;不绑定则仅落数据集仓库。"
+                >
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="选择目标数据湖"
+                    options={lakeOptions}
+                  />
+                </Form.Item>
               )}
 
               <Form.Item name="categoryId" label="分类(可选)">

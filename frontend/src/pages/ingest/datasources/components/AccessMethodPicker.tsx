@@ -176,10 +176,11 @@ const AccessMethodPicker: FC = () => {
         </div>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           <SectionTitle>外部 API</SectionTitle>
-          {/* Coming soon:暂不开放,置灰禁点(与数据库「暂未就绪」卡片同一套样式) */}
           <Card
+            hoverable
             data-testid="method-api"
-            style={{ flex: 1, opacity: 0.5, cursor: 'not-allowed' }}
+            onClick={() => go('/ingest/datasources/new/api')}
+            style={{ flex: 1 }}
             styles={{
               body: {
                 padding: 20,
@@ -198,13 +199,19 @@ const AccessMethodPicker: FC = () => {
             <Text type="secondary" style={{ fontSize: 13 }}>
               由外部系统主动 POST 数据到平台生成的推送端点,适合实时数据流。
             </Text>
-            <div style={{ marginTop: 'auto', paddingTop: 16 }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginTop: 'auto',
+                paddingTop: 16,
+              }}
+            >
               <Tag color="blue" style={{ fontSize: 11, letterSpacing: 0.5 }}>
                 <ApiOutlined /> REAL-TIME
               </Tag>
-              <Tag color="orange" style={{ fontSize: 11, letterSpacing: 0.5 }}>
-                COMING SOON
-              </Tag>
+              <ArrowRightOutlined style={{ color: '#1677ff' }} />
             </div>
           </Card>
         </div>

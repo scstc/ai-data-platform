@@ -252,3 +252,104 @@ async def test_idempotency_key_dedupes_within_ttl(
     async with session_factory() as session:
         versions = (await session.scalars(select(DatasetVersion))).all()
         assert len(versions) == 1  # 幂等:只落了一版
+
+
+async def test_push_with_lake_binding_archives_snapshot(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """config.lakeId 绑定数据湖的推送:records 同时以 parquet 快照归档入湖
+    (upload_channel=api),数据集版本记录湖快照血缘;再次推送落到同一
+    DataLakeObject 的递增版本。未绑定行为不变(其余用例覆盖)。"""
+    from app.models.data_lake import DataLake, DataLakeObject, DataLakeSnapshot
+    from app.services import data_lake as lake_service
+
+    puts: list[str] = []
+
+    async def fake_put(
+        object_key: str,
+        data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        puts.append(object_key)
+
+    monkeypatch.setattr(lake_service, "_put_object_to_lake_minio", fake_put)
+
+    async with session_factory() as session:
+        session.add(DataLake(id="lake-push01", name="推送归档湖"))
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/datasources",
+        json={
+            "name": "推送源A",
+            "type": "api",
+            "config": {"lakeId": "lake-push01"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    ds_data = resp.json()["data"]
+    # 建源时 lakeId 与后端生成的 pushToken/url 共存
+    assert ds_data["config"]["lakeId"] == "lake-push01"
+    token = ds_data["config"]["url"].rstrip("/").rsplit("/", 1)[-1]
+
+    r1 = await client.post(
+        f"/api/v1/ingest/push/{token}",
+        json={"records": [{"text": "hello"}, {"text": "world"}]},
+    )
+    assert r1.status_code == 200, r1.text
+
+    async with session_factory() as session:
+        snaps = (await session.scalars(select(DataLakeSnapshot))).all()
+        assert len(snaps) == 1
+        snap = snaps[0]
+        assert snap.lake_id == "lake-push01"
+        assert snap.upload_channel == "api"
+        assert snap.storage_format == "parquet"
+        assert snap.rows == 2
+        # 版本回指湖快照(血缘)
+        version = await session.get(
+            DatasetVersion, r1.json()["data"]["versionId"]
+        )
+        assert version is not None
+        assert version.source_snapshot_ids == [snap.id]
+
+    # 第二次推送:同一湖对象版本自增,快照 +1
+    r2 = await client.post(
+        f"/api/v1/ingest/push/{token}",
+        json={"records": [{"text": "again"}]},
+    )
+    assert r2.status_code == 200, r2.text
+    async with session_factory() as session:
+        objs = (await session.scalars(select(DataLakeObject))).all()
+        assert len(objs) == 1
+        assert objs[0].latest_version_no == 2
+        snap_count = len((await session.scalars(select(DataLakeSnapshot))).all())
+        assert snap_count == 2
+    assert len(puts) == 2
+
+
+async def test_push_with_missing_lake_fails_loud(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """绑定的数据湖不存在 → 500 诚实失败,不落数据集版本。"""
+    resp = await client.post(
+        "/api/v1/datasources",
+        json={
+            "name": "推送源B",
+            "type": "api",
+            "config": {"lakeId": "lake-nonexistent"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["data"]["config"]["url"].rstrip("/").rsplit("/", 1)[-1]
+
+    r = await client.post(
+        f"/api/v1/ingest/push/{token}",
+        json={"records": [{"text": "x"}]},
+    )
+    assert r.status_code == 500
+    async with session_factory() as session:
+        versions = (await session.scalars(select(DatasetVersion))).all()
+        assert versions == []

@@ -172,7 +172,7 @@ async def push_records(
 
     # --- 4. 归并落地 ---
     try:
-        version = await land_push_records(
+        version, deduped = await land_push_records(
             session,
             ds,
             records,
@@ -185,17 +185,23 @@ async def push_records(
             content={"success": False, "message": f"推送落地失败:{exc}"},
         )
 
-    return JSONResponse(
-        content={
-            "data": {
-                "datasetId": version.dataset_id,
-                "versionId": version.id,
-                "versionNo": version.version_no,
-                "rows": version.rows,
-            },
-            "success": True,
-        }
-    )
+    body: dict = {
+        "data": {
+            "datasetId": version.dataset_id,
+            "versionId": version.id,
+            "versionNo": version.version_no,
+            "rows": version.rows,
+            "deduped": deduped,
+        },
+        "success": True,
+    }
+    if deduped:
+        # 幂等命中要明示:调用方常误以为"请求成功=数据已落地",实际本次未落任何数据
+        body["message"] = (
+            "幂等键命中:返回此前已落地的版本,本次数据未落地。"
+            "如这是新一批数据,请更换 idempotencyKey 或不传。"
+        )
+    return JSONResponse(content=body)
 
 
 class _RotateTokenResponse(CamelModel):

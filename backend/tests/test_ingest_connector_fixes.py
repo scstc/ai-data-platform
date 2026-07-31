@@ -27,6 +27,15 @@ from app.models.push_idempotency import PushIdempotency
 from app.services.connectors.push import land_push_records
 
 
+@pytest.fixture(autouse=True)
+def _datasets_dir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """推送落地写 jsonl 到 settings.datasets_dir:指到 tmp,与本机环境解耦
+    (同 test_ingest_push.py 的同名 fixture)。"""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "datasets_dir", str(tmp_path))
+
+
 async def _seed_ds_and_lake(
     session_factory: async_sessionmaker,
     *,
@@ -144,13 +153,15 @@ async def _make_api_datasource(session, ds_id: str = "ds-push-fix") -> DataSourc
 async def test_push_idempotency_dedup_persisted(db_session) -> None:
     """同一 idempotency_key 有效期内重放 → 返回同一版本,不新增版本(DB 去重)。"""
     ds = await _make_api_datasource(db_session)
-    v1 = await land_push_records(
+    v1, deduped1 = await land_push_records(
         db_session, ds, [{"a": 1}], idempotency_key="k-dup"
     )
-    v2 = await land_push_records(
+    v2, deduped2 = await land_push_records(
         db_session, ds, [{"a": 2}], idempotency_key="k-dup"
     )
-    # 幂等命中:第二次未落地新版本,返回首次版本
+    # 幂等命中:第二次未落地新版本,返回首次版本,deduped 明示
+    assert not deduped1
+    assert deduped2
     assert v2.id == v1.id
     assert v2.version_no == v1.version_no
     # 幂等记录已持久到 DB(不是进程内字典)
@@ -163,7 +174,7 @@ async def test_push_idempotency_dedup_persisted(db_session) -> None:
 async def test_push_idempotency_expires_allows_relanding(db_session) -> None:
     """幂等记录过期后,同 key 重新落地为新版本(证明不是永久锁死)。"""
     ds = await _make_api_datasource(db_session, ds_id="ds-push-exp")
-    v1 = await land_push_records(
+    v1, _ = await land_push_records(
         db_session, ds, [{"a": 1}], idempotency_key="k-exp"
     )
     # 人为把该 key 记录置为已过期
@@ -171,8 +182,9 @@ async def test_push_idempotency_expires_allows_relanding(db_session) -> None:
     row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
 
-    v2 = await land_push_records(
+    v2, deduped = await land_push_records(
         db_session, ds, [{"a": 2}], idempotency_key="k-exp"
     )
+    assert not deduped
     assert v2.id != v1.id
     assert v2.version_no == v1.version_no + 1
